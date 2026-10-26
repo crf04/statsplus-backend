@@ -1058,6 +1058,7 @@ class LedgerRuntime:
                             str(row["stream_key"]): str(row["job_id"]) for row in slice_jobs
                         },
                         session=session,
+                        manifest_id=manifest_id,
                     )
                     succeeded = _succeeded_ledger_streams(materialized, l15_ready=l15_ready)
                     cas_failed = False

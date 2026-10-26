@@ -113,6 +113,14 @@ def _event_catalog_publication(
     }
 
 
+def _stored_game(game_id="game-1"):
+    """A game as ``_bind_current_ledger_source`` stores it, for a catalog to list."""
+
+    return SimpleNamespace(
+        game_id=game_id, home_team_id=1, away_team_id=2, game_date=slate_date_for_instant(AS_OF)
+    )
+
+
 def _bind_manifest_catalog(connection, games, cutoff, manifest_id):
     catalog = _event_catalog_publication(
         games,
@@ -2293,6 +2301,164 @@ def test_correction_outside_l15_preserves_l15_publication(tmp_path):
     )
 
 
+def test_a_night_that_accepts_only_an_old_correction_composes_every_stream(tmp_path):
+    """Tonight's manifest governs the whole slice it queued, even the Last 15
+    windows, whose games all rest on an earlier night's manifest."""
+
+    engine = _engine(tmp_path, "later-correction.sqlite3")
+    first_cutoff = AS_OF + timedelta(days=1, hours=5, minutes=22)
+    tonight = first_cutoff + timedelta(days=20)
+    now = [first_cutoff + timedelta(hours=18)]
+
+    def clock():
+        return now[0]
+
+    games = _league_games()
+    original = games[0]
+    # A sixteenth game for both of the first game's teams pushes that game
+    # out of their Last 15.
+    rematch = replace(
+        original,
+        game_id="later-correction-rematch",
+        game_date=original.game_date + timedelta(days=15),
+        source_observation_id="obs:later:rematch",
+        retrieved_at=first_cutoff + timedelta(hours=1),
+    )
+    rematch = replace(rematch, raw_rows=raw_rows_from_facts(rematch)).with_checksum()
+    all_games = (*games, rematch)
+
+    def open_manifest(connection, manifest_id, cutoff):
+        catalog = _event_catalog_publication(all_games, cutoff, f"{manifest_id}-event-catalog")
+        connection.execute(CatalogPublication.__table__.insert().values(**catalog))
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id=manifest_id,
+                season="2025-26",
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(days=30),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum=manifest_id,
+                event_catalog_publication_id=catalog["publication_id"],
+                event_catalog_checksum=catalog["checksum"],
+                status="active",
+                created_at=cutoff,
+            )
+        )
+
+    with engine.begin() as connection:
+        open_manifest(connection, "first-night", first_cutoff)
+    publications = PublicationService(engine, clock=clock)
+    publications.register_default_streams()
+    for stream_key, windows in (
+        ("traditional_opponent_season", ("season",)),
+        ("traditional_opponent_l15", ("l15",)),
+    ):
+        publications.register_stream(
+            stream_key,
+            provider="ledger",
+            owner="railway",
+            required_observations=("canonical_game_ledger",),
+            publication_strategy="ledger_compose",
+            supported_windows=windows,
+            enabled=True,
+            completeness_rule="league_complete",
+            freshness_rule="cutoff_current",
+        )
+    ledger = CanonicalGameLedgerRepository(
+        engine,
+        correction_sink=LedgerCorrectionQueue(clock=clock, require_governance=True),
+    )
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=ledger,
+        materialization=LedgerMaterializationService(
+            ledger,
+            parity_repository=LedgerParityArtifactRepository(engine),
+            parity_reader=LegacyParityDiagnosticReader(engine),
+            publication_service=publications,
+            clock=clock,
+        ),
+        governance=ActiveManifestLedgerGovernanceReader(engine, clock=clock),
+        matchup_materialization=LedgerMatchupMaterializationService(
+            ledger, TeamMatchupRepository(engine), clock=clock
+        ),
+        publication_service=publications,
+        clock=clock,
+    )
+    ledger.replace_games_atomic(
+        all_games,
+        accepted_observations={
+            game.source_observation_id: _boundary_observation_values(
+                game, cutoff=first_cutoff, manifest_id="first-night"
+            )
+            for game in all_games
+        },
+    )
+    assert runtime.compose_queued("2025-26") == len(LedgerCorrectionQueue.STREAMS)
+
+    # Twenty nights later, tonight's manifest accepts one correction: ten more
+    # defensive rebounds for the first game's away team.
+    with engine.begin() as connection:
+        connection.execute(CollectionManifest.__table__.update().values(status="superseded"))
+        open_manifest(connection, "tonight", tonight)
+    now[0] = tonight + timedelta(hours=18)
+    corrected = replace(
+        original,
+        team_facts=tuple(
+            replace(
+                fact,
+                defensive_rebounds=fact.defensive_rebounds + 10,
+                rebounds=fact.rebounds + 10,
+                def_two_pt_rebounds=fact.def_two_pt_rebounds + 10,
+            )
+            if fact.team_id == original.away_team_id
+            else fact
+            for fact in original.team_facts
+        ),
+        player_facts=tuple(
+            replace(
+                fact,
+                defensive_rebounds=fact.defensive_rebounds + 10,
+                rebounds=fact.rebounds + 10,
+                def_two_pt_rebounds=fact.def_two_pt_rebounds + 10,
+            )
+            if fact.team_id == original.away_team_id
+            else fact
+            for fact in original.player_facts
+        ),
+        source_observation_id="obs:later:corrected",
+        retrieved_at=tonight + timedelta(hours=1),
+    )
+    corrected = replace(corrected, raw_rows=raw_rows_from_facts(corrected)).with_checksum()
+    ledger.replace_games_atomic(
+        (corrected,),
+        accepted_observations={
+            corrected.source_observation_id: _boundary_observation_values(
+                corrected, cutoff=tonight, manifest_id="tonight"
+            )
+        },
+    )
+
+    assert runtime.compose_queued("2025-26") == len(LedgerCorrectionQueue.STREAMS)
+    with engine.connect() as connection:
+        jobs = connection.execute(
+            select(CompositionJob.stream_key, CompositionJob.status, CompositionJob.last_error).where(
+                CompositionJob.cutoff == tonight
+            )
+        ).all()
+        held = connection.execute(
+            select(PublicationVersion.stream_key, PublicationVersion.manifest_id).where(
+                PublicationVersion.cutoff == tonight, PublicationVersion.status == "candidate"
+            )
+        ).all()
+    assert sorted(jobs) == sorted((stream, "succeeded", None) for stream in LedgerCorrectionQueue.STREAMS)
+    assert held and {manifest_id for _stream, manifest_id in held} == {"tonight"}
+    assert {stream for stream, _manifest_id in held} >= {"assist_locations_l15", "rebound_types_l15"}
+    for stream_key in ("traditional_opponent_season", "traditional_opponent_l15"):
+        assert publications.current(stream_key).cutoff.replace(tzinfo=UTC) == tonight
+
+
 def test_recomposition_failure_after_first_staged_stream_rolls_back_batch(tmp_path, monkeypatch):
     engine = _engine(tmp_path, "atomic-runtime.sqlite3")
     publications = PublicationService(engine, clock=lambda: AS_OF)
@@ -2310,6 +2476,7 @@ def test_recomposition_failure_after_first_staged_stream_rolls_back_batch(tmp_pa
                 checksum="manifest",
                 status="active",
                 created_at=AS_OF,
+                **_bind_manifest_catalog(connection, (_stored_game("game-one"),), AS_OF, "manifest"),
             )
         )
         connection.execute(
@@ -3382,6 +3549,9 @@ def test_ledger_batch_refreshes_cached_pointer_before_advancing_fence(tmp_path):
                 checksum="cached-pointer-manifest",
                 status="active",
                 created_at=AS_OF,
+                **_bind_manifest_catalog(
+                    connection, (_stored_game("game-1"),), AS_OF, "cached-pointer-manifest"
+                ),
             )
         )
         connection.execute(
@@ -3503,7 +3673,7 @@ def test_corrected_inactive_candidate_invalidates_stale_activation_target(tmp_pa
     with engine.begin() as connection:
         catalog_binding = _bind_manifest_catalog(
             connection,
-            (),
+            (_stored_game(),),
             AS_OF,
             "inactive-candidate-manifest",
         )
@@ -3614,7 +3784,7 @@ def test_activation_rejects_candidate_after_canonical_source_advances(tmp_path):
     with engine.begin() as connection:
         catalog_binding = _bind_manifest_catalog(
             connection,
-            (),
+            (_stored_game(),),
             AS_OF,
             "stale-source-manifest",
         )
@@ -3714,7 +3884,7 @@ def test_correction_batch_refreshes_stream_lock_after_candidate_activation(tmp_p
     with engine.begin() as connection:
         catalog_binding = _bind_manifest_catalog(
             connection,
-            (),
+            (_stored_game(),),
             AS_OF,
             "activation-race-manifest",
         )
@@ -3865,7 +4035,7 @@ def test_correction_invalidates_same_game_candidates_across_cutoffs(
             manifest_id = f"cross-manifest-{index}"
             catalog_binding = _bind_manifest_catalog(
                 connection,
-                (),
+                (_stored_game(),),
                 cutoff,
                 manifest_id,
             )
@@ -4040,7 +4210,7 @@ def _three_activated_refreshes(engine):
     with engine.begin() as connection:
         catalog_binding = _bind_manifest_catalog(
             connection,
-            (),
+            (_stored_game(),),
             AS_OF,
             "history-manifest",
         )

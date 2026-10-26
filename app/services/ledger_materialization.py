@@ -118,6 +118,7 @@ class LedgerMaterializationService:
         candidate_stream_keys: frozenset[str] | None = None,
         composition_job_ids: Mapping[str, str] | None = None,
         session: Session | None = None,
+        manifest_id: str | None = None,
     ) -> LedgerMaterialization:
         canonical_season = validate_canonical_season(season)
         if expected_game_ids is None or set(
@@ -448,6 +449,7 @@ class LedgerMaterializationService:
                             payload=encoded_payload,
                             provenance=provenance,
                             reason=publication_reason,
+                            manifest_id=manifest_id,
                             corrected_provenance=corrected_provenance,
                             composition_job_id=(composition_job_ids or {}).get(stream_key),
                         )
@@ -462,6 +464,7 @@ class LedgerMaterializationService:
                         reason=publication_reason,
                         corrected_provenance=corrected_provenance,
                         session=session,
+                        manifest_id=manifest_id,
                     )
             if activate and batch:
                 candidate_versions.update(
@@ -800,10 +803,11 @@ def requeue_ledger_streams(
     checksum and accepts no observation, so reconciliation sees every succeeded
     job as current and composes nothing.  This is the explicit operator step
     that says "these stored facts changed": it runs each game through the same
-    queue an accepted game uses, in one transaction, against the active
-    manifest that governs the stored games' accepted evidence (it refuses unless
-    there is exactly one; its status and collection deadline are irrelevant to
-    recomposing evidence it already accepted).  The streams' jobs go back to
+    queue an accepted game uses, in one transaction, under the newest manifest
+    the stored games' evidence was accepted under, which then governs the
+    composition at its cutoff (it refuses evidence without a manifest, or two
+    manifests sharing that cutoff; their status and collection deadlines are
+    irrelevant to recomposing evidence already accepted).  The streams' jobs go back to
     ``queued`` with the games' current lineage, and ``compose_queued`` then
     publishes a new version only if the composed payload differs from the
     active one, so a rerun is harmless.  Returns the number of games queued.
@@ -828,11 +832,10 @@ def requeue_ledger_streams(
             .where(jobs.c.season == season, jobs.c.stream_key.in_(selected))
             .values(updated_at=jobs.c.updated_at)
         )
-        # Composition needs every game's accepted evidence under ONE manifest
-        # (provenance, cutoff and job all follow it).  Recompose under the
-        # manifest that actually governs the stored games, which after a
-        # manifest rollover is the superseded one, not the latest active one.
-        manifests = set(
+        # Recompose under the newest night that accepted any stored game, not
+        # the latest active manifest: after a manifest rollover the stored
+        # games may rest only on the superseded one.
+        manifest_ids = set(
             connection.execute(
                 select(CollectionObservation.manifest_id)
                 .join(
@@ -843,15 +846,25 @@ def requeue_ledger_streams(
                 .distinct()
             ).scalars()
         )
-        if len(manifests) != 1 or None in manifests:
+        manifests = {
+            row.manifest_id: row
+            for row in connection.execute(
+                select(CollectionManifest.manifest_id, CollectionManifest.cutoff).where(
+                    CollectionManifest.manifest_id.in_(tuple(key for key in manifest_ids if key))
+                )
+            )
+        }
+        newest = max((row.cutoff for row in manifests.values()), default=None)
+        composing = [row.manifest_id for row in manifests.values() if row.cutoff == newest]
+        if None in manifest_ids or len(manifests) != len(manifest_ids) or len(composing) != 1:
             raise LedgerMaterializationUnavailable(
-                "the stored games' accepted evidence must belong to exactly one manifest"
+                "the stored games' accepted evidence must name one newest manifest"
             )
         queue = LedgerCorrectionQueue(
             clock=clock,
             require_governance=True,
             streams=selected,
-            manifest_id=str(next(iter(manifests))),
+            manifest_id=str(composing[0]),
         )
         game_ids = tuple(summary.game_id for summary in repository.list_games(season, connection=connection))
         for start in range(0, len(game_ids), 25):

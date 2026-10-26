@@ -24,6 +24,7 @@ from app.domain.publication_integrity import (
     canonical_publication_json,
     publication_payload_checksum,
 )
+from app.domain.slate_time import EASTERN
 from app.domain.utc import assume_utc
 from app.migrations import run_migrations
 from app.models.canonical_game_ledger import LedgerParityArtifact
@@ -2322,7 +2323,7 @@ def _bounded_cli_world(tmp_path, monkeypatch):
             "scheduled_at": datetime.combine(
                 game.game_date,
                 datetime.min.time(),
-                tzinfo=UTC,
+                tzinfo=EASTERN,
             )
             + timedelta(hours=1),
             "status_text": "Final",

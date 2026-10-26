@@ -62,6 +62,7 @@ from app.services.collection_control import (
     PublicationService,
     _aware,
     _uuid,
+    composing_ledger_manifest,
     utcnow,
 )
 from app.services.database_first_activation import (
@@ -601,10 +602,10 @@ class TraditionalOpponentRebuildService:
             raise ControlPlaneError("publication_family_authority_mismatch")
         active_season = next(iter(seasons))
         active_cutoff = next(iter(cutoffs))
-        # A ledger-composed active version carries its authority through its
-        # accepted observations rather than on the row: the manifest is a
-        # property of the evidence, not of the rendering.  Both windows must
-        # rest on the same one, or they are not one family generation.
+        # A ledger-composed active version records no authority on the row:
+        # it rests on the manifest whose cutoff it was composed at.  Both
+        # windows must rest on the same one, or they are not one family
+        # generation.
         manifest = self._shared_manifest(session, versions)
         # A supplied season or cutoff is an assertion about the pair, so a
         # mismatch is a stale request rather than a substituted authority.
@@ -633,7 +634,12 @@ class TraditionalOpponentRebuildService:
         }
 
     def _shared_manifest(self, session, versions) -> CollectionManifest:
-        """Resolve the one manifest both windows' accepted evidence shares."""
+        """Resolve the one manifest both windows' compositions are bound to.
+
+        Each window is bound to the manifest whose cutoff it was composed at
+        (``composing_ledger_manifest``), the one its row records when it
+        records one.
+        """
 
         manifest_ids: set[str] = set()
         for version in versions.values():
@@ -645,12 +651,17 @@ class TraditionalOpponentRebuildService:
             ).all()
             if len(rows) != len(observation_ids):
                 raise ControlPlaneError("ledger_provenance_not_accepted")
-            manifest_ids |= {row.manifest_id for row in rows}
-            # A version that also records authority on the row may not
-            # disagree with the evidence it was composed from.
-            if version.manifest_id is not None:
-                manifest_ids.add(version.manifest_id)
-        if len(manifest_ids) != 1 or None in manifest_ids:
+            try:
+                composing = composing_ledger_manifest(
+                    session,
+                    season=version.season,
+                    cutoff=_aware(version.cutoff),
+                    manifest_id=version.manifest_id,
+                )
+            except ControlPlaneError as error:
+                raise ControlPlaneError("publication_family_authority_mismatch") from error
+            manifest_ids.add(composing.manifest_id)
+        if len(manifest_ids) != 1:
             raise ControlPlaneError("publication_family_authority_mismatch")
         manifest = session.get(CollectionManifest, next(iter(manifest_ids)))
         if (
@@ -732,6 +743,7 @@ class TraditionalOpponentRebuildService:
                     provenance=provenance,
                     reason=f"publication format rebuild to {locked.target_format}",
                     session=session,
+                    manifest_id=locked.manifest_id,
                 )
             locked.staged_season_publication_id = staged[SEASON_STREAM].publication_id
             locked.staged_season_checksum = staged[SEASON_STREAM].checksum
@@ -949,10 +961,10 @@ class TraditionalOpponentRebuildService:
         """The authority one publication actually rests on.
 
         A ledger-composed version records nothing on the row: its manifest and
-        Event Catalog come from the accepted observations behind it.  Reading
-        the null row fields would make every such publication look identical,
-        so two targets from different manifests would compare equal and pass a
-        coherence check that exists to catch exactly that.
+        Event Catalog are those of the manifest whose cutoff it was composed
+        at.  Reading the null row fields would make every such publication look
+        identical, so two targets from different manifests would compare equal
+        and pass a coherence check that exists to catch exactly that.
         """
 
         if version.manifest_id is not None:

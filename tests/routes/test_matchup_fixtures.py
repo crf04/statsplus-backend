@@ -3203,7 +3203,36 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         "journey-ledger-observation-second",
     )
     ledger_observation_checksum = hashlib.sha256(b"{}").hexdigest()
+    ledger_catalog = json.dumps(
+        {
+            "events": [
+                {
+                    "nba_game_id": GAME_ID,
+                    "home_team_id": BOS,
+                    "away_team_id": LAL,
+                    "phase": "Regular Season",
+                    "status": "Final",
+                    "status_code": 3,
+                    "scheduled_at": "2026-01-14T00:30:00-05:00",
+                }
+            ]
+        }
+    )
+    ledger_catalog_checksum = hashlib.sha256(ledger_catalog.encode()).hexdigest()
     with engine.begin() as connection:
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                publication_id="journey-ledger-catalog",
+                season=SEASON,
+                catalog_type="event",
+                cutoff=ledger_cutoff,
+                version="v1",
+                checksum=ledger_catalog_checksum,
+                payload=ledger_catalog,
+                complete=True,
+                published_at=ledger_cutoff,
+            )
+        )
         connection.execute(
             CollectionManifest.__table__.insert().values(
                 manifest_id=ledger_manifest_id,
@@ -3213,6 +3242,8 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
                 accepted_versions="[1]",
                 scopes='["canonical_game_ledger"]',
                 checksum="a" * 64,
+                event_catalog_publication_id="journey-ledger-catalog",
+                event_catalog_checksum=ledger_catalog_checksum,
                 status="active",
                 created_at=NOW - timedelta(days=2),
             )

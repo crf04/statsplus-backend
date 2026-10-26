@@ -8,14 +8,19 @@ pointer history, activation evidence, and audit events.
 
 from __future__ import annotations
 
+import hashlib
 import json
-from datetime import UTC
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
 
+from app.models.canonical_game_ledger import CanonicalGameLedgerGame, LedgerObservationEvidence
 from app.models.collection_control import (
     AuditEvent,
+    CatalogPublication,
+    CollectionManifest,
+    CollectionObservation,
     OperatorJob,
     PublicationActivation,
     PublicationPointer,
@@ -43,8 +48,11 @@ from tests.support.season_cutover import (
     NOW,
     OLD,
     OLD_CUTOFF,
+    OLD_GAMES,
     OLD_PROVENANCE,
+    OTHER_CUTOFF,
     OTHER_GAME,
+    OTHER_PROVENANCE,
     PER36,
     PLAYER_LOGS,
     SEASON_STREAM,
@@ -421,6 +429,347 @@ def test_cutover_moves_logs_and_held_streams_atomically(world):
         )
     ]
     assert [dict(item) for item in result.resource.moved] == moved
+
+
+# --- In-season composition over several nights' manifests -------------------
+
+#: The 2026-27 ledger on the night of ``manifest-other``: 150 games accepted
+#: under ``manifest-new`` the night before and one more accepted tonight.
+IN_SEASON_GAMES = (*NEW_GAMES, OTHER_GAME)
+IN_SEASON_PROVENANCE = {**NEW_PROVENANCE, **OTHER_PROVENANCE}
+
+
+def _compose_in_season(publications, stream_key, *, cutoff=OTHER_CUTOFF):
+    return publications.recompose_ledger(
+        stream_key,
+        season=NEW,
+        cutoff=cutoff,
+        payload=payload_for(stream_key, NEW, games=IN_SEASON_GAMES),
+        provenance=IN_SEASON_PROVENANCE,
+        reason="2026-27 ledger composition",
+    )
+
+
+def test_an_in_season_composition_rests_on_every_earlier_nights_manifest(world):
+    engine, publications, operations, before = world
+
+    logs = _compose_in_season(publications, PLAYER_LOGS)
+    season = _compose_in_season(publications, SEASON_STREAM)
+
+    # Bound to tonight's manifest, whose Event Catalog governs all 151 games.
+    assert (logs.season, logs.status, logs.manifest_id) == (NEW, "candidate", "manifest-other")
+    assert (season.season, season.status, season.manifest_id) == (NEW, "candidate", "manifest-other")
+    operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
+    assert pointers(engine) == {
+        PLAYER_LOGS: (logs.publication_id, NEW, "active", 2),
+        SEASON_STREAM: (season.publication_id, NEW, "active", 2),
+        L15_STREAM: before[L15_STREAM],
+    }
+
+
+def test_a_composition_refuses_evidence_from_a_manifest_after_its_cutoff(world):
+    engine, publications, _operations, _before = world
+    # A game ``manifest-new``'s catalog lists, tipped before its cutoff, whose
+    # current evidence was collected the next night under ``manifest-other``.
+    game_id = NEW_GAMES[0][0]
+    late = f"late:{game_id}"
+    with engine.begin() as connection:
+        connection.execute(
+            CollectionObservation.__table__.insert().values(
+                observation_id=late,
+                client_observation_id=late,
+                collector_id="test",
+                manifest_id="manifest-other",
+                environment="testing",
+                provider="pbp+nba_live_data",
+                observation_type="canonical_game_ledger",
+                scope=json.dumps({"game_id": game_id, "surface": "canonical_game_ledger"}),
+                season=NEW,
+                cutoff=OTHER_CUTOFF,
+                schema_version=1,
+                checksum=late,
+                payload="{}",
+                payload_bytes=2,
+                retrieved_at=OTHER_CUTOFF,
+                accepted_at=OTHER_CUTOFF,
+            )
+        )
+        connection.execute(
+            LedgerObservationEvidence.__table__.insert().values(
+                observation_id=late, game_id=game_id, created_at=OTHER_CUTOFF
+            )
+        )
+    accept_ledger(engine, NEW_GAMES[:1], "late")
+
+    with pytest.raises(ControlPlaneError) as refused:
+        compose_new(
+            publications,
+            PLAYER_LOGS,
+            provenance={key: game for key, game in NEW_PROVENANCE.items() if game != game_id}
+            | {late: game_id},
+        )
+
+    assert refused.value.reason == "ledger_provenance_manifest_mismatch"
+
+
+def test_each_game_is_judged_by_its_own_manifests_collection_deadline(world):
+    engine, publications, _operations, _before = world
+    # ``manifest-new``'s games were accepted at its cutoff; move its deadline
+    # before that.  Tonight's manifest's later deadline does not cover them.
+    with engine.begin() as connection:
+        connection.execute(
+            CollectionManifest.__table__.update()
+            .where(CollectionManifest.manifest_id == "manifest-new")
+            .values(collect_before=NEW_CUTOFF - timedelta(hours=1))
+        )
+
+    with pytest.raises(ControlPlaneError) as refused:
+        _compose_in_season(publications, PLAYER_LOGS)
+
+    assert refused.value.reason == "ledger_provenance_scope_mismatch"
+
+
+#: A game ``manifest-new`` accepted, the night before ``manifest-other``.
+OLDER_GAME = f"pbp:{NEW_GAMES[0][0]}"
+
+
+@pytest.mark.parametrize(
+    ("manifest_values", "observation_values", "refusal"),
+    [
+        pytest.param(
+            {"collect_before": NEW_CUTOFF + timedelta(hours=1)},
+            {"accepted_at": NEW_CUTOFF + timedelta(hours=2)},
+            "ledger_provenance_scope_mismatch",
+            id="accepted-after-its-manifests-deadline",
+        ),
+        pytest.param(
+            {"collect_before": NEW_CUTOFF + timedelta(hours=1)},
+            {"retrieved_at": NEW_CUTOFF + timedelta(hours=2)},
+            "ledger_provenance_scope_mismatch",
+            id="retrieved-after-its-manifests-deadline",
+        ),
+        pytest.param(
+            {"season": OLD},
+            {},
+            "ledger_provenance_manifest_mismatch",
+            id="manifest-of-another-season",
+        ),
+        pytest.param(
+            {"scopes": '["synergy_play_types"]'},
+            {},
+            "ledger_provenance_manifest_mismatch",
+            id="manifest-without-the-ledger-scope",
+        ),
+    ],
+)
+def test_a_composition_refuses_evidence_its_own_manifest_did_not_authorize(
+    world, manifest_values, observation_values, refusal
+):
+    engine, publications, _operations, _before = world
+    with engine.begin() as connection:
+        connection.execute(
+            CollectionManifest.__table__.update()
+            .where(CollectionManifest.manifest_id == "manifest-new")
+            .values(**manifest_values)
+        )
+        if observation_values:
+            connection.execute(
+                CollectionObservation.__table__.update()
+                .where(CollectionObservation.observation_id == OLDER_GAME)
+                .values(**observation_values)
+            )
+
+    with pytest.raises(ControlPlaneError) as refused:
+        _compose_in_season(publications, PLAYER_LOGS)
+
+    assert refused.value.reason == refusal
+
+
+def _republish_catalog(engine, edit, *, manifest_id="manifest-other", game_id=NEW_GAMES[0][0]):
+    """Publish ``manifest_id``'s Event Catalog (tonight's by default) with
+    ``edit`` applied to ``game_id``'s event, checksummed and bound as a real
+    catalog is."""
+
+    catalog_id = f"catalog-{manifest_id}"
+    with engine.begin() as connection:
+        document = json.loads(
+            connection.scalar(
+                select(CatalogPublication.payload).where(CatalogPublication.publication_id == catalog_id)
+            )
+        )
+        document["events"] = [
+            edited
+            for event in document["events"]
+            for edited in ((edit(event),) if event["nba_game_id"] == game_id else (event,))
+            if edited is not None
+        ]
+        payload = json.dumps(document, sort_keys=True, separators=(",", ":"))
+        checksum = hashlib.sha256(payload.encode()).hexdigest()
+        connection.execute(
+            CatalogPublication.__table__.update()
+            .where(CatalogPublication.publication_id == catalog_id)
+            .values(payload=payload, checksum=checksum)
+        )
+        connection.execute(
+            CollectionManifest.__table__.update()
+            .where(CollectionManifest.manifest_id == manifest_id)
+            .values(event_catalog_checksum=checksum)
+        )
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        pytest.param(
+            lambda event: {
+                **event,
+                "home_team_id": event["away_team_id"],
+                "away_team_id": event["home_team_id"],
+            },
+            id="home-and-away-reversed",
+        ),
+        pytest.param(
+            lambda event: {
+                **event,
+                "scheduled_at": (
+                    datetime.fromisoformat(event["scheduled_at"]) - timedelta(days=2)
+                ).isoformat(),
+            },
+            id="played-two-days-earlier",
+        ),
+        pytest.param(
+            lambda event: {**event, "status": "Postponed", "status_code": 1},
+            id="postponed",
+        ),
+        pytest.param(lambda event: None, id="no-longer-listed"),
+    ],
+)
+def test_a_composition_refuses_an_older_game_tonights_catalog_identifies_differently(world, edit):
+    engine, publications, operations, _before = world
+    _republish_catalog(engine, edit)
+
+    with pytest.raises(ControlPlaneError) as refused:
+        _compose_in_season(publications, PLAYER_LOGS)
+
+    assert refused.value.reason == "ledger_provenance_catalog_mismatch"
+    with pytest.raises(ControlPlaneError) as cutover:
+        operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
+    assert cutover.value.reason == "cutover_player_game_logs_candidate_required"
+
+
+#: The first game's tip moved to 9:30 PM ET on 2026-10-23, already
+#: 2026-10-24 in UTC: the hour 0022600003 tipped.
+LATE_TIP = datetime(2026, 10, 24, 1, 30, tzinfo=UTC)
+
+
+def _retime(engine, *, tip, stored_on, manifest_id="manifest-other", game_id=NEW_GAMES[0][0]):
+    _republish_catalog(
+        engine,
+        lambda event: {**event, "scheduled_at": tip.isoformat()},
+        manifest_id=manifest_id,
+        game_id=game_id,
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            CanonicalGameLedgerGame.__table__.update()
+            .where(CanonicalGameLedgerGame.game_id == game_id)
+            .values(game_date=stored_on)
+        )
+
+
+def test_a_late_tip_is_the_game_of_its_eastern_day(world):
+    engine, publications, _operations, _before = world
+    _retime(engine, tip=LATE_TIP, stored_on=date(2026, 10, 23))
+
+    logs = _compose_in_season(publications, PLAYER_LOGS)
+
+    assert (logs.season, logs.status, logs.manifest_id) == (NEW, "candidate", "manifest-other")
+
+
+def test_a_2025_26_late_tip_is_the_game_of_its_eastern_day(world):
+    engine, publications, _operations, _before = world
+    # 9 PM EST on 2025-11-14 is already 2025-11-15 in UTC.
+    _retime(
+        engine,
+        tip=datetime(2025, 11, 15, 2, tzinfo=UTC),
+        stored_on=date(2025, 11, 14),
+        manifest_id="manifest-old",
+        game_id=OLD_GAMES[0][0],
+    )
+
+    version = publications.compose_inactive_ledger(
+        PLAYER_LOGS,
+        season=OLD,
+        cutoff=OLD_CUTOFF,
+        payload=payload_for(PLAYER_LOGS, OLD, points=31),
+        provenance=OLD_PROVENANCE,
+    )
+
+    assert (version.season, version.status, version.manifest_id) == (OLD, "candidate", "manifest-old")
+
+
+def test_a_composition_refuses_a_game_stored_on_its_tips_utc_day(world):
+    engine, publications, operations, _before = world
+    # The LiveData fallback's misdating: the stored date is the tip's UTC day.
+    _retime(engine, tip=LATE_TIP, stored_on=date(2026, 10, 24))
+
+    with pytest.raises(ControlPlaneError) as refused:
+        _compose_in_season(publications, PLAYER_LOGS)
+
+    assert refused.value.reason == "ledger_provenance_catalog_mismatch"
+    with pytest.raises(ControlPlaneError) as cutover:
+        operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
+    assert cutover.value.reason == "cutover_player_game_logs_candidate_required"
+
+
+def test_a_cutover_refuses_a_candidate_whose_game_its_catalog_identifies_differently(world):
+    engine, publications, operations, before = world
+    _compose_in_season(publications, PLAYER_LOGS)
+    _compose_in_season(publications, SEASON_STREAM)
+    game_id, home_team_id, away_team_id = NEW_GAMES[0]
+    with engine.begin() as connection:
+        connection.execute(
+            CanonicalGameLedgerGame.__table__.update()
+            .where(CanonicalGameLedgerGame.game_id == game_id)
+            .values(home_team_id=away_team_id, away_team_id=home_team_id)
+        )
+
+    with pytest.raises(ControlPlaneError) as refused:
+        operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
+
+    assert refused.value.reason == "ledger_provenance_catalog_mismatch"
+    assert pointers(engine) == before
+
+
+@pytest.mark.parametrize("named", ["manifest-other", "manifest-twin"])
+def test_a_held_composition_is_governed_by_the_manifest_its_job_names(world, named):
+    engine, publications, _operations, _before = world
+    # A second ledger manifest shares tonight's cutoff and Event Catalog.
+    with engine.begin() as connection:
+        tonight = (
+            connection.execute(
+                select(CollectionManifest.__table__).where(CollectionManifest.manifest_id == "manifest-other")
+            )
+            .mappings()
+            .one()
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                {**tonight, "manifest_id": "manifest-twin", "checksum": "manifest-twin"}
+            )
+        )
+
+    logs = publications.recompose_ledger(
+        PLAYER_LOGS,
+        season=NEW,
+        cutoff=OTHER_CUTOFF,
+        payload=payload_for(PLAYER_LOGS, NEW, games=IN_SEASON_GAMES),
+        provenance=IN_SEASON_PROVENANCE,
+        reason="2026-27 ledger composition",
+        manifest_id=named,
+    )
+
+    assert (logs.season, logs.status, logs.manifest_id) == (NEW, "candidate", named)
 
 
 def test_cutover_refuses_without_a_player_game_logs_candidate(world):

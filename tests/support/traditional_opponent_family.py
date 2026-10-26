@@ -35,6 +35,7 @@ UTC = UTC
 SEASON = "2025-26"
 NOW = datetime(2026, 8, 12, tzinfo=UTC)
 CUTOFF = datetime(2026, 8, 12, 4, tzinfo=UTC)
+OPENING_CUTOFF = CUTOFF - timedelta(days=1)
 GAME_COUNT = 15
 TEAM_IDS = tuple(sorted(NBA_TEAM_IDS))
 SEASON_STREAM = "traditional_opponent_season"
@@ -103,12 +104,31 @@ def provenance():
     return {f"pbp:game-{index}": f"game-{index}" for index in range(GAME_COUNT)}
 
 
-def seed_family(tmp_path, *, clock=None, publication_format=TRADITIONAL_OPPONENT_V2):
-    """Return an engine whose family is active in ``publication_format``."""
+def seed_family(tmp_path, *, clock=None, publication_format=TRADITIONAL_OPPONENT_V2, opening_games=0):
+    """Return an engine whose family is active in ``publication_format``.
+
+    The first ``opening_games`` games were accepted the night before, under
+    ``opening-manifest``, as an in-season ledger keeps them.
+    """
 
     engine = create_engine(f"sqlite:///{tmp_path / 'family.sqlite3'}")
     run_migrations(engine)
-    catalog_payload = "{}"
+    catalog_payload = json.dumps(
+        {
+            "events": [
+                {
+                    "nba_game_id": f"game-{index}",
+                    "home_team_id": int(TEAM_IDS[index * 2]),
+                    "away_team_id": int(TEAM_IDS[index * 2 + 1]),
+                    "phase": "Regular Season",
+                    "status": "Final",
+                    "status_code": 3,
+                    "scheduled_at": CUTOFF.isoformat(),
+                }
+                for index in range(GAME_COUNT)
+            ]
+        }
+    )
     catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with engine.begin() as connection:
         connection.execute(
@@ -140,13 +160,28 @@ def seed_family(tmp_path, *, clock=None, publication_format=TRADITIONAL_OPPONENT
             )
         )
         connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="opening-manifest",
+                season=SEASON,
+                cutoff=OPENING_CUTOFF,
+                collect_before=OPENING_CUTOFF + timedelta(hours=8),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="opening-manifest",
+                event_catalog_publication_id="event-catalog",
+                event_catalog_checksum=catalog_checksum,
+                status="superseded",
+                created_at=OPENING_CUTOFF,
+            )
+        )
+        connection.execute(
             CollectionObservation.__table__.insert(),
             [
                 {
                     "observation_id": f"pbp:game-{index}",
                     "client_observation_id": f"pbp:game-{index}",
                     "collector_id": "test",
-                    "manifest_id": "ledger-manifest",
+                    "manifest_id": "opening-manifest" if index < opening_games else "ledger-manifest",
                     "environment": "testing",
                     "provider": "pbp+nba_live_data",
                     "observation_type": "canonical_game_ledger",
@@ -157,13 +192,13 @@ def seed_family(tmp_path, *, clock=None, publication_format=TRADITIONAL_OPPONENT
                         }
                     ),
                     "season": SEASON,
-                    "cutoff": CUTOFF,
+                    "cutoff": OPENING_CUTOFF if index < opening_games else CUTOFF,
                     "schema_version": 1,
                     "checksum": f"pbp:game-{index}",
                     "payload": "{}",
                     "payload_bytes": 2,
-                    "retrieved_at": NOW,
-                    "accepted_at": NOW,
+                    "retrieved_at": OPENING_CUTOFF if index < opening_games else NOW,
+                    "accepted_at": OPENING_CUTOFF if index < opening_games else NOW,
                 }
                 for index in range(GAME_COUNT)
             ],
