@@ -17,10 +17,9 @@ reads the unauthenticated ``/events`` listing and normalizes:
   (0.01 / 0.97) sits near 0.5 by construction and would otherwise beat the
   line people trade.  Only a midpoint within 0.15 of 0.5 can be standard: a
   tight book on a far rung (29.5 priced at 0.15 while the apps post 21.5) says
-  where the market is not.  Every other line is ALTERNATE.  When no line has a
-  midpoint, a single line missing its bid or ask is STANDARD; a wider book, a
-  line priced far from even, or several lines, are all ALTERNATE, never
-  guessed.
+  where the market is not.  Every other line is ALTERNATE, so a group with no
+  line priced near even -- only wide books, lines missing a bid or ask, or far
+  rungs -- has no standard line and is never guessed.
 
 Only full-game player points, rebounds and assists are in scope.  Game markets
 (moneyline, spreads, totals), period-scoped markets, futures events and
@@ -134,8 +133,6 @@ class _Prop:
     group: tuple[str, str, str]
     line: Decimal
     midpoint: Decimal | None
-    # Both sides quoted, but too far apart to say where the market is.
-    wide: bool
 
 
 class PolymarketAdapter:
@@ -366,8 +363,6 @@ class PolymarketAdapter:
                     prop.market.market_id,
                 ),
             )
-        if not quoted and len(props) == 1 and not props[0].wide:
-            return props[0]
         return None
 
     @staticmethod
@@ -530,14 +525,13 @@ class PolymarketAdapter:
             )
         except ValueError as error:
             raise CoverageRecordMalformed(str(error)) from error
-        wide = bid is not None and ask is not None and ask - bid > _MAX_QUOTED_SPREAD
-        midpoint = (bid + ask) / 2 if bid is not None and ask is not None and not wide else None
+        quoted = bid is not None and ask is not None and ask - bid <= _MAX_QUOTED_SPREAD
+        midpoint = (bid + ask) / 2 if quoted else None
         return _Prop(
             market=built,
             group=(athlete_id, market_type, game.event_id),
             line=threshold.value,
             midpoint=midpoint,
-            wide=wide,
         )
 
     @staticmethod

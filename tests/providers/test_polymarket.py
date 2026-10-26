@@ -301,15 +301,13 @@ def test_the_recorded_game_has_at_most_one_standard_line_per_player_and_statisti
             key = (market.athlete.provider_id, market.statistic.label)
             assert key not in standard
             standard[key] = market.market_id
-    # The one real two-line group has no midpoint on either line, so neither of
-    # its lines is guessed; every other group has a single line. The recorded
-    # game had settled, so the 15 lines trading at 0.995-1.0 are far from even
-    # and none of them is standard.
+    # The recorded game had settled: every line trades at 0.995-1.0 or lacks a
+    # bid, so none is priced near even and none is standard.
     assert _variants(snapshot)["2502857"] == "alternate"
     assert _variants(snapshot)["2503883"] == "alternate"
-    assert len(standard) == 13
-    assert sum(1 for v in _variants(snapshot).values() if v == "alternate") == 17
-    assert {m.variant_label for m in snapshot.markets} == {"standard", "alternate"}
+    assert standard == {}
+    assert sum(1 for v in _variants(snapshot).values() if v == "alternate") == 30
+    assert {m.variant_label for m in snapshot.markets} == {"alternate"}
 
 
 def test_the_line_with_the_midpoint_nearest_half_is_standard():
@@ -451,7 +449,7 @@ def test_a_book_ten_cents_wide_still_quotes_a_midpoint():
     assert _variants(snapshot) == {"ten": "standard", "tight": "alternate"}
 
 
-def test_with_no_midpoint_one_line_is_standard_and_several_are_all_alternate():
+def test_with_no_midpoint_no_line_is_standard_however_many_there_are():
     single = [_variant("only", line=17.5, bid=None, ask=0.5)]
     several = [
         _variant("a", line=17.5, bid=None, ask=0.5),
@@ -461,7 +459,7 @@ def test_with_no_midpoint_one_line_is_standard_and_several_are_all_alternate():
     one, _ = _snapshot(_game_with(single))
     many, _ = _snapshot(_game_with(several))
 
-    assert _variants(one) == {"only": "standard"}
+    assert _variants(one) == {"only": "alternate"}
     assert _variants(many) == {"a": "alternate", "b": "alternate"}
 
 
