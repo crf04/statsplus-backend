@@ -1,4 +1,4 @@
-"""Admin routes for the beta sign-up switch, the waitlist and research activity."""
+"""Admin routes for the beta sign-up switch, the waitlist, research activity and reports."""
 
 import re
 from datetime import date
@@ -16,6 +16,7 @@ admin_bp = Blueprint("admin", __name__)
 
 user_service = CurrentAppService("user")
 research_activity_service = CurrentAppService("research_activity")
+report_service = CurrentAppService("report")
 
 _LISTABLE_STATUSES = (ACCESS_WAITLISTED, ACCESS_ACTIVE)
 
@@ -86,3 +87,22 @@ def get_research_activity():
         except ValueError as error:
             raise InvalidInputError("as_of must be a valid date.") from error
     return jsonify(research_activity_service.report(as_of=as_of))
+
+
+@admin_bp.route("/users/<uid>/public-handle", methods=["PUT"])
+@require_admin
+@route_error_boundary("Failed to update the public handle.")
+def put_public_handle(uid):
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or "public_handle" not in body:
+        raise InvalidInputError('Body must be {"public_handle": "@handle" | null}.')
+    return jsonify(
+        {"uid": uid, "public_handle": report_service.set_public_handle(uid, body["public_handle"])}
+    )
+
+
+@admin_bp.route("/reports/<report_id>/takedown", methods=["POST"])
+@require_admin
+@route_error_boundary("Failed to take the report down.")
+def take_down_report(report_id):
+    return jsonify({"success": True, "report": report_service.take_down(report_id)})

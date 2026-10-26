@@ -2771,6 +2771,28 @@ user and the read-only demo database (`recording=False`) record nothing.
 `scripts/usage_report.py` reads the table through a read-only connection and
 prints the four report tables; see its docstring for the arguments.
 
+### CourtAI reports (#342)
+
+`reports` (migration 076, `app/models/report.py`) stores what the MCP
+`publish_report` tool posts to `POST /api/user/reports`: the validated document,
+the calls with their rerun results, and each card's HTML snapshot, in JSON
+columns (`JSONB` on PostgreSQL). `ReportService` (`app/services/reports.py`) is
+its only reader and writer, and `app/domain/report_document.py` holds the
+schema and limits, mirroring the MCP tool's, so a caller other than the MCP
+cannot store anything bigger. The route lifts the app-wide 1 MB body cap to
+2 MB for this one request, as the feedback route does.
+
+The public reads (`app/routes/report_routes.py`, `/api/reports/<id>`, `/meta`,
+`/preview.png`) are anonymous. The report read uses
+`require_auth_optional_allow_waitlisted`, the one optional-auth decorator that
+attaches a waitlisted caller instead of refusing them, so a waitlisted visitor
+can open a shared report; the token only decides `is_author`. Delete and
+takedown are soft timestamps, and missing, deleted and taken-down reports
+answer the same `404`. The author label is `users.public_handle` (migration
+077), shown only when the report opted in. The preview PNG reuses the shared
+canvas in `app/services/preview_card.py`; it reads one row, so it has no render
+budget.
+
 ### Database-first Matchups activation (#87)
 
 `DatabaseFirstPublicationReader` is the read-side authority for the first

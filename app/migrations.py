@@ -2109,6 +2109,58 @@ def downgrade_usage_events(connection: Connection) -> None:
     connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 73))
 
 
+def _create_reports_table(connection: Connection) -> None:
+    """Create the published reports table (crf04/statsplus#342).
+
+    Repeatable: ``checkfirst`` skips an existing table and never touches its
+    rows.  A database stopped before ``users`` existed gets it first, so the
+    foreign key has a target.
+    """
+    from app.models.report import Report
+    from app.models.user import User
+
+    User.__table__.create(connection, checkfirst=True)
+    Report.__table__.create(connection, checkfirst=True)
+
+
+def downgrade_reports(connection: Connection) -> None:
+    """Reverse ``076_create_reports``; also forgets its migration record.
+
+    Migrations here are forward-only at runtime.  This exists so the change is
+    provably reversible: it drops only the reports table.
+    """
+    from app.models.report import Report
+
+    Report.__table__.drop(connection, checkfirst=True)
+    connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 76))
+
+
+def _add_user_public_handle(connection: Connection) -> None:
+    """Add the nullable ``users.public_handle`` report author label (#342).
+
+    Rerun-safe: the column is added only when missing; a fresh database already
+    has it from the model-created ``users`` table.  Every existing row is null,
+    so no report shows an author until an admin sets a handle.
+    """
+    from app.models.user import PUBLIC_HANDLE_MAX_LENGTH, User
+
+    User.__table__.create(connection, checkfirst=True)
+    existing = {column["name"] for column in inspect(connection).get_columns("users")}
+    if "public_handle" not in existing:
+        connection.execute(
+            text(f"ALTER TABLE users ADD COLUMN public_handle VARCHAR({PUBLIC_HANDLE_MAX_LENGTH})")
+        )
+
+
+def downgrade_user_public_handle(connection: Connection) -> None:
+    """Reverse ``077_user_public_handle``; also forgets its migration record."""
+
+    existing = {column["name"] for column in inspect(connection).get_columns("users")}
+    if "public_handle" in existing:
+        connection.execute(text("ALTER TABLE users DROP COLUMN public_handle"))
+    connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 77))
+
+
 #: The indexes migration 075 adds for projection retention, by table: the
 #: date-ordered walk, then one per foreign key a delete must check.
 _PROJECTION_RETENTION_INDEXES: Final[tuple[tuple[str, str], ...]] = (
@@ -3108,6 +3160,8 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         _add_projection_retention,
         after_commit=_build_projection_retention_indexes,
     ),
+    Migration(76, "076_create_reports", _create_reports_table),
+    Migration(77, "077_user_public_handle", _add_user_public_handle),
 )
 
 

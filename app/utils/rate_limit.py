@@ -43,6 +43,7 @@ TARGET_BACKTEST_LIMIT = "60/minute"
 NL_QUERY_LIMIT = "30/minute"
 DFS_BOARD_LIMIT = "30/minute"
 FEEDBACK_LIMIT = "10/hour"
+REPORT_PUBLISH_LIMIT = "10/hour;30/day"
 
 #: Redis commands must not hold a request slot when the store is wedged.
 _STORAGE_TIMEOUT_SECONDS = 1
@@ -124,6 +125,7 @@ ROUTE_LIMITS = {
     "nl.process_natural_language_query": NL_QUERY_LIMIT,
     "dfs.dfs_board": DFS_BOARD_LIMIT,
     "users.submit_feedback": FEEDBACK_LIMIT,
+    "users.create_report": REPORT_PUBLISH_LIMIT,
 }
 
 
@@ -134,7 +136,7 @@ def _authenticate_before_limiting() -> None:
     if getattr(view, "requires_auth", False):
         _authenticate_request(allow_waitlisted=getattr(view, "allows_waitlisted", False))
     elif getattr(view, "optional_auth", False):
-        _authenticate_optionally()
+        _authenticate_optionally(allow_waitlisted=getattr(view, "allows_waitlisted", False))
 
 
 def init_rate_limiting(app: Flask, settings: RuntimeSettings) -> None:

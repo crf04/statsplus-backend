@@ -21,10 +21,11 @@ the service returns `503 Service Unavailable`. Missing or invalid tokens return
 
 Authentication levels:
 
-- Anonymous (crf04/statsplus#211): `GET /api/games/slate`, `GET /api/games/slate/edges`, `GET /api/games/ladder`, `GET /api/games/game_logs/preview.png` (crf04/statsplus#285), and `GET /api/games/slate/preview.png` and `GET /api/games/matchup/preview.png` (crf04/statsplus#320). They carry no auth check, so any `Authorization` header (a waitlisted user's token included) is ignored, never refused, and the [rate limiter](#rate-limits) counts the caller by client IP in the unauthenticated bucket.
+- Anonymous (crf04/statsplus#211): `GET /api/games/slate`, `GET /api/games/slate/edges`, `GET /api/games/ladder`, `GET /api/games/game_logs/preview.png` (crf04/statsplus#285), `GET /api/games/slate/preview.png` and `GET /api/games/matchup/preview.png` (crf04/statsplus#320), and `GET /api/reports/<id>/meta` and `GET /api/reports/<id>/preview.png` (crf04/statsplus#342). They carry no auth check, so any `Authorization` header (a waitlisted user's token included) is ignored, never refused, and the [rate limiter](#rate-limits) counts the caller by client IP in the unauthenticated bucket.
 - Required: `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/rotation`, `GET /api/games/seasons`, `GET /api/players/season_stats`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `POST /api/usage/mcp-tool-calls`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
-- Admin-only: `GET`/`PUT /api/admin/signups`, `GET /api/admin/users`, `POST /api/admin/users/<uid>/admit`, `PUT /api/admin/users/<uid>/cohort`, `GET /api/admin/research-activity`, `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
+- Admin-only: `GET`/`PUT /api/admin/signups`, `GET /api/admin/users`, `POST /api/admin/users/<uid>/admit`, `PUT /api/admin/users/<uid>/cohort`, `GET /api/admin/research-activity`, `PUT /api/admin/users/<uid>/public-handle`, `POST /api/admin/reports/<id>/takedown`, `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
+- Optional, waitlisted accepted: `GET /api/reports/<id>` (crf04/statsplus#342). A valid token only adds `is_author`; a waitlisted account's token is attached, never refused.
 - Admin claims: an authenticated token must contain `admin=true`, `role=admin`,
   or `roles` containing `admin` for admin-only routes. Missing claims return
   `403 Forbidden`.
@@ -51,7 +52,8 @@ read.
 ```
 
   `POST /api/user/attribution` accepts waitlisted accounts so their first-touch
-  source is recorded. Users with an admin claim are exempt, so the admin endpoints below stay
+  source is recorded, and `GET /api/reports/<id>` reads a report for them too
+  ([Reports](#reports)); publishing one is still refused. Users with an admin claim are exempt, so the admin endpoints below stay
   reachable even for an admin whose own first sign-in landed while paused.
   Optional-auth routes apply the same check whenever a valid token is sent. If
   the user row could not be synced, the stored status (or, with no row, the
@@ -237,7 +239,7 @@ The public error categories and HTTP statuses are:
 | Forbidden | `forbidden` | 403 | The authenticated user lacks the required permission. |
 | Waitlisted | `waitlisted` | 403 | The user signed in while sign-ups were paused and has not been admitted. Returned on every authenticated `/api` route except for admins and `POST /api/user/attribution`. See "Beta sign-ups and the waitlist". |
 | Rate limited | `rate_limited` | 429 | The caller exceeded a request limit (see [Rate limits](#rate-limits)). The response carries `Retry-After: <seconds>` and no `details`. |
-| Payload too large | `payload_too_large` | 413 | The request body exceeds 1 MB (collector envelope uploads keep their own 2 MB bound). |
+| Payload too large | `payload_too_large` | 413 | The request body exceeds 1 MB (collector envelope uploads keep their own 2 MB bound, `POST /api/user/reports` accepts 2 MB and `POST /api/user/feedback` 4 MB). |
 | Operation failed | `operation_failed` | 500 | A requested application operation could not be completed. |
 | Duplicate active operation | `duplicate_active_operation` | 409 | A data refresh or publication rebuild for the same operation is already queued or running. |
 | Collection operation conflict | `operation_conflict` | 409 | A collection fence, immutable cycle, retry state, or idempotency key conflicts with durable current state. |
@@ -279,6 +281,7 @@ reopens), and this body:
 | `POST /api/nl-query` | 30/min per user |
 | `GET /api/dfs/board` | 30/min per user |
 | `POST /api/user/feedback` | 10/hour per user |
+| `POST /api/user/reports` | 10/hour and 30/day per user |
 | every other authenticated `/api` route | 300/min per user, one shared bucket |
 | unauthenticated routes, except `/health` | 60/min per IP |
 
@@ -4856,6 +4859,179 @@ Validation and conflicts:
 - `409 operation_conflict` for a duplicate name within the account (compared
   case-insensitively) and for exceeding the cap of 100 saved items per
   account.
+
+### Reports
+
+A CourtAI report (crf04/statsplus#342) is a public, unlisted dashboard an AI
+assistant published through the CourtAI connector's `publish_report` tool: a
+document of tabs and items with grades, the tool calls behind its cards with
+their results, and each card's HTML as it was when published, so an old report
+keeps rendering after a card's design changes. Anyone with the link reads it,
+signed in or not. There is no listing of reports. A report is kept until its
+author deletes it or an admin takes it down.
+
+```http
+POST   /api/user/reports                       require_auth (waitlisted refused)
+DELETE /api/user/reports/<id>                  require_auth; the author only
+GET    /api/reports/<id>                       anonymous; a token adds is_author
+GET    /api/reports/<id>/meta                  anonymous
+GET    /api/reports/<id>/preview.png           anonymous
+POST   /api/admin/reports/<id>/takedown        require_admin
+PUT    /api/admin/users/<uid>/public-handle    require_admin
+```
+
+#### Publish a report
+
+`POST /api/user/reports`, body at most 2 MB (`413 payload_too_large` beyond):
+
+```json
+{
+  "report": {
+    "title": "Injury brief: Friday, Oct 24",
+    "date": "2026-10-24",
+    "opening": ["Three games carry a real absence."],
+    "skill": {"name": "courtai-injury-brief", "url": "https://courtai.app/connect"},
+    "footnote": "Facts about past games only.",
+    "tabs": [
+      {"title": "Spots", "layout": "rows", "items": [
+        {"title": "Brunson points", "tag": "lean", "subtitle": "Randle sits",
+         "key": "beat 9 of 12", "body": ["..."], "bullets": [["Sample", "12 games"]],
+         "watch": "Minutes cap", "cards": ["brunson-logs"],
+         "sources": [["Official report", "https://official.nba.com/nba-injury-report-2026-27-season/"]]}
+      ]}
+    ]
+  },
+  "calls": [
+    {"id": "brunson-logs", "tool": "query_game_logs", "args": {"player": "Jalen Brunson"},
+     "structured": {}, "meta": {}, "card": "game-logs"}
+  ],
+  "cards": {"game-logs": "<!doctype html>..."},
+  "show_author": false
+}
+```
+
+The server checks the body against the same schema and limits as the MCP tool
+(`app/domain/report_document.py`):
+
+| Field | Rule |
+| --- | --- |
+| `report.title` | 1-120 characters |
+| `report.date` | optional, a valid `YYYY-MM-DD` |
+| `report.opening` | at most 3 paragraphs of 1-600 characters |
+| `report.skill` | optional `{name: 1-60, url?}`; `url` must start with `https://courtai.app/` (at most 500 characters) |
+| `report.footnote` | optional, 1-300 characters |
+| `report.tabs` | 1-5 tabs of `{title: 1-30, layout: tiles \| rows \| list, items: at most 60}` |
+| item `title` | 1-120 characters |
+| item `tag` | optional, `strong`, `lean`, `thin`, `pass` or `tipped` |
+| item `subtitle`, `key` | optional, 1-240 characters |
+| item `body` | at most 6 paragraphs of 1-1500 characters |
+| item `bullets` | at most 10 `[label 1-80, text 1-300]` pairs |
+| item `watch` | optional, 1-500 characters |
+| item `cards` | at most 8 call ids, each naming a call in `calls` |
+| item `sources` | at most 12 `[fact 1-200, url]` pairs; `url` is `http://` or `https://`, at most 500 characters |
+| `calls` | at most 48 of `{id, tool, args, structured, meta?, card}`; `id` matches `[a-z0-9-]{1,40}` and is unique; `tool` is `query_game_logs`, `get_on_off`, `get_matchup`, `get_rotation` or `get_injuries`; `args` and `structured` are objects, `meta` an object or absent; `card` matches `[a-z0-9_-]{1,60}` and is a key of `cards` |
+| `cards` | an object of card name to non-empty HTML string, holding only cards some call names |
+| `show_author` | optional boolean, default `false` |
+
+Text is stored as given and the web app renders it escaped, so HTML in a text
+field is shown, never run. Control characters other than tab and newline are
+refused, and so are unknown keys. An omitted list is stored as `[]`, and an
+omitted or `null` optional field is left out of the stored document. A refusal
+is `400 invalid_input` whose `details.field` names the field, e.g.
+`{"field": "report.tabs[1].items[0].sources[0][1]"}`.
+
+`201`:
+
+```json
+{"success": true, "report": {"id": "k3x9q2mtzr", "url": "https://courtai.app/reports/k3x9q2mtzr", "created_at": "2026-10-25T18:04:11.204391+00:00"}}
+```
+
+The id is 10 random base62 characters. An account may hold 1,000 reports that
+it has not deleted (`409 operation_conflict` beyond); the limit is 10 an hour
+and 30 a day per account (`429 rate_limited`). A waitlisted account gets
+`403 waitlisted`.
+
+#### Read a report
+
+`GET /api/reports/<id>` (anonymous: 60/min per IP):
+
+```json
+{
+  "report": {
+    "id": "k3x9q2mtzr",
+    "created_at": "2026-10-25T18:04:11.204391+00:00",
+    "author": {"label": "@bighatprops"},
+    "is_author": false,
+    "document": {"title": "...", "opening": [], "tabs": []},
+    "calls": [{"id": "brunson-logs", "tool": "query_game_logs", "card": "game-logs", "structured": {}, "meta": null}],
+    "cards": {"game-logs": "<!doctype html>..."}
+  }
+}
+```
+
+`document` is the stored Report. `calls` omit the `args`. `author` is
+`{"label": <public handle>}` only when the report was published with
+`show_author: true` and the author's account has a public handle, else `null`
+(the web app then says "Built by a CourtAI user"); the Google display name is
+never shown. `is_author` is `true` only when the request carries the author's
+own valid token. A waitlisted token is accepted.
+
+#### Report meta
+
+`GET /api/reports/<id>/meta`, for link previews:
+
+```json
+{"id": "k3x9q2mtzr", "title": "Injury brief: Friday, Oct 24", "date": "2026-10-24",
+ "description": "Three games carry a real absence.", "tags": {"lean": 2, "pass": 1, "strong": 1}}
+```
+
+`date` is `null` when the report has none. `description` is the first
+`opening` paragraph with whitespace collapsed, cut on a word boundary to at most
+200 characters ending in `…`, or `null` without one. `tags` counts the items
+carrying each tag over every tab; a tag no item carries is left out.
+
+#### Report preview image
+
+`GET /api/reports/<id>/preview.png` is a 1200×630 `image/png` on the same
+canvas as the other [preview images](#get-slate-and-matchup-preview-images):
+the CourtAI brand row with the report's date (or `Report`), its title (one
+line, or two cut short), and the first three tagged items in document order,
+each a grade chip and the item's title, above the footer "A spot is a place to
+look, not a pick." It is served with `Cache-Control: no-cache`, so a cached copy
+is revalidated on every use and a deleted or taken-down report stops showing at
+once; a refusal carries `no-store`.
+
+#### Delete, take down and not found
+
+`DELETE /api/user/reports/<id>` deletes the caller's own report:
+`{"success": true, "message": "Report deleted"}`. Someone else's report, or
+one already deleted, is `404 resource_not_found`.
+
+`POST /api/admin/reports/<id>/takedown` hides a report for everyone:
+`{"success": true, "report": {"id": "k3x9q2mtzr", "taken_down_at": "..."}}`.
+It is idempotent and keeps the first time.
+
+A report that does not exist, was deleted or was taken down is the same
+`404` on all three reads, to everyone, the author included:
+
+```json
+{"error": {"code": "resource_not_found", "message": "This report isn't available."}}
+```
+
+Both are soft: the row stays, with `deleted_at` or `taken_down_at` set.
+Deleting the account deletes its reports.
+
+`PUT /api/admin/users/<uid>/public-handle` with `{"public_handle": "@bighatprops"}`
+sets the account's author label (trimmed, 1-40 printable characters) and
+answers `{"uid": "<uid>", "public_handle": "@bighatprops"}`; `null` clears it.
+An unknown uid is `404`.
+
+Storage: the `reports` table (migration 076): `id` (`VARCHAR(12)`), `firebase_uid`
+(foreign key to `users`, `ON DELETE CASCADE`), `created_at`, `title`
+(`VARCHAR(120)`), `document`, `calls` and `cards` (`JSONB` on PostgreSQL),
+`show_author`, `deleted_at` and `taken_down_at`, indexed on
+`(firebase_uid, created_at)`. Migration 077 adds the nullable
+`users.public_handle` (`VARCHAR(40)`).
 
 ### Targets
 

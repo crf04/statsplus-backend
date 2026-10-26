@@ -34,6 +34,10 @@ user_service = CurrentAppService("user")
 target_resolution_service = CurrentAppService("target_resolution")
 target_backtest_service = CurrentAppService("target_backtest")
 target_preview_service = CurrentAppService("target_preview")
+report_service = CurrentAppService("report")
+
+#: A report with 38 cards is about 820 KB; the app-wide cap is 1 MB.
+REPORT_MAX_REQUEST_BYTES = 2 * 1024 * 1024
 
 
 @user_bp.route("/profile", methods=["GET"])
@@ -559,6 +563,44 @@ def delete_target(target_id):
     user_service.delete_target(_authenticated_uid(), target_id)
 
     return jsonify({"success": True, "message": "Target deleted"})
+
+
+@user_bp.route("/reports", methods=["POST"])
+@require_auth
+@route_error_boundary("Failed to publish the report.")
+def create_report():
+    """
+    Publish a CourtAI report for the caller (crf04/statsplus#342).
+
+    Expected JSON body (at most 2 MB):
+        {
+            "report": {...},
+            "calls": [{"id", "tool", "args", "structured", "meta", "card"}],
+            "cards": {"<card>": "<html>"},
+            "show_author": false
+        }
+
+    Returns:
+        201 with the report's id, public URL and creation time
+    """
+    firebase_uid = _authenticated_uid()
+    request.max_content_length = REPORT_MAX_REQUEST_BYTES
+    published = report_service.publish(firebase_uid, request.get_json(silent=True))
+    return jsonify({"success": True, "report": published}), 201
+
+
+@user_bp.route("/reports/<report_id>", methods=["DELETE"])
+@require_auth
+@route_error_boundary("Failed to delete the report.")
+def delete_report(report_id):
+    """
+    Delete one of the caller's reports; it then reads as not found for everyone.
+
+    Returns:
+        JSON response confirming the deletion
+    """
+    report_service.delete(_authenticated_uid(), report_id)
+    return jsonify({"success": True, "message": "Report deleted"})
 
 
 @user_bp.route("/admin/stats", methods=["GET"])
