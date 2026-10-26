@@ -410,6 +410,22 @@ def test_fallback_games_pbpstats_never_served_derive_complete_locations(game_id,
     } == team_totals
 
 
+@pytest.mark.parametrize(
+    ("game_id", "turnovers"),
+    [
+        ("0022600101", {"GSW": 19, "MEM": 27}),
+        ("0022600102", {"LAC": 26, "LAL": 21}),
+    ],
+)
+def test_fallback_team_turnovers_include_team_turnovers(game_id, turnovers):
+    box, play_by_play, event = _recorded(game_id)
+
+    observation = compose_pbp_live_data_observation(None, box, event=event, live_play_by_play=play_by_play)
+    game = canonical_game_from_pbp(observation, event=event)
+
+    assert {fact.team_tricode: fact.turnovers for fact in game.team_facts} == turnovers
+
+
 def test_play_by_play_that_contradicts_the_box_leaves_the_fallback_without_a_split():
     box, play_by_play, event = _recorded("0022600009")
     rebound = next(
