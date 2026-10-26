@@ -203,6 +203,42 @@ def test_live_only_fallback_is_accepted_without_claiming_pbp_provenance():
     assert observation["_ledger_provenance"]["source_documents"]["pbp"] is None
 
 
+def test_live_only_fallback_dates_a_late_eastern_tip_on_its_eastern_slate_day():
+    live = _live_payload()
+    live["game"]["gameTimeUTC"] = "2026-10-21T01:30:00Z"
+    event = {**_event(), "scheduled_at": "2026-10-21T01:30:00Z"}
+
+    observation = compose_pbp_live_data_observation(None, live, event=event)
+    game = canonical_game_from_pbp(observation, event=event)
+
+    assert observation["date"] == "2026-10-20"
+    assert game.game_date.isoformat() == "2026-10-20"
+
+
+def test_live_only_fallback_without_a_utc_tip_dates_the_game_on_its_eastern_tip_date():
+    live = _live_payload()
+    live["game"]["gameTimeUTC"] = None
+    live["game"]["gameEt"] = "2026-10-20T20:30:00-04:00"
+    event = {key: value for key, value in _event().items() if key != "scheduled_at"}
+
+    observation = compose_pbp_live_data_observation(None, live, event=event)
+
+    assert observation["date"] == "2026-10-20"
+    assert canonical_game_from_pbp(observation, event=event).game_date.isoformat() == "2026-10-20"
+
+
+def test_live_only_fallback_without_any_tip_time_dates_the_game_on_its_governed_eastern_date():
+    live = _live_payload()
+    del live["game"]["gameTimeUTC"]
+    live["game"].pop("gameEt", None)
+    event = {**_event(), "scheduled_at": "2026-10-21T01:30:00Z"}
+
+    observation = compose_pbp_live_data_observation(None, live, event=event)
+
+    assert observation["date"] == "2026-10-20"
+    assert canonical_game_from_pbp(observation, event=event).game_date.isoformat() == "2026-10-20"
+
+
 class _Response:
     status_code = 200
 
@@ -408,6 +444,22 @@ def test_fallback_games_pbpstats_never_served_derive_complete_locations(game_id,
         )
         for tricode in team_totals
     } == team_totals
+
+
+@pytest.mark.parametrize(
+    ("game_id", "turnovers"),
+    [
+        ("0022600101", {"GSW": 19, "MEM": 27}),
+        ("0022600102", {"LAC": 26, "LAL": 21}),
+    ],
+)
+def test_fallback_team_turnovers_include_team_turnovers(game_id, turnovers):
+    box, play_by_play, event = _recorded(game_id)
+
+    observation = compose_pbp_live_data_observation(None, box, event=event, live_play_by_play=play_by_play)
+    game = canonical_game_from_pbp(observation, event=event)
+
+    assert {fact.team_tricode: fact.turnovers for fact in game.team_facts} == turnovers
 
 
 def test_play_by_play_that_contradicts_the_box_leaves_the_fallback_without_a_split():
