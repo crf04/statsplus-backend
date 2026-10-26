@@ -259,6 +259,21 @@ def test_an_invalid_body_is_refused_naming_the_field(client, signed_in, reports,
         assert connection.execute(text("SELECT count(*) FROM reports")).scalar() == 0
 
 
+@pytest.mark.parametrize("card", ["../matchup", "Matchup", "match up", "x" * 61])
+def test_a_malformed_card_name_is_refused_even_with_a_snapshot_under_that_name(
+    client, signed_in, reports, card
+):
+    body = _body()
+    body["calls"][1]["card"] = card
+    body["cards"] = {"game-logs": "<html>logs</html>", card: "<html>matchup</html>"}
+
+    response = _publish(client, signed_in(), body)
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["details"] == {"field": "calls[1].card"}
+    assert response.get_json()["error"]["message"].startswith("calls[1].card must be a card name")
+
+
 def test_html_in_the_text_is_stored_as_given(client, signed_in):
     script = "<script>alert('x')</script> & <b>bold</b>"
     body = _body(title=script)
