@@ -397,6 +397,13 @@ already-authorized sibling jobs; it never invokes provider refresh. The tick
 itself never constructs the application/provider dependency graph when idle.
 The worker does not call NBA endpoints or replace the residential collector.
 
+A shot-type job refused as `provider_window_lagging` (player tracking behind
+the governed games) is retried by every upload until its window closes. Once
+the window has closed on that refusal, the tick logs one ERROR,
+`player_shooting_refresh provider_window_lagging stream=... season=...
+cutoff=...`, and records a `player_shooting.window_lagging` audit event so it
+is not repeated. With `SENTRY_DSN` set, that log is a Sentry event.
+
 After every tick, whatever its state, the command fills the saved-Target
 Backtest result cache for Targets whose owners logged in within 14 days (#363;
 see `TargetBacktestService.precompute` in [ARCHITECTURE.md](ARCHITECTURE.md)).

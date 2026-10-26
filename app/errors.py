@@ -442,6 +442,28 @@ class ConflictError(AppError):
         return self._public_details
 
 
+class SelectedSeasonUnavailableError(AppError):
+    """An explicitly selected season is not offered (crf04/statsplus#330).
+
+    Never answered with another season's data: the refusal names the
+    selection and the Published Season the client can fall back to.
+    """
+
+    status_code = 503
+    code = "season_unavailable"
+    default_message = "The selected season is not available yet."
+
+    def __init__(
+        self, message: str | None = None, *, selected_season: str, published_season: str | None
+    ) -> None:
+        self._public_details = {"selected_season": selected_season, "published_season": published_season}
+        super().__init__(message)
+
+    @property
+    def public_details(self) -> dict[str, Any]:
+        return self._public_details
+
+
 class SeasonUnavailableError(AppError):
     """A season's retained Publication of one stream cannot be read.
 

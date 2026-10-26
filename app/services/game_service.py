@@ -19,16 +19,19 @@ from typing import ClassVar
 
 import pandas as pd
 from nba_api.stats.static import teams
+from sqlalchemy.engine import Engine
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.domain.play_type_matchup import complete_play_type_shares, play_type_matchup
 from app.models.game_logs import GameLogQuery, GameLogResponse
+from app.services.database_first_activation import ReadSeason
 from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS
 from app.services.publication_snapshot_calls import (
     accepts_keyword,
     call_with_read_scope,
 )
-from app.services.research_season import research_season
+from app.services.request_reads import request_read_scope
+from app.services.research_season import research_season, season_context
 from app.services.response_provenance import provenance_block
 from app.services.team_matchup_query import TEAM_MATCHUP_PUBLICATION_STREAM_KEYS
 from app.utils.cache_config import get_redis_client
@@ -147,10 +150,24 @@ class GameService:
         return research_season(self.settings, self.publication_reader)
 
     def list_seasons(self):
-        """Seasons whose game logs are readable, newest first, and the default."""
+        """Seasons whose game logs are readable, newest first, the default, and every choice.
+
+        ``choices`` adds the season after the Published Season while its game
+        logs serve, and names what each family would serve (crf04/statsplus#330).
+        """
 
         seasons = list(self.game_log_seasons.published_seasons()) if self.game_log_seasons is not None else []
-        return {"seasons": seasons, "default_season": self.default_season()}
+        reader = self.publication_reader
+        choices = (
+            reader.season_choices(seasons)
+            if getattr(reader, "captures_published_season", False) is True
+            else ()
+        )
+        return {
+            "seasons": seasons,
+            "default_season": self.default_season(),
+            "choices": [choice.to_dict() for choice in choices],
+        }
 
     def get_player_id(self, player_name, season):
         # The Athlete Catalog is the governed identity source game-log
@@ -222,7 +239,7 @@ class GameService:
 
         return catalog_rows
 
-    def _get_game_logs(self, player_name, season=None, *, publication_snapshot=None):
+    def _get_game_logs(self, player_name, season=None, *, publication_snapshot=None, connection=None):
         """Read player game logs directly from durable facts."""
         season = season or self.default_season()
         if self.game_logs_source is None:
@@ -238,6 +255,7 @@ class GameService:
             player_id,
             season,
             publication_snapshot=publication_snapshot,
+            connection=connection,
         ), None
 
     def get_common_games(
@@ -247,6 +265,7 @@ class GameService:
         season=None,
         *,
         publication_snapshot=None,
+        connection=None,
     ):
         """Find common games between players"""
         season = season or self.default_season()
@@ -262,6 +281,7 @@ class GameService:
                 player_name,
                 season,
                 publication_snapshot=publication_snapshot,
+                connection=connection,
             )
             player_game_team_pairs = set(
                 zip(player_gamelogs["GAME_ID"], player_gamelogs["TEAM_ABBREVIATION"], strict=False)
@@ -282,6 +302,7 @@ class GameService:
         season=None,
         *,
         publication_snapshot=None,
+        connection=None,
     ):
         """Find same-team games where any named player appeared."""
         season = season or self.default_season()
@@ -297,6 +318,7 @@ class GameService:
                 player_name,
                 season,
                 publication_snapshot=publication_snapshot,
+                connection=connection,
             )
             exclude_game_ids |= self._same_team_appearances(primary_game_team_pairs, player_gamelogs)
 
@@ -389,6 +411,7 @@ class GameService:
         season,
         *,
         publication_snapshot=None,
+        connection=None,
     ):
         """Filter games based on players on/off"""
         if players_on:
@@ -397,6 +420,7 @@ class GameService:
                 players_on,
                 season,
                 publication_snapshot=publication_snapshot,
+                connection=connection,
             )
             df = df[df["GAME_ID"].isin(common_games)]
 
@@ -406,6 +430,7 @@ class GameService:
                 players_off,
                 season,
                 publication_snapshot=publication_snapshot,
+                connection=connection,
             )
             df = df[~df["GAME_ID"].isin(exclude_games)]
 
@@ -426,7 +451,7 @@ class GameService:
             in_range &= game_days <= pd.Timestamp(end)
         return in_range
 
-    def apply_filters(self, df, query, teams_against=None, *, publication_snapshot=None):
+    def apply_filters(self, df, query, teams_against=None, *, publication_snapshot=None, connection=None):
         """Apply all filters to game logs dataframe using one typed query."""
         min_filter, max_filter = query.minutes_filter
         df = df[(df["MIN"] >= min_filter) & (df["MIN"] <= max_filter)]
@@ -475,6 +500,7 @@ class GameService:
                 query.players_off,
                 query.season_filter,
                 publication_snapshot=publication_snapshot,
+                connection=connection,
             )
 
         # Apply typed self filters.  HTTP ``min,max`` ranges have already been
@@ -563,13 +589,26 @@ class GameService:
         }
 
     def get_filtered_logs(self, player_name, query: GameLogQuery):
-        """Get filtered game logs based on one typed :class:`GameLogQuery`."""
-        publication_snapshot = self._publication_snapshot(query.season_filter)
+        """Get filtered game logs based on one typed :class:`GameLogQuery`.
+
+        Every fact read shares one connection, read from one database snapshot
+        on PostgreSQL, so a composition or prune after the capture cannot
+        change the logs it names.  A service scoped to an explicit selection
+        (``season_scoped``) adds ``season_context``.
+        """
+
+        engine = self.engine if isinstance(self.engine, Engine) else None
+        with request_read_scope(engine, repeatable_read=True) as (connection, session):
+            return self._filtered_logs(player_name, query, connection=connection, session=session)
+
+    def _filtered_logs(self, player_name, query: GameLogQuery, *, connection, session):
+        publication_snapshot = self._publication_snapshot(query.season_filter, session=session)
         full_game_logs, next_team = call_with_read_scope(
             self._get_game_logs,
             player_name,
             query.season_filter,
             publication_snapshot=publication_snapshot,
+            connection=connection,
         )
         # The NBA person id, so the client can show the player's headshot.
         player_id = None
@@ -602,6 +641,7 @@ class GameService:
             query,
             teams_against=resolved_teams,
             publication_snapshot=publication_snapshot,
+            connection=connection,
         )
 
         # Calculate statistics
@@ -683,8 +723,9 @@ class GameService:
             # the Diets and the Season Defense Sheet behind PLAYTYPE_RTG and
             # any Team Filter ranking.
             provenance=provenance_block(publication_snapshot),
+            season_context=season_context(self.publication_reader, publication_snapshot, self.default_season),
         )
-        return result.model_dump()
+        return result.model_dump(exclude=None if result.season_context else {"season_context"})
 
     def _posted_line_for(self, player_id, player_name, query, full_game_logs):
         """The line day's ``posted_line`` object, else ``None`` (#238)."""
@@ -734,8 +775,12 @@ class GameService:
             lines[index] = found.as_response() if found is not None else None
         return lines
 
-    def _publication_snapshot(self, season):
-        """Capture all immutable publications composed by this request."""
+    def _publication_snapshot(self, season, *, session=None):
+        """Capture all immutable publications composed by this request.
+
+        A season before the Published Season reads its retained Publications;
+        a later one serves held candidates only to a reader scoped to it.
+        """
 
         if self.publication_reader is None:
             return None
@@ -749,33 +794,14 @@ class GameService:
             keyword["projection_only_keys"] = _PROJECTION_ONLY_STREAM_KEYS
         if accepts_keyword(snapshot, "decoded_only_keys"):
             keyword["decoded_only_keys"] = _DECODED_ONLY_STREAM_KEYS
-        live = snapshot(_PUBLICATION_STREAM_KEYS, season=season, **keyword)
-        return self._retained_for_past_season(live, season, keyword)
-
-    def _retained_for_past_season(self, live, season, keyword):
-        """Swap a live capture for the season's retained one when it is earlier.
-
-        An explicit ``season_filter`` naming a season before the active
-        Publication's season reads that season's latest retained, unrevoked
-        Publication of every stream (the authority ``/seasons`` lists and
-        ``retained_game_read`` serves), so the logs, Diets and rankings of one
-        response come from one retained generation.  Anything else, including
-        the active season and an omitted season, keeps the live capture.
-        """
-
-        retained = getattr(self.publication_reader, "retained_snapshot", None)
-        read_of = getattr(live, "read", None)
-        if season is None or not callable(retained) or not callable(read_of):
-            return live
-        logs = read_of("player_game_logs")
-        active_season = getattr(logs, "season", None)
+        if session is not None and accepts_keyword(snapshot, "session"):
+            keyword["session"] = session
         if (
-            getattr(logs, "unavailable_reason", None) != "publication_season_mismatch"
-            or not isinstance(active_season, str)
-            or season >= active_season
+            getattr(self.publication_reader, "captures_published_season", False) is True
+            and season is not None
         ):
-            return live
-        return retained(_PUBLICATION_STREAM_KEYS, season=season, **keyword)
+            season = ReadSeason(season, requested=season)
+        return snapshot(_PUBLICATION_STREAM_KEYS, season=season, **keyword)
 
     def filter_teams(self, team_filter, rank_filter, season):
         """Select opponents by Season Rankings: the first N, last N, or a rank range.

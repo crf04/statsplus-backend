@@ -78,7 +78,7 @@ The app reads from five distinct sources:
 | Bundled SQLite demo data | `app.utils.db.get_engine()` | Default, offline-capable read path |
 | NBA Stats | `app.providers.nba_stats.NBAStatsAdapter` → `nba_api` → `stats.nba.com` | All live NBA calls use one injected, instrumented adapter with schema validation and a process-shared bound; bounded by `NBA_STATS_TIMEOUT_SECONDS` |
 | PBP Stats | `app.providers.pbp_stats.PBPStatsAdapter` → shared `requests.Session` → `api.pbpstats.com` | Normalized play-by-play aggregates, refreshes, retries, telemetry, and the separate PBP health probe |
-| NBA LiveData | `app.providers.nba_live_data.NBALiveDataBoxscoreAdapter` → shared retrying session → NBA-hosted LiveData S3 | Fail-closed traditional box-score fallback for governed ledger games whose primary PBP evidence is malformed; accepted composite observations retain both source documents |
+| NBA LiveData | `app.providers.nba_live_data.NBALiveDataBoxscoreAdapter` → shared retrying session → NBA-hosted LiveData S3 | Final-score witness for every governed ledger game, and fail-closed traditional box-score fallback when primary PBP evidence is malformed or lost events; accepted composite observations retain both source documents. From 2026-27 its play-by-play `heave` actions are subtracted from PBP Stats FGA/3PA, matching NBA.com; the corrected team FGA/3PA must equal the final LiveData box score. A play-by-play that is unavailable or unfinished, a missing box score, or a mismatch never lets PBP Stats attempts through |
 | NBA injury report | gated `app.providers.nba_injury_report.NBAInjuryReportProvider` → injected `requests.Session` | Disabled by default; one current PDF observation only after the feature gate is explicit |
 
 Redis is an optional cache. Connection failure disables caching without blocking startup. After startup, a Redis connection or timeout error opens a per-process breaker in `NBAGameCache` (`REDIS_FAILURE_COOLDOWN_SECONDS`, 30 s) during which `get`/`set`/`delete` bypass Redis instead of paying the socket timeout on every call; `get_cache_stats()` reports `circuit_open`. OpenAI is an optional structured-output fallback for natural-language parsing below `LLM_CONFIDENCE_THRESHOLD`. Firebase is optional for local development but should be configured in production.
@@ -288,13 +288,13 @@ not counted twice:
 | Provider | Seam | Operations |
 | --- | --- | --- |
 | NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_season`, `player_game_logs_recorded`, `player_diets_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `team_game_log`, `league_player_shot_type`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_totals_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
-| NBA LiveData | `NBALiveDataBoxscoreAdapter` | `game_boxscore`; used only after primary governed PBP evidence fails validation, with both source documents retained in the accepted composite observation |
+| NBA LiveData | `NBALiveDataBoxscoreAdapter` | `game_boxscore`; every governed ledger game reads its final score here, and the box score becomes evidence only after primary PBP evidence fails validation, with both source documents retained in the accepted composite observation. `game_playbyplay` for every 2026-27 ledger game, to exclude heaves from attempts; the same box score checks the corrected attempts of a game with heaves |
 | PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_player_diet`, `get_totals_opponent`, `health_probe`, `player_game_logs`, `game_player_stats`, `team_game_log` |
 | Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests share one pooled Requests session built once per adapter (pool sized for the capped detail fan-out); explicitly injected sessions serialize only their `get` call. The shared DFS transport owns one safe-GET retry. Dabble names a multi-player offering (first scorer, `to_score_25_plus_points`) with one `marketId` for every player, so a repeated market id with different content is excluded as `conflicting_source_identity` (skipped, warning kept) rather than malformed; it leaves the snapshot complete. |
 | PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 | Underdog | `UnderdogAdapter` (shared DFS snapshot contract) | Appearance, player, and game joins remain inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 | Kalshi | `KalshiAdapter` (shared DFS snapshot contract) | One open-game lookup (`open_games`: the `KXNBAGAME` events with their milestones, which carry the exact tip-off) and one paginated read per player series (`series_markets`: `KXNBAPTS`, `KXNBAREB`, `KXNBAAST`, `KXNBA3PT`, `KXNBABLK`, `KXNBASTL`). The shared DFS transport owns one safe-GET retry. A failed series makes the snapshot partial; a failed game lookup keeps Kalshi's estimated start times and also makes it partial. |
-| Polymarket | `PolymarketAdapter` (shared DFS snapshot contract) | A prediction market, read from the unauthenticated Gamma `/events?tag_slug=nba&closed=false` listing (100 events per page, bounded page count); each player prop is one Yes (Over) / No (Under) market inside a game event. Over is priced at `1 / bestAsk` and Under at `1 / (1 - bestBid)` as decimal prices rounded to six places at selection scope, and a market missing either ask prices neither side. Per player, statistic and game, the line whose Over midpoint is nearest 0.5 is the one `standard` line (ties to the lower line); every other line is `alternate`, and several lines with no midpoint are all `alternate`. Game, period-scoped, futures and unmapped markets are excluded with typed coverage. The closed telemetry operation is `get_snapshot`; no retry strategy is configured. |
+| Polymarket | `PolymarketAdapter` (shared DFS snapshot contract) | A prediction market, read from the unauthenticated Gamma `/events?tag_slug=nba&closed=false` listing (100 events per page, bounded page count); each player prop is one Yes (Over) / No (Under) market inside a game event. Over is priced at `1 / bestAsk` and Under at `1 / (1 - bestBid)` as decimal prices rounded to six places at selection scope, and a market missing either ask prices neither side. Per player, statistic and game, the line whose Over midpoint is nearest 0.5 is the one `standard` line (ties to the lower line); every other line is `alternate`, and several lines with no midpoint are all `alternate`. Only a book at most 0.10 wide (`bestAsk - bestBid`) has a midpoint, because an empty book such as 0.01 / 0.97 sits near 0.5 by construction and would otherwise beat the traded line; a lone line with such a book is `alternate` too. Game, period-scoped, futures and unmapped markets are excluded with typed coverage. The closed telemetry operation is `get_snapshot`; no retry strategy is configured. |
 | Novig | `NovigAdapter` (shared DFS snapshot contract) | Market-list pages and one paginated event list (`/catalog/events?league=NBA`, joined to markets by `eventId`; the per-event route is throttled) come from the public v3 catalog; prices and player identity come from the web app's batch book endpoint (`api.novig.us/nbx/v1/markets/book/batch`, at most 150 market ids per call, browser-like headers). The closed telemetry operations are `market_page`, `event_page`, and `market_book_batch`, with bounded concurrency from the registry's `detail_concurrency` (at most four). A batch that answers 404 (one settled or removed market) is split in halves recursively until the stale market stands alone, and only that market is dropped, excluded as `ineligible_status`; a market whose batch entry is malformed, or whose batch cannot be read, is a malformed record and the snapshot is partial. Market-list pages hold 1,000 rows, so the whole catalog fits well inside the 25-page cap; overflowing the cap still makes the snapshot partial. A ladder of strikes collapses to at most one `standard` line per (player, statistic, game): the Over midpoint nearest 0.5, ties to the lower strike, counting only midpoints within 0.25 of 0.5. A group with no such midpoint, a lone strike included, is all `alternate`. A market that could not be read has no midpoint. No retry strategy is configured beyond the shared transport's one safe retry. |
 | NBA injury report (`nba_injury_report`) | `NBAInjuryReportProvider` | One league-wide report read with the closed operation `get_injuries`; the newest report at or before now is found by stepping back through both file-name formats in at most 12 requests, where 403/404 means unpublished. Raw statuses are retained and only Probable, Questionable, Doubtful, and Out normalize canonically; `Available` stays raw with no canonical status. |
 
@@ -1950,11 +1950,35 @@ lacks complete raw evidence (a pre-032 game) is re-fetched at missing-game
 priority regardless of age. Historical repair skips games whose accepted
 observation already belongs to the active manifest, except games accepted
 through the NBA LiveData fallback (`nba_live_data` or `pbp+nba_live_data`
-provenance): those carry no assist-location evidence and remain repair targets
-on every explicit repair run until a complete PBP observation replaces them.
+provenance): those remain repair targets on every explicit repair run until a
+complete PBP observation replaces them. A fallback without any PBP player row
+also fetches LiveData play-by-play and derives each player's assist locations
+and miss-type rebounds from it with PBPStats' zone rules (legacy coordinates,
+rim under 4 ft, short mid-range under 14 ft, corner three at legacy y <= 87;
+one rebound per missed shot). Each family is kept only when it reproduces every
+player's box-score assists, or defensive and offensive rebounds; otherwise the
+game stays without it, as a box-score-only fallback is. A fallback game stored
+without either family keeps one `ledger_fallback_evidence` Reconciliation Item
+(reason `evidence_incomplete`) per season and game, whose details name the game
+and the families it still lacks; each later acceptance updates that list, and
+the first acceptance with both families, from LiveData or a PBP replacement,
+resolves the item. These details are the only ones the admin reconciliation
+route and collection diagnostics show, so the streams held at
+`*_evidence_incomplete` point at the game.
 Repair is operator-invoked and bounded per run by `--max-games` and the
 provider retry cap; there is no persisted per-game attempt budget, so a game
-PBP keeps refusing is re-attempted on each run. Each provider response records its own timezone-aware
+PBP keeps refusing is re-attempted on each run. Every target also fetches its
+NBA LiveData box score for the final score, and a game whose LiveData score is
+unavailable is refused. Evidence from any source is accepted only when each
+team's player points sum to that final score, its team points equal it, and
+its recorded period clock (when it has one) and player-minutes-over-five are
+within 0.05 of the game's nominal length, so a LiveData box score short of its
+minutes is refused at acceptance rather than at composition. PBP evidence that
+fails a check lost events (0022600101's PBPStats document clocks its first period at 11:29
+and drops 2 MEM points), so the game is accepted from the LiveData box score
+alone rather than a composite that keeps the PBP rows. Such a refetch may then
+replace a stored game that carries the miss-type rebound split, but only when
+the stored player points miss the witnessed final score. Each provider response records its own timezone-aware
 retrieval time at the moment it returns, so every staged observation and
 archived row carries that response's retrieval time rather than the batch start.
 Any failed target keeps the previous valid publication and reports the season as
@@ -1970,13 +1994,17 @@ canonical player while retaining every team-at-game identity. Season and
 exact L15 materialization selects governed game IDs only and refuses to call a
 window complete until all 30 governed teams are present (and L15 has 15
 eligible games for each). League averages use the population denominator;
-team values are normalized to per-48 from the nominal game length each
-retained team-minute value establishes (48 minutes plus 5 per overtime; the
-retained player-minutes-over-five drifts from it by seconds of PBP clock
-precision, accepted up to 0.05 minutes, and a value outside that band is
-unavailable because the ledger has no independent game-duration evidence;
-count-per-game fallback remains for hand-built replay facts without
-minutes), and competition ranks are deterministic with ties
+team values are normalized to per-48 from each game's nominal length (48
+minutes plus 5 per overtime). The period count of the PBPStats
+`team_results` period clock, read from each game's source observation, names
+that length. Each team's recorded clock and its retained
+player-minutes-over-five must both lie within 0.05 minutes of it. A short clock
+means PBPStats lost the events of the missing time, and a missing player row
+shortens the minutes even when both sides lose one; either makes the game
+unavailable (`IncompleteGameError`). Evidence without a recorded clock (a
+LiveData box score) takes the period count from its minutes; count-per-game
+fallback remains for hand-built replay facts without minutes. Competition ranks are
+deterministic with ties
 represented as `1, 1, 3`.
 `LedgerMaterializationService` stores the complete derived payloads and creates
 inactive control-plane candidate versions with normalized game-observation
@@ -5165,7 +5193,20 @@ everyone, but a player the provider omits from one category is published with
 the slices it does have -- the Diet and profile already report an absent slice
 as absent rather than as zero. A split that breaks
 `shot_type_shooting_violation` -- the one rule shared with the refresh path --
-fails the candidate. The version binds the same manifest and Event Catalog
+fails the candidate.
+NBA player tracking can trail the box score by game-days while still
+answering, and its only tell is a smaller games played. So the collector
+bounds every read to the cutoff's slate date (`DateTo`) and carries the
+box-score games over the same bound: each player's (`LeagueDashPlayerStats`)
+and each team's (`LeagueDashTeamStats`). The composer refuses with
+`provider_window_lagging` unless every team's box-score games equal the games
+the cutoff governs, every player's tracking games equal his box-score
+games, and every player with box-score field-goal attempts appears in at
+least one category (a player with none has no shot type and may be absent);
+an observation without the bound or the evidence is
+`provider_window_unverified`. The refused job is retried by the next upload
+inside the collection window, so the publication moves as soon as NBA catches
+up and never to a lagging candidate. The version binds the same manifest and Event Catalog
 authority the opponent streams bind, and the strict `decode_player_diet`
 read-side decoder must accept the exact candidate before its pointer moves.
 The fourth Diet stream, `player_assist_locations`, is composed from the

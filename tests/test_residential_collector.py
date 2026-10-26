@@ -960,34 +960,44 @@ def _player_shot_type_rows(player_id, category, *, share, fga, fgm):
 _SHOT_TYPE_CATEGORIES = ("Catch and Shoot", "Pullups", "Less Than 10 ft")
 
 
-def _grouped_shot_type_control_plane(tmp_path, name, *, categories=_SHOT_TYPE_CATEGORIES):
+def _grouped_shot_type_control_plane(
+    tmp_path,
+    name,
+    *,
+    categories=_SHOT_TYPE_CATEGORIES,
+    engine=None,
+    season="2025-26",
+    now=NOW,
+    events=None,
+):
     """A control plane authorized to ingest the player shot-type surface."""
 
-    engine = create_engine(f"sqlite:///{tmp_path / name}")
-    run_migrations(engine)
-    control = CollectionControlService(engine, clock=lambda: NOW)
-    control.activate_season("2025-26", actor="operator")
+    if engine is None:
+        engine = create_engine(f"sqlite:///{tmp_path / name}")
+        run_migrations(engine)
+    control = CollectionControlService(engine, clock=lambda: now)
+    control.activate_season(season, actor="operator")
     team_ids = sorted(NBA_TEAM_IDS)
-    event_request = control.create_bootstrap_request("2025-26", "event", cutoff=NOW)
+    if events is None:
+        events = [
+            {
+                "nba_game_id": f"game-{index}",
+                "home_team_id": team_ids[index * 2],
+                "away_team_id": team_ids[index * 2 + 1],
+                "scheduled_at": (now - timedelta(days=2, hours=index)).isoformat(),
+            }
+            for index in range(15)
+        ]
+    event_request = control.create_bootstrap_request(season, "event", cutoff=now)
     control.publish_catalog(
         event_request.request_id,
         {
             "complete_snapshot": True,
-            "events": [
-                {
-                    "nba_game_id": f"game-{index}",
-                    "home_team_id": team_ids[index * 2],
-                    "away_team_id": team_ids[index * 2 + 1],
-                    "phase": "Regular Season",
-                    "status": "Final",
-                    "scheduled_at": (NOW - timedelta(days=2, hours=index)).isoformat(),
-                }
-                for index in range(15)
-            ],
+            "events": [{**event, "phase": "Regular Season", "status": "Final"} for event in events],
         },
         version="event-v1",
     )
-    athlete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=NOW)
+    athlete_request = control.create_bootstrap_request(season, "athlete", cutoff=now)
     control.publish_catalog(
         athlete_request.request_id,
         {
@@ -997,21 +1007,21 @@ def _grouped_shot_type_control_plane(tmp_path, name, *, categories=_SHOT_TYPE_CA
                     "player_id": "2544",
                     "team_id": team_ids[0],
                     "status": "active",
-                    "event_ids": [f"game-{index}" for index in range(15)],
+                    "event_ids": [event["nba_game_id"] for event in events],
                 }
             ],
         },
         version="athlete-v1",
     )
     manifest = control.create_manifest(
-        "2025-26",
-        cutoff=NOW,
+        season,
+        cutoff=now,
         scopes={"grouped_shot_types", "canonical_game_ledger"},
-        collect_before=NOW + timedelta(hours=1),
+        collect_before=now + timedelta(hours=1),
     )
     publications = PublicationService(
         engine,
-        clock=lambda: NOW,
+        clock=lambda: now,
         l15_expectation_resolver=ActiveManifestLedgerGovernanceReader(engine),
     )
     # The production registration, verbatim from the surface registry, then
@@ -1022,7 +1032,7 @@ def _grouped_shot_type_control_plane(tmp_path, name, *, categories=_SHOT_TYPE_CA
     operations = CollectionOperationsService(
         engine,
         publication_service=publications,
-        clock=lambda: NOW,
+        clock=lambda: now,
     )
     activation = operations.activate_stream(
         "grouped_shot_types",
@@ -1034,7 +1044,7 @@ def _grouped_shot_type_control_plane(tmp_path, name, *, categories=_SHOT_TYPE_CA
         engine,
         environment="testing",
         signing_secret="test",
-        clock=lambda: NOW,
+        clock=lambda: now,
     )
     identity = tokens.create_identity(
         "collector",
@@ -1050,23 +1060,47 @@ def _grouped_shot_type_control_plane(tmp_path, name, *, categories=_SHOT_TYPE_CA
     ingestion = ObservationIngestionService(
         engine,
         publication_service=publications,
-        clock=lambda: NOW + timedelta(seconds=next(ticks)),
+        clock=lambda: now + timedelta(seconds=next(ticks)),
     )
 
-    def deliver(rows_for, *, suffix="", window="season", scope_override=None):
-        for category in categories:
-            observation = normalize_grouped_shot_response(
-                rows_for(category),
-                season="2025-26",
-                cutoff=NOW,
+    team_games = [
+        {
+            "TEAM_ID": team_id,
+            "GP": sum(
+                team_id in {int(event["home_team_id"]), int(event["away_team_id"])} for event in events
+            ),
+        }
+        for team_id in sorted(int(value) for value in NBA_TEAM_IDS)
+    ]
+
+    def deliver(rows_for, *, suffix="", window="season", scope_override=None, only=None, observations=None):
+        def complete_window(category):
+            rows = rows_for(category)
+            return normalize_grouped_shot_response(
+                rows,
+                season=season,
+                cutoff=now,
                 scope={
                     "window": window,
                     "subject": "player",
                     "phase": "Regular Season",
                     "category": category,
+                    "endpoint_window": {
+                        "date_from": None,
+                        "date_to": slate_date_for_instant(now).strftime("%m/%d/%Y"),
+                    },
                     **(scope_override or {}),
                 },
+                games_response=[
+                    {"PLAYER_ID": row["PLAYER_ID"], "GP": row["GP"], "FGA": row["FGA"]} for row in rows
+                ],
+                team_games_response=team_games,
             )
+
+        if observations is None:
+            observations = [complete_window(category) for category in only or categories]
+        for observation in observations:
+            category = observation.scope["category"]
             raw = json.dumps(observation.payload, sort_keys=True, separators=(",", ":")).encode()
             ingestion.ingest(
                 claims,
@@ -1074,10 +1108,10 @@ def _grouped_shot_type_control_plane(tmp_path, name, *, categories=_SHOT_TYPE_CA
                     "client_observation_id": f"shots-{window}-{category}{suffix}",
                     "observation_type": "grouped_shot_types",
                     "provider": "nba",
-                    "season": "2025-26",
-                    "cutoff": NOW.isoformat(),
+                    "season": season,
+                    "cutoff": now.isoformat(),
                     "schema_version": 2,
-                    "retrieved_at": NOW.isoformat(),
+                    "retrieved_at": now.isoformat(),
                     "manifest_id": manifest.manifest_id,
                     "scope": observation.scope,
                     "environment": "testing",
@@ -1349,6 +1383,239 @@ def test_player_shot_type_composition_refuses_a_missing_category(tmp_path):
         )
 
 
+def _composition_job(engine, stream_key):
+    with engine.connect() as connection:
+        job = connection.execute(
+            select(CompositionJob.__table__).where(CompositionJob.__table__.c.stream_key == stream_key)
+        ).one()
+        pointer = connection.execute(
+            select(PublicationPointer.__table__.c.active_publication_id).where(
+                PublicationPointer.__table__.c.stream_key == stream_key
+            )
+        ).scalar()
+    return (job.status, job.last_error, job.attempts, job.generation), pointer
+
+
+_SHOT_TYPE_FRESHNESS = json.loads(
+    (Path(__file__).parent / "fixtures" / "player_shot_types" / "freshness_2026_27.json").read_text()
+)
+
+
+class _NBAOnTheMorningOf1025:
+    """NBA.com as the residential collector met it at 2026-10-25 10:02 UTC.
+
+    The box-score endpoints covered all 36 games through 10/24, while player
+    tracking still answered as of 10/22 whatever DateTo it was sent.
+    """
+
+    def __init__(self, *, tracking="10/22/2026", box="10/24/2026", untracked=(), one_game_short=()):
+        self.tracking = tracking
+        self.box = box
+        self.untracked = set(untracked)
+        self.one_game_short = set(one_game_short)
+        self.requests = []
+
+    def fetch_player_shot_type(self, general_range, **parameters):
+        self.requests.append(("tracking", parameters.get("date_to")))
+        (result,) = _SHOT_TYPE_FRESHNESS["tracking"][self.tracking][general_range]["resultSets"]
+        rows = [
+            [*row[:2], row[2] - 1, row[3] - 1, *row[4:]] if row[0] in self.one_game_short else row
+            for row in result["rowSet"]
+            if row[0] not in self.untracked
+        ]
+        return {"resultSets": [{**result, "rowSet": rows}]}
+
+    def fetch_player_season_totals(self, date_from=None, **parameters):
+        self.requests.append(("player_games", parameters.get("date_to")))
+        return _SHOT_TYPE_FRESHNESS["player_games"][self.box]
+
+    def fetch_team_season_totals(self, date_from=None, **parameters):
+        self.requests.append(("team_games", parameters.get("date_to")))
+        return _SHOT_TYPE_FRESHNESS["team_games"][self.box]
+
+
+def _collect_player_shot_types_on_1025(tmp_path, nba):
+    """Run the manifest's player shot-type work against ``nba`` and drain the queue."""
+
+    cutoff = datetime.fromisoformat(_SHOT_TYPE_FRESHNESS["cutoff"])
+    engine, manifest, _publications, deliver = _grouped_shot_type_control_plane(
+        tmp_path,
+        "shots-1025.sqlite3",
+        season="2026-27",
+        now=cutoff,
+        events=_SHOT_TYPE_FRESHNESS["events"],
+    )
+    executor = ResidentialScopeExecutor(nba, clock=lambda: cutoff)
+    observations = [
+        observation
+        for descriptor in _collector_scope_descriptors({"grouped_shot_types"}, cutoff)
+        for observation in executor.iter_scope(
+            ScopeWork(
+                scope=descriptor["scope"],
+                observation_type=descriptor["scope"],
+                season="2026-27",
+                cutoff=cutoff.isoformat(),
+                instruction_id=manifest.manifest_id,
+                manifest_id=manifest.manifest_id,
+                parameters=descriptor["parameters"],
+            ),
+            collector_id="collector",
+            environment="testing",
+            retrieved_at=cutoff,
+        )
+    ]
+    deliver(None, observations=observations)
+    composed = _compose_queued_slice(engine, season="2026-27")
+    with engine.connect() as connection:
+        job = connection.execute(
+            select(CompositionJob.__table__).where(
+                CompositionJob.__table__.c.stream_key == "grouped_shot_types"
+            )
+        ).one()
+        versions = (
+            connection.execute(
+                select(PublicationVersion.__table__).where(
+                    PublicationVersion.__table__.c.stream_key == "grouped_shot_types"
+                )
+            )
+            .mappings()
+            .all()
+        )
+    return composed, (job.status, job.last_error), versions
+
+
+def test_player_shot_types_behind_the_box_score_are_not_published(tmp_path):
+    # The 2026-10-25 collection: tracking two game-days behind the 36 games
+    # the cutoff governs.  Its players' games played fall short of their box
+    # score games, so nothing is composed and the job records why.
+    composed, job, versions = _collect_player_shot_types_on_1025(tmp_path, _NBAOnTheMorningOf1025())
+
+    assert composed == 0
+    assert job == ("failed", "provider_window_lagging")
+    assert versions == []
+
+
+def test_player_shot_types_and_box_score_both_behind_the_ledger_are_not_published(tmp_path):
+    # Tracking and the box score agree with each other at 10/22, but the
+    # cutoff governs every game through 10/24: the evidence is complete only
+    # for a window the ledger has already moved past.
+    composed, job, versions = _collect_player_shot_types_on_1025(
+        tmp_path, _NBAOnTheMorningOf1025(tracking="10/22/2026", box="10/22/2026")
+    )
+
+    assert composed == 0
+    assert job == ("failed", "provider_window_lagging")
+    assert versions == []
+
+
+def test_player_shot_types_covering_every_governed_game_are_published(tmp_path):
+    composed, job, versions = _collect_player_shot_types_on_1025(
+        tmp_path, _NBAOnTheMorningOf1025(tracking="10/24/2026")
+    )
+
+    assert composed == 1
+    assert job == ("succeeded", None)
+    (version,) = versions
+    rows = json.loads(version["payload"])["rows"]
+    assert len(rows) == 908
+    # 388 box-score players through 10/24; the 17 with no field-goal attempts
+    # have no tracking row and are legitimately absent.
+    assert len({row["player_id"] for row in rows}) == 371
+    jokic = {row["slice_key"]: row for row in rows if row["player_id"] == 203999}
+    assert {key: (row["games_played"], row["volume"]) for key, row in jokic.items()} == {
+        "catch_and_shoot": (2, 15.0),
+        "less_than_10_ft": (2, 22.0),
+        "pullups": (2, 5.0),
+    }
+
+
+def test_player_shot_types_short_of_a_players_box_score_games_are_not_published(tmp_path):
+    # Every box-score shooter is tracked through 10/24, but tracking counts
+    # Jokic in 1 of his 2 games: it has not caught up with his second game.
+    composed, job, versions = _collect_player_shot_types_on_1025(
+        tmp_path, _NBAOnTheMorningOf1025(tracking="10/24/2026", one_game_short={203999})
+    )
+
+    assert composed == 0
+    assert job == ("failed", "provider_window_lagging")
+    assert versions == []
+
+
+def test_player_shot_types_missing_a_box_score_shooter_are_not_published(tmp_path):
+    # Tracking through 10/24 with Jokic (2 games, 42 box-score attempts) absent
+    # from all three categories: every row present agrees with the box score,
+    # but 905 of the 908 rows would publish him as having no shot types.
+    composed, job, versions = _collect_player_shot_types_on_1025(
+        tmp_path, _NBAOnTheMorningOf1025(tracking="10/24/2026", untracked={203999})
+    )
+
+    assert composed == 0
+    assert job == ("failed", "provider_window_lagging")
+    assert versions == []
+
+
+def test_player_shot_types_bounded_to_another_slate_are_not_published(tmp_path):
+    # Complete evidence, but for the day before the cutoff's slate: it does
+    # not describe the window the cutoff governs.
+    engine, _manifest, _publications, deliver = _grouped_shot_type_control_plane(
+        tmp_path, "shots-other-slate.sqlite3"
+    )
+    deliver(
+        lambda category: _player_shot_type_rows(2544, category, share=0.25, fga=100, fgm=46),
+        scope_override={"endpoint_window": {"date_from": None, "date_to": "08/12/2026"}},
+    )
+
+    assert _compose_queued_slice(engine) == 0
+    assert _composition_job(engine, "grouped_shot_types") == (
+        ("failed", "provider_window_unverified", 0, 1),
+        None,
+    )
+
+
+def test_player_shot_type_reads_are_bound_to_the_cutoff_slate(tmp_path):
+    nba = _NBAOnTheMorningOf1025(tracking="10/24/2026")
+
+    _collect_player_shot_types_on_1025(tmp_path, nba)
+
+    assert sorted(set(nba.requests)) == [
+        ("player_games", "10/25/2026"),
+        ("team_games", "10/25/2026"),
+        ("tracking", "10/25/2026"),
+    ]
+
+
+def test_player_diet_job_retries_only_when_a_new_observation_is_accepted(tmp_path):
+    engine, manifest, publications, deliver = _grouped_shot_type_control_plane(
+        tmp_path, "diet-requeue.sqlite3"
+    )
+
+    def rows(fgm):
+        return lambda category: _player_shot_type_rows(2544, category, share=0.25, fga=100, fgm=fgm)
+
+    deliver(rows(46), only=("Catch and Shoot", "Less Than 10 ft"))
+    assert _compose_queued_slice(engine) == 0
+    failed = (("failed", "base_incomplete", 0, 1), None)
+    assert _composition_job(engine, "grouped_shot_types") == failed
+
+    # A replayed upload and the generic idempotent enqueue bring no new input.
+    deliver(rows(46), only=("Catch and Shoot", "Less Than 10 ft"))
+    publications.enqueue("grouped_shot_types", season="2025-26", cutoff=NOW, manifest_id=manifest.manifest_id)
+    assert _compose_queued_slice(engine) == 0
+    assert _composition_job(engine, "grouped_shot_types") == failed
+
+    deliver(rows(46), only=("Pullups",))
+    assert _composition_job(engine, "grouped_shot_types") == (("queued", None, 1, 2), None)
+    assert _compose_queued_slice(engine) == 1
+    (state, publication_id) = _composition_job(engine, "grouped_shot_types")
+    assert state == ("succeeded", None, 1, 2)
+    assert publication_id is not None
+
+    # A later accepted observation leaves a succeeded job and its publication alone.
+    deliver(rows(50), suffix="-retry")
+    assert _compose_queued_slice(engine) == 0
+    assert _composition_job(engine, "grouped_shot_types") == (("succeeded", None, 1, 2), publication_id)
+
+
 def test_player_shot_type_composer_refuses_a_missing_category_centrally(
     tmp_path,
 ):
@@ -1384,6 +1651,8 @@ def test_player_shot_type_composer_refuses_a_missing_category_centrally(
                 cutoff=NOW,
                 manifest_id=manifest.manifest_id,
                 provenance_ids=provenance_ids,
+                # Each team plays one of the control plane's fifteen games.
+                expected_game_ids_by_team={int(team_id): frozenset({"one game"}) for team_id in NBA_TEAM_IDS},
             )
 
         assert len(compose(complete)["rows"]) == 3
@@ -1994,6 +2263,7 @@ def test_synergy_window_binds_team_minutes_and_tolerates_partial_play_type_games
         ("mixed_governance_db_error", 2),
         ("backdated_synergy", 4),
         ("l15_boundary_mismatch", 4),
+        ("late_teams", 2),
     ),
 )
 def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows(
@@ -2253,7 +2523,16 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         ).encode()
         with pytest.raises(ControlPlaneError, match="malformed_payload"):
             ingestion.ingest(claims, mismatched, mismatched_payload)
+    late_team_ids = {int(team_id) for team_id in team_ids[-3:]} if evidence_mode == "late_teams" else set()
+    late_documents = []
     for document in uploaded:
+        if (
+            document["observation_type"] in {"shot_types_opponent", "shot_zones_opponent"}
+            and document["scope"]["window"] == "season"
+            and int(document["scope"]["team_id"]) in late_team_ids
+        ):
+            late_documents.append(document)
+            continue
         payload = json.dumps(document.pop("payload"), sort_keys=True, separators=(",", ":")).encode()
         ingestion.ingest(claims, document, payload)
     queued_streams = set(publication_streams)
@@ -2470,6 +2749,32 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         publication_service=publications,
         clock=lambda: NOW,
     )
+    if evidence_mode == "late_teams":
+        # The cron composes while three teams' season observations are still
+        # on their way, then they arrive.
+        assert {
+            (document["observation_type"], int(document["scope"]["team_id"])) for document in late_documents
+        } == {
+            (kind, team_id)
+            for kind in ("shot_types_opponent", "shot_zones_opponent")
+            for team_id in late_team_ids
+        }
+        assert runtime.compose_queued("2025-26") == 3
+        with control_db.connect() as connection:
+            early_jobs = {
+                row.stream_key: (row.status, row.last_error)
+                for row in connection.execute(select(CompositionJob))
+            }
+        assert early_jobs == {
+            "synergy_play_types_opponent_season": ("succeeded", None),
+            "grouped_shot_types_opponent_l15": ("succeeded", None),
+            "exact_shot_zones_opponent_l15": ("succeeded", None),
+            "grouped_shot_types_opponent_season": ("failed", "publication_candidate_invalid"),
+            "exact_shot_zones_opponent_season": ("failed", "publication_candidate_invalid"),
+        }
+        for document in late_documents:
+            payload = json.dumps(document.pop("payload"), sort_keys=True, separators=(",", ":")).encode()
+            ingestion.ingest(claims, document, payload)
     original_resolver = publications.l15_expectation_resolver
     if evidence_mode.startswith("mixed_governance_"):
 
@@ -3312,6 +3617,105 @@ def test_provider_timeout_is_retryable_and_expired_token_is_rejected(tmp_path: P
         {"token": "expired", "expires_at": (NOW - timedelta(seconds=1)).isoformat()}, now=NOW
     )
     assert token.is_expired
+
+
+class BusyTransport(FakeTransport):
+    def __init__(self, *, discovery, busy_uploads, retry_after="20"):
+        super().__init__(discovery=discovery)
+        self.busy_uploads = busy_uploads
+        self.retry_after = retry_after
+        self.upload_times = []
+
+    def request(self, method, url, *, headers=None, body=None, json_body=None, timeout=30):
+        if "/api/collector/observations" in url:
+            self.upload_times.append(self.clock())
+            if len(self.upload_times) <= self.busy_uploads:
+                self.calls.append((method, url, headers or {}, body, json_body))
+                return HTTPResponse(
+                    429,
+                    {"error": {"code": "rate_limited", "details": {"retry_after_seconds": 20}}},
+                    {"Retry-After": self.retry_after},
+                )
+        return super().request(method, url, headers=headers, body=body, json_body=json_body, timeout=timeout)
+
+
+def _busy_collector(tmp_path: Path, *, collect_before: datetime, busy_uploads: int):
+    discovery = {
+        "environment": "testing",
+        "bootstrap_requests": [],
+        "manifests": [
+            {
+                "manifest_id": "m-busy",
+                "season": "2025-26",
+                "cutoff": NOW.isoformat(),
+                "collect_before": collect_before.isoformat(),
+                "accepted_versions": [2],
+                "scopes": [],
+            }
+        ],
+    }
+    transport = BusyTransport(discovery=discovery, busy_uploads=busy_uploads)
+    collector, _, outbox = _collector(tmp_path, discovery=discovery, transport=transport)
+    clock = [NOW]
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += timedelta(seconds=seconds)
+
+    transport.clock = collector.clock = lambda: clock[0]
+    collector.sleep = sleep
+    outbox.enqueue(
+        kind="observation",
+        client_observation_id="busy",
+        checksum=_wire_checksum("busy"),
+        cutoff=NOW,
+        payload=_wire("busy", "busy"),
+        metadata={"manifest_id": "m-busy", "observation_type": "grouped_shot_types"},
+    )
+    return collector, transport, outbox, sleeps
+
+
+def test_busy_upload_near_its_deadline_is_retried_within_the_run(tmp_path: Path):
+    collect_before = NOW + timedelta(seconds=60)
+    collector, transport, outbox, sleeps = _busy_collector(
+        tmp_path, collect_before=collect_before, busy_uploads=2
+    )
+
+    result = collector.run()
+
+    assert result.uploaded == 1
+    assert outbox.count() == 0
+    assert sleeps == [20]
+    assert transport.upload_times == [NOW, NOW, NOW + timedelta(seconds=20)]
+    outbox.close()
+
+
+def test_busy_upload_is_not_retried_when_the_wait_would_pass_its_deadline(tmp_path: Path):
+    collector, transport, outbox, sleeps = _busy_collector(
+        tmp_path, collect_before=NOW + timedelta(seconds=15), busy_uploads=2
+    )
+
+    result = collector.run()
+
+    assert result.disposition is RunDisposition.RETRY
+    assert result.uploaded == 0
+    assert outbox.count() == 1
+    assert sleeps == []
+    outbox.close()
+
+
+def test_busy_upload_retries_stop_at_the_attempt_cap(tmp_path: Path):
+    collector, transport, outbox, sleeps = _busy_collector(
+        tmp_path, collect_before=NOW + timedelta(hours=1), busy_uploads=1000
+    )
+
+    result = collector.run()
+
+    assert result.disposition is RunDisposition.RETRY
+    assert outbox.count() == 1
+    assert sleeps == [20] * 10
+    outbox.close()
 
 
 def test_outbox_replay_survives_repository_restart_and_live_lease_is_busy(tmp_path: Path):

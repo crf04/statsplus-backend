@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import UTC, datetime, time
 from zoneinfo import ZoneInfo
@@ -33,6 +34,9 @@ STREAMS = ("grouped_shot_types", "exact_shot_zones")
 CENTRAL = ZoneInfo("America/Chicago")
 ACTOR = "player_shooting_refresh"
 REASON = "Daily residential player shooting refresh"
+LAGGING = "provider_window_lagging"
+
+logger = logging.getLogger(__name__)
 
 
 def _utc(value: datetime) -> datetime:
@@ -88,6 +92,7 @@ class PlayerShootingRefresh:
         if not active or not enabled:
             return {"state": "disabled" if active else "season_inactive", "composed_jobs": 0}
         composed = self.composer_factory().compose_queued(season) if queued else 0
+        self._alert_closed_lagging_windows(season, now)
         if not cutoff <= now < deadline:
             return {"state": "outside_window", "composed_jobs": composed}
         with self.engine.begin() as connection, Session(connection) as session, session.begin():
@@ -219,6 +224,37 @@ class PlayerShootingRefresh:
             return f"awaiting_{kind}"
         self._audit(session, "player_shooting.manifest_created", manifest.manifest_id, now)
         return "manifest_ready"
+
+    def _alert_closed_lagging_windows(self, season, now):
+        """Report once each day the provider was still behind when collection closed.
+
+        A lagging refusal is retried by every upload until the window closes;
+        only a day that ended refused needs a person, and only once.
+        """
+
+        with self.engine.begin() as connection, Session(connection) as session, session.begin():
+            alerted = select(AuditEvent.resource).where(AuditEvent.action == "player_shooting.window_lagging")
+            for job in session.scalars(
+                select(CompositionJob).where(
+                    CompositionJob.season == season,
+                    CompositionJob.stream_key.in_(STREAMS),
+                    CompositionJob.status == "failed",
+                    CompositionJob.last_error == LAGGING,
+                    CompositionJob.job_id.not_in(alerted),
+                )
+            ):
+                cutoff = _utc(job.cutoff)
+                if now < daily_window(cutoff)[1]:
+                    continue
+                logger.error(
+                    "%s %s stream=%s season=%s cutoff=%s",
+                    ACTOR,
+                    LAGGING,
+                    job.stream_key,
+                    season,
+                    cutoff.isoformat(),
+                )
+                self._audit(session, "player_shooting.window_lagging", job.job_id, now)
 
     @staticmethod
     def _complete(session, manifest):

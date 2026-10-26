@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import math
 import re
-from collections.abc import Mapping
+from collections import Counter, defaultdict
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -12,6 +14,11 @@ from typing import Any
 import requests
 
 from app.config.settings import RuntimeSettings
+from app.domain.rebound_types import (
+    DEFENSIVE_REBOUND_TYPE_ATTRIBUTES,
+    OFFENSIVE_REBOUND_TYPE_ATTRIBUTES,
+    REBOUND_TYPE_FIELDS,
+)
 from app.domain.slate_time import slate_date_for_instant
 from app.domain.utc import parse_utc_iso
 from app.utils.nba_api_config import get_shared_nba_session
@@ -32,6 +39,10 @@ NBA_LIVE_DATA_PLAY_BY_PLAY_URL = (
     "NBA/liveData/playbyplay/playbyplay_{game_id}.json"
 )
 
+#: From 2026-27 NBA.com leaves end-of-period heaves out of FGA and 3PA, while
+#: PBP Stats still counts each one as a missed three.
+HEAVES_EXCLUDED_SEASON = "2026-27"
+
 _PLAYER_FIELDS = {
     "FGM": "fieldGoalsMade",
     "FGA": "fieldGoalsAttempted",
@@ -51,6 +62,23 @@ _PLAYER_FIELDS = {
     "Fouls": "foulsPersonal",
     "Points": "points",
 }
+
+_ASSIST_SPLIT_FIELDS = ("TwoPtAssists", "ThreePtAssists")
+_ASSIST_LOCATION_FIELDS = (
+    "AtRimAssists",
+    "ShortMidRangeAssists",
+    "LongMidRangeAssists",
+    "Corner3Assists",
+    "Arc3Assists",
+)
+_REBOUND_WIRE = dict(REBOUND_TYPE_FIELDS)
+_DEFENSIVE_REBOUND_FIELDS = tuple(_REBOUND_WIRE[name] for name in DEFENSIVE_REBOUND_TYPE_ATTRIBUTES)
+_OFFENSIVE_REBOUND_FIELDS = tuple(_REBOUND_WIRE[name] for name in OFFENSIVE_REBOUND_TYPE_ATTRIBUTES)
+_THREE_POINT_ACTIONS = frozenset({"3pt", "heave"})
+#: Zone bounds PBPStats applies, in feet from the rim on legacy coordinates.
+_AT_RIM_FEET = 4
+_SHORT_MID_RANGE_FEET = 14
+_CORNER_THREE_MAX_LEGACY_Y = 87
 
 
 class NBALiveDataBoxscoreAdapter:
@@ -129,8 +157,14 @@ def compose_pbp_live_data_observation(
     live_observation: Mapping[str, Any],
     *,
     event: Mapping[str, object],
+    live_play_by_play: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Preserve PBP evidence and fill only its missing fields from LiveData."""
+    """Preserve PBP evidence and fill only its missing fields from LiveData.
+
+    Without any PBP player row, LiveData play-by-play supplies the assist
+    locations and miss-type rebounds, each family only when it reproduces
+    every player's box-score assists or rebounds.
+    """
 
     game = live_observation.get("game")
     if not isinstance(game, Mapping) or game.get("gameStatus") != 3:
@@ -198,6 +232,11 @@ def compose_pbp_live_data_observation(
                 summary[wire_name] = residual
         stats[side] = {"FullGame": [summary, *player_rows]}
         team_results[side] = {"FullGame": merged_totals}
+    if live_play_by_play is not None and not pbp_rows:
+        _fill_play_by_play_counts(
+            [row for side_rows in stats.values() for row in side_rows["FullGame"][1:]],
+            live_play_by_play,
+        )
 
     pbp = dict(pbp_observation or {})
     provider = "pbp+nba_live_data" if usable_pbp is not None else "nba_live_data"
@@ -232,6 +271,192 @@ def _eastern_game_date(game: Mapping[str, Any], event: Mapping[str, object]) -> 
     if not isinstance(scheduled_at, datetime):
         scheduled_at = parse_utc_iso(str(scheduled_at))
     return slate_date_for_instant(scheduled_at).isoformat()
+
+
+def _fill_play_by_play_counts(rows: list[dict[str, Any]], live_play_by_play: Mapping[str, Any]) -> None:
+    game = live_play_by_play.get("game")
+    actions = game.get("actions") if isinstance(game, Mapping) else None
+    if not isinstance(actions, list):
+        return
+    counts = _play_by_play_counts([action for action in actions if isinstance(action, Mapping)])
+    by_player = {int(row["EntityId"]): row for row in rows}
+    if not set(counts) <= set(by_player):
+        return
+    families = (
+        (
+            _ASSIST_SPLIT_FIELDS + _ASSIST_LOCATION_FIELDS,
+            lambda row, player: sum(player[field] for field in _ASSIST_SPLIT_FIELDS)
+            == sum(player[field] for field in _ASSIST_LOCATION_FIELDS)
+            == row["Assists"],
+        ),
+        (
+            _DEFENSIVE_REBOUND_FIELDS + _OFFENSIVE_REBOUND_FIELDS,
+            lambda row, player: sum(player[field] for field in _DEFENSIVE_REBOUND_FIELDS)
+            == row["DefRebounds"]
+            and sum(player[field] for field in _OFFENSIVE_REBOUND_FIELDS) == row["OffRebounds"],
+        ),
+    )
+    for fields, reconciles in families:
+        if all(reconciles(row, counts[player_id]) for player_id, row in by_player.items()):
+            for player_id, row in by_player.items():
+                for field in fields:
+                    row[field] = counts[player_id][field]
+
+
+def _play_by_play_counts(actions: list[Mapping[str, Any]]) -> dict[int, Counter]:
+    """Count each player's assists by shot zone and rebounds by miss type."""
+
+    counts: dict[int, Counter] = defaultdict(Counter)
+    for action in actions:
+        if (
+            action.get("shotResult") == "Made"
+            and action.get("assistPersonId")
+            and action.get("actionType") in {"2pt", *_THREE_POINT_ACTIONS}
+        ):
+            player = counts[int(action["assistPersonId"])]
+            three = action["actionType"] in _THREE_POINT_ACTIONS
+            player["ThreePtAssists" if three else "TwoPtAssists"] += 1
+            zone = _assist_zone(action, three=three)
+            if zone is not None:
+                player[zone] += 1
+    shots = {action.get("actionNumber"): action for action in actions}
+    # A miss has one rebound; LiveData can log the same one twice.
+    rebounds = {
+        action.get("shotActionNumber") or ("unlinked", action.get("actionNumber")): action
+        for action in actions
+        if action.get("actionType") == "rebound"
+        and action.get("personId")
+        and "team" not in (action.get("qualifiers") or ())
+    }
+    for rebound in rebounds.values():
+        shot = shots.get(rebound.get("shotActionNumber"))
+        kind = None if shot is None else shot.get("actionType")
+        side = "Def" if rebound.get("subType") == "defensive" else "Off"
+        if kind == "freethrow":
+            field = f"FT{side}Rebounds"
+        elif kind == "2pt":
+            field = f"{side}TwoPtRebounds"
+        elif kind in _THREE_POINT_ACTIONS:
+            field = f"{side}ThreePtRebounds"
+        else:
+            continue
+        counts[int(rebound["personId"])][field] += 1
+    return counts
+
+
+def _assist_zone(action: Mapping[str, Any], *, three: bool) -> str | None:
+    x, y = action.get("xLegacy"), action.get("yLegacy")
+    if three:
+        return "Corner3Assists" if y is not None and y <= _CORNER_THREE_MAX_LEGACY_Y else "Arc3Assists"
+    if x is None or y is None:
+        return None
+    distance = round(math.hypot(x, y) / 10, 1)
+    if distance < _AT_RIM_FEET:
+        return "AtRimAssists"
+    if distance < _SHORT_MID_RANGE_FEET:
+        return "ShortMidRangeAssists"
+    return "LongMidRangeAssists"
+
+
+def exclude_heaves(
+    pbp_observation: Mapping[str, Any],
+    play_by_play: Mapping[str, Any],
+    fetch_box_score: Callable[[], Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Take NBA heave actions out of PBP Stats' three-point attempts.
+
+    LiveData logs only a missed heave as a ``heave`` action naming its shooter;
+    a made heave is an ordinary made three that NBA.com still counts. The
+    corrected team attempts must equal the final LiveData box score, so PBP
+    Stats attempts that already leave heaves out are not reduced twice.
+    """
+
+    actions = play_by_play["game"]["actions"]
+    if not any(action.get("actionType") == "game" and action.get("subType") == "end" for action in actions):
+        raise ProviderResponseError("NBA LiveData play-by-play has not reached the end of the game.")
+    heaves = Counter(
+        int(action.get("personId") or 0) for action in actions if action.get("actionType") == "heave"
+    )
+    if not heaves:
+        return dict(pbp_observation)
+    observation = deepcopy(dict(pbp_observation))
+    remaining = Counter(heaves)
+    for side in ("Home", "Away"):
+        team_heaves = 0
+        for row in _pbp_side_rows(observation, side):
+            player_id = int(row.get("EntityId") or 0)
+            count = remaining.pop(player_id, 0) if player_id > 0 else 0
+            if count:
+                _subtract_heaves(row, count)
+                team_heaves += count
+        if team_heaves:
+            total = _pbp_team_total(observation, side)
+            if total is None:
+                raise ProviderResponseError("PBP Stats team totals are missing for a side with heaves.")
+            _subtract_heaves(total, team_heaves)
+    if +remaining:
+        raise ProviderResponseError("An NBA LiveData heave has no PBP Stats shooter row.")
+    box_score = fetch_box_score()["game"]
+    box_by_team = {int(box_score[key]["teamId"]): box_score[key] for key in ("homeTeam", "awayTeam")}
+    for side in ("Home", "Away"):
+        box_team = box_by_team.get(int(observation.get(f"{side.lower()}_team_id") or 0))
+        if box_team is None:
+            raise ProviderResponseError("PBP Stats and the NBA LiveData box score name different teams.")
+        total = _pbp_team_total(observation, side) or {}
+        three_point_attempts = int(total.get("FG3A") or 0)
+        field_goal_attempts = total.get("FGA")
+        if field_goal_attempts is None:
+            field_goal_attempts = int(total.get("FG2A") or 0) + three_point_attempts
+        box = box_team["statistics"]
+        box_attempts = (_count(box, "fieldGoalsAttempted"), _count(box, "threePointersAttempted"))
+        if (int(field_goal_attempts), three_point_attempts) != box_attempts:
+            raise ProviderResponseError(
+                "PBP Stats attempts without heaves do not match the NBA LiveData box score."
+            )
+    observation["_ledger_heaves_excluded"] = {
+        str(player_id): count for player_id, count in sorted(heaves.items())
+    }
+    return observation
+
+
+def _pbp_side_rows(observation: Mapping[str, Any], side: str) -> list[dict[str, Any]]:
+    stats = observation.get("stats")
+    side_value = stats.get(side) if isinstance(stats, Mapping) else None
+    rows = side_value.get("FullGame") if isinstance(side_value, Mapping) else None
+    if not isinstance(rows, list):
+        raise ProviderResponseError("PBP Stats evidence has no FullGame rows to remove heaves from.")
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _subtract_heaves(row: dict[str, Any], heaves: int) -> None:
+    for key in ("FG3A", "FGA"):
+        if key == "FGA" and row.get(key) is None:
+            continue
+        remaining = int(row.get(key) or 0) - heaves
+        if remaining < 0:
+            raise ProviderResponseError(f"PBP Stats {key} has fewer attempts than NBA LiveData heaves.")
+        row[key] = remaining
+
+
+def live_data_final_score(
+    live_observation: Mapping[str, Any],
+    *,
+    event: Mapping[str, object],
+) -> dict[int, int]:
+    """Return each team's final score from the governed game's LiveData box score."""
+
+    game = live_observation.get("game")
+    if not isinstance(game, Mapping) or game.get("gameStatus") != 3:
+        raise ProviderResponseError("NBA LiveData box score is not final.")
+    if str(game.get("gameId")) != str(event.get("nba_game_id")):
+        raise ProviderResponseError("NBA LiveData game identity contradicts governance.")
+    scores: dict[int, int] = {}
+    for key, team_id in (("homeTeam", event["home_team_id"]), ("awayTeam", event["away_team_id"])):
+        team = game.get(key)
+        if not isinstance(team, Mapping) or int(team.get("teamId") or 0) != int(team_id):
+            raise ProviderResponseError("NBA LiveData team identity contradicts governance.")
+        scores[int(team_id)] = _count(team, "score")
+    return scores
 
 
 def _pbp_identity_does_not_contradict(
@@ -361,8 +586,11 @@ def _pbp_minutes(value: object) -> str:
 
 
 __all__ = [
+    "HEAVES_EXCLUDED_SEASON",
     "NBA_LIVE_DATA_BOXSCORE_URL",
     "NBA_LIVE_DATA_PLAY_BY_PLAY_URL",
     "NBALiveDataBoxscoreAdapter",
     "compose_pbp_live_data_observation",
+    "exclude_heaves",
+    "live_data_final_score",
 ]

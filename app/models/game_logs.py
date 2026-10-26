@@ -685,6 +685,9 @@ class GameLogResponse(BaseModel):
     player_id: int | None = None
     posted_line: dict[str, Any] | None = None
     provenance: dict[str, Any]
+    #: ``{selected_season, published_season}``, only when the request selected
+    #: a season explicitly (crf04/statsplus#330); omitted otherwise.
+    season_context: dict[str, str] | None = None
 
 
 __all__ = [

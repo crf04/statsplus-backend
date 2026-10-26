@@ -336,3 +336,168 @@ def test_livedata_composite_identifies_itself_as_fallback_evidence_with_no_split
     team_rows = [row for row in game.raw_rows if row.row_type == "team"]
     assert {row.payload["LedgerEvidenceProvider"] for row in team_rows} == {"nba_live_data"}
     assert all(player.def_two_pt_rebounds is None for player in game.player_facts)
+
+
+_FIXTURES = Path("tests/fixtures/nba_live_data")
+_LOCATION_ATTRIBUTES = {
+    "TwoPtAssists": "two_point_assists",
+    "ThreePtAssists": "three_point_assists",
+    "AtRimAssists": "at_rim_assists",
+    "ShortMidRangeAssists": "short_mid_range_assists",
+    "LongMidRangeAssists": "long_mid_range_assists",
+    "Corner3Assists": "corner3_assists",
+    "Arc3Assists": "arc3_assists",
+    "DefTwoPtRebounds": "def_two_pt_rebounds",
+    "DefThreePtRebounds": "def_three_pt_rebounds",
+    "FTDefRebounds": "ft_def_rebounds",
+    "OffTwoPtRebounds": "off_two_pt_rebounds",
+    "OffThreePtRebounds": "off_three_pt_rebounds",
+    "FTOffRebounds": "ft_off_rebounds",
+}
+
+
+def _recorded(game_id):
+    box = json.loads((_FIXTURES / f"boxscore_{game_id}.json").read_text())
+    play_by_play = json.loads((_FIXTURES / f"playbyplay_{game_id}.json").read_text())
+    game = box["game"]
+    event = {
+        "nba_game_id": game_id,
+        "season": "2026-27",
+        "classification": "Regular Season",
+        "scheduled_at": game["gameTimeUTC"],
+        "home_team_id": game["homeTeam"]["teamId"],
+        "home_team_tricode": game["homeTeam"]["teamTricode"],
+        "away_team_id": game["awayTeam"]["teamId"],
+        "away_team_tricode": game["awayTeam"]["teamTricode"],
+        "status_code": 3,
+        "status_text": "Final",
+    }
+    return box, play_by_play, event
+
+
+def _location_counts(game):
+    return {
+        str(player.player_id): {
+            wire: getattr(player, attribute) for wire, attribute in _LOCATION_ATTRIBUTES.items()
+        }
+        for player in game.player_facts
+    }
+
+
+@pytest.mark.parametrize("game_id", ["0022600003", "0022600005"])
+def test_live_play_by_play_reproduces_pbpstats_assist_locations_and_rebound_types(game_id):
+    box, play_by_play, event = _recorded(game_id)
+
+    observation = compose_pbp_live_data_observation(None, box, event=event, live_play_by_play=play_by_play)
+    game = canonical_game_from_pbp(observation, event=event)
+
+    pbpstats = json.loads((_FIXTURES / f"pbpstats_location_counts_{game_id}.json").read_text())
+    assert _location_counts(game) == pbpstats
+
+
+@pytest.mark.parametrize(
+    ("game_id", "team_totals"),
+    [
+        (
+            "0022600009",
+            {
+                "HOU": (25, 11, 2, 3, 1, 8, 15, 16, 5, 5, 3, 0),
+                "SAS": (21, 10, 0, 0, 3, 8, 19, 12, 0, 5, 4, 0),
+            },
+        ),
+        (
+            "0022600102",
+            {
+                "LAC": (24, 8, 3, 1, 4, 8, 7, 13, 3, 5, 5, 1),
+                "LAL": (29, 17, 2, 0, 6, 4, 12, 13, 4, 5, 3, 0),
+            },
+        ),
+    ],
+)
+def test_fallback_games_pbpstats_never_served_derive_complete_locations(game_id, team_totals):
+    from app.services.ledger_derivations import derive_assist_location_facts
+
+    box, play_by_play, event = _recorded(game_id)
+
+    observation = compose_pbp_live_data_observation({}, box, event=event, live_play_by_play=play_by_play)
+    game = canonical_game_from_pbp(observation, event=event)
+
+    assert len(derive_assist_location_facts((game,))) == len(game.player_facts)
+    fields = (
+        "assists",
+        "at_rim_assists",
+        "short_mid_range_assists",
+        "long_mid_range_assists",
+        "corner3_assists",
+        "arc3_assists",
+        "def_two_pt_rebounds",
+        "def_three_pt_rebounds",
+        "ft_def_rebounds",
+        "off_two_pt_rebounds",
+        "off_three_pt_rebounds",
+        "ft_off_rebounds",
+    )
+    assert {
+        tricode: tuple(
+            sum(getattr(player, field) for player in game.player_facts if player.team_tricode == tricode)
+            for field in fields
+        )
+        for tricode in team_totals
+    } == team_totals
+
+
+def test_play_by_play_that_contradicts_the_box_leaves_the_fallback_without_a_split():
+    box, play_by_play, event = _recorded("0022600009")
+    rebound = next(
+        action
+        for action in play_by_play["game"]["actions"]
+        if action["actionType"] == "rebound" and action.get("personId")
+    )
+    play_by_play["game"]["actions"].remove(rebound)
+    assisted = next(action for action in play_by_play["game"]["actions"] if action.get("assistPersonId"))
+    del assisted["assistPersonId"]
+
+    observation = compose_pbp_live_data_observation({}, box, event=event, live_play_by_play=play_by_play)
+    game = canonical_game_from_pbp(observation, event=event)
+
+    assert {(player.at_rim_assists, player.def_two_pt_rebounds) for player in game.player_facts} == {
+        (None, None)
+    }
+
+
+def test_a_rebound_off_a_heave_is_a_three_point_rebound():
+    box, play_by_play, event = _recorded("0022600009")
+    actions = play_by_play["game"]["actions"]
+    shots = {action["actionNumber"]: action for action in actions}
+    rebound = next(
+        action
+        for action in actions
+        if action["actionType"] == "rebound"
+        and action.get("personId")
+        and shots[action["shotActionNumber"]]["actionType"] == "3pt"
+    )
+    shots[rebound["shotActionNumber"]]["actionType"] = "heave"
+
+    observation = compose_pbp_live_data_observation({}, box, event=event, live_play_by_play=play_by_play)
+    game = canonical_game_from_pbp(observation, event=event)
+
+    assert (
+        sum(player.def_three_pt_rebounds + player.off_three_pt_rebounds for player in game.player_facts) == 35
+    )
+
+
+@pytest.mark.parametrize(("legacy_y", "corner_and_arc"), [(87, (1, 1)), (88, (0, 2))])
+def test_a_three_is_a_corner_three_through_legacy_y_87(legacy_y, corner_and_arc):
+    box, play_by_play, event = _recorded("0022600009")
+    assisted = next(
+        action
+        for action in play_by_play["game"]["actions"]
+        if action.get("assistPersonId") and action["actionType"] == "3pt"
+    )
+    assisted["yLegacy"] = legacy_y
+
+    observation = compose_pbp_live_data_observation({}, box, event=event, live_play_by_play=play_by_play)
+    game = canonical_game_from_pbp(observation, event=event)
+
+    passer = next(player for player in game.player_facts if player.player_id == 1627832)
+    assert (passer.corner3_assists, passer.arc3_assists) == corner_and_arc
