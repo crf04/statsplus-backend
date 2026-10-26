@@ -434,9 +434,23 @@ class LedgerBackfillService:
                     raise
                 return game, observation_values
 
+            play_by_play_outcome: list = []
+
+            def play_by_play():
+                # The heave check and the fallback read one response, so a
+                # second request cannot lose what the first returned.
+                if not play_by_play_outcome:
+                    try:
+                        play_by_play_outcome.append(self.live_data_provider.fetch_play_by_play(game_id))
+                    except Exception as error:
+                        play_by_play_outcome.append(error)
+                if isinstance(play_by_play_outcome[0], Exception):
+                    raise play_by_play_outcome[0]
+                return play_by_play_outcome[0]
+
             def optional_play_by_play():
                 try:
-                    return self.live_data_provider.fetch_play_by_play(game_id)
+                    return play_by_play()
                 except (ProviderResponseError, ProviderUnavailableError, OSError):
                     # The box score alone is still an acceptable game; it
                     # only lacks the assist locations and rebound types.
@@ -452,9 +466,9 @@ class LedgerBackfillService:
                 try:
                     primary = self._without_heaves(
                         self.provider.fetch_game_stats(game_id, season, season_type="Regular Season"),
-                        game_id=game_id,
                         season=season,
                         live_data=live_data,
+                        play_by_play=play_by_play,
                     )
                     game, observation_values = stage_and_normalize(primary, final_score=final_score)
                 except ReboundTypeIdentityError:
@@ -631,14 +645,10 @@ class LedgerBackfillService:
             )
         )
 
-    def _without_heaves(self, observation, *, game_id: str, season: str, live_data):
+    def _without_heaves(self, observation, *, season: str, live_data, play_by_play):
         if season < HEAVES_EXCLUDED_SEASON:
             return observation
-        return exclude_heaves(
-            observation,
-            self.live_data_provider.fetch_play_by_play(game_id),
-            lambda: live_data,
-        )
+        return exclude_heaves(observation, play_by_play(), lambda: live_data)
 
     def _targets(
         self,
