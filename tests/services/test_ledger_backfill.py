@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
@@ -1543,6 +1544,41 @@ def test_a_live_data_box_score_whose_players_miss_its_score_is_refused(tmp_path)
     assert not result.complete
     assert result.failed_game_ids == ("0022600101",)
     assert CanonicalGameLedgerRepository(engine).get_game("0022600101") is None
+
+
+def _refused_0022600101(tmp_path, box):
+    cutoff = datetime(2026, 10, 25, 10, tzinfo=UTC)
+    engine = _ledger_0022600101(tmp_path, cutoff)
+    service = _service_0022600101(
+        engine, pbp=_Documents(_truncated_pbp()), live_data=_Documents(box), now=cutoff
+    )
+
+    result = service.refresh("2026-27", **_authorized(_event_0022600101(), cutoff))
+
+    assert not result.complete
+    assert result.failed_game_ids == ("0022600101",)
+    assert CanonicalGameLedgerRepository(engine).get_game("0022600101") is None
+
+
+def test_a_live_data_box_score_short_of_the_nominal_minutes_is_refused(tmp_path):
+    # Five players per team lose 31 seconds and keep their points: about
+    # 47.48 team minutes, which composition would refuse after acceptance.
+    box = _box_score_0022600101()
+    for team in ("homeTeam", "awayTeam"):
+        for player in box["game"][team]["players"][:5]:
+            minutes, seconds = re.fullmatch(r"PT(\d+)M(\d+)\.00S", player["statistics"]["minutes"]).groups()
+            remaining = int(minutes) * 60 + int(seconds) - 31
+            player["statistics"]["minutes"] = f"PT{remaining // 60:02d}M{remaining % 60:02d}.00S"
+
+    _refused_0022600101(tmp_path, box)
+
+
+def test_a_live_data_box_score_whose_team_points_miss_its_score_is_refused(tmp_path):
+    # MEM's players and team.score say 111; its team statistics say 113.
+    box = _box_score_0022600101()
+    box["game"]["awayTeam"]["statistics"]["points"] = 113
+
+    _refused_0022600101(tmp_path, box)
 
 
 def test_a_game_without_a_final_score_is_refused_even_from_complete_pbp(tmp_path):
