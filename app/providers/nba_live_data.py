@@ -424,6 +424,27 @@ def _subtract_heaves(row: dict[str, Any], heaves: int) -> None:
         row[key] = remaining
 
 
+def live_data_final_score(
+    live_observation: Mapping[str, Any],
+    *,
+    event: Mapping[str, object],
+) -> dict[int, int]:
+    """Return each team's final score from the governed game's LiveData box score."""
+
+    game = live_observation.get("game")
+    if not isinstance(game, Mapping) or game.get("gameStatus") != 3:
+        raise ProviderResponseError("NBA LiveData box score is not final.")
+    if str(game.get("gameId")) != str(event.get("nba_game_id")):
+        raise ProviderResponseError("NBA LiveData game identity contradicts governance.")
+    scores: dict[int, int] = {}
+    for key, team_id in (("homeTeam", event["home_team_id"]), ("awayTeam", event["away_team_id"])):
+        team = game.get(key)
+        if not isinstance(team, Mapping) or int(team.get("teamId") or 0) != int(team_id):
+            raise ProviderResponseError("NBA LiveData team identity contradicts governance.")
+        scores[int(team_id)] = _count(team, "score")
+    return scores
+
+
 def _pbp_identity_does_not_contradict(
     observation: Mapping[str, Any] | None,
     expected: Mapping[str, tuple[int, str]],
@@ -557,4 +578,5 @@ __all__ = [
     "NBALiveDataBoxscoreAdapter",
     "compose_pbp_live_data_observation",
     "exclude_heaves",
+    "live_data_final_score",
 ]

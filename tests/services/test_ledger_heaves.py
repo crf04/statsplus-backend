@@ -129,7 +129,7 @@ def _refresh(
     repository = CanonicalGameLedgerRepository(engine)
     service = LedgerBackfillService(
         provider=_PBPStats(payload),
-        fallback_provider=_LiveData(
+        live_data_provider=_LiveData(
             _play_by_play(game_id) if play_by_play is None else play_by_play,
             _box_score(game_id) if box_score is None else box_score,
         ),
