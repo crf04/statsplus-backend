@@ -1571,6 +1571,7 @@ class _Documents:
         self.document = document
         self.play_by_play = _heave_free_play_by_play_0022600101() if play_by_play is None else play_by_play
         self.calls = []
+        self.play_by_play_calls = []
 
     def fetch_game_stats(self, game_id, season, *, season_type="Regular Season"):
         self.calls.append(game_id)
@@ -1579,6 +1580,9 @@ class _Documents:
         return json.loads(json.dumps(self.document))
 
     def fetch_play_by_play(self, game_id):
+        self.play_by_play_calls.append(game_id)
+        if isinstance(self.play_by_play, Exception):
+            raise self.play_by_play
         return json.loads(json.dumps(self.play_by_play))
 
 
@@ -1942,9 +1946,9 @@ class _PlayByPlayOnce(_Documents):
     """Serves the heave check its play-by-play, then the provider goes down."""
 
     def fetch_play_by_play(self, game_id):
-        if getattr(self, "served", False):
+        if self.play_by_play_calls:
+            self.play_by_play_calls.append(game_id)
             raise ProviderUnavailableError("NBA LiveData play-by-play is unavailable")
-        self.served = True
         return super().fetch_play_by_play(game_id)
 
 
@@ -1969,9 +1973,17 @@ def _short_clock_0022600101(tmp_path, live_data):
 
 # Without its heave the PBPStats rows fail the whole-game check (#590); with
 # it they fail the heave attempt check first.  Both fall back to the box.
-@pytest.mark.parametrize("heaves", [False, True], ids=["short-clock", "heave-check"])
-def test_a_game_refused_from_pbpstats_keeps_assist_and_rebound_evidence_from_live_data(tmp_path, heaves):
-    live_data = _Documents(_box_score_0022600101(), play_by_play=_full_play_by_play_0022600101(heaves=heaves))
+# The heave check's play-by-play is the fallback's evidence, so an outage
+# after that one request cannot cost the game its evidence.
+@pytest.mark.parametrize(
+    ("documents", "heaves"),
+    [(_Documents, False), (_Documents, True), (_PlayByPlayOnce, False)],
+    ids=["short-clock", "heave-check", "outage-after-first-request"],
+)
+def test_a_game_refused_from_pbpstats_keeps_assist_and_rebound_evidence_from_live_data(
+    tmp_path, documents, heaves
+):
+    live_data = documents(_box_score_0022600101(), play_by_play=_full_play_by_play_0022600101(heaves=heaves))
 
     result, stored, provider, items = _short_clock_0022600101(tmp_path, live_data)
 
@@ -1993,11 +2005,13 @@ def test_a_game_refused_from_pbpstats_keeps_assist_and_rebound_evidence_from_liv
     assert assisted == {GSW: 23, MEM: 27}
     assert rebounds == {GSW: 41, MEM: 47}
     assert items == []
+    assert live_data.play_by_play_calls == ["0022600101"]
 
 
 def test_a_short_clock_game_whose_play_by_play_fails_is_accepted_and_named(tmp_path):
-    live_data = _PlayByPlayOnce(
-        _box_score_0022600101(), play_by_play=_full_play_by_play_0022600101(heaves=False)
+    live_data = _Documents(
+        _box_score_0022600101(),
+        play_by_play=ProviderUnavailableError("NBA LiveData play-by-play is unavailable"),
     )
 
     result, stored, provider, items = _short_clock_0022600101(tmp_path, live_data)
@@ -2011,3 +2025,4 @@ def test_a_short_clock_game_whose_play_by_play_fails_is_accepted_and_named(tmp_p
             "open",
         )
     ]
+    assert live_data.play_by_play_calls == ["0022600101"]
