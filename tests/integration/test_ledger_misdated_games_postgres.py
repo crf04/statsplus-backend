@@ -5,6 +5,7 @@ publication contains, and serializes with a concurrent ledger composition."""
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import threading
 import time
@@ -73,9 +74,16 @@ def test_only_the_unpublished_late_tip_stored_on_its_utc_date_is_withdrawn(engin
 
 TIP = datetime(2024, 11, 15, 1, 30, tzinfo=UTC)
 NOW = TIP + timedelta(days=1)
+# The composing manifest pins an earlier Event Catalog that listed the tip
+# on the stored day; a later refresh moved it before Eastern midnight.
+PINNED_TIP = datetime(2024, 11, 15, 17, 0, tzinfo=UTC)
 
 
 def misdated_game_a_ledger_stream_can_compose(engine):
+    """A game the composing manifest's catalog dates as stored while the
+    current Event Catalog dates it a day earlier, so a composition may
+    publish it and the withdrawal flags it."""
+
     activate_season(engine, "2024-25")
     observation_id = store_dated_game(
         engine,
@@ -87,7 +95,21 @@ def misdated_game_a_ledger_stream_can_compose(engine):
     )
     service = PublicationService(engine, clock=lambda: NOW)
     service.register_default_streams()
-    checksum = hashlib.sha256(b"{}").hexdigest()
+    catalog = json.dumps(
+        {
+            "events": [
+                {
+                    "nba_game_id": "0022400001",
+                    "scheduled_at": PINNED_TIP.isoformat(),
+                    "home_team_id": 1610612747,
+                    "away_team_id": 1610612759,
+                    "status": "Final",
+                    "status_code": 3,
+                }
+            ]
+        }
+    )
+    checksum = hashlib.sha256(catalog.encode()).hexdigest()
     with engine.begin() as connection:
         connection.execute(
             CatalogPublication.__table__.insert().values(
@@ -97,7 +119,7 @@ def misdated_game_a_ledger_stream_can_compose(engine):
                 cutoff=NOW,
                 version="v1",
                 checksum=checksum,
-                payload="{}",
+                payload=catalog,
                 complete=True,
                 published_at=NOW,
             )
