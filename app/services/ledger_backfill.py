@@ -489,12 +489,13 @@ class LedgerBackfillService:
                     accepted_observations={observation_id: accepted_observation},
                 )[0]
                 committed = True
-                missing_families = _missing_evidence_families(game)
-                # A fallback game names what it still lacks; any complete
-                # acceptance, pbpstats or LiveData, resolves that report.  A
-                # stale candidate the ledger kept out says nothing of the
-                # stored game.
-                if write.checksum == game.checksum and (primary_failed or not missing_families):
+                # A fallback game names what the stored game still lacks; any
+                # complete acceptance, pbpstats or LiveData, resolves that
+                # report.  A replay or a stale candidate the ledger kept out
+                # is judged by the game already stored.
+                stored = game if write.inserted or write.replaced else self.repository.get_game(game_id)
+                missing_families = _missing_evidence_families(stored)
+                if primary_failed or not missing_families:
                     self.reconciliation_sink(
                         game_id,
                         {"kind": "fallback_evidence", "season": season, "missing_families": missing_families},
