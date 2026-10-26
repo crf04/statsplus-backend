@@ -24,7 +24,11 @@ from app.domain.nba_events import (
 from app.errors import ProviderUnavailableError
 from app.models.collection_control import CollectionManifest
 from app.models.event_catalog import EventCatalogEntry
-from app.providers.nba_live_data import compose_pbp_live_data_observation
+from app.providers.nba_live_data import (
+    HEAVES_EXCLUDED_SEASON,
+    compose_pbp_live_data_observation,
+    exclude_heaves,
+)
 from app.services.canonical_game_ledger import (
     CanonicalGame,
     CanonicalGameLedgerRepository,
@@ -426,7 +430,11 @@ class LedgerBackfillService:
                 primary = None
                 primary_failed = False
                 try:
-                    primary = self.provider.fetch_game_stats(game_id, season, season_type="Regular Season")
+                    primary = self._without_heaves(
+                        self.provider.fetch_game_stats(game_id, season, season_type="Regular Season"),
+                        game_id=game_id,
+                        season=season,
+                    )
                     game, observation_values = stage_and_normalize(primary)
                 except ReboundTypeIdentityError:
                     # Ordinary PBP evidence whose miss-type parts do not add up
@@ -598,6 +606,18 @@ class LedgerBackfillService:
                 key=lambda event: (str(event.get("scheduled_at")), str(event.get("nba_game_id"))),
                 reverse=True,
             )
+        )
+
+    def _without_heaves(self, observation, *, game_id: str, season: str):
+        if season < HEAVES_EXCLUDED_SEASON:
+            return observation
+        if self.fallback_provider is None:
+            raise LedgerValidationError("PBP Stats attempts need NBA LiveData play-by-play to exclude heaves")
+        fallback = self.fallback_provider
+        return exclude_heaves(
+            observation,
+            fallback.fetch_play_by_play(game_id),
+            lambda: fallback.fetch_game_stats(game_id, season, season_type="Regular Season"),
         )
 
     def _targets(

@@ -78,7 +78,7 @@ The app reads from five distinct sources:
 | Bundled SQLite demo data | `app.utils.db.get_engine()` | Default, offline-capable read path |
 | NBA Stats | `app.providers.nba_stats.NBAStatsAdapter` → `nba_api` → `stats.nba.com` | All live NBA calls use one injected, instrumented adapter with schema validation and a process-shared bound; bounded by `NBA_STATS_TIMEOUT_SECONDS` |
 | PBP Stats | `app.providers.pbp_stats.PBPStatsAdapter` → shared `requests.Session` → `api.pbpstats.com` | Normalized play-by-play aggregates, refreshes, retries, telemetry, and the separate PBP health probe |
-| NBA LiveData | `app.providers.nba_live_data.NBALiveDataBoxscoreAdapter` → shared retrying session → NBA-hosted LiveData S3 | Fail-closed traditional box-score fallback for governed ledger games whose primary PBP evidence is malformed; accepted composite observations retain both source documents |
+| NBA LiveData | `app.providers.nba_live_data.NBALiveDataBoxscoreAdapter` → shared retrying session → NBA-hosted LiveData S3 | Fail-closed traditional box-score fallback for governed ledger games whose primary PBP evidence is malformed; accepted composite observations retain both source documents. From 2026-27 its play-by-play `heave` actions are subtracted from PBP Stats FGA/3PA, matching NBA.com; the corrected team FGA/3PA must equal the final LiveData box score. A play-by-play that is unavailable or unfinished, a missing box score, or a mismatch never lets PBP Stats attempts through |
 | NBA injury report | gated `app.providers.nba_injury_report.NBAInjuryReportProvider` → injected `requests.Session` | Disabled by default; one current PDF observation only after the feature gate is explicit |
 
 Redis is an optional cache. Connection failure disables caching without blocking startup. After startup, a Redis connection or timeout error opens a per-process breaker in `NBAGameCache` (`REDIS_FAILURE_COOLDOWN_SECONDS`, 30 s) during which `get`/`set`/`delete` bypass Redis instead of paying the socket timeout on every call; `get_cache_stats()` reports `circuit_open`. OpenAI is an optional structured-output fallback for natural-language parsing below `LLM_CONFIDENCE_THRESHOLD`. Firebase is optional for local development but should be configured in production.
@@ -288,7 +288,7 @@ not counted twice:
 | Provider | Seam | Operations |
 | --- | --- | --- |
 | NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_season`, `player_game_logs_recorded`, `player_diets_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `team_game_log`, `league_player_shot_type`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_totals_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
-| NBA LiveData | `NBALiveDataBoxscoreAdapter` | `game_boxscore` and `game_playbyplay`; used only after primary governed PBP evidence fails validation, with both box-score source documents retained in the accepted composite observation |
+| NBA LiveData | `NBALiveDataBoxscoreAdapter` | `game_boxscore` and `game_playbyplay`; used only after primary governed PBP evidence fails validation, with both box-score source documents retained in the accepted composite observation. `game_playbyplay` for every 2026-27 ledger game, to exclude heaves from attempts, and `game_boxscore` for a game with heaves, to check the corrected attempts |
 | PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_player_diet`, `get_totals_opponent`, `health_probe`, `player_game_logs`, `game_player_stats`, `team_game_log` |
 | Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests share one pooled Requests session built once per adapter (pool sized for the capped detail fan-out); explicitly injected sessions serialize only their `get` call. The shared DFS transport owns one safe-GET retry. Dabble names a multi-player offering (first scorer, `to_score_25_plus_points`) with one `marketId` for every player, so a repeated market id with different content is excluded as `conflicting_source_identity` (skipped, warning kept) rather than malformed; it leaves the snapshot complete. |
 | PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
@@ -5182,7 +5182,20 @@ everyone, but a player the provider omits from one category is published with
 the slices it does have -- the Diet and profile already report an absent slice
 as absent rather than as zero. A split that breaks
 `shot_type_shooting_violation` -- the one rule shared with the refresh path --
-fails the candidate. The version binds the same manifest and Event Catalog
+fails the candidate.
+NBA player tracking can trail the box score by game-days while still
+answering, and its only tell is a smaller games played. So the collector
+bounds every read to the cutoff's slate date (`DateTo`) and carries the
+box-score games over the same bound: each player's (`LeagueDashPlayerStats`)
+and each team's (`LeagueDashTeamStats`). The composer refuses with
+`provider_window_lagging` unless every team's box-score games equal the games
+the cutoff governs, every player's tracking games equal his box-score
+games, and every player with box-score field-goal attempts appears in at
+least one category (a player with none has no shot type and may be absent);
+an observation without the bound or the evidence is
+`provider_window_unverified`. The refused job is retried by the next upload
+inside the collection window, so the publication moves as soon as NBA catches
+up and never to a lagging candidate. The version binds the same manifest and Event Catalog
 authority the opponent streams bind, and the strict `decode_player_diet`
 read-side decoder must accept the exact candidate before its pointer moves.
 The fourth Diet stream, `player_assist_locations`, is composed from the

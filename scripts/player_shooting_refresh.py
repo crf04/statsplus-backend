@@ -18,6 +18,7 @@ from sqlalchemy import create_engine
 from app.services.active_season import AmbiguousActiveSeason, active_season
 from app.services.player_shooting_refresh import PlayerShootingRefresh
 from app.utils.db import _normalize_database_url, is_demo_database_url
+from app.utils.sentry_setup import init_sentry
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,7 @@ def main(argv=None):
     database_url = os.environ.get("DATABASE_URL", "")
     if not database_url or is_demo_database_url(database_url):
         parser.error("DATABASE_URL must identify a writable application database")
+    init_sentry()
     engine = create_engine(_normalize_database_url(database_url))
     try:
         try:
