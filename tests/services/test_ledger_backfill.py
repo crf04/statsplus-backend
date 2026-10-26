@@ -2008,11 +2008,24 @@ def test_a_game_refused_from_pbpstats_keeps_assist_and_rebound_evidence_from_liv
     assert live_data.play_by_play_calls == ["0022600101"]
 
 
-def test_a_short_clock_game_whose_play_by_play_fails_is_accepted_and_named(tmp_path):
-    live_data = _Documents(
-        _box_score_0022600101(),
-        play_by_play=ProviderUnavailableError("NBA LiveData play-by-play is unavailable"),
-    )
+def _ended_play_by_play_without_events():
+    play_by_play = _full_play_by_play_0022600101(heaves=False)
+    actions = play_by_play["game"]["actions"]
+    play_by_play["game"]["actions"] = [
+        action for action in actions if (action["actionType"], action.get("subType")) == ("game", "end")
+    ]
+    return play_by_play
+
+
+# An unavailable play-by-play fails the heave check and falls back from there;
+# one that passes it but cannot reconcile to the box falls back as short-clock.
+@pytest.mark.parametrize(
+    "play_by_play",
+    [lambda: ProviderUnavailableError("NBA LiveData play-by-play is unavailable"), _ended_play_by_play_without_events],
+    ids=["unavailable", "no-events"],
+)
+def test_a_short_clock_game_whose_play_by_play_fails_is_accepted_and_named(tmp_path, play_by_play):
+    live_data = _Documents(_box_score_0022600101(), play_by_play=play_by_play())
 
     result, stored, provider, items = _short_clock_0022600101(tmp_path, live_data)
 
