@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
-from typing import Any, Final
+from typing import Any, Final, Literal
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -38,6 +38,7 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.orm import Session
 
 from app.domain.nba_events import REGULAR_SEASON_TYPE, is_final_event
 from app.domain.rebound_types import (
@@ -46,6 +47,7 @@ from app.domain.rebound_types import (
     REBOUND_TYPE_ATTRIBUTES,
     REBOUND_TYPE_FIELDS,
 )
+from app.domain.slate_time import slate_date_for_instant
 from app.domain.utc import assume_utc
 from app.errors import ProviderUnavailableError
 from app.models.canonical_game_ledger import (
@@ -57,8 +59,16 @@ from app.models.canonical_game_ledger import (
     LedgerObservationEvidence,
     LedgerPublication,
 )
-from app.models.collection_control import CollectionManifest, CollectionObservation
+from app.models.collection_control import (
+    ActiveSeason,
+    CollectionManifest,
+    CollectionObservation,
+    PublicationObservation,
+    PublicationStream,
+)
+from app.models.event_catalog import EventCatalogEntry
 from app.providers.pbp_game_logs import PBP_GAME_LOG_COUNTING_COLUMNS, PBPGameLogAdapter
+from app.services.collection_control import _lock_streams
 from app.services.nba_stats_adapter import validate_canonical_season
 from app.services.pbp_game_log_normalization import normalize_pbp_game_logs, parse_pbp_minutes
 from app.utils.db import is_demo_database_url
@@ -788,6 +798,26 @@ class LedgerGameSummary:
     retrieved_at: datetime
     player_count: int
     team_count: int
+
+
+MisdatedVerdict = Literal["withdraw", "referenced_by_publication", "needs_investigation"]
+
+
+@dataclass(frozen=True, slots=True)
+class MisdatedLedgerGame:
+    """A stored game whose date is not its Event Catalog tip's Eastern date.
+
+    ``withdraw`` is the LiveData fallback defect: fallback evidence stored on
+    the tip's UTC date.  A game any publication version references keeps its
+    rows for the correction path, and any other disagreement is left for a
+    person to explain.
+    """
+
+    game_id: str
+    stored_game_date: date
+    eastern_game_date: date
+    verdict: MisdatedVerdict
+    publication_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -2801,6 +2831,37 @@ def record_schema_drift(connection: Connection, drift: Mapping[str, object]) -> 
     )
 
 
+def _misdated_verdict(row: Any, *, referenced: bool) -> MisdatedVerdict:
+    if referenced:
+        return "referenced_by_publication"
+    if (
+        row.provider in LEDGER_FALLBACK_EVIDENCE_PROVIDERS
+        and row.game_date == assume_utc(row.scheduled_at).astimezone(UTC).date()
+    ):
+        return "withdraw"
+    return "needs_investigation"
+
+
+def _publication_ids_by_game(connection: Connection, game_ids: set[str]) -> dict[str, tuple[str, ...]]:
+    """Every publication version, in any status, whose evidence names a game."""
+
+    if not game_ids:
+        return {}
+    observation = CollectionObservation.__table__
+    link = PublicationObservation.__table__
+    rows = connection.execute(
+        select(link.c.publication_id, observation.c.scope)
+        .join(observation, observation.c.observation_id == link.c.observation_id)
+        .where(or_(*(observation.c.scope.contains(game_id) for game_id in game_ids)))
+    ).all()
+    found: dict[str, set[str]] = {}
+    for publication_id, scope in rows:
+        game_id = str(json.loads(scope).get("game_id") or "")
+        if game_id in game_ids:
+            found.setdefault(game_id, set()).add(str(publication_id))
+    return {game_id: tuple(sorted(ids)) for game_id, ids in found.items()}
+
+
 class CanonicalGameLedgerRepository:
     """Temporary-DB friendly atomic repository for complete games and progress."""
 
@@ -3511,6 +3572,71 @@ class CanonicalGameLedgerRepository:
             statement = statement.where(game_table.c.game_date <= _canonical_date(through))
         with self.engine.connect() as connection:
             return frozenset(str(row[0]) for row in connection.execute(statement).all())
+
+    def withdraw_misdated_games(
+        self, season: str, *, dry_run: bool = False
+    ) -> tuple[MisdatedLedgerGame, ...]:
+        """Withdraw stored games the LiveData fallback dated on the tip's UTC day.
+
+        A correction cannot change a game's identity, so a game accepted on the
+        wrong date can never be rechecked.  Withdrawing its facts makes it a
+        missing game that the next refresh re-accepts through the governed
+        path; its accepted observations stay retained.  Only the active season
+        is written, because a closed season has no refresh to re-accept it.
+        Every disagreement is returned with its verdict; a rerun withdraws
+        nothing more.
+        """
+
+        canonical_season = validate_canonical_season(season)
+        tables = self._tables()
+        game = tables["game"]
+        event = EventCatalogEntry.__table__
+        observation = CollectionObservation.__table__
+        with self.engine.begin() as connection:
+            if (
+                not dry_run
+                and connection.execute(
+                    select(ActiveSeason.season).where(
+                        ActiveSeason.season == canonical_season,
+                        ActiveSeason.status == "active",
+                        ActiveSeason.phase == "Regular Season",
+                    )
+                ).first()
+                is None
+            ):
+                raise LedgerValidationError(
+                    f"{canonical_season} is not the active season; only a dry run may read it"
+                )
+            rows = connection.execute(
+                select(game.c.game_id, game.c.game_date, event.c.scheduled_at, observation.c.provider)
+                .join(event, (event.c.nba_game_id == game.c.game_id) & (event.c.season == game.c.season))
+                .outerjoin(observation, observation.c.observation_id == game.c.source_observation_id)
+                .where(game.c.season == canonical_season)
+                .order_by(game.c.game_id)
+                .with_for_update(of=game)
+            ).all()
+            disagreements = [row for row in rows if row.game_date != slate_date_for_instant(row.scheduled_at)]
+            # Every publication writer validates its ledger evidence under its
+            # stream locks, so holding all of them through the delete means a
+            # composition either committed before the guard reads or reads
+            # the game only after it is gone.
+            _lock_streams(Session(bind=connection), connection.scalars(select(PublicationStream.stream_key)))
+            publication_ids = _publication_ids_by_game(connection, {row.game_id for row in disagreements})
+            misdated = tuple(
+                MisdatedLedgerGame(
+                    row.game_id,
+                    row.game_date,
+                    slate_date_for_instant(row.scheduled_at),
+                    _misdated_verdict(row, referenced=row.game_id in publication_ids),
+                    publication_ids.get(row.game_id, ()),
+                )
+                for row in disagreements
+            )
+            if not dry_run:
+                for item in misdated:
+                    if item.verdict == "withdraw":
+                        self._delete_game(connection, item.game_id, tables)
+        return misdated
 
     def backfill_rebound_types(
         self,
