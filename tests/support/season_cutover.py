@@ -82,6 +82,19 @@ THIN_GAMES = NEW_GAMES[:15]
 #: The later manifest's extra game: the first two teams meet again.
 OTHER_GAME = ("0022600151", TEAM_IDS[0], TEAM_IDS[1])
 SHORT_GAME = ("0022700001", TEAM_IDS[0], TEAM_IDS[1])
+#: Each game's one tip time, the evening before the first manifest that
+#: governs it; every Event Catalog that lists the game agrees on it.
+TIPS = {
+    game_id: cutoff - timedelta(hours=6)
+    for games, cutoff in (
+        (OLD_GAMES, OLD_CUTOFF),
+        (NEW_GAMES, NEW_CUTOFF),
+        (THIN_GAMES, THIN_CUTOFF),
+        ((OTHER_GAME,), OTHER_CUTOFF),
+        ((SHORT_GAME,), SHORT_CUTOFF),
+    )
+    for game_id, _home, _away in games
+}
 
 
 def _authority(
@@ -101,7 +114,7 @@ def _authority(
             "phase": "Regular Season",
             "status": "Final",
             "status_code": 3,
-            "scheduled_at": (cutoff - timedelta(hours=6)).isoformat(),
+            "scheduled_at": TIPS[game_id].isoformat(),
         }
         for game_id, home, away in catalog_games
     ]
@@ -169,7 +182,7 @@ def _authority(
                     game_id=game_id,
                     season=season,
                     season_type="Regular Season",
-                    game_date=(cutoff - timedelta(hours=6)).date(),
+                    game_date=TIPS[game_id].date(),
                     home_team_id=int(home),
                     home_team_tricode=TRICODES[home],
                     away_team_id=int(away),

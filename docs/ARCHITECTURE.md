@@ -2099,10 +2099,25 @@ active manifest before `collect_before`; already accepted observations may be
 composed later from their immutable manifest/cutoff even after that manifest
 is expired or superseded (`scripts/ledger_refresh.py --compose-only` performs
 that operation without entering collection). Every ledger observation stores that manifest ID,
-the canonical ledger surface scope, schema version, and manifest cutoff, and a
-candidate retains that exact timestamp and refuses mixed-manifest or
-mismatched-cutoff provenance; composition never rounds the cutoff to the
-calendar day. Provider
+the canonical ledger surface scope, schema version, and manifest cutoff. An
+in-season ledger holds games accepted on many nights, each under that night's
+manifest (an unchanged recheck leaves a game's evidence where it was). A
+composition at cutoff C is bound to the manifest of the cycle composing it:
+the ledger manifest whose cutoff is C, named by its composition job or else
+the season's only manifest at C. The candidate records that manifest and its
+Event Catalog. Every game's evidence is judged by the manifest that accepted
+it: same season, ledger scope and accepted schema version, a cutoff no later
+than C, stamped with that manifest's cutoff, and retrieved and accepted before
+that manifest's `collect_before` (`ledger_provenance_manifest_mismatch` or
+`ledger_provenance_scope_mismatch` otherwise). Every game's stored identity
+must also agree with the composing manifest's Event Catalog: its date is the
+tip's Eastern date (never the UTC date the LiveData fallback once stored), its
+home and away teams are the catalog's, and the catalog lists it as final, not
+postponed and tipped by C. A game it identifies differently or no longer lists is refused with
+`ledger_provenance_catalog_mismatch` for the correction path to resolve, and
+the cutover's lineage check applies the same rule to each candidate's
+recorded catalog. Composition never rounds the cutoff to the calendar day.
+Provider
 documents live only in an exact-ID staging cache during validation: successful
 entries are consumed after the atomic ledger commit, while every rejected or
 failed entry is discarded without affecting concurrent IDs. Validation and

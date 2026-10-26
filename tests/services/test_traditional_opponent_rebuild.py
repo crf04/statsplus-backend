@@ -727,6 +727,20 @@ def test_the_promotion_reuses_the_active_pairs_authority(family):
         assert version.event_catalog_publication_id == "event-catalog"
 
 
+def test_a_family_resting_on_several_nights_manifests_rebuilds_under_its_cutoffs_manifest(tmp_path):
+    engine = seed_family(tmp_path, opening_games=5)
+    publications = PublicationService(engine, clock=lambda: NOW)
+    service = _service(engine)
+
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
+    assert rebuild.manifest_id == "ledger-manifest"
+    done = service.run(rebuild.rebuild_id, owner="worker-1")
+
+    assert done.state == "succeeded"
+    for stream_key in (SEASON_STREAM, L15_STREAM):
+        assert publications.current(stream_key).manifest_id == "ledger-manifest"
+
+
 def test_a_rebuild_is_not_a_composition_job_or_a_repair(family):
     """The operation has its own durable identity and lifecycle."""
 

@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import create_engine, select
 
+from app.domain.slate_time import slate_date_for_instant
 from app.migrations import run_migrations
 from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
 from app.models.canonical_game_ledger import (
@@ -67,7 +68,7 @@ def _bind_current_ledger_source(
                 game_id=game_id,
                 season="2025-26",
                 season_type="Regular Season",
-                game_date=cutoff.date(),
+                game_date=slate_date_for_instant(cutoff),
                 home_team_id=1,
                 home_team_tricode="ATL",
                 away_team_id=2,
@@ -87,6 +88,28 @@ def _bind_current_ledger_source(
                 created_at=cutoff,
             )
         )
+
+
+def _ledger_games_catalog(*game_ids: str, tipped: datetime) -> str:
+    """An Event Catalog listing the games ``_bind_current_ledger_source`` stores,
+    tipped at their cutoff."""
+
+    return json.dumps(
+        {
+            "events": [
+                {
+                    "nba_game_id": game_id,
+                    "home_team_id": 1,
+                    "away_team_id": 2,
+                    "phase": "Regular Season",
+                    "status": "Final",
+                    "status_code": 3,
+                    "scheduled_at": tipped.isoformat(),
+                }
+                for game_id in game_ids
+            ]
+        }
+    )
 
 
 def _player_log_payload(*, points=25):
@@ -159,7 +182,7 @@ def test_inactive_ledger_rehearsal_persists_payload_and_normalized_provenance(co
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publications = PublicationService(control_db, clock=lambda: now)
     publications.register_default_streams()
-    catalog_payload = "{}"
+    catalog_payload = _ledger_games_catalog("game-1", "game-2", tipped=now)
     catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with control_db.begin() as connection:
         connection.execute(
@@ -284,7 +307,7 @@ def test_inactive_ledger_replaces_legacy_candidate_without_manifest_binding(cont
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publications = PublicationService(control_db, clock=lambda: now)
     publications.register_default_streams()
-    catalog_payload = "{}"
+    catalog_payload = _ledger_games_catalog("game-1", tipped=now)
     catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with control_db.begin() as connection:
         connection.execute(
@@ -386,7 +409,7 @@ def test_player_log_candidate_and_rollback_keep_indexed_projection(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publications = PublicationService(control_db, clock=lambda: now)
     publications.register_default_streams()
-    catalog_payload = "{}"
+    catalog_payload = _ledger_games_catalog("game-1", tipped=now)
     catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with control_db.begin() as connection:
         connection.execute(
@@ -551,7 +574,7 @@ def test_ledger_rehearsal_rejects_cross_manifest_and_cutoff_provenance(control_d
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publications = PublicationService(control_db, clock=lambda: now + timedelta(days=2))
     publications.register_default_streams()
-    catalog_payload = "{}"
+    catalog_payload = _ledger_games_catalog("game-1", "game-2", "game-3", tipped=now)
     catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with control_db.begin() as connection:
         connection.execute(
@@ -622,13 +645,15 @@ def test_ledger_rehearsal_rejects_cross_manifest_and_cutoff_provenance(control_d
                 )
             ],
         )
-    _bind_current_ledger_source(
-        control_db,
-        game_id="game-1",
-        observation_id="obs-1",
-        cutoff=now,
-    )
+    for index in (1, 2):
+        _bind_current_ledger_source(
+            control_db,
+            game_id=f"game-{index}",
+            observation_id=f"obs-{index}",
+            cutoff=now,
+        )
 
+    # Two manifests share the cutoff and the composition names neither.
     with pytest.raises(ControlPlaneError, match="manifest_mismatch"):
         publications.compose_inactive_ledger(
             "player_per36",
@@ -661,9 +686,10 @@ def test_ledger_rehearsal_rejects_cross_manifest_and_cutoff_provenance(control_d
         season="2025-26",
         cutoff=now,
         payload={"rows": [{"player_id": 1}]},
-        provenance={"obs-1": "game-1"},
+        provenance={"obs-1": "game-1", "obs-2": "game-2"},
+        manifest_id="ledger-manifest-a",
     )
-    assert version.status == "candidate"
+    assert (version.status, version.manifest_id) == ("candidate", "ledger-manifest-a")
 
 
 def test_pending_parity_blocks_ledger_stream_activation(control_db, monkeypatch):
@@ -3592,7 +3618,7 @@ def test_a_real_candidate_survives_pruning_until_it_activates_and_stays_readable
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publications = PublicationService(control_db, clock=lambda: now)
     publications.register_default_streams()
-    catalog_payload = "{}"
+    catalog_payload = _ledger_games_catalog("assist-diet-game", tipped=now)
     catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with control_db.begin() as connection:
         connection.execute(
@@ -3725,7 +3751,7 @@ def test_player_assist_locations_ledger_candidate_activates_without_parity_evide
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publications = PublicationService(control_db, clock=lambda: now)
     publications.register_default_streams()
-    catalog_payload = "{}"
+    catalog_payload = _ledger_games_catalog("assist-diet-game", tipped=now)
     catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with control_db.begin() as connection:
         connection.execute(
@@ -3887,7 +3913,7 @@ _REBOUND_SLICES = (
 def _seed_rebound_authority(control_db, now):
     """One accepted ledger game, its manifest and its Event Catalog."""
 
-    catalog_payload = "{}"
+    catalog_payload = _ledger_games_catalog("rebound-game", tipped=now)
     catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with control_db.begin() as connection:
         connection.execute(
