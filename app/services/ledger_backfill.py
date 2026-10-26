@@ -434,6 +434,14 @@ class LedgerBackfillService:
                     raise
                 return game, observation_values
 
+            def optional_play_by_play():
+                try:
+                    return self.live_data_provider.fetch_play_by_play(game_id)
+                except (ProviderResponseError, ProviderUnavailableError, OSError):
+                    # The box score alone is still an acceptable game; it
+                    # only lacks the assist locations and rebound types.
+                    return None
+
             try:
                 live_data = self.live_data_provider.fetch_game_stats(
                     game_id, season, season_type="Regular Season"
@@ -458,8 +466,11 @@ class LedgerBackfillService:
                 except IncompleteGameError:
                     # PBP rows that lost events cannot be filled from LiveData,
                     # only replaced by its box score.
+                    primary_failed = True
                     game, observation_values = stage_and_normalize(
-                        compose_pbp_live_data_observation(None, live_data, event=event),
+                        compose_pbp_live_data_observation(
+                            None, live_data, event=event, live_play_by_play=optional_play_by_play()
+                        ),
                         final_score=final_score,
                         source_provider="nba_live_data",
                     )
@@ -470,14 +481,8 @@ class LedgerBackfillService:
                     OSError,
                 ):
                     primary_failed = True
-                    try:
-                        play_by_play = self.live_data_provider.fetch_play_by_play(game_id)
-                    except (ProviderResponseError, ProviderUnavailableError, OSError):
-                        # The box score alone is still an acceptable game; it
-                        # only lacks the assist locations and rebound types.
-                        play_by_play = None
                     composite = compose_pbp_live_data_observation(
-                        primary, live_data, event=event, live_play_by_play=play_by_play
+                        primary, live_data, event=event, live_play_by_play=optional_play_by_play()
                     )
                     game, observation_values = stage_and_normalize(
                         composite,
