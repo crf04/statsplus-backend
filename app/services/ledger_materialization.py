@@ -398,25 +398,11 @@ class LedgerMaterializationService:
                 )
             if l15_window.complete:
                 candidates.append(("traditional_opponent_l15", l15_window.teams))
-            if season_window.complete:
-                candidates.append(
-                    (
-                        "assist_locations_season",
-                        assist_season.teams if assist_season is not None else (),
-                    )
-                )
-            if l15_window.complete:
-                candidates.append(
-                    (
-                        "assist_locations_l15",
-                        assist_l15.teams if assist_l15 is not None else (),
-                    )
-                )
+            if season_window.complete and assist_season is not None:
+                candidates.append(("assist_locations_season", assist_season.teams))
+            if l15_window.complete and assist_l15 is not None:
+                candidates.append(("assist_locations_l15", assist_l15.teams))
             if season_window.complete and player_assist_diet is not None:
-                # Unlike the sibling windows above, an empty payload is never
-                # appended here: ``decode_player_diet`` refuses an empty
-                # publication, and a ``ControlPlaneError`` raised mid-batch
-                # would abort every other candidate in this slice.
                 candidates.append(("player_assist_locations", player_assist_diet))
             if season_window.complete and rebound_season is not None:
                 candidates.append(("rebound_types_season", rebound_season.teams))

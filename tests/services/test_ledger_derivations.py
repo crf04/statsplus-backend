@@ -31,6 +31,7 @@ from app.services.collection_control import PublicationService
 from app.services.database_first_activation import decode_player_diet
 from app.services.ledger_derivations import (
     ASSIST_METRICS,
+    IncompleteGameError,
     LedgerDerivationUnavailable,
     competition_ranks,
     derive_assist_location_facts,
@@ -235,7 +236,9 @@ def test_window_materialization_counts_reconciled_sparse_locations():
 
 REGULATION_CLOCK = (12.0, 12.0, 12.0, 12.0)
 #: 0022600101 (MEM @ GSW, 2026-10-23): PBPStats ``team_results`` clocks the
-#: first period at 11:29 for both teams and the other three at 12:00.
+#: first period at 11:29 for both teams and the other three at 12:00.  The
+#: missing 31 seconds are lost events, not a clock gap: NBA.com credits MEM's
+#: Quinten Post with 2 points in them.
 GAP_CLOCK = (11 + 29 / 60, 12.0, 12.0, 12.0)
 
 
@@ -276,12 +279,9 @@ def _game_length(home, away, clock=None):
 def test_the_recorded_period_clock_names_the_game_length():
     assert _game_length(48.0, 48.0, REGULATION_CLOCK) == 48.0
     assert _game_length(47.976666, 48.02, REGULATION_CLOCK) == 48.0
-    # A clock gap shortens the recorded clock and both sides' minutes alike.
-    assert _game_length(47.477, 47.48, GAP_CLOCK) == 48.0
+    # One second of clock precision (0022500237 records 47:59 beside 48:00).
+    assert _game_length(47.99, 47.99, (11 + 59 / 60, 12.0, 12.0, 12.0)) == 48.0
     assert _game_length(53.0, 53.0, (*REGULATION_CLOCK, 5.0)) == 53.0
-    # An overtime clock that lost 2:31 still makes five periods: 53, not 48.
-    short_overtime = (*REGULATION_CLOCK, 2 + 29 / 60)
-    assert _game_length(50.483, 50.48, short_overtime) == 53.0
     assert _game_length(58.0, 58.0, (*REGULATION_CLOCK, 5.0, 5.0)) == 58.0
     # No retained minutes keeps the count-per-game replay fallback.
     assert _game_length(0.0, 0.0, REGULATION_CLOCK) == 0.0
@@ -298,6 +298,17 @@ def test_minutes_short_of_the_recorded_period_clock_fail_closed():
             _game_length(home, away, REGULATION_CLOCK)
     with pytest.raises(LedgerDerivationUnavailable):
         _game_length(47.477, 48.0, GAP_CLOCK)
+
+
+def test_a_period_clock_short_of_its_nominal_length_fails_closed():
+    # PBPStats lost the events of the missing time, so minutes that match the
+    # short clock prove nothing about the game.
+    with pytest.raises(IncompleteGameError, match="period clock is short"):
+        _game_length(47.477, 47.48, GAP_CLOCK)
+    with pytest.raises(IncompleteGameError, match="period clock is short"):
+        _game_length(50.483, 50.48, (*REGULATION_CLOCK, 2 + 29 / 60))
+    with pytest.raises(IncompleteGameError, match="period clock is short"):
+        _game_length(48.0, 48.0, GAP_CLOCK)
 
 
 def test_a_period_count_that_contradicts_the_minutes_fails_closed():
@@ -407,36 +418,27 @@ def test_non_nominal_team_minutes_fail_closed_in_every_consumer():
         )
 
 
-def test_a_game_clock_gap_on_both_sides_keeps_the_regulation_length_in_every_consumer():
-    # Each side's player minutes over five are 47.477 and 47.480 against a
-    # recorded 47:29 clock.  The game still had four periods.
+def test_a_game_clock_gap_on_both_sides_fails_closed_in_every_consumer():
+    # 0022600101's player minutes over five (47.477 and 47.480) match its
+    # recorded 47:29 clock, and the game still lost 31 seconds of events.
     league = _league_games()
     gap = league[0]
     games = _with_game_minutes(
         league, gap.game_id, {gap.home_team_id: 47.477, gap.away_team_id: 47.480}, GAP_CLOCK
     )
-    window = materialize_team_window(games, **_window_kwargs(games))
-    assert window.complete
-    minutes = {team.team_id: team.team_minutes for team in window.teams}
-    assert minutes[gap.home_team_id] == 15 * 48.0
-    assert minutes[gap.away_team_id] == 15 * 48.0
-    assist = materialize_assist_location_window(games, **_window_kwargs(games))
-    assert {team.team_id: team.team_minutes for team in assist.teams}[gap.home_team_id] == 15 * 48.0
-    rebound = materialize_rebound_type_window(games, **_window_kwargs(games))
-    assert {team.team_id: team.team_minutes for team in rebound.teams}[gap.away_team_id] == 15 * 48.0
-    report = compare_ledger_to_legacy(
-        games,
-        (),
-        season="2025-26",
-        legacy_traditional_rows=({"TEAM_ID": gap.home_team_id, "OPP_REB": 1.0},),
-    )
-    # 15 games of 5 opponent rebounds over 15 regulation lengths.
-    assert [
-        difference.ledger_value
-        for difference in report.differences
-        if difference.identity == f"traditional:{gap.home_team_id}"
-        and difference.field == "opponent_rebounds"
-    ] == [5.0]
+    with pytest.raises(IncompleteGameError):
+        materialize_team_window(games, **_window_kwargs(games))
+    with pytest.raises(IncompleteGameError):
+        materialize_assist_location_window(games, **_window_kwargs(games))
+    with pytest.raises(IncompleteGameError):
+        materialize_rebound_type_window(games, **_window_kwargs(games))
+    with pytest.raises(IncompleteGameError):
+        compare_ledger_to_legacy(
+            games,
+            (),
+            season="2025-26",
+            legacy_traditional_rows=({"TEAM_ID": gap.home_team_id, "OPP_REB": 1.0},),
+        )
 
 
 def test_a_player_row_missing_from_each_side_fails_closed_in_every_consumer():

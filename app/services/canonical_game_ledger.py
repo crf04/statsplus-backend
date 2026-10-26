@@ -2852,8 +2852,14 @@ class CanonicalGameLedgerRepository:
         games: Iterable[CanonicalGame],
         *,
         accepted_observations: Mapping[str, Mapping[str, Any]] | None = None,
+        final_scores: Mapping[str, Mapping[int, int]] | None = None,
     ) -> tuple[LedgerWriteResult, ...]:
-        """Validate every game before one transaction replaces all candidates."""
+        """Validate every game before one transaction replaces all candidates.
+
+        ``final_scores`` holds each game's witnessed final score by team.  A
+        stored game whose player points miss it lost events, so a replacement
+        without the miss-type rebound split may displace it.
+        """
 
         candidates = tuple(validate_complete_game(game) for game in games)
         if not candidates:
@@ -2945,8 +2951,34 @@ class CanonicalGameLedgerRepository:
                         raise LedgerValidationError(
                             "accepted observation identity conflicts with stored evidence"
                         )
-                results.append(self._replace_candidate(connection, candidate, tables))
+                results.append(
+                    self._replace_candidate(
+                        connection,
+                        candidate,
+                        tables,
+                        final_score=(final_scores or {}).get(candidate.game_id),
+                    )
+                )
         return tuple(results)
+
+    @staticmethod
+    def _stored_points_miss(
+        connection: Connection,
+        game_id: str,
+        final_score: Mapping[int, int] | None,
+        tables: Mapping[str, Any],
+    ) -> bool:
+        if final_score is None:
+            return False
+        player = tables["player"]
+        stored = dict(
+            connection.execute(
+                select(player.c.team_id, func.sum(player.c.points))
+                .where(player.c.game_id == game_id)
+                .group_by(player.c.team_id)
+            ).all()
+        )
+        return {team_id: int(stored.get(team_id) or 0) for team_id in final_score} != dict(final_score)
 
     @staticmethod
     def _lock_manifest_authorization(
@@ -3132,6 +3164,8 @@ class CanonicalGameLedgerRepository:
         connection: Connection,
         candidate: CanonicalGame,
         tables: Mapping[str, Any],
+        *,
+        final_score: Mapping[int, int] | None = None,
     ) -> LedgerWriteResult:
         existing = (
             connection.execute(select(tables["game"]).where(tables["game"].c.game_id == candidate.game_id))
@@ -3155,6 +3189,7 @@ class CanonicalGameLedgerRepository:
                 .limit(1)
             ).first()
             is not None
+            and not self._stored_points_miss(connection, candidate.game_id, final_score, tables)
         ):
             raise ReboundTypeRegressionError(
                 "rebound_types_regression: the replacement carries no miss-type "
@@ -3422,7 +3457,7 @@ class CanonicalGameLedgerRepository:
     ) -> frozenset[str]:
         """Return manifest games whose accepted observation used the fallback.
 
-        A ``nba_live_data`` or ``pbp+nba_live_data`` observation carries no
+        A ``nba_live_data`` or ``pbp+nba_live_data`` observation may lack
         assist-location evidence, so the game stays a repair target until a
         complete PBP observation replaces it.
         """

@@ -459,6 +459,7 @@ def build_dependencies(
             AcceptedObservationParticipantCatalog,
             CollectionObservationLedgerRecorder,
             LedgerBackfillService,
+            collection_control_reconciliation_sink,
         )
         from app.services.ledger_matchup_materialization import (
             LedgerMatchupMaterializationService,
@@ -501,16 +502,14 @@ def build_dependencies(
             ledger_observation_recorder = CollectionObservationLedgerRecorder(engine)
             ledger_backfill_service = LedgerBackfillService(
                 provider=pbp_game_logs_provider,
-                fallback_provider=nba_live_data_provider,
+                live_data_provider=nba_live_data_provider,
                 athlete_catalog=athlete_catalog_service,
                 participant_catalog=AcceptedObservationParticipantCatalog(
                     engine, ledger_observation_recorder
                 ),
                 observation_recorder=ledger_observation_recorder,
-                reconciliation_sink=lambda game_id, details: collection_control.record_identity_unresolved(
-                    season=str(details.get("season", settings.nba.current_season)),
-                    kind="ledger_athlete",
-                    details={"game_id": game_id, **details},
+                reconciliation_sink=collection_control_reconciliation_sink(
+                    collection_control, default_season=settings.nba.current_season
                 ),
                 repository=canonical_game_ledger_repository,
                 max_concurrency=1,

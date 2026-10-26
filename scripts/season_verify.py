@@ -32,6 +32,7 @@ from app.domain.slate_time import slate_date_for_instant
 from app.domain.utc import assume_utc
 from app.models.collection_control import PublicationVersion
 from app.services.database_first_activation import (
+    PublicationPayloadError,
     _decode_known_publication_payload,
     decode_player_game_logs,
     decode_player_per36,
@@ -340,6 +341,21 @@ def verify_stream(
         "version": candidate.version,
         "cutoff": cutoff.isoformat(),
     }
+    try:
+        return _verify_candidate(session, candidate, result, stream_key, season, nba)
+    except (PublicationPayloadError, json.JSONDecodeError) as error:
+        return {**result, "status": "invalid_candidate", "reason": str(error), "passed": False}
+
+
+def _verify_candidate(
+    session: Session,
+    candidate: PublicationVersion,
+    result: dict[str, Any],
+    stream_key: str,
+    season: str,
+    nba: NbaReference,
+) -> dict[str, Any]:
+    cutoff = assume_utc(candidate.cutoff)
     payload = json.loads(candidate.payload)
     if stream_key in NO_REFERENCE_STREAMS:
         rows = _decode_known_publication_payload(

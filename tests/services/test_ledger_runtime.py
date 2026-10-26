@@ -888,18 +888,27 @@ def _record_period_clock(engine, game, clock, *, observation_id=None, accepted_a
         )
 
 
-def test_a_clock_gap_game_composes_at_regulation_length_from_its_stored_period_clock(tmp_path):
+def test_a_clock_gap_game_fails_its_composition_and_logs_the_cause(tmp_path, caplog):
     # 0022600101: 237:24 player minutes (47.48 over five) against a 47:29 clock.
+    # PBPStats lost the last 31 seconds of the first period.
     games = _retimed_league(237 + 24 / 60)
     engine, runtime = _seeded_league_runtime(
         tmp_path, "clock-gap.sqlite3", games, streams=("traditional_opponent_season",)
     )
     _record_period_clock(engine, games[0], ("11:29", "12:00", "12:00", "12:00"))
 
-    assert runtime.compose_queued("2025-26") == 1
+    with caplog.at_level("WARNING", logger="app.services.ledger_runtime"):
+        assert runtime.compose_queued("2025-26") == 0
     with engine.connect() as connection:
         job = connection.execute(select(CompositionJob.__table__)).mappings().one()
-    assert (job["status"], job["last_error"]) == ("succeeded", None)
+    assert (job["status"], job["last_error"]) == ("failed", "recomposition_failed")
+    assert [
+        record.getMessage() for record in caplog.records if record.name == "app.services.ledger_runtime"
+    ] == [
+        "ledger recomposition failed: season=2025-26 cutoff=2025-10-15T05:22:00+00:00 "
+        "manifest=None streams=traditional_opponent_season "
+        "error=IncompleteGameError: the recorded period clock is short of the game's nominal length"
+    ]
 
 
 def test_a_game_reads_the_period_clock_of_the_observation_its_rows_were_accepted_from(tmp_path):
@@ -955,7 +964,7 @@ def test_a_composition_short_of_its_period_clock_logs_the_cause(tmp_path, caplog
             "WARNING",
             "ledger recomposition failed: season=2025-26 cutoff=2025-10-15T05:22:00+00:00 "
             "manifest=None streams=traditional_opponent_season "
-            "error=LedgerDerivationUnavailable: team minutes do not match the game's period clock",
+            "error=IncompleteGameError: team minutes do not match the game's nominal length",
         )
     ]
 
