@@ -40,7 +40,7 @@ from app.services.ledger_backfill import (
     CollectionObservationLedgerRecorder,
     LedgerBackfillService,
 )
-from app.services.ledger_derivations import nominal_game_minutes
+from app.services.ledger_derivations import governed_assist_locations, nominal_game_minutes
 from app.services.ledger_materialization import LedgerCorrectionQueue
 
 
@@ -1926,3 +1926,88 @@ def test_a_stored_truncated_game_is_corrected_from_the_live_data_box_score_on_re
     stored = repository.get_game("0022600101")
     assert _points_by_team(stored) == FINAL_0022600101
     assert _accepted_provider(engine, stored) == "nba_live_data"
+
+
+def _full_play_by_play_0022600101(*, heaves=True):
+    """NBA LiveData's whole 0022600101 play-by-play: its shots, free throws and rebounds."""
+
+    play_by_play = json.loads(Path("tests/fixtures/nba_live_data/playbyplay_0022600101.json").read_text())
+    if not heaves:
+        actions = play_by_play["game"]["actions"]
+        play_by_play["game"]["actions"] = [action for action in actions if action["actionType"] != "heave"]
+    return play_by_play
+
+
+class _PlayByPlayOnce(_Documents):
+    """Serves the heave check its play-by-play, then the provider goes down."""
+
+    def fetch_play_by_play(self, game_id):
+        if getattr(self, "served", False):
+            raise ProviderUnavailableError("NBA LiveData play-by-play is unavailable")
+        self.served = True
+        return super().fetch_play_by_play(game_id)
+
+
+def _short_clock_0022600101(tmp_path, live_data):
+    from app.services.collection_control import CollectionControlService, CollectionOperationsService
+    from app.services.ledger_backfill import collection_control_reconciliation_sink
+
+    cutoff = datetime(2026, 10, 25, 10, tzinfo=UTC)
+    engine = _ledger_0022600101(tmp_path, cutoff)
+    service = _service_0022600101(engine, pbp=_Documents(_truncated_pbp()), live_data=live_data, now=cutoff)
+    service.reconciliation_sink = collection_control_reconciliation_sink(
+        CollectionControlService(engine), default_season="2026-27"
+    )
+    result = service.refresh("2026-27", **_authorized(_event_0022600101(), cutoff))
+    items = [
+        (item["kind"], item["details"], item["status"])
+        for item in CollectionOperationsService(engine).diagnostics()["reconciliation"]
+    ]
+    stored = CanonicalGameLedgerRepository(engine).get_game("0022600101")
+    return result, stored, _accepted_provider(engine, stored), items
+
+
+# Without its heave the PBPStats rows fail the whole-game check (#590); with
+# it they fail the heave attempt check first.  Both fall back to the box.
+@pytest.mark.parametrize("heaves", [False, True], ids=["short-clock", "heave-check"])
+def test_a_game_refused_from_pbpstats_keeps_assist_and_rebound_evidence_from_live_data(tmp_path, heaves):
+    live_data = _Documents(_box_score_0022600101(), play_by_play=_full_play_by_play_0022600101(heaves=heaves))
+
+    result, stored, provider, items = _short_clock_0022600101(tmp_path, live_data)
+
+    assert (result.complete, provider) == (True, "nba_live_data")
+    assisted = {GSW: 0, MEM: 0}
+    rebounds = {GSW: 0, MEM: 0}
+    for player in stored.player_facts:
+        locations = governed_assist_locations(player)
+        assisted[player.team_id] += locations["two_point_assists"] + locations["three_point_assists"]
+        rebounds[player.team_id] += (
+            player.def_two_pt_rebounds
+            + player.def_three_pt_rebounds
+            + player.ft_def_rebounds
+            + player.off_two_pt_rebounds
+            + player.off_three_pt_rebounds
+            + player.ft_off_rebounds
+        )
+    # NBA.com's box score: GSW 23 assists and 41 rebounds, MEM 27 and 47.
+    assert assisted == {GSW: 23, MEM: 27}
+    assert rebounds == {GSW: 41, MEM: 47}
+    assert items == []
+
+
+def test_a_short_clock_game_whose_play_by_play_fails_is_accepted_and_named(tmp_path):
+    live_data = _PlayByPlayOnce(
+        _box_score_0022600101(), play_by_play=_full_play_by_play_0022600101(heaves=False)
+    )
+
+    result, stored, provider, items = _short_clock_0022600101(tmp_path, live_data)
+
+    assert (result.complete, provider) == (True, "nba_live_data")
+    assert _points_by_team(stored) == FINAL_0022600101
+    assert items == [
+        (
+            "ledger_fallback_evidence",
+            {"game_id": "0022600101", "missing_families": "assist_locations,rebound_types"},
+            "open",
+        )
+    ]
