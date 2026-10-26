@@ -1957,9 +1957,11 @@ provider retry cap; there is no persisted per-game attempt budget, so a game
 PBP keeps refusing is re-attempted on each run. Every target also fetches its
 NBA LiveData box score for the final score, and a game whose LiveData score is
 unavailable is refused. Evidence from any source is accepted only when each
-team's player points sum to that final score and its recorded period clock is
-not short of the game's nominal length. PBP evidence that fails either check
-lost events (0022600101's PBPStats document clocks its first period at 11:29
+team's player points sum to that final score, its team points equal it, and
+its recorded period clock (when it has one) and player-minutes-over-five are
+within 0.05 of the game's nominal length, so a LiveData box score short of its
+minutes is refused at acceptance rather than at composition. PBP evidence that
+fails a check lost events (0022600101's PBPStats document clocks its first period at 11:29
 and drops 2 MEM points), so the game is accepted from the LiveData box score
 alone rather than a composite that keeps the PBP rows. Such a refetch may then
 replace a stored game that carries the miss-type rebound split, but only when

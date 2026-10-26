@@ -38,7 +38,7 @@ from app.services.canonical_game_ledger import (
     ReboundTypeIdentityError,
     canonical_game_from_pbp,
 )
-from app.services.ledger_derivations import IncompleteGameError, recorded_period_count
+from app.services.ledger_derivations import IncompleteGameError, nominal_game_minutes
 from app.utils.telemetry import ProviderResponseError
 
 
@@ -696,17 +696,19 @@ class LedgerBackfillService:
 def _require_whole_game(game: CanonicalGame, final_score: Mapping[int, int]) -> None:
     """Refuse evidence that lost part of the game.
 
-    A recorded period clock short of the game's nominal length, or player
-    points that do not sum to each team's final score, mean the provider
-    dropped events.
+    A recorded period clock or team minutes short of the game's nominal
+    length, or player or team points that miss each team's final score, mean
+    the provider dropped events.
     """
 
-    recorded_period_count(game)
+    nominal_game_minutes(game)
     points = dict.fromkeys(final_score, 0)
     for player in game.player_facts:
         points[player.team_id] = points.get(player.team_id, 0) + player.points
     if points != final_score:
         raise IncompleteGameError("player points do not sum to the final score")
+    if {fact.team_id: fact.points for fact in game.team_facts} != final_score:
+        raise IncompleteGameError("team points do not match the final score")
 
 
 def _aware(value: datetime) -> datetime:

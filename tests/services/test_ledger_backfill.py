@@ -158,6 +158,12 @@ def _event():
 
 def _payload():
     payload = json.loads(Path("tests/fixtures/pbp_stats/game_stats.valid.json").read_text())
+    # Acceptance holds each team to a whole game's 240 player-minutes, which
+    # three players can carry only as a stand-in for a full rotation.
+    for side, minutes in (("Home", "120:00"), ("Away", "240:00")):
+        for row in payload["stats"][side]["FullGame"]:
+            if row["EntityId"] != "0":
+                row["Minutes"] = minutes
     payload["participant_ids_by_team"] = {
         "1610612747": [2544, 203507],
         "1610612759": [201935],
