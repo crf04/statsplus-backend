@@ -6,3 +6,4 @@ cab44a800ee3ba48e3707a260de01e812efc71d7:tests/services/test_ledger_runtime.py:g
 c6e118d51ba661b8311e563f0313dae9f1d76b11:tests/fixtures/serving_season/pre_cutover_responses.json:generic-api-key:1024
 c6e118d51ba661b8311e563f0313dae9f1d76b11:tests/fixtures/serving_season/pre_cutover_responses.json:generic-api-key:1324
 05caff77426bcc9c6e121afc0560443970caf828:tests/fixtures/omitted_season/matchup.json:generic-api-key:1
+c3b36eae6cfd978c448b89bbeebc38988b6da784:tests/fixtures/omitted_season/unscheduled.json:generic-api-key:1

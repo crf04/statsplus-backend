@@ -27,7 +27,7 @@ from typing import Any
 import redis
 
 from app.config.settings import RuntimeSettings
-from app.services.research_season import published_capture, season_is_pinned
+from app.services.research_season import published_capture, season_is_pinned, selected_season
 from app.utils.redis_breaker import RedisCircuitBreaker
 
 #: Bumped whenever the Matchup document's shape changes, so a stored document
@@ -172,9 +172,16 @@ class PublicationSnapshotReuse:
         stream_keys: Collection[str],
         capture: Callable[[Any], Any],
     ) -> tuple[str, Any]:
-        """``published_capture`` that reuses a snapshot of the same generation."""
+        """``published_capture`` that reuses a snapshot of the same generation.
+
+        A reader scoped to an explicit selection always captures: the live
+        generation names no held candidate, and each read rechecks its
+        candidates' ledger lineage.
+        """
 
         max_age = settings.cache.snapshot_reuse_max_age_seconds
+        if selected_season(publication_reader) is not None:
+            max_age = 0
         generation = self._generation(settings, publication_reader, stream_keys) if max_age > 0 else None
         if generation is None:
             return published_capture(settings, publication_reader, capture)

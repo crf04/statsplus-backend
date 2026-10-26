@@ -28,9 +28,11 @@ from functools import partial
 from typing import Any
 
 import redis
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.config.settings import RuntimeSettings
+from app.domain.nba_events import season_for_game_id
 from app.errors import (
     AppError,
     ProviderUnavailableError,
@@ -44,6 +46,8 @@ from app.services.matchup_snapshot import (
     read_game_matchup,
     request_matchups,
 )
+from app.services.request_reads import request_read_scope
+from app.services.research_season import refuse_evidence_after_game, season_context, selected_season
 from app.services.serving_season import merge_trailing
 from app.services.slate_fallback import read_slate
 from app.services.target_resolution import MatchupReader, SlateReader
@@ -83,6 +87,7 @@ class SlateEdgesService:
         redis_client: Any | None = None,
         snapshot_reuse: PublicationSnapshotReuse | None = None,
         matchup_cache: ComposedMatchupCache | None = None,
+        engine: Engine | None = None,
     ) -> None:
         self.slates = slates
         self.matchups = matchups
@@ -95,6 +100,7 @@ class SlateEdgesService:
         # Optional reuse (#422), shared with Target resolution.
         self.snapshot_reuse = snapshot_reuse
         self.matchup_cache = matchup_cache
+        self._engine = engine
         # The response cache is off, never an error, without a client, without
         # settings or with its flag off.
         self._redis = redis_client
@@ -109,8 +115,20 @@ class SlateEdgesService:
         Slate's ``previous_game_day``/``next_game_day`` rule (``slate_fallback.read_slate``)."""
 
         slate = read_slate(self.slates.get_slate, requested_date, fallback)
-        _slate, response = self._read(slate, may_compose=lambda: True)
+        # Each game's schedule facts are its own season's (crf04/statsplus#330 AC9).
+        for game in slate["games"]:
+            refuse_evidence_after_game(self.publication_reader, season_for_game_id(game["game_id"]))
+        # A selection's capture and every game's reads share one REPEATABLE
+        # READ snapshot, as a selected Matchup's do, so a prune that commits
+        # in between cannot empty a later game's projection reads.  None of
+        # them writes.
+        engine = None if selected_season(self.publication_reader) is None else self._engine
+        with request_read_scope(engine, repeatable_read=True) as read_scope:
+            matchups = self._request_matchups(read_scope=None if engine is None else read_scope)
+            _slate, response = self._read(slate, matchups, may_compose=lambda: True)
+        context = season_context(self.publication_reader, getattr(matchups, "snapshot", None), lambda: None)
         return {
+            **({} if context is None else {"season_context": context}),
             **response,
             "games": [
                 {name: value for name, value in game.items() if name not in _PREVIEW_KEYS}
@@ -144,15 +162,14 @@ class SlateEdgesService:
         slate = read_slate(get_slate, requested_date, fallback)
         if game_id is not None and all(game["game_id"] != game_id for game in slate["games"]):
             raise ResourceNotFoundError("The requested game was not found.")
-        return self._read(slate, may_compose=may_compose)
+        return self._read(slate, self._request_matchups(), may_compose=may_compose)
 
     def _read(
-        self, slate: dict[str, Any], *, may_compose: Callable[[], bool]
+        self, slate: dict[str, Any], matchups: MatchupReader, *, may_compose: Callable[[], bool]
     ) -> tuple[dict[str, Any], dict[str, Any]] | None:
         slate_games = list(slate["games"])
         if not slate_games:
             return slate, self._response(slate["slate_date"], [], [], [])
-        matchups = self._request_matchups()
         key = self._cache_key(slate, matchups)
         cached = None if key is None else self._cache_read(key)
         if cached is not None:
@@ -272,6 +289,8 @@ class SlateEdgesService:
             "schema": SLATE_EDGES_CACHE_SCHEMA,
             "slate_date": slate["slate_date"],
             "season": matchups.season,
+            # A selection lists trailing samples an omitted read leaves out.
+            "selected_season": selected_season(self.publication_reader),
             # Both: a capture can mix live pointers with retained history rows.
             "generation": [list(entry) for entry in generation],
             "retained_history": [list(entry) for entry in getattr(snapshot, "retained_history", ())],
@@ -321,7 +340,7 @@ class SlateEdgesService:
         except Exception:
             pass
 
-    def _request_matchups(self) -> MatchupReader:
+    def _request_matchups(self, *, read_scope: tuple[Any, Any] | None = None) -> MatchupReader:
         return request_matchups(
             composer=self.matchups,
             publication_reader=self.publication_reader,
@@ -332,6 +351,7 @@ class SlateEdgesService:
             # The edges response is cached for a TTL of its own: composing
             # from a cached Matchup would stack the two (#422).
             cache_reads=False,
+            read_scope=read_scope,
         )
 
     # -- selection -----------------------------------------------------------

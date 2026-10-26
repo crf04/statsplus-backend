@@ -41,6 +41,8 @@ from app.services.research_season import (
     event_season,
     focal_game_rows,
     published_capture,
+    refuse_evidence_after_game,
+    season_context,
 )
 from app.services.statistic_catalog import StatisticCatalog
 
@@ -117,7 +119,13 @@ class MatchupSelectionService:
         )
 
     def get_selection(self, *, game_id: str, player_id: int) -> dict[str, Any]:
-        with request_read_scope(self._engine) as (connection, session):
+        """One player's selection tables, every read from one database snapshot on PostgreSQL.
+
+        As for the Matchup, the compose never writes on that connection.
+        """
+
+        refuse_evidence_after_game(self.publication_reader, event_season(self.settings, game_id, None))
+        with request_read_scope(self._engine, repeatable_read=True) as (connection, session):
             return self._compose_selection(
                 game_id=game_id,
                 player_id=player_id,
@@ -239,7 +247,9 @@ class MatchupSelectionService:
         )
         peer_rates = {peer_id: summary.season_rate for peer_id, summary in summaries.items()}
         archetype_rated = self._rate_rows(archetype_records, markets, peer_rates)
+        context = season_context(self.publication_reader, publication_snapshot, lambda: season)
         return {
+            **({} if context is None else {"season_context": context}),
             "player_id": player_id,
             "experience": self._experience(historical, focal_record, markets),
             "freshness": {

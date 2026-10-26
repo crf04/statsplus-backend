@@ -13,6 +13,8 @@ from __future__ import annotations
 from datetime import timedelta
 from types import SimpleNamespace
 
+from sqlalchemy import text
+
 from app.config.settings import (
     AuthenticationSettings,
     CacheSettings,
@@ -20,19 +22,29 @@ from app.config.settings import (
     NBASeasonSettings,
     RuntimeSettings,
 )
-from app.services.database_first_activation import DatabaseFirstPublicationReader
+from app.services.diet_baselines import DietBaselinesService
 from app.services.game_logs_source import StoredGameLogsSource
 from app.services.game_service import GameService
+from app.services.matchup_injuries import unavailable_injury_result
+from app.services.matchup_reuse import ComposedMatchupCache, PublicationSnapshotReuse
+from app.services.matchup_selection import MatchupSelectionService
+from app.services.matchup_snapshot import capture_matchup_snapshot
 from app.services.player_game_log_repository import PlayerGameLogRepository
+from app.services.player_service import PlayerProfileReader, PlayerService
+from app.services.slate_edges import SlateEdgesService
 from app.services.slate_service import SlateService
 from app.services.statistic_catalog import StatisticCatalog
 from tests.services.test_serving_season_matchup import (
     ATL,
+    BOS,
     GAME_ID,
     PLAYER_ID,
+    TRICODES,
     World,
+    _Catalog,
     _game_event,
     _log_payload,
+    _Pool,
 )
 from tests.support.season_cutover import (
     L15_STREAM,
@@ -41,6 +53,7 @@ from tests.support.season_cutover import (
     NEW_GAMES,
     NEW_PROVENANCE,
     NOW,
+    OLD,
     PLAYER_LOGS,
     SEASON_STREAM,
     THIN_CUTOFF,
@@ -50,9 +63,13 @@ from tests.support.season_cutover import (
     open_opening_week,
     payload_for,
 )
+from tests.test_game_log_preview import FakeRedis
 from tests.test_published_season_reads import ScheduleCatalog
 
 PLAYER_NAME = "Player 0"
+#: A 2025-26 ATL @ BOS game, final: a 2026-27 selection for it is refused.
+OLD_GAME_ID = "0022500900"
+OLD_SLATE_DATE = "2026-03-10"
 
 
 def settings() -> RuntimeSettings:
@@ -82,12 +99,40 @@ class Catalog:
         ]
 
 
+def _old_game_event():
+    event = {
+        **_game_event(),
+        "nba_game_id": OLD_GAME_ID,
+        "season": OLD,
+        "scheduled_at": "2026-03-11T00:00:00+00:00",
+        "status_text": "Final",
+        "status_code": 3,
+    }
+    for side, team_id in (("away", ATL), ("home", BOS)):
+        event[f"{side}_team"] = {
+            "id": team_id,
+            "name": f"{TRICODES[team_id]} team",
+            "tricode": TRICODES[team_id],
+        }
+    return event
+
+
+class _NoPeers:
+    def list_peer_ids(self, player_id, *, connection=None):
+        return ()
+
+
+class _StoredInjuries:
+    """A stored-only injury reader holding no report."""
+
+    def get_injuries(self, *, event, season, pool_players):
+        return unavailable_injury_result("disabled")
+
+
 class SelectedWorld(World):
     def __init__(self, tmp_path, *, engine=None):
         super().__init__(tmp_path, engine=engine)
-        self.reader = DatabaseFirstPublicationReader(
-            self.engine, clock=lambda: NOW, season_candidates=self.publications
-        )
+        self.reader = self.service.publication_reader
         self.logs = PlayerGameLogRepository(
             self.engine,
             statistic_catalog=StatisticCatalog.load_default(),
@@ -106,8 +151,52 @@ class SelectedWorld(World):
             game_log_seasons=self.logs,
         )
         self.slates = SlateService(
-            ScheduleCatalog({NEW: [_game_event()]}), settings=settings(), clock=lambda: NOW
+            ScheduleCatalog({NEW: [_game_event()], OLD: [_old_game_event()]}),
+            settings=settings(),
+            clock=lambda: NOW,
+            publication_reader=self.reader,
+            matchup_snapshot=lambda reader: capture_matchup_snapshot(settings(), reader),
         )
+        self.selections = MatchupSelectionService(
+            event_catalog=self.service.event_catalog,
+            player_pool=_Pool(),
+            player_logs=self.logs,
+            archetypes=_NoPeers(),
+            statistic_catalog=StatisticCatalog.load_default(),
+            settings=settings(),
+            publication_reader=self.reader,
+            engine=self.engine,
+        )
+        self.redis = FakeRedis()
+        self.edges = SlateEdgesService(
+            slates=self.slates,
+            matchups=self.service,
+            publication_reader=self.reader,
+            injuries=_StoredInjuries(),
+            settings=settings(),
+            redis_client=self.redis,
+            snapshot_reuse=PublicationSnapshotReuse(),
+            matchup_cache=ComposedMatchupCache(self.redis),
+            engine=self.engine,
+        )
+        self.profiles = PlayerService(
+            self.engine,
+            profile_reader=PlayerProfileReader(_Catalog(), self.service.player_diets),
+            settings=settings(),
+            publication_reader=self.reader,
+        )
+        self.baselines = DietBaselinesService(
+            player_diets=self.service.player_diets, settings=settings(), publication_reader=self.reader
+        )
+
+    def live(self, stream_key):
+        """The publication the live pointer of ``stream_key`` names."""
+
+        with self.engine.connect() as connection:
+            return connection.scalar(
+                text("SELECT active_publication_id FROM publication_pointers WHERE stream_key = :k"),
+                {"k": stream_key},
+            )
 
     def hold_opening_week(self):
         """Hold 2026-27 candidates from the opening week: one game a team."""
@@ -160,4 +249,13 @@ class SelectedWorld(World):
         )
 
 
-__all__ = ["GAME_ID", "NEW", "PLAYER_ID", "PLAYER_NAME", "SelectedWorld", "settings"]
+__all__ = [
+    "GAME_ID",
+    "NEW",
+    "OLD_GAME_ID",
+    "OLD_SLATE_DATE",
+    "PLAYER_ID",
+    "PLAYER_NAME",
+    "SelectedWorld",
+    "settings",
+]

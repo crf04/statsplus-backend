@@ -219,8 +219,11 @@ class World:
             publication_reader=self.reader,
         )
 
-    def compose(self, stream, season, payload):
+    def compose(self, stream, season, payload, *, hold=False):
         """Activate one Publication through the pointer-advancing write path.
+
+        ``hold`` leaves a season other than the published one held as a
+        candidate, as composition does until the operator's cutover.
 
         A Diet stream's public compose also demands the collection manifest
         and observations that authorized it; those are not what these tests
@@ -242,7 +245,8 @@ class World:
                 now=NOW,
                 derive_expected_fence_from_lock=True,
             )
-            cut_over_if_held(self.publications, version, session=session)
+            if not hold:
+                cut_over_if_held(self.publications, version, session=session)
 
     def publish_season(self, season, *, okc_games, corner_three):
         """Activate one season's five Backtest streams."""
@@ -448,6 +452,33 @@ def test_the_default_follows_the_diets_serving_season(world):
     assert (*_season(switched), switched["published_season"]) == (NEW, "default", NEW)
     assert switched["games_considered"] == {"played": 1, "kept": 1}
     assert _fitting(switched) == []
+
+
+def test_held_2026_27_candidates_never_serve_a_backtest_before_its_cutover(world):
+    """statsplus#330 AC4: a Backtest reads exactly the season chosen, never a held candidate.
+
+    Every Backtest stream holds a 2026-27 candidate, its Diets included, yet
+    2025-26 is still the Published Season: 2026-27 stays unavailable rather
+    than mixing 2026-27 logs with 2025-26 Diets or serving the candidates.
+    """
+
+    target = world.saved_target()
+    world.compose("player_game_logs", NEW, {"rows": _season_logs(NEW, okc_games=1)}, hold=True)
+    for base, (stream, *_rest) in DIET_STREAMS.items():
+        world.compose(stream, NEW, _diet_rows(base, NEW, 0.1), hold=True)
+    service = world.backtests()
+
+    with pytest.raises(SeasonUnavailableError, match="2026-27.*player_game_logs") as refused:
+        service.backtest(OWNER, target["id"], season=NEW)
+    default, _ = service.backtest(OWNER, target["id"])
+
+    assert refused.value.public_details == {
+        "season": NEW,
+        "published_season": LAST,
+        "stream": "player_game_logs",
+    }
+    assert (*_season(default), default["published_season"]) == (LAST, "default", LAST)
+    assert default["games_considered"] == {"played": 2, "kept": 2}
 
 
 def test_last_season_reads_its_own_retained_generation_after_the_new_one_activates(

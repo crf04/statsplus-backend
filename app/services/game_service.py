@@ -33,6 +33,7 @@ from app.services.publication_snapshot_calls import (
 from app.services.request_reads import request_read_scope
 from app.services.research_season import research_season, season_context
 from app.services.response_provenance import provenance_block
+from app.services.serving_season import snapshot_trailing
 from app.services.team_matchup_query import TEAM_MATCHUP_PUBLICATION_STREAM_KEYS
 from app.utils.cache_config import get_redis_client
 from app.utils.tables import normalize_table_name
@@ -725,7 +726,11 @@ class GameService:
             provenance=provenance_block(publication_snapshot),
             season_context=season_context(self.publication_reader, publication_snapshot, self.default_season),
         )
-        return result.model_dump(exclude=None if result.season_context else {"season_context"})
+        if result.season_context is None:
+            return result.model_dump(exclude={"season_context"})
+        # An explicit selection also names the families its Diets and
+        # rankings read from their previous season, with that season's sample.
+        return {**result.model_dump(), "trailing": snapshot_trailing(publication_snapshot)}
 
     def _posted_line_for(self, player_id, player_name, query, full_game_logs):
         """The line day's ``posted_line`` object, else ``None`` (#238)."""

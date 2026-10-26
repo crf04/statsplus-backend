@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
@@ -86,10 +87,12 @@ from app.services.research_season import (
     event_season,
     focal_game_read,
     published_capture,
+    refuse_evidence_after_game,
     research_season,
+    season_context,
 )
 from app.services.response_provenance import provenance_block
-from app.services.serving_season import trailing
+from app.services.serving_season import snapshot_trailing
 from app.services.slate_service import SlateService
 from app.services.statistic_catalog import StatisticCatalog
 from app.services.stats_freshness_repository import StatsFreshness
@@ -561,7 +564,7 @@ def build_publication_metadata(
                 also=[read.to_dict() for read in retained_reads],
             ),
         },
-        "trailing": trailing((getattr(publication_snapshot, "reads", None) or {}).values()),
+        "trailing": snapshot_trailing(publication_snapshot),
         "coverage": {
             "mixed_cutoff": bool(metadata["mixed_cutoff"]),
             "mixed_freshness": bool(metadata["mixed_freshness"]),
@@ -574,6 +577,13 @@ def build_publication_metadata(
 #: The Serving Season keys a Base window state carries in
 #: ``league.surface_availability``; freshness surfaces keep their own shape.
 _SERVING_SEASON_STATE_KEYS = frozenset({"season", "window_games"})
+
+
+def _as_of_season(season: str, publication_snapshot: Any) -> str:
+    """``as_of.season``: the Published Season, which a capture of a selected season names."""
+
+    published = getattr(publication_snapshot, "published_season", None)
+    return published if isinstance(published, str) else season
 
 
 class MatchupService:
@@ -636,7 +646,16 @@ class MatchupService:
         )
 
     def get_matchup(self, *, game_id: str) -> dict[str, Any]:
-        with request_read_scope(self._engine) as (connection, session):
+        """One game's Matchup, every read from one database snapshot on PostgreSQL.
+
+        The compose never writes on that connection, so a composition or prune
+        that commits after the capture cannot empty a later projection read.
+        A service scoped to an explicit selection (``season_scoped``) adds
+        ``season_context``.
+        """
+
+        refuse_evidence_after_game(self.publication_reader, event_season(self.settings, game_id, None))
+        with request_read_scope(self._engine, repeatable_read=True) as (connection, session):
             return self._compose_matchup(game_id=game_id, connection=connection, session=session)
 
     def observed_now(self) -> datetime:
@@ -670,6 +689,7 @@ class MatchupService:
         injuries: MatchupInjuryReader | None,
         compose_cache: MatchupComposeCache | None = None,
         season: str | None = None,
+        read_scope: tuple[Connection, Session] | None = None,
     ) -> dict[str, Any]:
         """Compose one Matchup over a generation the caller already holds.
 
@@ -684,9 +704,12 @@ class MatchupService:
         reads are not repeated per game; omitting it keeps today's per-call
         behavior. ``season`` is the evidence season the caller captured the
         snapshot for, so the two cannot disagree; omitted, it is resolved here.
+        ``read_scope`` is the caller's ``(connection, session)``, the one its
+        snapshot was captured on; omitted, the compose opens its own.
         """
 
-        with request_read_scope(self._engine) as (connection, session):
+        scope = nullcontext(read_scope) if read_scope is not None else request_read_scope(self._engine)
+        with scope as (connection, session):
             return self._compose_matchup(
                 game_id=game_id,
                 connection=connection,
@@ -715,9 +738,11 @@ class MatchupService:
         the game Matchup uses. Exactly one of ``player_id``, ``player_name``,
         or ``team`` names who is scored; the route enforces that.
         ``player_team`` narrows a ``player_name`` to one team's namesake.
+        Every read comes from one database snapshot, as a game Matchup's does,
+        and a service scoped to an explicit selection adds ``season_context``.
         """
 
-        with request_read_scope(self._engine) as (connection, session):
+        with request_read_scope(self._engine, repeatable_read=True) as (connection, session):
             return self._compose_unscheduled(
                 opponent=opponent,
                 player_id=player_id,
@@ -886,9 +911,13 @@ class MatchupService:
             {},
         )
         diet_freshness = self._diet_freshness(diets)
+        context = season_context(self.publication_reader, publication_snapshot, lambda: season)
         return {
+            **({} if context is None else {"season_context": context}),
             "experience": experience,
-            "as_of": self._as_of(season, windows, sections, diet_freshness),
+            "as_of": self._as_of(
+                _as_of_season(season, publication_snapshot), windows, sections, diet_freshness
+            ),
             "league": self._league(windows, metric_indexes, availability),
             "teams": [
                 self._team(
@@ -1118,10 +1147,17 @@ class MatchupService:
             injury_block=injury_result.block,
         )
         diet_freshness = self._diet_freshness(diets)
+        context = season_context(self.publication_reader, publication_snapshot, lambda: season)
         return {
+            **({} if context is None else {"season_context": context}),
             "game": game,
             "experience": experience,
-            "as_of": self._as_of(season, windows, experience["sections"], diet_freshness),
+            "as_of": self._as_of(
+                _as_of_season(season, publication_snapshot),
+                windows,
+                experience["sections"],
+                diet_freshness,
+            ),
             "league": league,
             "teams": teams,
             "players": self._players(

@@ -461,6 +461,13 @@ def _authenticate_optionally() -> None:
         _refuse_waitlisted(synced, tolerate_lookup_errors=True)
 
 
+def signed_in_user() -> dict[str, Any] | None:
+    """The caller of an anonymous route when a valid bearer token names one, else ``None``."""
+
+    _authenticate_optionally()
+    return get_current_user()
+
+
 def require_auth_optional(f: Callable[..., Any]) -> Callable[..., Any]:
     """Optionally authenticate a request when a bearer token is provided."""
 

@@ -246,7 +246,9 @@ class World:
             freshness_rule="cutoff_current",
         )
         self.diet = self._compose_diet()
-        reader = DatabaseFirstPublicationReader(self.engine, clock=lambda: NOW)
+        reader = DatabaseFirstPublicationReader(
+            self.engine, clock=lambda: NOW, season_candidates=self.publications
+        )
         self.service = MatchupService(
             event_catalog=_Schedule(),
             player_pool=_Pool(),

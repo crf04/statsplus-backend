@@ -1,9 +1,10 @@
 """League shares from the same stored Diet generation the Matchup reads."""
 
 from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
-from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS
+from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS, PLAYER_DIET_PUBLICATION_STREAMS
 from app.services.publication_snapshot_calls import call_with_read_scope
-from app.services.research_season import published_capture
+from app.services.research_season import published_capture, season_context
+from app.services.serving_season import readiness_rule, snapshot_trailing
 
 
 class DietBaselinesService:
@@ -42,8 +43,27 @@ class DietBaselinesService:
                 value = baseline.league_average_share if baseline else None
                 shares[base][slice_key] = round(value, 6) if value is not None else None
         observed = [item.retrieved_at for item in result.observations] if result else []
+        context = season_context(self.publication_reader, snapshot, lambda: season)
+        if context is None:
+            return {
+                "season": season,
+                "captured_at": max(observed).isoformat() if observed else None,
+                "shares": shares,
+            }
+        # A selection names the season each base actually serves, and which trail.
+        bases = {}
+        for base, stream_key in sorted(PLAYER_DIET_PUBLICATION_STREAMS.items()):
+            read = snapshot.read(stream_key)
+            bases[base] = {
+                "family": readiness_rule(stream_key).family,
+                "season": read.season if read.available else None,
+            }
+        served = [entry["season"] for entry in bases.values() if entry["season"] is not None]
         return {
-            "season": season,
+            "season_context": context,
+            "season": max(served, default=season),
             "captured_at": max(observed).isoformat() if observed else None,
             "shares": shares,
+            "bases": bases,
+            "trailing": snapshot_trailing(snapshot),
         }

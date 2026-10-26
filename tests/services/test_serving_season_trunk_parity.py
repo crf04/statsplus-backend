@@ -52,14 +52,15 @@ def _slate_service(matchups) -> SlateService:
     )
     # Assigned rather than passed, so trunk, which the golden is captured
     # from and has no such parameter, runs this module unchanged.
-    slate.trailing_families = lambda: _published_trailing(matchups)
+    slate.publication_reader = matchups.publication_reader
+    slate.matchup_snapshot = lambda reader: _matchup_snapshot(matchups, reader)
     return slate
 
 
-def _published_trailing(matchups):
-    from app.services.matchup_snapshot import published_trailing
+def _matchup_snapshot(matchups, reader):
+    from app.services.matchup_snapshot import capture_matchup_snapshot
 
-    return published_trailing(matchups.settings, matchups.publication_reader)
+    return capture_matchup_snapshot(matchups.settings, reader)
 
 
 def _responses(tmp_path: Path) -> dict:
