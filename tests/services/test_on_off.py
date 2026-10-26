@@ -54,11 +54,26 @@ class FakeProvider:
     def __init__(self):
         self.calls = []
         self.fail = False
+        self.call_seconds = 0.0
+        self.waited = []
 
-    def get_wowy(self, *, team_id, season, on_player_ids=(), off_player_ids=(), season_type="Regular Season"):
+    def get_wowy(
+        self,
+        *,
+        team_id,
+        season,
+        on_player_ids=(),
+        off_player_ids=(),
+        season_type="Regular Season",
+        deadline_seconds=None,
+    ):
         self.calls.append((team_id, season, tuple(on_player_ids), tuple(off_player_ids)))
         if self.fail:
             raise ProviderUnavailableError("PBP Stats could not be reached.")
+        if deadline_seconds is not None and self.call_seconds > deadline_seconds:
+            self.waited.append(deadline_seconds)
+            raise ProviderUnavailableError("PBP Stats did not finish in time.")
+        self.waited.append(self.call_seconds)
         return PBPTotalsAdapter.parse_wowy(json.loads(FIXTURE.read_text()))
 
 
@@ -235,6 +250,28 @@ def test_failed_fetch_without_a_cached_copy_is_unavailable(api, provider):
         "stale": False,
         "players": [],
     }
+
+
+def test_a_hung_upstream_serves_the_cached_copy_before_the_mcp_gives_up(api, provider, clock):
+    fresh = api(QUERY).get_json()
+    clock.now = NOW + timedelta(hours=25)
+    provider.call_seconds = 60.0
+
+    body = api(QUERY).get_json()
+
+    assert body["stale"] is True
+    assert body["players"] == fresh["players"]
+    assert provider.waited[-1] < 20
+
+
+def test_a_hung_upstream_without_a_cached_copy_is_unavailable_before_the_mcp_gives_up(api, provider):
+    provider.call_seconds = 60.0
+
+    body = api(QUERY).get_json()
+
+    assert body["status"] == "unavailable"
+    assert body["players"] == []
+    assert provider.waited == [pytest.approx(15.0, abs=0.5)]
 
 
 def test_expired_entry_is_refetched_and_rewritten(api, provider, clock, redis):
@@ -441,7 +478,7 @@ def test_busy_slot_on_the_request_path_serves_the_stale_copy(provider, redis, cl
 
 
 def test_busy_in_process_slot_on_the_request_path_returns_at_once(provider, clock):
-    ticks = iter([100.0, 100.5])
+    now = [100.0]
     sleeps = []
     service = OnOffService(
         provider,
@@ -449,10 +486,11 @@ def test_busy_in_process_slot_on_the_request_path_returns_at_once(provider, cloc
         redis_client=None,
         clock=clock,
         sleep=sleeps.append,
-        monotonic=lambda: next(ticks),
+        monotonic=lambda: now[0],
     )
 
     service.get("DEN", "2025-26", off=[1])
+    now[0] = 100.5
     started = time.perf_counter()
     body = service.get("DEN", "2025-26", off=[2])
 
@@ -641,6 +679,16 @@ def test_get_cached_without_a_cache_is_unavailable(provider):
 
     assert service.get_cached("DEN", "2025-26", off=[203999])["status"] == "unavailable"
     assert provider.calls == []
+
+
+def test_the_scheduled_warm_waits_out_a_slow_upstream(service, provider):
+    provider.call_seconds = 60.0
+
+    result = service.warm(injury_warm_requests(ENTRIES, "2025-26"))
+
+    assert result["fetched"] == 4
+    assert result["failed"] == 0
+    assert provider.waited == [60.0] * 4
 
 
 def test_warm_is_idempotent_within_the_ttl(service, provider, clock):
