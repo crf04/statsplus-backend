@@ -103,6 +103,7 @@ def test_every_nba_request_carries_the_proxy(wire):
     )
     _swallow(provider.fetch_player_shooting_zone, season="2026-27", season_type="Regular Season")
     _swallow(provider.fetch_player_season_totals, season="2026-27", season_type="Regular Season")
+    _swallow(provider.fetch_team_season_totals, season="2026-27", season_type="Regular Season")
     _swallow(
         provider.fetch_opponent_shot_chart,
         "Overall",
@@ -122,7 +123,7 @@ def test_every_nba_request_carries_the_proxy(wire):
         date_to=None,
         measure_type="Opponent",
     )
-    assert len(wire) >= 9
+    assert len(wire) >= 10
     assert all("nba.com" in url for url, _ in wire)
     assert all(proxies == {"http": PROXY, "https": PROXY} for _, proxies in wire)
 

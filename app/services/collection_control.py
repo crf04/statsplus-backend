@@ -140,6 +140,7 @@ MAX_PAYLOAD_DEPTH = 64
 MAX_RECORDS_PER_OBSERVATION = 100_000
 COLLECTOR_LEASE_SECONDS = 30
 COLLECTOR_LEASE_RETRY_SECONDS = 1
+COMPOSITION_BUSY_RETRY_SECONDS = 30
 STALE_ALERT_SECONDS = 60 * 60
 ATTENTION_ALERT_SECONDS = 6 * 60 * 60
 MAX_EVENT_CATALOG_GAMES = 3_000
@@ -685,6 +686,7 @@ def _collector_scope_descriptors(
             }
             for category in PLAY_TYPES
         )
+    date_to = slate_date_for_instant(_aware(cutoff)).strftime("%m/%d/%Y")
     if shots:
         descriptors.extend(
             {
@@ -693,11 +695,12 @@ def _collector_scope_descriptors(
                     "window": "season",
                     "subject": "player",
                     "general_range": category,
+                    "date_from": None,
+                    "date_to": date_to,
                 },
             }
             for category in SHOOTING_TYPES
         )
-    date_to = slate_date_for_instant(_aware(cutoff)).strftime("%m/%d/%Y")
     if zones:
         # The player zone surface takes three provider reads, so binding the
         # manifest's own date bound is what proves they describe one window.
@@ -1255,6 +1258,53 @@ def _is_player_season_scope(scope: Mapping[str, Any]) -> bool:
     )
 
 
+def _assert_player_shot_types_cover_governed_games(
+    scope: Mapping[str, Any],
+    document: Mapping[str, Any],
+    *,
+    cutoff: datetime,
+    expected_game_ids_by_team: Mapping[int, frozenset[str]] | None,
+) -> frozenset[int]:
+    """Refuse player tracking that does not yet cover every governed game.
+
+    NBA player tracking can trail the box score by game-days while still
+    answering, and its only tell is a smaller games played.  The observation
+    proves its window twice over: every team's box-score games equal the
+    games the cutoff governs, and every player's tracking games equal his
+    box-score games over the same date bound.
+
+    Returns the players with box-score field-goal attempts.  A player tracking
+    has not reached has no record here at all, so the caller requires each of
+    them in at least one category.  A player with no attempts has no shot
+    type and is legitimately absent from every category.
+    """
+
+    if not expected_game_ids_by_team:
+        raise ValueError("publication governance is incomplete")
+    endpoint_window = scope.get("endpoint_window")
+    team_games = document.get("team_games_played")
+    box_attempts = document.get("box_field_goal_attempts")
+    if (
+        not isinstance(endpoint_window, Mapping)
+        or endpoint_window.get("date_to") != slate_date_for_instant(cutoff).strftime("%m/%d/%Y")
+        or not isinstance(team_games, Mapping)
+        or not isinstance(box_attempts, Mapping)
+    ):
+        raise _ProviderWindowUnavailable("provider_window_unverified")
+    if any(
+        team_games.get(str(team_id)) != len(game_ids)
+        for team_id, game_ids in expected_game_ids_by_team.items()
+    ) or any(
+        not isinstance(record, Mapping) or record.get("box_games_played") != record.get("games_played")
+        for record in document.get("records") or ()
+    ):
+        raise _ProviderWindowUnavailable("provider_window_lagging")
+    try:
+        return frozenset(int(player_id) for player_id, attempts in box_attempts.items() if attempts > 0)
+    except (TypeError, ValueError) as error:
+        raise ValueError("publication observation value invalid") from error
+
+
 def _compose_player_diet_observation_payload(
     session: Session,
     *,
@@ -1264,6 +1314,7 @@ def _compose_player_diet_observation_payload(
     cutoff: datetime,
     manifest_id: str,
     provenance_ids: set[str],
+    expected_game_ids_by_team: Mapping[int, frozenset[str]] | None = None,
 ) -> dict[str, Any]:
     """Derive the player shot-type Diet payload from immutable observations.
 
@@ -1341,6 +1392,7 @@ def _compose_player_diet_observation_payload(
     observed_categories: set[str] = set()
     facts: dict[tuple[int, str], dict[str, Any]] = {}
     sources: list[dict[str, str]] = []
+    shooters: set[int] = set()
     for observation in sorted(latest.values(), key=lambda row: row.observation_id):
         if (
             observation.manifest_id != manifest_id
@@ -1363,6 +1415,12 @@ def _compose_player_diet_observation_payload(
         records = document.get("records")
         if not isinstance(records, list):
             raise ValueError("publication observation rows missing")
+        shooters |= _assert_player_shot_types_cover_governed_games(
+            _safe_json_mapping(observation.scope),
+            document,
+            cutoff=cutoff,
+            expected_game_ids_by_team=expected_game_ids_by_team,
+        )
         sources.append(
             {
                 "observation_id": observation.observation_id,
@@ -1415,6 +1473,8 @@ def _compose_player_diet_observation_payload(
         raise ValueError("publication observation rows missing")
     if observed_categories != expected_slices:
         raise ValueError("publication observation categories incomplete")
+    if not shooters <= {player_id for player_id, _slice in facts}:
+        raise _ProviderWindowUnavailable("provider_window_lagging")
     return {
         "base": base,
         "rows": [facts[identity] for identity in sorted(facts)],
@@ -2214,6 +2274,14 @@ def _record_rollback_history(
     _record_pointer_activation(session, pointer, restored, now=now)
 
 
+def _refuse_empty_league_publication(stream: PublicationStream, payload: Any) -> None:
+    """A League Complete stream covers every governed team, so an empty row list is never valid."""
+
+    rows = payload.get("rows") if isinstance(payload, Mapping) else payload
+    if stream.completeness_rule == "league_complete" and isinstance(rows, list) and not rows:
+        raise ControlPlaneError("empty_publication")
+
+
 def _lock_streams(session: Session, stream_keys: Iterable[str]) -> None:
     """Lock stream rows in sorted key order, before any pointer or version.
 
@@ -2349,6 +2417,19 @@ _REBOUND_TEAM_STREAM_WINDOWS = {
 COUPLED_PUBLICATION_STREAM_FAMILIES: tuple[tuple[str, ...], ...] = (
     ("traditional_opponent_season", "traditional_opponent_l15"),
 )
+
+
+def coupled_left_behind(moving: Iterable[str], left_behind: Mapping[str, str]) -> dict[str, str]:
+    """``left_behind`` plus every moving member of a coupled family one of whose members stays."""
+
+    moving = set(moving)
+    result = dict(left_behind)
+    for family in COUPLED_PUBLICATION_STREAM_FAMILIES:
+        members = [key for key in family if key in moving]
+        if any(key in result for key in members):
+            for key in members:
+                result.setdefault(key, "publication_family_coupled")
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -3524,6 +3605,36 @@ class CollectionControlService(_SessionService):
                     created_at=self.clock(),
                 )
                 session.add(row)
+            return row
+
+    def reconcile_fallback_evidence(
+        self, *, season: str, game_id: str, missing_families: tuple[str, ...]
+    ) -> ReconciliationItem | None:
+        """Keep one item per fallback game naming the evidence it still lacks; resolve it once none is missing."""
+
+        dedupe_key = _checksum(_json({"season": season, "kind": FALLBACK_EVIDENCE_KIND, "game_id": game_id}))[
+            :128
+        ]
+        with self.session() as session, session.begin():
+            row = session.scalar(
+                select(ReconciliationItem).where(ReconciliationItem.dedupe_key == dedupe_key)
+            )
+            if not missing_families:
+                if row is not None and row.status == "open":
+                    row.status, row.resolved_at = "resolved", self.clock()
+                return row
+            details = _json({"game_id": game_id, "missing_families": ",".join(missing_families)})
+            if row is None:
+                row = ReconciliationItem(
+                    item_id=_uuid(),
+                    season=season,
+                    kind=FALLBACK_EVIDENCE_KIND,
+                    reason="evidence_incomplete",
+                    dedupe_key=dedupe_key,
+                    created_at=self.clock(),
+                )
+                session.add(row)
+            row.details, row.status, row.resolved_at = details, "open", None
             return row
 
     def publish_catalog(
@@ -5540,9 +5651,43 @@ class PublicationService(_SessionService):
                 )
             ]
             for stream_key in matching:
-                self.enqueue(
-                    stream_key, season=season, cutoff=cutoff, manifest_id=manifest_id, session=session
+                if stream_key not in NBA_PUBLICATION_STREAM_KEYS | PLAYER_DIET_OBSERVATION_STREAM_KEYS:
+                    # Ledger streams carry per-game lineage and requeue
+                    # through reconcile_pending.
+                    self.enqueue(
+                        stream_key, season=season, cutoff=cutoff, manifest_id=manifest_id, session=session
+                    )
+                    continue
+                # These streams compose from every accepted observation at
+                # compose time, so a new one is new input.  The worker holds
+                # the job row from claim to completion; holding it here until
+                # this acceptance commits orders the two.  A composition that
+                # already holds it makes this upload retry later instead of
+                # waiting: a wait can outlast the collector's lease and lose
+                # the observation.
+                job_query = select(CompositionJob).where(
+                    CompositionJob.stream_key == stream_key,
+                    CompositionJob.season == season,
+                    CompositionJob.cutoff == _aware(cutoff),
                 )
+                job = session.scalar(job_query.with_for_update(skip_locked=True))
+                if job is None:
+                    if session.scalar(job_query) is not None:
+                        raise ControlPlaneError(
+                            "collector_busy", retry_after_seconds=COMPOSITION_BUSY_RETRY_SECONDS
+                        )
+                    self.enqueue(
+                        stream_key, season=season, cutoff=cutoff, manifest_id=manifest_id, session=session
+                    )
+                elif job.status == "failed":
+                    job.status = "queued"
+                    job.attempts = int(job.attempts or 0) + 1
+                    job.last_error = None
+                    job.updated_at = self.clock()
+                    job.generation = int(job.generation or 1) + 1
+                    job.claimed_generation = None
+                    if manifest_id is not None:
+                        job.manifest_id = manifest_id
         return len(matching)
 
     def retry(self, job_id: str, *, reason: str, session: Session | None = None) -> CompositionJob:
@@ -5980,6 +6125,19 @@ class PublicationService(_SessionService):
                 )
             except PublicationGovernanceUnavailable as error:
                 raise ControlPlaneError("publication_governance_unavailable") from error
+            if stream_key == "grouped_shot_types":
+                try:
+                    expected_game_ids_by_team = resolve_governed_team_game_ids(
+                        self.l15_expectation_resolver,
+                        season,
+                        _aware(cutoff),
+                        window="season",
+                        manifest_id=authority.manifest_id,
+                        event_catalog_publication_id=authority.event_catalog_publication_id,
+                        event_catalog_checksum=authority.event_catalog_checksum,
+                    )
+                except PublicationGovernanceUnavailable as error:
+                    raise ControlPlaneError("publication_governance_unavailable") from error
             try:
                 derived_payload = _compose_player_diet_observation_payload(
                     session,
@@ -5989,7 +6147,10 @@ class PublicationService(_SessionService):
                     cutoff=_aware(cutoff),
                     manifest_id=authority.manifest_id,
                     provenance_ids=provenance_ids,
+                    expected_game_ids_by_team=expected_game_ids_by_team,
                 )
+            except _ProviderWindowUnavailable as error:
+                raise ControlPlaneError(str(error)) from error
             except ValueError as error:
                 raise ControlPlaneError("publication_candidate_invalid") from error
             # A caller that supplied its own payload must have derived exactly
@@ -6095,6 +6256,7 @@ class PublicationService(_SessionService):
         )
         if stream is None or not stream.enabled:
             raise ControlPlaneError("stream_unavailable")
+        _refuse_empty_league_publication(stream, payload)
         pointer = session.scalar(
             select(PublicationPointer)
             .where(PublicationPointer.stream_key == stream_key)
@@ -6720,6 +6882,7 @@ class PublicationService(_SessionService):
             )
             if stream is None or stream.provider != "ledger":
                 raise ControlPlaneError("inactive_ledger_stream_required")
+            _refuse_empty_league_publication(stream, payload)
             self._assert_ledger_provenance(
                 session,
                 season=season,
@@ -7488,6 +7651,20 @@ class PublicationService(_SessionService):
         composition applies, bound to the candidate's own manifest.
         """
 
+        provenance = self._candidate_ledger_lineage(session, candidate)
+        self._assert_ledger_provenance(
+            session,
+            season=candidate.season,
+            cutoff=_aware(candidate.cutoff),
+            provenance=provenance,
+            manifest_id=candidate.manifest_id,
+        )
+        return provenance
+
+    @staticmethod
+    def _candidate_ledger_lineage(session: Session, candidate: PublicationVersion) -> dict[str, str]:
+        """A ledger candidate's recorded ``{observation_id: game_id}``."""
+
         lineage_rows = session.execute(
             select(
                 PublicationObservation.observation_id,
@@ -7515,13 +7692,6 @@ class PublicationService(_SessionService):
             if not game_id:
                 raise ControlPlaneError("ledger_provenance_not_accepted")
             provenance[str(observation_id)] = game_id
-        self._assert_ledger_provenance(
-            session,
-            season=candidate.season,
-            cutoff=_aware(candidate.cutoff),
-            provenance=provenance,
-            manifest_id=candidate.manifest_id,
-        )
         return provenance
 
     def _cutover_refusal(
@@ -7556,26 +7726,13 @@ class PublicationService(_SessionService):
         left_behind: dict[str, str] = {}
         for key in [PUBLISHED_SEASON_STREAM, *sorted(set(by_stream) - {PUBLISHED_SEASON_STREAM})]:
             stream, candidate = by_stream[key]
-            if not self._readiness_rule_holds(
-                key,
-                season=season,
-                cutoff=_aware(candidate.cutoff),
-                authority=candidate if candidate.manifest_id else None,
-            ):
-                left_behind[key] = NOT_READY_REASON
-                continue
-            try:
-                self._assert_cutover_candidate(
-                    session,
-                    stream,
-                    candidate,
-                    season=season,
-                    authority=authority,
-                )
-            except ControlPlaneError as error:
+            refusal = self.season_candidate_refusal(
+                session, stream, candidate, season=season, authority=authority
+            )
+            if refusal is not None:
                 if key == PUBLISHED_SEASON_STREAM:
-                    return error.reason, {}
-                left_behind[key] = error.reason
+                    return refusal, {}
+                left_behind[key] = refusal
                 continue
             if authority is None:
                 authority = (
@@ -7583,12 +7740,61 @@ class PublicationService(_SessionService):
                     candidate.event_catalog_publication_id,
                     candidate.event_catalog_checksum,
                 )
-        for family in COUPLED_PUBLICATION_STREAM_FAMILIES:
-            members = [key for key in family if key in by_stream]
-            if any(key in left_behind for key in members):
-                for key in members:
-                    left_behind.setdefault(key, "publication_family_coupled")
-        return None, left_behind
+        return None, coupled_left_behind(by_stream, left_behind)
+
+    def season_candidate_refusal(
+        self,
+        session: Session,
+        stream: PublicationStream,
+        candidate: PublicationVersion,
+        *,
+        season: str,
+        authority: tuple[str, str, str] | None = None,
+        ledger_lineage: bool = True,
+    ) -> str | None:
+        """Why a cutover to ``season`` would leave ``candidate`` behind, or ``None``.
+
+        Its family's Readiness Rule at the candidate's own cutoff and
+        authority, then every per-publication check of ``_assert_cutover_candidate``.
+        ``authority`` adds the cutover's cross-stream rule (the
+        ``player_game_logs`` candidate's manifest and Event Catalog); without
+        it the candidate is judged on its own, as an Unpublished Season read
+        judges it (crf04/statsplus#330).  Without ``ledger_lineage`` the
+        verdict leaves out ``season_candidate_lineage_refusal``, the one check
+        a later ledger correction can change, so it holds for the publication.
+        """
+
+        if not self._readiness_rule_holds(
+            stream.stream_key,
+            season=season,
+            cutoff=_aware(candidate.cutoff),
+            authority=candidate if candidate.manifest_id else None,
+        ):
+            return NOT_READY_REASON
+        try:
+            self._assert_cutover_candidate(
+                session, stream, candidate, season=season, authority=authority, ledger_lineage=ledger_lineage
+            )
+        except ControlPlaneError as error:
+            return error.reason
+        return None
+
+    def season_candidate_lineage_refusal(
+        self, session: Session, stream: PublicationStream, candidate: PublicationVersion
+    ) -> str | None:
+        """Why a ledger candidate's games are no longer the ledger's accepted evidence, or ``None``.
+
+        The ledger replaces a corrected game's source observation in place, so
+        this can refuse a candidate whose other checks passed.
+        """
+
+        if stream.provider != "ledger":
+            return None
+        try:
+            self._assert_candidate_ledger_lineage(session, candidate)
+        except ControlPlaneError as error:
+            return error.reason
+        return None
 
     def _assert_cutover_candidate(
         self,
@@ -7598,6 +7804,7 @@ class PublicationService(_SessionService):
         *,
         season: str,
         authority: tuple[str, str, str] | None,
+        ledger_lineage: bool = True,
     ) -> None:
         key = stream.stream_key
         if not publication_payload_matches_checksum(
@@ -7633,7 +7840,11 @@ class PublicationService(_SessionService):
             raise ControlPlaneError("publication_governance_unavailable") from error
         governed = {str(game_id) for game_ids in expected.values() for game_id in game_ids}
         if stream.provider == "ledger":
-            lineage = self._assert_candidate_ledger_lineage(session, candidate)
+            lineage = (
+                self._assert_candidate_ledger_lineage(session, candidate)
+                if ledger_lineage
+                else self._candidate_ledger_lineage(session, candidate)
+            )
             if set(lineage.values()) != governed:
                 raise ControlPlaneError("publication_game_set_mismatch")
         _validate_activation_candidate_payload(
@@ -9245,16 +9456,7 @@ class CollectionOperationsService(_SessionService):
                 {"alert_id": row.alert_id, "severity": row.severity, "code": row.code, "status": row.status}
                 for row in alerts
             ],
-            "reconciliation": [
-                {
-                    "item_id": row.item_id,
-                    "season": row.season,
-                    "kind": row.kind,
-                    "reason": row.reason,
-                    "status": row.status,
-                }
-                for row in items
-            ],
+            "reconciliation": [reconciliation_item_view(row) for row in items],
             "validation": [
                 {"summary_id": row.summary_id, "cycle_id": row.cycle_id, "status": row.status}
                 for row in validations
@@ -10242,6 +10444,24 @@ def _parse_datetime(value: Any) -> datetime:
     return parsed.astimezone(UTC)
 
 
+FALLBACK_EVIDENCE_KIND = "ledger_fallback_evidence"
+
+
+def reconciliation_item_view(row: ReconciliationItem) -> dict[str, Any]:
+    """An item as operators read it; only a fallback-evidence item's details, which name its game, are shown."""
+
+    view = {
+        "item_id": row.item_id,
+        "season": row.season,
+        "kind": row.kind,
+        "reason": row.reason,
+        "status": row.status,
+    }
+    if row.kind == FALLBACK_EVIDENCE_KIND:
+        view["details"] = json.loads(row.details)
+    return view
+
+
 def _valid_season(season: str) -> bool:
     if not isinstance(season, str) or len(season) != 7 or season[4] != "-":
         return False
@@ -10269,4 +10489,5 @@ __all__ = [
     "SurfaceDefinition",
     "composing_ledger_manifest",
     "decompress_gzip_limited",
+    "reconciliation_item_view",
 ]

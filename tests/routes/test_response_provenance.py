@@ -403,7 +403,8 @@ def test_game_logs_return_the_generation_their_logs_were_read_from(
     )
 
     response = client.get(
-        "/api/games/game_logs?player_name=LeBron%20James&season_filter=2025-26",
+        # The pinned default season: an explicit one would scope a copy of the inner reader.
+        "/api/games/game_logs?player_name=LeBron%20James",
         headers=authenticate(),
     )
 

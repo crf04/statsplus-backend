@@ -22,7 +22,21 @@ from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from sqlalchemy import case, delete, exists, func, insert, inspect, literal, or_, select, update
+from sqlalchemy import (
+    JSON,
+    case,
+    cast,
+    delete,
+    exists,
+    func,
+    insert,
+    inspect,
+    literal,
+    or_,
+    select,
+    type_coerce,
+    update,
+)
 from sqlalchemy.engine import Connection, Engine
 
 from app.domain.nba_events import REGULAR_SEASON_TYPE, is_final_event
@@ -33,6 +47,7 @@ from app.domain.rebound_types import (
     REBOUND_TYPE_FIELDS,
 )
 from app.domain.utc import assume_utc
+from app.errors import ProviderUnavailableError
 from app.models.canonical_game_ledger import (
     CanonicalGameLedgerGame,
     CanonicalGameLedgerPlayerFact,
@@ -741,6 +756,11 @@ class CanonicalGame:
     checksum: str | None = None
     raw_rows: tuple[LedgerGameRow, ...] = ()
     raw_checksum: str | None = None
+    # Each team's recorded period clock, in minutes per period, read from the
+    # source observation's PBPStats ``team_results`` envelopes.  Empty when the
+    # evidence records none (a LiveData box score or hand-built facts).  It is
+    # provider JSON, not a retained primitive, so ``game_checksum`` excludes it.
+    period_minutes_by_team: tuple[tuple[int, tuple[float, ...]], ...] = ()
 
     def with_checksum(self) -> CanonicalGame:
         return replace(
@@ -1543,6 +1563,40 @@ def _governed_orientation(
     return oriented
 
 
+def _recorded_period_minutes(
+    observation: Mapping[str, Any],
+    *,
+    home_team_id: int,
+    away_team_id: int,
+) -> tuple[tuple[int, tuple[float, ...]], ...]:
+    """Return each team's ``team_results`` period clock, or ``()``.
+
+    PBPStats keys one envelope per period (``"1"``, ``"2"``, ...) beside
+    ``FullGame``, each with the period's ``MM:SS`` clock.  Evidence without a
+    contiguous, well-formed clock for both sides records none, and the game is
+    then held to each period's nominal length.
+    """
+
+    observation = _governed_orientation(observation, home_team_id=home_team_id, away_team_id=away_team_id)
+    team_results = observation.get("team_results")
+    if not isinstance(team_results, Mapping):
+        return ()
+    clocks: list[tuple[int, tuple[float, ...]]] = []
+    for side, team_id in (("Home", home_team_id), ("Away", away_team_id)):
+        envelopes = team_results.get(side)
+        if not isinstance(envelopes, Mapping):
+            return ()
+        periods = sorted(int(key) for key in envelopes if isinstance(key, str) and key.isdigit())
+        if not periods or periods != list(range(1, len(periods) + 1)):
+            return ()
+        try:
+            clock = tuple(parse_pbp_minutes(envelopes[str(period)].get("Minutes")) for period in periods)
+        except (AttributeError, ProviderUnavailableError):
+            return ()
+        clocks.append((team_id, clock))
+    return tuple(sorted(clocks))
+
+
 def _validate_wire_game_identity(
     observation: Mapping[str, Any],
     *,
@@ -2134,6 +2188,11 @@ def canonical_game_from_pbp(
         ),
         raw_rows=raw_rows,
         raw_checksum=raw_checksum(raw_rows),
+        period_minutes_by_team=(
+            ()
+            if raw_observation is None
+            else _recorded_period_minutes(raw_observation, home_team_id=home_id, away_team_id=away_id)
+        ),
     ).with_checksum()
 
 
@@ -2793,8 +2852,14 @@ class CanonicalGameLedgerRepository:
         games: Iterable[CanonicalGame],
         *,
         accepted_observations: Mapping[str, Mapping[str, Any]] | None = None,
+        final_scores: Mapping[str, Mapping[int, int]] | None = None,
     ) -> tuple[LedgerWriteResult, ...]:
-        """Validate every game before one transaction replaces all candidates."""
+        """Validate every game before one transaction replaces all candidates.
+
+        ``final_scores`` holds each game's witnessed final score by team.  A
+        stored game whose player points miss it lost events, so a replacement
+        without the miss-type rebound split may displace it.
+        """
 
         candidates = tuple(validate_complete_game(game) for game in games)
         if not candidates:
@@ -2886,8 +2951,34 @@ class CanonicalGameLedgerRepository:
                         raise LedgerValidationError(
                             "accepted observation identity conflicts with stored evidence"
                         )
-                results.append(self._replace_candidate(connection, candidate, tables))
+                results.append(
+                    self._replace_candidate(
+                        connection,
+                        candidate,
+                        tables,
+                        final_score=(final_scores or {}).get(candidate.game_id),
+                    )
+                )
         return tuple(results)
+
+    @staticmethod
+    def _stored_points_miss(
+        connection: Connection,
+        game_id: str,
+        final_score: Mapping[int, int] | None,
+        tables: Mapping[str, Any],
+    ) -> bool:
+        if final_score is None:
+            return False
+        player = tables["player"]
+        stored = dict(
+            connection.execute(
+                select(player.c.team_id, func.sum(player.c.points))
+                .where(player.c.game_id == game_id)
+                .group_by(player.c.team_id)
+            ).all()
+        )
+        return {team_id: int(stored.get(team_id) or 0) for team_id in final_score} != dict(final_score)
 
     @staticmethod
     def _lock_manifest_authorization(
@@ -3073,6 +3164,8 @@ class CanonicalGameLedgerRepository:
         connection: Connection,
         candidate: CanonicalGame,
         tables: Mapping[str, Any],
+        *,
+        final_score: Mapping[int, int] | None = None,
     ) -> LedgerWriteResult:
         existing = (
             connection.execute(select(tables["game"]).where(tables["game"].c.game_id == candidate.game_id))
@@ -3096,6 +3189,7 @@ class CanonicalGameLedgerRepository:
                 .limit(1)
             ).first()
             is not None
+            and not self._stored_points_miss(connection, candidate.game_id, final_score, tables)
         ):
             raise ReboundTypeRegressionError(
                 "rebound_types_regression: the replacement carries no miss-type "
@@ -3195,6 +3289,7 @@ class CanonicalGameLedgerRepository:
         team_rows: dict[Any, list[Mapping[str, Any]]] = {}
         player_rows: dict[Any, list[Mapping[str, Any]]] = {}
         raw_rows: dict[Any, list[Mapping[str, Any]]] = {}
+        period_documents: dict[str, Mapping[str, Any]] = {}
         scope = self.engine.connect() if connection is None else nullcontext(connection)
         with scope as connection:
             for start in range(0, len(unique_ids), _GAME_READ_CHUNK_SIZE):
@@ -3234,12 +3329,34 @@ class CanonicalGameLedgerRepository:
                         .all()
                     ):
                         grouped.setdefault(row["game_id"], []).append(row)
+                # Only the period clock is read from each source document.
+                # The payload is a text column: PostgreSQL parses it as JSON,
+                # and SQLite's JSON functions read the text directly.
+                document = (
+                    cast(CollectionObservation.payload, JSON)
+                    if connection.dialect.name == "postgresql"
+                    else type_coerce(CollectionObservation.payload, JSON)
+                )
+                for row in connection.execute(
+                    select(
+                        CollectionObservation.observation_id,
+                        document["team_results"].label("team_results"),
+                        document["home_team_id"].label("home_team_id"),
+                        document["away_team_id"].label("away_team_id"),
+                    ).where(
+                        CollectionObservation.observation_id.in_(
+                            sorted({row["source_observation_id"] for row in found.values()})
+                        )
+                    )
+                ).mappings():
+                    period_documents[row["observation_id"]] = row
         games = {
             game_id: _game_from_rows(
                 game_row,
                 team_rows.get(game_id, ()),
                 player_rows.get(game_id, ()),
                 raw_rows.get(game_id, ()),
+                period_documents.get(game_row["source_observation_id"]),
             )
             for game_id, game_row in game_rows.items()
         }
@@ -3340,7 +3457,7 @@ class CanonicalGameLedgerRepository:
     ) -> frozenset[str]:
         """Return manifest games whose accepted observation used the fallback.
 
-        A ``nba_live_data`` or ``pbp+nba_live_data`` observation carries no
+        A ``nba_live_data`` or ``pbp+nba_live_data`` observation may lack
         assist-location evidence, so the game stays a repair target until a
         complete PBP observation replaces it.
         """
@@ -3806,6 +3923,7 @@ def _game_from_rows(
     team_rows: Sequence[Mapping[str, Any]],
     player_rows: Sequence[Mapping[str, Any]],
     raw_rows: Sequence[Mapping[str, Any]] = (),
+    period_document: Mapping[str, Any] | None = None,
 ) -> CanonicalGame:
     teams = tuple(
         TeamGameFact(**{key: row[key] for key in TeamGameFact.__dataclass_fields__}) for row in team_rows
@@ -3858,6 +3976,15 @@ def _game_from_rows(
         checksum=game_row["checksum"],
         raw_rows=archived,
         raw_checksum=game_row.get("raw_checksum"),
+        period_minutes_by_team=(
+            ()
+            if period_document is None
+            else _recorded_period_minutes(
+                period_document,
+                home_team_id=game_row["home_team_id"],
+                away_team_id=game_row["away_team_id"],
+            )
+        ),
     )
 
 

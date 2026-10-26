@@ -25,6 +25,7 @@ from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.errors import ProviderUnavailableError
 from app.migrations import run_migrations
 from app.providers.nba_injury_report import InjuryEntryEvidence, InjuryProviderSnapshot
+from app.services.database_first_activation import ReadSeason
 from app.services.game_log_frame import derive_game_log_frame
 from app.services.game_service import GameService
 from app.services.injury_listing import StoredInjuryListing
@@ -818,14 +819,15 @@ def test_without_games_equal_the_game_log_players_off_filter(client, authenticat
 
 
 class RetainedReader:
-    """A publication reader whose active season has moved on from ``PRIOR``."""
+    """A publication reader whose Published Season has moved on from ``PRIOR``."""
+
+    captures_published_season = True
 
     def snapshot(self, keys, season=None, **keywords):
+        if isinstance(season, ReadSeason) and season.requested is not None and season.requested < CURRENT:
+            return SimpleNamespace(name="retained")
         read = SimpleNamespace(season=CURRENT, unavailable_reason="publication_season_mismatch")
         return SimpleNamespace(read=lambda key: read, name="live")
-
-    def retained_snapshot(self, keys, season=None, **keywords):
-        return SimpleNamespace(name="retained")
 
 
 def test_last_seasons_logs_are_read_from_the_retained_publication(world):

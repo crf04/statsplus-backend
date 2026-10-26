@@ -361,6 +361,61 @@ def test_a_line_with_a_midpoint_beats_a_line_without_one():
     assert _variants(snapshot) == {"quoted": "standard", "no_bid": "alternate"}
 
 
+def test_an_empty_book_whose_midpoint_sits_at_half_does_not_beat_the_traded_line():
+    # Darius Garland's points ladder for LAC @ OKC on 2026-10-25, as posted.
+    markets = [
+        _variant("9.5", line=9.5, bid=0.27, ask=0.97),
+        _variant("14.5", line=14.5, bid=0.2, ask=0.8),  # midpoint 0.50, 60 cents wide
+        _variant("19.5", line=19.5, bid=0.53, ask=0.55),  # midpoint 0.54
+        _variant("24.5", line=24.5, bid=0.09, ask=0.31),
+        _variant("29.5", line=29.5, bid=0.02, ask=0.13),
+        _variant("34.5", line=34.5, bid=0.01, ask=0.95),
+    ]
+
+    snapshot, _ = _snapshot(_game_with(markets))
+
+    assert _variants(snapshot) == {
+        "9.5": "alternate",
+        "14.5": "alternate",
+        "19.5": "standard",
+        "24.5": "alternate",
+        "29.5": "alternate",
+        "34.5": "alternate",
+    }
+
+
+def test_a_ladder_of_only_wide_books_has_no_standard_line():
+    # Brook Lopez's points ladder for LAC @ OKC on 2026-10-25, as posted.
+    markets = [
+        _variant("4.5", line=4.5, bid=0.01, ask=0.97),  # midpoint 0.49
+        _variant("9.5", line=9.5, bid=0.01, ask=0.49),
+        _variant("14.5", line=14.5, bid=0.01, ask=0.21),
+    ]
+
+    snapshot, _ = _snapshot(_game_with(markets))
+
+    assert _variants(snapshot) == {"4.5": "alternate", "9.5": "alternate", "14.5": "alternate"}
+
+
+def test_a_lone_wide_book_is_not_standard():
+    markets = [_variant("only", line=14.5, bid=0.2, ask=0.8)]
+
+    snapshot, _ = _snapshot(_game_with(markets))
+
+    assert _variants(snapshot) == {"only": "alternate"}
+
+
+def test_a_book_ten_cents_wide_still_quotes_a_midpoint():
+    markets = [
+        _variant("ten", line=17.5, bid=0.45, ask=0.55),  # midpoint 0.50, spread 0.10
+        _variant("tight", line=18.5, bid=0.38, ask=0.40),  # midpoint 0.39
+    ]
+
+    snapshot, _ = _snapshot(_game_with(markets))
+
+    assert _variants(snapshot) == {"ten": "standard", "tight": "alternate"}
+
+
 def test_with_no_midpoint_one_line_is_standard_and_several_are_all_alternate():
     single = [_variant("only", line=17.5, bid=None, ask=0.5)]
     several = [

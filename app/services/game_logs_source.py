@@ -8,6 +8,7 @@ from typing import Any, Protocol
 import pandas as pd
 
 from app.services.game_log_frame import GAME_LOG_FRAME_COLUMNS, derive_game_log_frame
+from app.services.publication_snapshot_calls import call_with_read_scope
 
 
 class PlayerGameLogReader(Protocol):
@@ -60,13 +61,16 @@ class StoredGameLogsSource:
         season: str,
         *,
         publication_snapshot: Any | None = None,
+        connection: Any | None = None,
     ) -> pd.DataFrame:
         complete, publication_snapshot = self._complete(season, publication_snapshot)
         records = (
-            self.repository.list_player_rows(
+            call_with_read_scope(
+                self.repository.list_player_rows,
                 season,
                 player_id,
                 publication_snapshot=publication_snapshot,
+                connection=connection,
             )
             if complete
             else ()

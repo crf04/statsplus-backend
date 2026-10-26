@@ -243,7 +243,7 @@ The public error categories and HTTP statuses are:
 | Collection operation conflict | `operation_conflict` | 409 | A collection fence, immutable cycle, retry state, or idempotency key conflicts with durable current state. |
 | Board too large | `board_too_large` | 400 | The post-filter DFS Board exceeds the configured market ceiling. |
 | DFS Board disabled | `dfs_board_disabled` | 404 | The deployment does not publish the DFS Board. |
-| Season unavailable | `season_unavailable` | 503 | A Backtest's season retains no readable Publication of one of its streams; the message names the stream, and `details` is `{season, published_season, stream}`. |
+| Season unavailable | `season_unavailable` | 503 | A Backtest's season retains no readable Publication of one of its streams; the message names the stream, and `details` is `{season, published_season, stream}`. A selected season that is not offered (crf04/statsplus#330) has `details` `{selected_season, published_season}`. |
 
 An error may carry an optional `details` object when a caller cannot act on the
 failure without structured facts. It is present only where this document says
@@ -1170,7 +1170,7 @@ DFS provider and writes nothing.
   Publication snapshot, each reduced to its game's entry before the next. With
   Redis enabled (`ENABLE_CACHE`, and
   `SLATE_EDGES_CACHE_ENABLED`, default `true`) the whole response is also
-  cached under `slate:edges:v2:<sha256>`, keyed on the slate date, the
+  cached under `slate:edges:v5:<sha256>`, keyed on the slate date, the
   evidence season, the Publication generation (live pointers and retained
   history rows), each game's id, status and tip time, every Matchup score and
   Diet baseline setting (game-count and per-Base volume floors), and the
@@ -1180,7 +1180,7 @@ DFS provider and writes nothing.
   lag such a change by up to `SLATE_EDGES_CACHE_TTL_SECONDS` (default 300)
   before it expires. A Redis failure is a miss, never an error.
 - Composed Matchups are also cached (crf04/statsplus-backend#422) under
-  `matchup:composed:v2:<sha256>` by `MATCHUP_CACHE_ENABLED` (default `true`)
+  `matchup:composed:v5:<sha256>` by `MATCHUP_CACHE_ENABLED` (default `true`)
   for `MATCHUP_CACHE_TTL_SECONDS` (default 300), and
   [Resolve every Target](#resolve-every-target-against-one-slate-date) reads
   them. The key is the evidence season; the Publication generation (live
@@ -1783,7 +1783,21 @@ The stored Diet/sheet intersection supports PTS through play types, shot zones,
 and shot types; FGA through shot zones and shot types; AST through assist
 locations; and 3PM, FG2A, and FG3A through shot zones and shot types. PTS
 shot-type concessions derive stored points as `2 × FG2M + 3 × FG3M`, and FGA
-derives `FG2A + FG3A`. The attempt markets use their matching stored shot stat;
+derives `FG2A + FG3A`. Each shot type's twos and threes are weighted by the player's own mix, not the
+opponent's: `ratio = p2 * (T_FG2 / L_FG2) + p3 * (T_FG3 / L_FG3)`, with `p2`
+the player's share of the slice's points from his made shots (`2 * FG2M`
+against `3 * FG3M`), falling back to `2 * FG2A` against `3 * FG3A` when he made
+none; FGA uses his attempt shares instead. A slice whose league allows no
+threes (Less Than 10 ft) reduces to the twos ratio, and a slice with no stored
+shooting split keeps the opponent-mix ratio. 3PM, FG2A and FG3A are single-stat
+and unchanged. In the PTS and FGA markets each window's `components.shot_types`
+cell also carries `slices`, one entry per slice the component used, in Player
+Diet order: `{"key": "Pullups", "percent_vs_league_average": 20.84}`, the
+slice's ratio minus one in percent (the Defense Sheet's units). A slice the
+component did not use, or scored without his own split (opponent-mix
+fallback), is omitted; no other cell carries `slices`, including
+the PA, PR and PRA combos, whose MCP reads take the PTS cell's.
+The attempt markets use their matching stored shot stat;
 3PM uses stored `FGM` in the two three-point zones and `FG3M` by shot type.
 For zone-specific attempt/make markets, the player's stored FGA volumes derive
 the exact conditional Diet across the applicable two- or three-point zones;
@@ -1998,7 +2012,9 @@ the [Unscheduled Matchup](#get-unscheduled-matchup) carry a top-level
 waits on (`synergy`: `"NBA has published the season and every team has played
 10 games"`). Each family switches at its first composition after its rule
 holds, so `trailing` shrinks with no operator action. Last 15 never trails: it
-reads `window_not_ready` until its first new-season composition.
+reads `window_not_ready` until its first new-season composition. The exception
+is a selected Unpublished Season (crf04/statsplus#330), where `last_15` trails
+with `rule` `"its first window of the season is composed"`.
 ### Historical Matchup participants
 
 In historical mode `players` is not a Player Pool. It is populated from the
@@ -2448,8 +2464,23 @@ whose `player_game_logs` can be read through a published Publication
 
 ```json
 {
-  "seasons": ["2026-27", "2025-26"],
-  "default_season": "2025-26"
+  "seasons": ["2025-26", "2024-25"],
+  "default_season": "2025-26",
+  "choices": [
+    {
+      "season": "2026-27",
+      "mode": "unpublished",
+      "families": {
+        "game_logs": {"served_season": "2026-27", "state": "serving"},
+        "player_diets": {"served_season": "2025-26", "state": "trailing", "reason": "season_not_composed"},
+        "team_defense": {"served_season": "2025-26", "state": "trailing", "reason": "readiness_not_met"},
+        "last_15": {"served_season": "2025-26", "state": "trailing", "reason": "season_not_composed"}
+      },
+      "team_games": {"min": 2, "max": 4}
+    },
+    {"season": "2025-26", "mode": "published", "families": {"game_logs": {"served_season": "2025-26", "state": "serving"}}},
+    {"season": "2024-25", "mode": "retained", "families": {"game_logs": {"served_season": "2024-25", "state": "serving"}}}
+  ]
 }
 ```
 
@@ -2462,6 +2493,26 @@ whose `player_game_logs` can be read through a published Publication
 - `default_season`: the season `GET /api/games/game_logs` reads when
   `season_filter` is omitted (the active Publication's season; an
   `NBA_CURRENT_SEASON` pin wins).
+- `choices` (crf04/statsplus#330): every season a request may select, newest
+  first; clients derive their season options from it. Each listed season is
+  `published` (the active Publication's season) or `retained`. The season
+  after the Published Season is added as `unpublished` while its
+  `player_game_logs` candidate passes the Season Cutover's per-publication
+  checks (authority, checksum, decode, every governed game of all thirty
+  teams), with `team_games`, the fewest and most games any team has in it.
+  `families` names, per Readiness Rule family with a published stream, what a
+  read of that season serves: `serving` its own season, `trailing` its
+  previous season, or `unavailable` (`served_season` `null`). `reason` is one
+  of `window_not_ready`, `season_not_composed`, `readiness_not_met` and
+  `upstream_missing`, when one applies. A family is reported as its
+  furthest-behind stream: one `unavailable` stream makes the family
+  `unavailable`, otherwise one `trailing` stream makes it `trailing`, and the
+  reason is that stream's. A family whose streams are all disabled is left
+  out. In an `unpublished` choice, Last 15 trails on its previous season's
+  window until a window of the selected season serves: `season_not_composed`
+  with no candidate, `window_not_ready` with one that fails its checks. It is
+  `unavailable` only when the previous season's window is missing too. After a
+  real Season Cutover, Last 15 still never trails.
 
 | Case | Response |
 | --- | --- |
@@ -2812,7 +2863,7 @@ Query parameters:
 | `opponent_tricode` | No | One NBA team tricode (for example `OKC`; surrounding whitespace and letter case are normalized) that keeps only games played against that opponent. Unlike `teams_against[]` it names a team rather than ranking one, and the two compose as a conjunction: a game must be against the named opponent *and* against a ranked opponent. A value that is not an NBA tricode is rejected with `400` `invalid_input` |
 | `location_filter` | No | `Home`, `Away`, or `Both`. Default `Both` |
 | `game_filter` | No | Last N games |
-| `season_filter` | No | Canonical NBA season in `YYYY-YY` form, with `YY` equal to the following calendar year's final two digits (for example, `2024-25`). Whitespace is trimmed. Default is the current season. A season before the active Publication's season is read from that season's latest retained, unrevoked, unretired Publication (the seasons [`GET /api/games/seasons`](#get-seasons) lists): the logs, averages, `season_game_count`, Diets, rankings and `provenance` all come from that one retained generation. A revoked, retired, pruned or projection-less season, or a disabled stream, reads no games with an unavailable `provenance` entry. The active season and an omitted `season_filter` are unchanged |
+| `season_filter` | No | Canonical NBA season in `YYYY-YY` form, with `YY` equal to the following calendar year's final two digits (for example, `2024-25`). Whitespace is trimmed. Default is the current season. A season before the active Publication's season is read from that season's latest retained, unrevoked, unretired Publication (the seasons [`GET /api/games/seasons`](#get-seasons) lists): the logs, averages, `season_game_count`, Diets, rankings and `provenance` all come from that one retained generation. A revoked, retired, pruned or projection-less season, or a disabled stream, reads no games with an unavailable `provenance` entry. The active season and an omitted `season_filter` are unchanged. An explicit `season_filter` is a Selected Season (crf04/statsplus#330): the response adds `season_context: {selected_season, published_season}`, and the season after the Published Season reads its held candidates as if the Season Cutover had run (game logs from its candidate, a family not ready, Last 15 included until a window of the selected season serves, from its previous season labelled `prior_season`; `provenance.generation[].status` may be `candidate`). A selected season that is not offered (the next season before `GET /api/games/seasons` lists it, or any later one) is `503 season_unavailable` with `details: {selected_season, published_season}`, never another season's answer |
 | `playstyle_RTG_min` | No | Finite numeric lower bound on `PLAYTYPE_RTG`. Default `0` |
 | `playstyle_RTG_max` | No | Finite numeric upper bound on `PLAYTYPE_RTG`. Default `200` |
 | `self_filters[STAT]` | No | Ordered inclusive stat range as `min,max` (normalized to a typed `between` filter); repeat the parameter to combine multiple constraints for one stat. Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FG2M`, `FG2A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, `FD_PTS`, and `USG_PCT` (0-100). `PLUS_MINUS` is not supported per the #66 contract amendment |
@@ -2990,7 +3041,7 @@ percentage. Players are ordered by minutes. The result is cached in Redis for
 24 hours. When a refresh fails the cached copy is served with `"stale": true`
 (its original `cached_at`); with no copy the response is HTTP 200 with
 `"status": "unavailable"`, `"cached_at": null` and an empty `players`.
-Upstream calls are throttled through a Redis slot shared by every worker and the warm (`ON_OFF_MIN_INTERVAL_SECONDS`). A request never waits for that slot: when it is taken, the cached copy is served with `"stale": true`, or with no copy the `unavailable` response above, at once. A split with no players is not cached by a request. Only the scheduled warm waits for the slot. A waiting warm is first in line for the next slot, and one user's requests may start at most 10 upstream calls a minute (cache hits are free); past that the request is answered as when the slot is busy. `on[]` takes at most 5 ids (all on the floor together), `off[]` at most 15.
+Upstream calls are throttled through a Redis slot shared by every worker and the warm (`ON_OFF_MIN_INTERVAL_SECONDS`). A request never waits for that slot: when it is taken, the cached copy is served with `"stale": true`, or with no copy the `unavailable` response above, at once. A request's upstream call is one attempt that stops after 15 seconds, under the MCP client's 20-second timeout; when it fails or runs out, the request is answered the same way. A split with no players is not cached by a request. Only the scheduled warm waits for the slot. A waiting warm is first in line for the next slot, and one user's requests may start at most 10 upstream calls a minute (cache hits are free); past that the request is answered as when the slot is busy. `on[]` takes at most 5 ids (all on the floor together), `off[]` at most 15.
 `python scripts/on_off_warm.py [--date YYYY-MM-DD]` (default: today, Eastern)
 warms the cache for the stored injury report's Out, Doubtful and Questionable
 players; run it after every scheduled injury refresh (`railway.on_off_warm.json`,
@@ -4228,6 +4279,12 @@ POST /api/admin/collection/publication-rebuilds
 GET /api/admin/collection/publication-rebuilds/<family>/<rebuild_id>
 POST /api/admin/collection/publication-rebuilds/<family>/rollback
 ```
+
+`GET /api/admin/collection/reconciliation` lists open items with `item_id`,
+`season`, `kind`, `reason`, and `status`; diagnostics' `reconciliation` rows
+have the same shape. Only a `ledger_fallback_evidence` item adds `details`
+(`game_id` and the comma-separated `missing_families`); other kinds keep their
+details private.
 
 `POST /api/admin/collection/publication-rebuilds` starts one durable
 publication-format rebuild. The body names the publication `family`, an
@@ -5893,11 +5950,21 @@ or writes occur.
 `opponent_ranks` is empty with no next game. Otherwise it carries every available
 stat in the Opposing Team Profile's five Season categories, with play types as
 points allowed per 48 (Playtype Points, not points per possession). A stat every
-ranked team ties on, such as 3s inside 10 ft, is omitted. Each entry has
+ranked team ties on, such as 3s inside 10 ft, is omitted, and so is a stat whose
+per-team values repeat another's (Inside 10 ft attempts when its 3PA all tie);
+of two copies, the one with a `team_filter` stays. Of the catch-and-shoot rows
+only points and attempts are listed, and of the pull-up rows only 2PA, 3PA,
+points and attempts. Each entry has
 `group`, `label`, `value`, `vs_league_pct`, `most_rank`, `ranked_teams`,
 `team_filter` (a named Team Filter, a `sheet:<base>:<row key>` reference such as
-`sheet:play_types:Isolation:PTS`, or null), and `unit` (`count`, `percent`, or
-`league_ratio`). Assist values are ratios to the league average; their
+`sheet:play_types:Isolation:PTS`, or null), `unit` (`count`, `percent`, or
+`league_ratio`), `family`, and `markets`. Entries that tell the same story share a
+`family`: `points`, `rebounds` (with Putback points), `assists`, `2pt-assists`,
+`3pt-assists`, `steals-blocks`, `turnovers`, `free-throws`, `field-goals`,
+`threes`, `inside` (Restricted Area, In The Paint (Non-RA) and Inside 10 ft rows),
+`zone:<zone>`, `shot-type:<stored slice>`, or `play-type:<key>`. `markets` lists
+the base stat codes the entry bears on, drawn from `PTS`, `REB`, `AST`, `FG3M`,
+`FTA`, `FTM`, `STL`, `BLK`, and `TOV`. Assist values are ratios to the league average; their
 percentage is `(ratio - 1) * 100`. Percentage values such
 as FG% are fractions. Missing or untrusted publications omit their categories.
 All five categories read one publication generation and share the profile's

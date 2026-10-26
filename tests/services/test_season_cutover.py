@@ -33,7 +33,7 @@ from app.services.collection_control import (
 )
 from app.services.database_first_activation import (
     DatabaseFirstPublicationReader,
-    PublishedSeason,
+    ReadSeason,
 )
 from app.services.traditional_opponent_rebuild import (
     TraditionalOpponentRebuildService,
@@ -1077,7 +1077,7 @@ def _l15_read(engine):
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
     return reader.snapshot(
         (PLAYER_LOGS, L15_STREAM),
-        season=PublishedSeason(OLD),
+        season=ReadSeason(OLD),
     ).reads[L15_STREAM]
 
 
@@ -1402,7 +1402,9 @@ def test_revert_of_an_unknown_cutover_is_not_found(world):
 # --- Rule 1 through the nightly composition job --------------------------
 
 
-def test_a_held_composition_job_settles_succeeded_and_is_not_retried(tmp_path):
+def _held_runtime(tmp_path, *, games=None, streams=(PLAYER_LOGS, SEASON_STREAM, L15_STREAM)):
+    """A 2025-26 runtime composing while 2024-25 is published on ``streams``."""
+
     from datetime import datetime, timedelta
 
     from sqlalchemy import create_engine
@@ -1412,7 +1414,6 @@ def test_a_held_composition_job_settles_succeeded_and_is_not_retried(tmp_path):
         ActiveSeason,
         CatalogPublication,
         CollectionManifest,
-        CompositionJob,
     )
     from app.models.event_catalog import EventCatalogEntry
     from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
@@ -1441,7 +1442,7 @@ def test_a_held_composition_job_settles_succeeded_and_is_not_retried(tmp_path):
     published = "2024-25"
     engine = create_engine(f"sqlite:///{tmp_path / 'held-job.sqlite3'}")
     run_migrations(engine)
-    games = _league_games()
+    games = games or _league_games()
     with engine.begin() as connection:
         catalog = _event_catalog_publication(games, cutoff, "held-event-catalog")
         connection.execute(CatalogPublication.__table__.insert().values(**catalog))
@@ -1496,7 +1497,7 @@ def test_a_held_composition_job_settles_succeeded_and_is_not_retried(tmp_path):
     publications = PublicationService(engine, clock=lambda: runtime_now)
     publications.register_default_streams()
     published_ids = {}
-    for stream_key in (PLAYER_LOGS, SEASON_STREAM, L15_STREAM):
+    for stream_key in streams:
         publications.register_stream(
             stream_key,
             provider="ledger",
@@ -1543,6 +1544,16 @@ def test_a_held_composition_job_settles_succeeded_and_is_not_retried(tmp_path):
         clock=lambda: runtime_now,
     )
 
+    return engine, runtime, published_ids
+
+
+def test_a_held_composition_job_settles_succeeded_and_is_not_retried(tmp_path):
+    from app.models.collection_control import CompositionJob
+    from app.services.ledger_materialization import LedgerCorrectionQueue
+
+    engine, runtime, published_ids = _held_runtime(tmp_path)
+    published = "2024-25"
+
     assert runtime.compose_queued("2025-26") == len(LedgerCorrectionQueue.STREAMS)
 
     with engine.connect() as connection:
@@ -1578,6 +1589,87 @@ def test_a_held_composition_job_settles_succeeded_and_is_not_retried(tmp_path):
     ]
     # Nothing is left queued or failed, so no later pass recomposes it.
     assert runtime.compose_queued("2025-26") == 0
+
+
+def test_a_composition_failed_for_incomplete_assist_evidence_holds_no_candidate(tmp_path):
+    from dataclasses import replace
+
+    from app.models.collection_control import CompositionJob
+    from app.services.canonical_game_ledger import raw_rows_from_facts
+    from tests.services.test_ledger_derivations import _league_games
+
+    games = list(_league_games())
+    first = games[0]
+    without_locations = replace(
+        first,
+        player_facts=tuple(
+            replace(
+                player,
+                two_point_assists=None,
+                three_point_assists=None,
+                arc3_assists=None,
+                corner3_assists=None,
+                at_rim_assists=None,
+                short_mid_range_assists=None,
+                long_mid_range_assists=None,
+            )
+            for player in first.player_facts
+        ),
+        checksum=None,
+    )
+    games[0] = replace(without_locations, raw_rows=raw_rows_from_facts(without_locations)).with_checksum()
+    engine, runtime, published_ids = _held_runtime(
+        tmp_path,
+        games=tuple(games),
+        streams=(PLAYER_LOGS, SEASON_STREAM, "assist_locations_season"),
+    )
+
+    runtime.compose_queued("2025-26")
+
+    with engine.connect() as connection:
+        job = connection.execute(
+            select(CompositionJob.status, CompositionJob.last_error).where(
+                CompositionJob.stream_key == "assist_locations_season"
+            )
+        ).one()
+        versions = connection.execute(
+            select(PublicationVersion.season, PublicationVersion.status).where(
+                PublicationVersion.stream_key == "assist_locations_season"
+            )
+        ).all()
+    assert tuple(job) == ("failed", "assist_location_evidence_incomplete")
+    assert versions == [("2024-25", "active")]
+    assert pointers(engine)["assist_locations_season"][0] == published_ids["assist_locations_season"]
+
+
+@pytest.mark.parametrize(
+    ("stream_key", "payload"),
+    [
+        ("assist_locations_season", []),
+        ("player_assist_locations", {"base": "assist_locations", "rows": []}),
+    ],
+)
+def test_an_empty_payload_is_never_stored_for_a_league_complete_stream(world, stream_key, payload):
+    engine, publications, _operations, _before = world
+
+    with pytest.raises(ControlPlaneError, match="empty_publication"):
+        publications.compose_inactive_ledger(
+            stream_key,
+            season=NEW,
+            cutoff=NEW_CUTOFF,
+            payload=payload,
+            provenance=NEW_PROVENANCE,
+        )
+
+    with engine.connect() as connection:
+        assert (
+            connection.scalar(
+                select(func.count())
+                .select_from(PublicationVersion)
+                .where(PublicationVersion.stream_key == stream_key)
+            )
+            == 0
+        )
 
 
 # --- Concurrency on Postgres -------------------------------------------------
@@ -1733,7 +1825,7 @@ def test_a_trailing_stream_left_behind_serves_its_prior_season_then_activates_on
     operations.cutover_season(NEW, actor=ACTOR, reason=REASON, leave_behind=[L15_STREAM, SEASON_STREAM])
 
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
-    waiting = reader.snapshot((PLAYER_LOGS, SEASON_STREAM), season=PublishedSeason(NEW)).reads[SEASON_STREAM]
+    waiting = reader.snapshot((PLAYER_LOGS, SEASON_STREAM), season=ReadSeason(NEW)).reads[SEASON_STREAM]
     assert (waiting.status, waiting.unavailable_reason, waiting.season, waiting.publication_id) == (
         "prior_season",
         None,
@@ -1744,7 +1836,7 @@ def test_a_trailing_stream_left_behind_serves_its_prior_season_then_activates_on
     first = compose_new(publications, SEASON_STREAM, points=12)
 
     assert pointers(engine)[SEASON_STREAM] == (first.publication_id, NEW, "active", 2)
-    served = reader.snapshot((PLAYER_LOGS, SEASON_STREAM), season=PublishedSeason(NEW)).reads[SEASON_STREAM]
+    served = reader.snapshot((PLAYER_LOGS, SEASON_STREAM), season=ReadSeason(NEW)).reads[SEASON_STREAM]
     assert (served.status, served.unavailable_reason, served.season) == ("active", None, NEW)
 
 
@@ -1903,7 +1995,7 @@ def _opening_week_cutover(operations, publications):
 
 def _snapshot_reads(engine):
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
-    snapshot = reader.snapshot((PLAYER_LOGS, SEASON_STREAM, L15_STREAM), season=PublishedSeason(NEW))
+    snapshot = reader.snapshot((PLAYER_LOGS, SEASON_STREAM, L15_STREAM), season=ReadSeason(NEW))
     return snapshot.season, {
         key: (read.status, read.unavailable_reason, read.season, read.publication_id, read.available)
         for key, read in snapshot.reads.items()
@@ -1996,7 +2088,7 @@ def test_reverting_an_opening_week_cutover_restores_every_read_to_the_old_season
     operations.revert_season_cutover(NEW, cutover.job_id, actor=ACTOR, reason="2026-27 opened too early")
 
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
-    snapshot = reader.snapshot((PLAYER_LOGS, SEASON_STREAM, L15_STREAM), season=PublishedSeason(NEW))
+    snapshot = reader.snapshot((PLAYER_LOGS, SEASON_STREAM, L15_STREAM), season=ReadSeason(NEW))
     assert snapshot.season == OLD
     assert {key: (read.status, read.season, read.publication_id) for key, read in snapshot.reads.items()} == {
         key: ("active", OLD, _id(before, key)) for key in (PLAYER_LOGS, SEASON_STREAM, L15_STREAM)

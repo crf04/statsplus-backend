@@ -21,7 +21,7 @@ from datetime import date
 
 from app.config.settings import current_nba_season
 from app.domain.nba_events import season_for_game_id
-from app.services.database_first_activation import PublishedSeason
+from app.services.database_first_activation import ReadSeason
 from app.services.publication_snapshot_calls import call_with_read_scope
 
 
@@ -89,6 +89,38 @@ def research_service(service, publication_reader):
         }
     )
     return scoped
+
+
+def season_scoped(service, season: str | None):
+    """A request-scoped copy of ``service`` answering an explicit selection of ``season``.
+
+    The copy's publication reader is ``reader.for_season(season)``, so its
+    captures read the selected season, an Unpublished one included.  ``None``
+    (no selection), or a reader that cannot be scoped, returns ``service``.
+    """
+
+    reader = getattr(service, "publication_reader", None)
+    if season is None or getattr(reader, "captures_published_season", False) is not True:
+        return service
+    scoped = copy(service)
+    scoped.publication_reader = reader.for_season(season)
+    return scoped
+
+
+def season_context(publication_reader, snapshot, default_season) -> dict[str, str] | None:
+    """``season_context`` of a response to an explicit selection, else ``None``.
+
+    The Published Season is the one the capture named; ``default_season()``
+    (the caller's own default) answers for a capture that named none.
+    """
+
+    selected = getattr(publication_reader, "selected_season", None)
+    if selected is None:
+        return None
+    return {
+        "selected_season": selected,
+        "published_season": getattr(snapshot, "published_season", None) or default_season(),
+    }
 
 
 def previous_nba_season(season: str) -> str:
@@ -200,7 +232,7 @@ def published_capture(settings, publication_reader, capture):
     """Capture one snapshot and return ``(season, snapshot)`` from it.
 
     ``capture(season)`` takes the season to capture in. A reader that can
-    decide the season inside its own capture (``PublishedSeason``) does, so a
+    decide the season inside its own capture (``ReadSeason``) does, so a
     season activation cannot fall between discovering the season and reading
     in it; any other reader keeps the two-step lookup. A pin, or no reader,
     captures in the settings season.
@@ -211,7 +243,7 @@ def published_capture(settings, publication_reader, capture):
     if season_is_pinned(settings):
         return settings.nba.current_season, capture(settings.nba.current_season)
     if getattr(publication_reader, "captures_published_season", False) is True:
-        snapshot = capture(PublishedSeason(settings.nba.current_season))
+        snapshot = capture(ReadSeason(settings.nba.current_season))
         season = getattr(snapshot, "season", None)
         return (season if isinstance(season, str) else settings.nba.current_season), snapshot
     season = research_season(settings, publication_reader)

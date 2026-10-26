@@ -10,6 +10,7 @@ from app.models.catalogs import PLAY_TYPES
 from app.services.matchup import DEFENSE_BASES, MatchupService
 from app.services.player_diet import (
     PlayerDietResult,
+    ShotTypeShooting,
     StoredPlayerDietFact,
     StoredPlayerDietObservation,
 )
@@ -31,23 +32,32 @@ from app.services.team_matchup_repository import (
 )
 
 
-def _computed_scores(player):
+def _computed_scores(player, *, keep_slices=False):
     """The computed score cells, with the additive input naming checked once.
 
     Every window carries `missing_inputs` naming the score-contract inputs it
     could not consume. These tests assert the arithmetic, so the additive key
     is verified here and removed from the compared shape; its exact values are
-    asserted in `tests/services/test_matchup_service.py`.
+    asserted in `tests/services/test_matchup_service.py`. The shot-type
+    `slices` are likewise dropped unless `keep_slices` is set: only the
+    player-mix tests assert them.
     """
 
     windows = [window for market in player["scores"].values() for window in market.values()]
     assert windows
     assert all(isinstance(window["missing_inputs"], list) for window in windows)
+
+    def window_shape(window):
+        shape = {key: value for key, value in window.items() if key != "missing_inputs"}
+        if not keep_slices:
+            shape["components"] = {
+                base: {key: value for key, value in cell.items() if key != "slices"}
+                for base, cell in window["components"].items()
+            }
+        return shape
+
     return {
-        market: {
-            name: {key: value for key, value in window.items() if key != "missing_inputs"}
-            for name, window in market_windows.items()
-        }
+        market: {name: window_shape(window) for name, window in market_windows.items()}
         for market, market_windows in player["scores"].items()
     }
 
@@ -189,7 +199,7 @@ class _Windows:
         return self.last_15 if window_games == 15 else self.season
 
 
-def _fact(base, slice_key, share, volume, games=20):
+def _fact(base, slice_key, share, volume, games=20, shooting=None):
     units = {
         "play_types": ("possessions", "nba_synergy"),
         "shot_zones": ("field_goal_attempts", "nba_stats"),
@@ -208,6 +218,7 @@ def _fact(base, slice_key, share, volume, games=20):
         unit,
         provider,
         RETRIEVED_AT,
+        shooting=shooting,
     )
 
 
@@ -415,8 +426,15 @@ def test_shot_type_score_derives_fga_from_stored_two_and_three_attempts():
         ),
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    assert _computed_scores(player)["FGA"]["season"] == {
-        "components": {"shot_types": {"value": 0.05, "thin": False}},
+    assert _computed_scores(player, keep_slices=True)["FGA"]["season"] == {
+        "components": {
+            "shot_types": {
+                "value": 0.05,
+                "thin": False,
+                # No shooting split to read: each slice keeps the opponent-mix
+                # ratio in the value and none is listed in `slices`.
+            }
+        },
         "blend": {"value": 0.05, "thin": False},
     }
 
@@ -1406,3 +1424,209 @@ def test_a_missing_rebound_types_base_is_listed_and_leaves_traditional_alone():
         "components": {"traditional": {"value": 0.25, "thin": False}},
         "blend": {"value": 0.25, "thin": False},
     }
+
+
+# --- Shot-type scores weigh twos and threes by the player's own mix (#578) ----
+#
+# League / opponent allowed per 48 for each slice; Less Than 10 ft has no threes.
+_MIX_METRICS = (
+    ("shot_types", "catch_and_shoot", "FG2M", 5.0, 5.0),
+    ("shot_types", "catch_and_shoot", "FG3M", 4.0, 5.0),
+    ("shot_types", "catch_and_shoot", "FG2A", 10.0, 11.0),
+    ("shot_types", "catch_and_shoot", "FG3A", 8.0, 10.0),
+    ("shot_types", "pullups", "FG2M", 4.0, 4.4),
+    ("shot_types", "pullups", "FG3M", 2.0, 3.0),
+    ("shot_types", "pullups", "FG2A", 9.0, 9.0),
+    ("shot_types", "pullups", "FG3A", 5.0, 6.0),
+    ("shot_types", "less_than_10_ft", "FG2M", 6.0, 6.6),
+    ("shot_types", "less_than_10_ft", "FG3M", 0.0, 0.0),
+    ("shot_types", "less_than_10_ft", "FG2A", 12.0, 12.0),
+    ("shot_types", "less_than_10_ft", "FG3A", 0.0, 0.0),
+)
+
+
+def _split(two_makes, three_makes, two_attempts, three_attempts):
+    return ShotTypeShooting(
+        makes=two_makes + three_makes,
+        two_point_makes=two_makes,
+        two_point_attempts=two_attempts,
+        two_point_share=0.0,
+        three_point_makes=three_makes,
+        three_point_attempts=three_attempts,
+        three_point_share=0.0,
+    )
+
+
+# Catch and Shoot: 30 vs 30 points made -> half twos.  Pull-ups: 4 vs 24 points
+# made -> 1/7 twos, 6/7 threes.  Less Than 10 ft: all twos.
+_MIX_SHOOTING = {
+    "Catch and Shoot": _split(15, 10, 30, 10),
+    "Pullups": _split(2, 8, 6, 24),
+    "Less Than 10 ft": _split(20, 0, 40, 0),
+}
+
+
+def _mix_facts(shooting=None):
+    shooting = _MIX_SHOOTING if shooting is None else shooting
+    return (
+        _fact("shot_types", "Catch and Shoot", 0.5, 50, shooting=shooting.get("Catch and Shoot")),
+        _fact("shot_types", "Pullups", 0.3, 30, shooting=shooting.get("Pullups")),
+        _fact("shot_types", "Less Than 10 ft", 0.2, 20, shooting=shooting.get("Less Than 10 ft")),
+    )
+
+
+def _mix_scores(markets, *, shooting=None, extra_facts=(), extra_metrics=(), **kwargs):
+    player = _service(
+        markets=markets,
+        facts=(*extra_facts, *_mix_facts(shooting)),
+        season_metrics=(*extra_metrics, *_MIX_METRICS),
+        **kwargs,
+    ).get_matchup(game_id=GAME_ID)["players"][0]
+    return _computed_scores(player, keep_slices=True)
+
+
+def test_points_shot_type_score_weighs_twos_and_threes_by_his_own_made_mix():
+    zone_slices = ("Restricted Area", "In The Paint (Non-RA)", "Mid-Range", "Corner 3", "Above the Break 3")
+    scores = _mix_scores(
+        ("PTS",),
+        extra_facts=(
+            *_complete_play_facts(_fact("play_types", "Transition", 1.0, 100)),
+            *(_fact("shot_zones", slice_key, 0.2, 20) for slice_key in zone_slices),
+        ),
+        extra_metrics=(
+            ("play_types", "Transition", "PTS", 10.0, 12.0),
+            *(
+                ("shot_zones", slice_key, "FGM", 10.0, 15.0 if slice_key == "Restricted Area" else 10.0)
+                for slice_key in zone_slices
+            ),
+        ),
+    )
+
+    # Catch and Shoot: 1/2 * (5/5) + 1/2 * (5/4) = 1.125
+    # Pullups:         1/7 * (4.4/4) + 6/7 * (3/2) = 10.1/7 (the opponent-mix ratio was 17.8/14)
+    # Less Than 10 ft: league has no threes -> the twos ratio, 6.6/6 = 1.1
+    # 0.5 * 0.125 + 0.3 * (10.1/7 - 1) + 0.2 * 0.1 = 0.215357
+    assert scores["PTS"]["season"] == {
+        "components": {
+            "play_types": {"value": 0.2, "thin": False},
+            "shot_zones": {"value": 0.1, "thin": False},
+            "shot_types": {
+                "value": 0.215357,
+                "thin": False,
+                "slices": [
+                    {"key": "Catch and Shoot", "percent_vs_league_average": 12.5},
+                    {"key": "Pullups", "percent_vs_league_average": 44.285714},
+                    {"key": "Less Than 10 ft", "percent_vs_league_average": 10.0},
+                ],
+            },
+        },
+        # (0.2 + 0.1 + 0.215357) / 3
+        "blend": {"value": 0.171786, "thin": False},
+    }
+    assert (
+        scores["PTS"]["last_15"]["components"]["shot_types"]
+        == scores["PTS"]["season"]["components"]["shot_types"]
+    )
+
+
+def test_a_slice_with_no_makes_falls_back_to_his_attempt_mix_and_no_split_to_the_opponent_mix():
+    no_makes = {**_MIX_SHOOTING, "Pullups": _split(0, 0, 10, 10)}
+    # 2 * 10 vs 3 * 10 attempts -> 0.4 twos: 0.4 * 1.1 + 0.6 * 1.5 = 1.34
+    # 0.5 * 0.125 + 0.3 * 0.34 + 0.2 * 0.1 = 0.1845
+    assert _mix_scores(("PTS",), shooting=no_makes)["PTS"]["season"]["components"]["shot_types"] == {
+        "value": 0.1845,
+        "thin": False,
+        "slices": [
+            {"key": "Catch and Shoot", "percent_vs_league_average": 12.5},
+            {"key": "Pullups", "percent_vs_league_average": 34.0},
+            {"key": "Less Than 10 ft", "percent_vs_league_average": 10.0},
+        ],
+    }
+
+    no_split = {key: value for key, value in _MIX_SHOOTING.items() if key != "Pullups"}
+    # Pull-ups keep (2 * 4.4 + 3 * 3) / (2 * 4 + 3 * 2) = 17.8/14
+    assert _mix_scores(("PTS",), shooting=no_split)["PTS"]["season"]["components"]["shot_types"] == {
+        "value": 0.163929,
+        "thin": False,
+        "slices": [
+            # Pull-ups were scored without his split, so they are not "for his mix".
+            {"key": "Catch and Shoot", "percent_vs_league_average": 12.5},
+            {"key": "Less Than 10 ft", "percent_vs_league_average": 10.0},
+        ],
+    }
+
+
+def test_a_slice_with_neither_makes_nor_attempts_is_scored_by_the_opponent_mix_and_not_listed():
+    empty = {**_MIX_SHOOTING, "Pullups": _split(0, 0, 0, 0)}
+    assert _mix_scores(("PTS",), shooting=empty)["PTS"]["season"]["components"]["shot_types"] == {
+        "value": 0.163929,
+        "thin": False,
+        "slices": [
+            {"key": "Catch and Shoot", "percent_vs_league_average": 12.5},
+            {"key": "Less Than 10 ft", "percent_vs_league_average": 10.0},
+        ],
+    }
+
+
+def test_less_than_10_ft_without_league_threes_scores_the_twos_ratio_whatever_his_mix():
+    # A (mis)reported three-point make in the slice must not move it: the league allows none.
+    odd = {**_MIX_SHOOTING, "Less Than 10 ft": _split(10, 10, 20, 20)}
+    cell = _mix_scores(("PTS",), shooting=odd)["PTS"]["season"]["components"]["shot_types"]
+    assert cell["slices"][2] == {"key": "Less Than 10 ft", "percent_vs_league_average": 10.0}
+    assert cell["value"] == 0.215357
+
+
+def test_fga_shot_type_score_weighs_twos_and_threes_by_his_attempt_shares():
+    # Catch and Shoot: 30 of 40 attempts are twos -> 0.75 * (11/10) + 0.25 * (10/8) = 1.1375
+    # Pullups:         6 of 30 -> 0.2 * (9/9) + 0.8 * (6/5) = 1.16
+    # Less Than 10 ft: no league threes -> 12/12 = 1.0
+    # 0.5 * 0.1375 + 0.3 * 0.16 + 0.2 * 0 = 0.11675
+    assert _mix_scores(("FGA",))["FGA"] == {
+        window: {
+            "components": {
+                "shot_types": {
+                    "value": 0.11675,
+                    "thin": False,
+                    "slices": [
+                        {"key": "Catch and Shoot", "percent_vs_league_average": 13.75},
+                        {"key": "Pullups", "percent_vs_league_average": 16.0},
+                        {"key": "Less Than 10 ft", "percent_vs_league_average": 0.0},
+                    ],
+                }
+            },
+            "blend": {"value": 0.11675, "thin": False},
+        }
+        for window in ("season", "last_15")
+    }
+
+
+def test_single_stat_shot_type_scores_are_unchanged_and_carry_no_slices():
+    scores = _mix_scores(("3PM", "FG2A", "FG3A"))
+    # Values captured from the code before the player-mix weighting (origin/master e791f928).
+    assert scores == {
+        market: {
+            window: {
+                "components": {"shot_types": {"value": value, "thin": False}},
+                "blend": {"value": value, "thin": False},
+            }
+            for window in ("season", "last_15")
+        }
+        for market, value in {"3PM": 0.275, "FG2A": 0.05, "FG3A": 0.185}.items()
+    }
+
+
+def test_slices_ride_only_the_shot_types_cell_of_points_and_fga_in_both_windows():
+    scores = _mix_scores(("PTS", "FGA", "3PM", "FG2A", "FG3A", "PA"), per_game={"PTS": 20.0, "AST": 5.0})
+
+    carrying = {
+        (market, window, base)
+        for market, windows in scores.items()
+        for window, score in windows.items()
+        for base, cell in score["components"].items()
+        if "slices" in cell
+    }
+    assert carrying == {
+        (market, window, "shot_types") for market in ("PTS", "FGA") for window in ("season", "last_15")
+    }
+    assert "slices" not in scores["PA"]["season"]["components"]["shot_types"]
+    assert all("slices" not in score["blend"] for windows in scores.values() for score in windows.values())

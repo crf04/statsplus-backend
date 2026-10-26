@@ -85,6 +85,9 @@ class _Fallback:
         self.calls += 1
         return self.live
 
+    def fetch_play_by_play(self, game_id):
+        raise ProviderResponseError("LiveData play-by-play is unavailable")
+
 
 class _UnavailablePrimary:
     def fetch_game_stats(self, *args, **kwargs):
@@ -94,7 +97,7 @@ class _UnavailablePrimary:
 def _refresh(repository, primary, fallback):
     service = LedgerBackfillService(
         provider=primary,
-        fallback_provider=fallback,
+        live_data_provider=fallback,
         repository=repository,
         athlete_catalog=_Athletes(),
         participant_catalog=_Participants(),
@@ -106,16 +109,22 @@ def _refresh(repository, primary, fallback):
     return service.refresh("2024-25", historical_repair=True, **_authorized(_event(), CUTOFF))
 
 
-def test_a_primary_split_regression_fails_the_game_and_never_reaches_livedata(tmp_path):
+def test_a_primary_split_regression_fails_the_game_and_never_reaches_livedata(tmp_path, monkeypatch):
     live, regressed, repository = _setup(tmp_path)
     assert _stored(repository)[0] == (2544, 2, 2)
     fallback = _Fallback(live)
+    composed = []
+    monkeypatch.setattr(
+        "app.services.ledger_backfill.compose_pbp_live_data_observation",
+        lambda *args, **kwargs: composed.append(args),
+    )
 
     result = _refresh(repository, _Provider(regressed), fallback)
 
     assert result.failed_game_ids == ("0022400001",)
     assert result.games_replaced == 0
-    assert fallback.calls == 0
+    # LiveData supplies the final score only; its box score is never evidence.
+    assert composed == []
     assert _stored(repository)[0] == (2544, 2, 2)
 
 

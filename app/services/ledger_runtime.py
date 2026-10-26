@@ -1107,13 +1107,29 @@ class LedgerRuntime:
                             completed += int(success)
                     if cas_failed:
                         raise ControlPlaneError("stale_composition_generation")
-            except (ControlPlaneError, LedgerMaterializationUnavailable, LedgerDerivationUnavailable):
+            except (
+                ControlPlaneError,
+                LedgerMaterializationUnavailable,
+                LedgerDerivationUnavailable,
+            ) as error:
                 self._mark_slice_failed(
                     season=season,
                     cutoff=stored_cutoff,
                     manifest_id=manifest_id,
                     jobs=slice_jobs or (),
                     reason="recomposition_failed",
+                )
+                # The job row keeps only the generic reason.  The JSON
+                # formatter drops ``extra``, so the message carries the slice.
+                logger.warning(
+                    "ledger recomposition failed: season=%s cutoff=%s manifest=%s streams=%s error=%s: %s",
+                    season,
+                    cutoff.isoformat(),
+                    manifest_id,
+                    ",".join(sorted(job["stream_key"] for job in slice_jobs or ())),
+                    type(error).__name__,
+                    error,
+                    exc_info=True,
                 )
                 continue
             except Exception:
@@ -1124,7 +1140,12 @@ class LedgerRuntime:
                     jobs=slice_jobs or (),
                     reason="recomposition_failed",
                 )
-                logger.exception("unexpected ledger recomposition failure", extra={"season": season})
+                logger.exception(
+                    "unexpected ledger recomposition failure: season=%s cutoff=%s manifest=%s",
+                    season,
+                    cutoff.isoformat(),
+                    manifest_id,
+                )
                 raise
         return completed
 
