@@ -1579,6 +1579,16 @@ def test_a_live_data_box_score_short_of_the_nominal_minutes_is_refused(tmp_path)
     _refused_0022600101(tmp_path, box)
 
 
+def test_a_live_data_box_score_with_zero_minutes_is_refused(tmp_path):
+    # Every player keeps his participation and counts but records no minutes.
+    box = _box_score_0022600101()
+    for team in ("homeTeam", "awayTeam"):
+        for player in box["game"][team]["players"]:
+            player["statistics"]["minutes"] = "PT00M00.00S"
+
+    _refused_0022600101(tmp_path, box)
+
+
 def test_a_live_data_box_score_whose_team_points_miss_its_score_is_refused(tmp_path):
     # MEM's players and team.score say 111; its team statistics say 113.
     box = _box_score_0022600101()
