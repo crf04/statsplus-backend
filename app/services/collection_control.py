@@ -686,6 +686,7 @@ def _collector_scope_descriptors(
             }
             for category in PLAY_TYPES
         )
+    date_to = slate_date_for_instant(_aware(cutoff)).strftime("%m/%d/%Y")
     if shots:
         descriptors.extend(
             {
@@ -694,11 +695,12 @@ def _collector_scope_descriptors(
                     "window": "season",
                     "subject": "player",
                     "general_range": category,
+                    "date_from": None,
+                    "date_to": date_to,
                 },
             }
             for category in SHOOTING_TYPES
         )
-    date_to = slate_date_for_instant(_aware(cutoff)).strftime("%m/%d/%Y")
     if zones:
         # The player zone surface takes three provider reads, so binding the
         # manifest's own date bound is what proves they describe one window.
@@ -1256,6 +1258,53 @@ def _is_player_season_scope(scope: Mapping[str, Any]) -> bool:
     )
 
 
+def _assert_player_shot_types_cover_governed_games(
+    scope: Mapping[str, Any],
+    document: Mapping[str, Any],
+    *,
+    cutoff: datetime,
+    expected_game_ids_by_team: Mapping[int, frozenset[str]] | None,
+) -> frozenset[int]:
+    """Refuse player tracking that does not yet cover every governed game.
+
+    NBA player tracking can trail the box score by game-days while still
+    answering, and its only tell is a smaller games played.  The observation
+    proves its window twice over: every team's box-score games equal the
+    games the cutoff governs, and every player's tracking games equal his
+    box-score games over the same date bound.
+
+    Returns the players with box-score field-goal attempts.  A player tracking
+    has not reached has no record here at all, so the caller requires each of
+    them in at least one category.  A player with no attempts has no shot
+    type and is legitimately absent from every category.
+    """
+
+    if not expected_game_ids_by_team:
+        raise ValueError("publication governance is incomplete")
+    endpoint_window = scope.get("endpoint_window")
+    team_games = document.get("team_games_played")
+    box_attempts = document.get("box_field_goal_attempts")
+    if (
+        not isinstance(endpoint_window, Mapping)
+        or endpoint_window.get("date_to") != slate_date_for_instant(cutoff).strftime("%m/%d/%Y")
+        or not isinstance(team_games, Mapping)
+        or not isinstance(box_attempts, Mapping)
+    ):
+        raise _ProviderWindowUnavailable("provider_window_unverified")
+    if any(
+        team_games.get(str(team_id)) != len(game_ids)
+        for team_id, game_ids in expected_game_ids_by_team.items()
+    ) or any(
+        not isinstance(record, Mapping) or record.get("box_games_played") != record.get("games_played")
+        for record in document.get("records") or ()
+    ):
+        raise _ProviderWindowUnavailable("provider_window_lagging")
+    try:
+        return frozenset(int(player_id) for player_id, attempts in box_attempts.items() if attempts > 0)
+    except (TypeError, ValueError) as error:
+        raise ValueError("publication observation value invalid") from error
+
+
 def _compose_player_diet_observation_payload(
     session: Session,
     *,
@@ -1265,6 +1314,7 @@ def _compose_player_diet_observation_payload(
     cutoff: datetime,
     manifest_id: str,
     provenance_ids: set[str],
+    expected_game_ids_by_team: Mapping[int, frozenset[str]] | None = None,
 ) -> dict[str, Any]:
     """Derive the player shot-type Diet payload from immutable observations.
 
@@ -1342,6 +1392,7 @@ def _compose_player_diet_observation_payload(
     observed_categories: set[str] = set()
     facts: dict[tuple[int, str], dict[str, Any]] = {}
     sources: list[dict[str, str]] = []
+    shooters: set[int] = set()
     for observation in sorted(latest.values(), key=lambda row: row.observation_id):
         if (
             observation.manifest_id != manifest_id
@@ -1364,6 +1415,12 @@ def _compose_player_diet_observation_payload(
         records = document.get("records")
         if not isinstance(records, list):
             raise ValueError("publication observation rows missing")
+        shooters |= _assert_player_shot_types_cover_governed_games(
+            _safe_json_mapping(observation.scope),
+            document,
+            cutoff=cutoff,
+            expected_game_ids_by_team=expected_game_ids_by_team,
+        )
         sources.append(
             {
                 "observation_id": observation.observation_id,
@@ -1416,6 +1473,8 @@ def _compose_player_diet_observation_payload(
         raise ValueError("publication observation rows missing")
     if observed_categories != expected_slices:
         raise ValueError("publication observation categories incomplete")
+    if not shooters <= {player_id for player_id, _slice in facts}:
+        raise _ProviderWindowUnavailable("provider_window_lagging")
     return {
         "base": base,
         "rows": [facts[identity] for identity in sorted(facts)],
@@ -5962,6 +6021,19 @@ class PublicationService(_SessionService):
                 )
             except PublicationGovernanceUnavailable as error:
                 raise ControlPlaneError("publication_governance_unavailable") from error
+            if stream_key == "grouped_shot_types":
+                try:
+                    expected_game_ids_by_team = resolve_governed_team_game_ids(
+                        self.l15_expectation_resolver,
+                        season,
+                        _aware(cutoff),
+                        window="season",
+                        manifest_id=authority.manifest_id,
+                        event_catalog_publication_id=authority.event_catalog_publication_id,
+                        event_catalog_checksum=authority.event_catalog_checksum,
+                    )
+                except PublicationGovernanceUnavailable as error:
+                    raise ControlPlaneError("publication_governance_unavailable") from error
             try:
                 derived_payload = _compose_player_diet_observation_payload(
                     session,
@@ -5971,7 +6043,10 @@ class PublicationService(_SessionService):
                     cutoff=_aware(cutoff),
                     manifest_id=authority.manifest_id,
                     provenance_ids=provenance_ids,
+                    expected_game_ids_by_team=expected_game_ids_by_team,
                 )
+            except _ProviderWindowUnavailable as error:
+                raise ControlPlaneError(str(error)) from error
             except ValueError as error:
                 raise ControlPlaneError("publication_candidate_invalid") from error
             # A caller that supplied its own payload must have derived exactly

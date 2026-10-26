@@ -768,13 +768,27 @@ def normalize_grouped_shot_response(
     season: str,
     cutoff: datetime | str,
     scope: Mapping[str, Any] | None = None,
+    games_response: Any = None,
+    team_games_response: Any = None,
 ) -> NormalizedObservation:
+    """Normalize player tracking shot types beside their box-score games.
+
+    ``games_response`` and ``team_games_response`` are the player and team
+    box-score totals over the same date bound.  Each record keeps the
+    player's box-score games as ``box_games_played`` and the payload keeps
+    every team's as ``team_games_played``, so composition can refuse
+    tracking that has not yet caught up with the games the cutoff governs.
+    Every player's box-score attempts travel as ``box_field_goal_attempts``,
+    because tracking that has not reached a player at all leaves no record
+    whose games could fall short.
+    """
+
     scope = dict(scope or {"window": "season", "subject": "player", "phase": "Regular Season"})
     if scope.get("window") not in {"season", "l15"}:
         raise ProviderContractError("provider_window_unsupported")
     requested = scope.get("category", scope.get("general_range"))
     required = (str(requested),) if requested is not None else None
-    return _stat_rows(
+    observation = _stat_rows(
         response,
         categories=SHOT_TYPES,
         category_names=("category", "shot_type", "SHOT_TYPE", "general_range"),
@@ -787,6 +801,21 @@ def normalize_grouped_shot_response(
         category_default=str(requested or "Catch and Shoot"),
         required_categories=required,
     )
+    if games_response is None or team_games_response is None:
+        return observation
+    games = _player_games_played(games_response)
+    for record in observation.payload["records"]:
+        record["box_games_played"] = games.get(record["player_id"])
+    observation.payload["team_games_played"] = {
+        str(team_id): played for team_id, played in _team_games_played(team_games_response).items()
+    }
+    observation.payload["box_field_goal_attempts"] = {
+        str(_positive_id(_required(row, "PLAYER_ID", "player_id"))): int(
+            _number(_required(row, "FGA", "field_goal_attempts"), integer=True)
+        )
+        for row in _records(games_response)
+    }
+    return observation
 
 
 def normalize_opponent_grouped_shot_response(
@@ -1161,6 +1190,18 @@ def _player_games_played(response: Any) -> dict[int, int]:
         if played < 1:
             raise ProviderContractError("value_invariant_failed")
         games[player_id] = int(played)
+    if not games:
+        raise ProviderContractError("provider_schema_changed")
+    return games
+
+
+def _team_games_played(response: Any) -> dict[int, int]:
+    games: dict[int, int] = {}
+    for row in _records(response):
+        team_id = _positive_id(_required(row, "TEAM_ID", "team_id"))
+        if team_id in games:
+            raise ProviderContractError("duplicate_identity")
+        games[team_id] = int(_number(_required(row, "GP", "games_played"), integer=True))
     if not games:
         raise ProviderContractError("provider_schema_changed")
     return games
