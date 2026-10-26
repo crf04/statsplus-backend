@@ -67,18 +67,24 @@ def _metric_families():
         markets = ("PTS", "FG3M") if zone in THREE_POINT_SHOT_ZONES else ("PTS",)
         for stat in SHOT_ZONE_STATS:
             families[key("shot_zones", f"{zone}_{stat}")] = (family, markets)
+    # The list keeps only these C&S and pull-up rows; None leaves a metric off it.
+    shown = {
+        "catch_and_shoot": {"PTS", "FGA"},
+        "pullups": {"FG2A", "FG3A", "PTS", "FGA"},
+    }
     for shot in SHOT_TYPE_SLICES:
         family = "inside" if shot == "less_than_10_ft" else f"shot-type:{shot}"
         threes = ("PTS",) if family == "inside" else ("PTS", "FG3M")
-        for metrics, markets in (
-            ((f"{shot}_FG2M",), ("PTS",)),
-            ((f"{shot}_FG2A",), ("PTS",)),
-            ((f"{shot}_FG3M",), threes),
-            ((f"{shot}_FG3A",), threes),
-            ((f"{shot}_FG2M", f"{shot}_FG3M"), ("PTS",)),
-            ((f"{shot}_FG2A", f"{shot}_FG3A"), ("PTS",)),
+        for stat, metrics, markets in (
+            ("FG2M", (f"{shot}_FG2M",), ("PTS",)),
+            ("FG2A", (f"{shot}_FG2A",), ("PTS",)),
+            ("FG3M", (f"{shot}_FG3M",), threes),
+            ("FG3A", (f"{shot}_FG3A",), threes),
+            ("PTS", (f"{shot}_FG2M", f"{shot}_FG3M"), ("PTS",)),
+            ("FGA", (f"{shot}_FG2A", f"{shot}_FG3A"), ("PTS",)),
         ):
-            families[key("shot_types", *metrics)] = (family, markets)
+            listed = shot not in shown or stat in shown[shot]
+            families[key("shot_types", *metrics)] = (family, markets) if listed else None
     return families
 
 
@@ -86,7 +92,7 @@ _METRIC_FAMILIES = _metric_families()
 
 
 def metric_family(definition):
-    """The family a profile metric shares with its near-twins, and the stats it bears on."""
+    """The family a profile metric shares with its near-twins and the stats it bears on, or None when the list leaves it out."""
     return _METRIC_FAMILIES[
         definition.base,
         frozenset(metric for metric, _ in definition.numerator),
@@ -178,7 +184,7 @@ class NextOpponentService:
                 for base, rows in rows_by_base.items()
                 if rows is not None
                 for metric in opponent_profile_metrics(base, publication_league_table(rows))
-                if len(set(metric[2].values.values())) >= 2
+                if len(set(metric[2].values.values())) >= 2 and metric_family(metric[3]) is not None
             ]
             # A copy of another column (Inside 10 ft attempts once its 3PA all
             # tie) says nothing new; keep the copy the panel can add as a filter.
