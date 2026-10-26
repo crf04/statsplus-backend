@@ -135,11 +135,7 @@ def test_next_game_and_all_categories(setup):
         "OPP_STL",
         "OPP_FG3M",
         "OPP_FG3A",
-        "C&S 3s",
         "C&S PTS",
-        "C&S 3A",
-        "PU 2s",
-        "PU 3s",
         "PU PTS",
         "Less Than 10 ft",
         "sheet:play_types:PRBallHandler:PTS",
@@ -169,7 +165,6 @@ def test_next_game_and_all_categories(setup):
     assert labels["sheet:play_types:PRBallHandler:PTS"] == "P&R ball-handler points"
     assert labels["sheet:play_types:OffRebound:PTS"] == "Putback points"
     assert labels["Corner3Assists"] == "Corner-3 assists"
-    assert labels["C&S 3s"] == "C&S 3s"
 
 
 @pytest.mark.parametrize("direction", ["most", "fewest", "tie"])
@@ -366,7 +361,7 @@ def test_every_metric_has_a_family_and_markets(setup):
     client, reads, _ = setup
     distinct_metrics(reads)
     rows = get(client).get_json()["opponent_ranks"]
-    assert len(rows) == 64
+    assert len(rows) == 58
     for row in rows:
         assert row["family"], row["label"]
         assert row["markets"] and set(row["markets"]) <= MARKETS, row["label"]
@@ -398,8 +393,8 @@ def test_rows_name_their_family_and_markets(setup):
             "Inside 10 ft 3PA",
             "Mid-Range attempts",
             "Corner 3 makes",
-            "C&S 2s",
-            "C&S 3PA",
+            "C&S attempts",
+            "Pull-up 3PA",
             "Pull-up points",
             "Isolation points",
         )
@@ -423,8 +418,8 @@ def test_rows_name_their_family_and_markets(setup):
         "Inside 10 ft 3PA": ("inside", ["PTS"]),
         "Mid-Range attempts": ("zone:Mid-Range", ["PTS"]),
         "Corner 3 makes": ("zone:Corner 3", ["PTS", "FG3M"]),
-        "C&S 2s": ("shot-type:catch_and_shoot", ["PTS"]),
-        "C&S 3PA": ("shot-type:catch_and_shoot", ["PTS", "FG3M"]),
+        "C&S attempts": ("shot-type:catch_and_shoot", ["PTS"]),
+        "Pull-up 3PA": ("shot-type:pullups", ["PTS", "FG3M"]),
         "Pull-up points": ("shot-type:pullups", ["PTS"]),
         "Isolation points": ("play-type:Isolation", ["PTS"]),
     }
@@ -451,14 +446,32 @@ def test_of_two_copies_the_filterable_one_is_kept(setup):
     client, reads, _ = setup
     distinct_metrics(reads)
     zones, shots = "exact_shot_zones_opponent_season", "grouped_shot_types_opponent_season"
-    copy = {row.team_tricode: row.per48["pullups_FG2M"] for row in reads[shots].decoded}
+    copy = {row.team_tricode: row.per48["less_than_10_ft_FG2M"] for row in reads[shots].decoded}
     reads[zones] = replace(
         reads[zones],
         decoded=tuple(
-            replace(row, per48={**row.per48, "Mid-Range_FGM": copy[row.team_tricode]})
+            replace(row, per48={**row.per48, "Restricted Area_FGM": copy[row.team_tricode]})
             for row in reads[zones].decoded
         ),
     )
     labels = {row["label"]: row["team_filter"] for row in get(client).get_json()["opponent_ranks"]}
-    assert "Mid-Range makes" not in labels
-    assert labels["Pull-up 2s"] == "PU 2s"
+    assert "Restricted Area makes" not in labels
+    assert labels["Inside 10 ft 2s"] == "Less Than 10 ft"
+
+
+def test_only_the_chosen_catch_and_shoot_and_pull_up_rows_are_listed(setup):
+    client, reads, _ = setup
+    distinct_metrics(reads)
+    labels = sorted(
+        row["label"]
+        for row in get(client).get_json()["opponent_ranks"]
+        if row["label"].startswith(("C&S", "Pull-up"))
+    )
+    assert labels == [
+        "C&S attempts",
+        "C&S points",
+        "Pull-up 2PA",
+        "Pull-up 3PA",
+        "Pull-up attempts",
+        "Pull-up points",
+    ]
