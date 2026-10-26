@@ -77,7 +77,7 @@ the most important variables:
 | `OPENAI_API_KEY` | No | If absent, NL queries stay in NLP-only mode |
 | `LLM_MODEL` | No | `gpt-4o-mini` |
 | `ENABLE_LLM_FALLBACK` | No | Enabled only when `OPENAI_API_KEY` is present |
-| `LLM_CONFIDENCE_THRESHOLD` | No | `0.7` |
+| `LLM_CONFIDENCE_THRESHOLD` | No | `0.9` |
 | `REDIS_URL` | No | If unavailable, caching falls back without blocking app startup |
 | `TARGET_BACKTEST_CACHE_ENABLED` | No | `true`; the saved-Target Backtest result cache (#279) served from and written to Redis under the Publication generation key |
 | `TARGET_BACKTEST_CACHE_TTL_SECONDS` | No | `86400`; TTL carried by every key the result cache writes |
@@ -436,8 +436,8 @@ returned to clients.
 The code uses Firebase ID tokens in `Authorization: Bearer <token>` headers.
 
 - Protected routes fail closed when Firebase Admin is unavailable (`503 Service Unavailable`). Requests without a valid Firebase ID token receive `401 Unauthorized`.
-- Protected routes include `GET /api/games/slate`, `GET /api/games/matchup`, `GET /api/games/game_logs`, `POST /api/nl-query`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
-- Admin routes include `/api/user/admin/stats`, all `/api/data/*` endpoints, `PUT /api/players/fetch`, `/api/admin/*`, and `/api/admin/collection/*`. They require a verified Firebase ID token with one of these custom claims: `admin=true`, `role=admin`, or `roles` containing `admin`.
+- Protected routes include `GET /api/games/matchup`, `GET /api/games/game_logs`, `POST /api/nl-query`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes. `GET /api/games/slate`, `/slate/edges`, `/ladder` and the `preview.png` routes are anonymous (see [API_DOCUMENTATION.md](docs/API_DOCUMENTATION.md#authentication)).
+- Admin routes include `/api/user/admin/stats`, all `/api/data/*` endpoints, `PUT /api/players/fetch`, `/api/admin/*`, `/api/admin/collection/*`, and `GET /api/health/{nba-api,pbp-api,pbp-stats,detailed}`. They require a verified Firebase ID token with one of these custom claims: `admin=true`, `role=admin`, or `roles` containing `admin`.
 - For local, credential-free development only, set `FLASK_ENV=development` and `FIREBASE_ADMIN_DISABLED=true`. This explicit bypass uses a synthetic `dev-user`, is rejected outside development/tests and in production, and must not be enabled in a deployed environment. On a non-demo database it provisions a `users` row for `dev-user` once per process (so Target writes satisfy `targets_firebase_uid_fkey`); the public read-only demo fixture is never written.
 - Player and team read routes remain optional-auth. `POST /api/user/activity/ping` also remains optional-auth.
 
@@ -608,6 +608,7 @@ docs/
   PUBLICATION_REPAIR_GROUPS.md  Atomic publication repair groups
   LEDGER_CORRECTION_OPERATIONS.md  Canonical ledger correction runbook
   MATCHUP_PARITY_OPERATIONS.md  Matchup materializer parity runbook
+  PROJECTION_RETENTION_OPERATIONS.md  Projection archive retention runbook
   contracts/               Shared contract fixtures (Target statistic catalogue)
   agents/                  Issue-tracker and triage-label rules for agents
 prompts/

@@ -5657,7 +5657,7 @@ used to repair the fixture.
   limit in one worker reuse that gate.
 - The `NBA_STATS_MAX_CONCURRENCY` bound is per worker **process**, not global:
   all adapters in each worker share one gate, so worst-case provider
-  concurrency is `workers × NBA_STATS_MAX_CONCURRENCY` (4 × 10 = 40 with the
+  concurrency is `workers × NBA_STATS_MAX_CONCURRENCY` (8 × 10 = 80 with the
   Procfile defaults). A true cross-process bound would need shared locking
   (e.g. Redis) and is intentionally out of scope; operators scale the bound and
   worker count together.

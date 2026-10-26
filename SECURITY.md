@@ -33,8 +33,8 @@ the reason in the pull request.
 Dependabot checks the root Python dependency inputs and GitHub Actions weekly.
 Its grouped pull requests must update both the direct requirement pins and the
 generated `requirements-lock.txt`; regenerate the lock with the command in
-`CONTRIBUTING.md`, review release notes for breaking changes, and run
-`./scripts/check.sh` before merging.
+`CONTRIBUTING.md`, review release notes for breaking changes, and confirm CI is green on the
+pull request before merging.
 
 The `Security` workflow audits the hashed lock file with `pip-audit` on every
 pull request, push to the default branches, and weekly schedule. A known
