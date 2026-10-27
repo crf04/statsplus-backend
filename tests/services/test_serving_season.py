@@ -39,13 +39,14 @@ def test_the_readiness_rules_name_each_familys_streams_and_threshold():
                 "exact_shot_zones_opponent_season",
                 "grouped_shot_types_opponent_season",
                 "rebound_types_season",
+                "synergy_play_types_opponent_season",
                 "traditional_opponent_season",
             ],
             1,
             EVERY_TEAM_PLAYS_ONE,
         ),
         "synergy": (
-            ["synergy_play_types", "synergy_play_types_opponent_season"],
+            ["synergy_play_types"],
             10,
             "NBA has published the season and every team has played 10 games",
         ),
@@ -81,6 +82,7 @@ def test_team_defense_holds_once_all_thirty_teams_have_played_a_game():
         "traditional_opponent_season",
         "grouped_shot_types_opponent_season",
         "exact_shot_zones_opponent_season",
+        "synergy_play_types_opponent_season",
         "assist_locations_season",
         "rebound_types_season",
     ):
@@ -129,6 +131,19 @@ def test_trailing_lists_each_family_with_a_prior_season_read_once_in_table_order
         },
     ]
     assert trailing([_read("exact_shot_zones", "active", "2026-27")]) == []
+
+
+def test_play_type_defense_trails_as_team_defense_and_player_synergy_as_synergy():
+    assert trailing([_read("synergy_play_types_opponent_season", "prior_season")]) == [
+        {"family": "team_defense", "serving_season": "2025-26", "rule": EVERY_TEAM_PLAYS_ONE},
+    ]
+    assert trailing([_read("synergy_play_types", "prior_season")]) == [
+        {
+            "family": "synergy",
+            "serving_season": "2025-26",
+            "rule": "NBA has published the season and every team has played 10 games",
+        },
+    ]
 
 
 def test_merged_trailing_lists_keep_one_entry_per_family_in_table_order():
