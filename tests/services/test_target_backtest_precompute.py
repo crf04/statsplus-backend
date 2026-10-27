@@ -282,6 +282,26 @@ def test_held_2026_27_candidates_are_filled_under_their_own_key_until_one_is_wit
     assert _without_duration(withdrawn) == _counts(already_cached=2)
 
 
+def test_a_superseded_held_diet_misses_the_entry_the_precompute_filled(world):
+    first, _second = _two_targets(world)
+    seasons._hold_new_season(world)
+    service = world.backtests(redis_client=CountingRedis())
+
+    filled = service.precompute(now=NOW)
+    seasons._supersede_held_shot_zones(world)
+    selected, state = service.backtest(OWNER, first["id"], season=NEW)
+    refilled = service.precompute(now=NOW)
+
+    assert _without_duration(filled) == _counts(seasons=[LAST, NEW], eligible=4, computed=4)
+    assert state == "miss"
+    seasons._assert_superseded_shot_zones(selected)
+    # Only the second Target's 2026-27 entry is new; the first's was filed
+    # by the read above, and 2025-26's did not move.
+    assert _without_duration(refilled) == _counts(
+        seasons=[LAST, NEW], eligible=4, already_cached=3, computed=1
+    )
+
+
 def test_one_targets_failure_is_logged_and_the_run_continues(world, monkeypatch, caplog):
     first, second = _two_targets(world)
     service = world.backtests(redis_client=CountingRedis())

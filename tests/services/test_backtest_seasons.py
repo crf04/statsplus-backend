@@ -584,6 +584,40 @@ def test_a_superseded_2026_27_candidate_never_serves_from_the_cache(world):
     assert len({key for key, _ttl in redis.sets}) == 2
 
 
+def _supersede_held_shot_zones(world):
+    """A newer held shot-zone candidate: LeBron's Corner 3 share 0.5 -> 0.7.
+
+    Tatum keeps 0.1, so the baseline moves (0.5 + 0.1) / 2 = 0.3 -> 0.4.
+    The game logs are unchanged.
+    """
+
+    world.compose("exact_shot_zones", NEW, _diet_rows("shot_zones", NEW, 0.7), hold=True)
+
+
+def _assert_superseded_shot_zones(body):
+    assert (*_season(body), body["published_season"]) == (NEW, "requested", LAST)
+    assert body["games_considered"] == {"played": 1, "kept": 1}
+    share = body["players"][0]["shares"][0]
+    assert (share["share"], share["league_average_share"]) == (0.7, 0.4)
+
+
+def test_a_superseded_2026_27_diet_candidate_never_serves_from_the_cache(world):
+    target = world.saved_target()
+    _hold_new_season(world)
+    redis = bt.FakeRedis()
+    service = world.backtests(redis_client=redis)
+
+    first, first_state = service.backtest(OWNER, target["id"], season=NEW)
+    _supersede_held_shot_zones(world)
+    newer, newer_state = service.backtest(OWNER, target["id"], season=NEW)
+    again, again_state = service.backtest(OWNER, target["id"], season=NEW)
+
+    assert (first_state, newer_state, again_state) == ("miss", "miss", "hit")
+    _assert_held_2026_27(first)
+    _assert_superseded_shot_zones(newer)
+    assert again == newer
+
+
 @pytest.mark.parametrize("stream", ["player_game_logs", "exact_shot_zones"])
 def test_a_withdrawn_2026_27_candidate_never_serves_from_the_cache(world, stream):
     target = world.saved_target()
@@ -711,6 +745,22 @@ def test_a_pin_behind_the_live_pointer_reads_its_published_season_retained(world
     # A season ahead of the pin is still requestable, read retained.
     assert (*_season(ahead), ahead["published_season"]) == (NEW, "requested", LAST)
     assert ahead["games_considered"] == {"played": 1, "kept": 1}
+
+
+def test_a_default_pinned_behind_every_live_stream_is_cached_on_its_retained_rows(world):
+    _activate_new_season(world)
+    _pin(world, LAST)
+    target = world.saved_target()
+    service = world.backtests(redis_client=bt.FakeRedis())
+
+    first, first_state = service.backtest(OWNER, target["id"])
+    again, again_state = service.backtest(OWNER, target["id"])
+
+    assert (first_state, again_state) == ("miss", "hit")
+    assert (*_season(again), again["published_season"]) == (LAST, "default", LAST)
+    assert again["games_considered"] == {"played": 2, "kept": 2}
+    assert again["players"][0]["shares"][0]["share"] == 0.42
+    assert again == first
 
 
 @pytest.mark.parametrize("season", ["2024-25", "2027-28", "2025-2026", "26-27", "", 2025])
