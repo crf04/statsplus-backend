@@ -66,6 +66,12 @@ _STREAM_KEY_BY_BASE: dict[str, str] = {
 TEAM_FILTER_PUBLICATION_STREAM_KEYS = frozenset(_STREAM_KEY_BY_BASE.values())
 
 
+def season_stream_key(base: str) -> str:
+    """The Season publication stream one base is read from."""
+
+    return _STREAM_KEY_BY_BASE[base]
+
+
 @dataclass(frozen=True, slots=True)
 class TeamFilterRanking:
     """How one Team Filter is computed from a publication's per-48 metrics.
@@ -438,6 +444,7 @@ __all__ = [
     "TEAM_FILTER_RANKINGS",
     "TeamFilterRanking",
     "TeamFilterRankingService",
+    "season_stream_key",
     "team_filter_ranking",
 ]
 

@@ -2537,8 +2537,8 @@ whose `player_game_logs` can be read through a published Publication
 
 `GET /api/games/matchup`, `/api/games/matchup/selection`,
 `/api/matchups/unscheduled`, `/api/games/slate`, `/api/games/slate/edges`,
-`/api/players/profile` and `/api/diet/baselines` take an optional `season` (canonical `YYYY-YY`), the Evidence season
-(crf04/statsplus#330). Game logs keep `season_filter`, which follows the same
+`/api/players/profile`, `/api/teams/stats` and `/api/diet/baselines` take an optional `season` (canonical `YYYY-YY`), the Evidence season
+(crf04/statsplus#330, #369). Game logs keep `season_filter`, which follows the same
 rules. Without `season` every response is byte for byte what it was.
 
 - A selected season reads as game logs' `season_filter` does: the Published
@@ -2548,8 +2548,8 @@ rules. Without `season` every response is byte for byte what it was.
   ready serves its previous season labelled `prior_season` and is listed in
   `trailing` with its `team_games` sample.
 - The response adds `season_context: {selected_season, published_season}`.
-  `/api/players/profile`, whose body can be an array, instead answers
-  `{data: <today's body>, season_context, trailing}`, `trailing` naming each
+  `/api/players/profile` and `/api/teams/stats`, whose bodies can be arrays,
+  instead answer `{data: <today's body>, season_context, trailing}`, `trailing` naming each
   family the body's facts were read from that serves an earlier season (empty
   when none does). Game logs, both Matchups and the Slate also list
   `trailing`; slate edges list the trailing families of the Matchups they
@@ -2585,7 +2585,7 @@ rules. Without `season` every response is byte for byte what it was.
 - A malformed `season` is `400 invalid_input` (`details.parameters:
   ["season"]`). A season not offered is `503 season_unavailable` with
   `details: {selected_season, published_season}`.
-- The Slate, slate edges and profile also answer anonymous callers. One
+- The Slate, slate edges, profile and team stats also answer anonymous callers. One
   without a valid token may name the Published Season or an earlier one; a
   later season is `503 season_unavailable` before anything is read or cached,
   as for a [game-log preview](#get-game-log-preview-image).
@@ -3640,6 +3640,11 @@ Query parameters:
 - `team`: full team name, such as `Los Angeles Lakers`.
 - `category`: `Traditional`, `Playtypes`, `Playtype Points`, `Assists`, `Zone Shooting`, or `Shooting Type`.
 - `date`: accepted and ignored.  Rankings are always whole-season.
+- `season`: optional Evidence season; see [Evidence season](#evidence-season).
+  With it the body is `{data, season_context, trailing}`, read from one
+  capture of the category's Season stream. Opponent streams are the
+  `team_defense` family, so `trailing` is empty once every team has played a
+  game. An empty `data` is `200`, not `404`.
 
 Example:
 
