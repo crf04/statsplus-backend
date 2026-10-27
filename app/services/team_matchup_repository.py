@@ -8,6 +8,7 @@ from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime
+from functools import lru_cache
 from math import isfinite
 from zoneinfo import ZoneInfo
 
@@ -1283,8 +1284,13 @@ def _game_ids_json(game_ids: tuple[str, ...]) -> str | None:
     return json.dumps(sorted(game_ids), separators=(",", ":"))
 
 
+@lru_cache(maxsize=4096)
 def _parse_game_ids(value: str | None) -> tuple[str, ...]:
-    """Parse a stored game-id lineage column back to a tuple."""
+    """Parse a stored game-id lineage column back to a tuple.
+
+    Memoized: a snapshot's facts repeat one lineage string per team, and the
+    same snapshot is read again by every Matchup (crf04/statsplus-backend#612).
+    """
 
     if not value:
         return ()
@@ -1305,8 +1311,9 @@ def _source_observation_ids_json(observation_ids: tuple[str, ...]) -> str | None
     return json.dumps(sorted(set(observation_ids)), separators=(",", ":"))
 
 
+@lru_cache(maxsize=4096)
 def _parse_source_observation_ids(value: str | None) -> tuple[str, ...]:
-    """Parse source-observation lineage, failing closed for legacy rows."""
+    """Parse source-observation lineage, failing closed for legacy rows (memoized like game ids)."""
 
     if not value:
         return ()

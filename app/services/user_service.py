@@ -8,7 +8,6 @@ including creating, updating, and retrieving user information.
 import logging
 import re
 from datetime import UTC, datetime, timedelta
-from math import isfinite
 from typing import Any
 
 from flask import g, has_request_context
@@ -21,7 +20,8 @@ from app.domain.nba_teams import (
     canonical_nba_team_abbreviation,
 )
 from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
-from app.domain.target_statistics import validate_stat_preferences
+from app.domain.player_position import POSITION_GROUPS
+from app.domain.target_statistics import TARGET_STAT_KEYS, validate_stat_preferences
 from app.errors import (
     ConflictError,
     InvalidAttributionError,
@@ -46,6 +46,8 @@ from app.models.saved_filter_set import (
     SAVED_FILTER_SET_QUERY_STRING_MAX_LENGTH,
 )
 from app.models.target import (
+    POSITION_QUALIFIER_BASE,
+    SEASON_AVERAGE_QUALIFIER_BASE,
     TARGET_COMPARATORS,
     TARGET_NOTE_MAX_LENGTH,
     derive_target_title,
@@ -262,6 +264,17 @@ _TARGET_QUALIFIER_MESSAGE = (
     "A qualifier needs a known diet base, a slice of that base, a comparator "
     "of at_or_above or at_or_below, and a threshold share between 0 and 1."
 )
+_TARGET_POSITION_QUALIFIER_MESSAGE = (
+    "A position qualifier needs a non-empty list of distinct groups from Guard, Wing and Big."
+)
+#: No season average or per-36 rate comes near this, and it keeps ten Average
+#: signatures inside the stored signature column.
+TARGET_AVERAGE_THRESHOLD_MAX = 1000
+_TARGET_AVERAGE_QUALIFIER_MESSAGE = (
+    "An average qualifier needs a known stat, a comparator of at_or_above or "
+    f"at_or_below, and a finite threshold from 0 to {TARGET_AVERAGE_THRESHOLD_MAX}."
+)
+_TARGET_SECOND_POSITION_MESSAGE = "A target may hold at most one position qualifier."
 
 
 def _validated_target_opponent(value: Any) -> str:
@@ -286,10 +299,52 @@ def _validated_target_threshold(value: Any) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise InvalidInputError(_TARGET_QUALIFIER_MESSAGE)
 
-    threshold = float(value)
-    if not isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+    # Compared as given: an integer too large for a float must be refused,
+    # not raise OverflowError, and NaN fails the chain.
+    if not 0 <= value <= 1:
         raise InvalidInputError(_TARGET_QUALIFIER_MESSAGE)
-    return threshold
+    return float(value)
+
+
+def _validated_position_qualifier(value: dict[str, Any]) -> dict[str, Any]:
+    groups = value.get("groups")
+    if (
+        not isinstance(groups, list)
+        or not groups
+        or any(not isinstance(group, str) or group not in POSITION_GROUPS for group in groups)
+        or len(set(groups)) != len(groups)
+    ):
+        raise InvalidInputError(_TARGET_POSITION_QUALIFIER_MESSAGE)
+    # Stored in the groups' own order, so a set has one representation.
+    return {
+        "base": POSITION_QUALIFIER_BASE,
+        "groups": [group for group in POSITION_GROUPS if group in groups],
+    }
+
+
+def _validated_average_qualifier(value: dict[str, Any]) -> dict[str, Any]:
+    stat = value.get("stat")
+    comparator = value.get("comparator")
+    threshold = value.get("threshold")
+    if (
+        not isinstance(stat, str)
+        or stat not in TARGET_STAT_KEYS
+        or not isinstance(comparator, str)
+        or comparator not in TARGET_COMPARATORS
+        or isinstance(threshold, bool)
+        or not isinstance(threshold, (int, float))
+        # Compared as given, never through ``float``: an integer too large for
+        # a float is refused here instead of raising OverflowError, and NaN
+        # fails the chain.
+        or not 0 <= threshold <= TARGET_AVERAGE_THRESHOLD_MAX
+    ):
+        raise InvalidInputError(_TARGET_AVERAGE_QUALIFIER_MESSAGE)
+    return {
+        "base": SEASON_AVERAGE_QUALIFIER_BASE,
+        "stat": stat,
+        "comparator": comparator,
+        "threshold": float(threshold),
+    }
 
 
 def _validated_target_qualifier(value: Any) -> dict[str, Any]:
@@ -299,6 +354,10 @@ def _validated_target_qualifier(value: Any) -> dict[str, Any]:
         raise InvalidInputError(_TARGET_QUALIFIER_MESSAGE)
 
     base = value.get("base")
+    if base == POSITION_QUALIFIER_BASE:
+        return _validated_position_qualifier(value)
+    if base == SEASON_AVERAGE_QUALIFIER_BASE:
+        return _validated_average_qualifier(value)
     if not isinstance(base, str) or base not in PLAYER_DIET_QUALIFIER_SLICES:
         raise InvalidInputError(_TARGET_QUALIFIER_MESSAGE)
 
@@ -331,6 +390,8 @@ def _validated_target_qualifiers(value: Any) -> list[dict[str, Any]]:
         raise InvalidInputError(f"A target may hold at most {TARGET_QUALIFIER_LIMIT} qualifiers.")
 
     qualifiers = [_validated_target_qualifier(item) for item in value]
+    if sum(qualifier["base"] == POSITION_QUALIFIER_BASE for qualifier in qualifiers) > 1:
+        raise InvalidInputError(_TARGET_SECOND_POSITION_MESSAGE)
     # Compared through the same part the stored signature is built from, so a
     # repeat within one request means exactly what a duplicate across two does.
     identities = [target_qualifier_part(qualifier) for qualifier in qualifiers]

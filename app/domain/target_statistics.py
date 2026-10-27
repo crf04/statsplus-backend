@@ -26,6 +26,15 @@ _TWO_POINT_ZONE_DEFAULTS = ("PTS", "PTS/36", "FG2A", "FG2A/36")
 _THREE_POINT_ZONE_DEFAULTS = ("PTS", "PTS/36", "3PA", "3PA/36")
 _SHOT_TYPE_DEFAULTS = ("PTS", "PTS/36", "FGA", "FGA/36")
 _ASSIST_LOCATION_DEFAULTS = ("AST", "AST/36")
+#: What a Target shows when no Qualifier names a Diet slice to describe, so a
+#: Position-only or Average-only Target still has columns to read.
+_PLAYER_RULE_DEFAULTS = ("PTS", "PTS/36")
+#: The columns the Backtest reads per game: the governed markets (``3PA`` is the
+#: display spelling of ``FG3A``) and their per-36 rates.  An Average Qualifier
+#: adds its own stat only where the Backtest can read it per game.
+_DISPLAYABLE_STATS = frozenset(
+    {"PTS", "REB", "AST", "3PM", "3PA", "FG2A", "FGA", "STL", "BLK", "TOV", "PA", "PR", "RA", "PRA"}
+)
 
 
 def target_default_stat_columns(base: str, slice_key: str) -> tuple[str, ...]:
@@ -54,13 +63,119 @@ def target_stat_columns(
 
     columns: list[str] = []
     for qualifier in qualifiers:
-        for column in target_default_stat_columns(
-            str(qualifier.get("base", "")),
-            str(qualifier.get("slice_key", "")),
-        ):
+        if qualifier.get("base") == "season_average":
+            stat = str(qualifier.get("stat", ""))
+            candidates = (stat,) if stat.removesuffix("/36") in _DISPLAYABLE_STATS else ()
+        else:
+            candidates = target_default_stat_columns(
+                str(qualifier.get("base", "")),
+                str(qualifier.get("slice_key", "")),
+            )
+        for column in candidates:
             if column not in columns:
                 columns.append(column)
-    return tuple(columns)
+    return tuple(columns) or _PLAYER_RULE_DEFAULTS
+
+
+#: The box-score totals a season stat is read from, by the names the Backtest's
+#: ``season_totals`` carries.
+_COMBINATIONS = {
+    "PA": ("PTS", "AST"),
+    "PR": ("PTS", "REB"),
+    "RA": ("REB", "AST"),
+    "PRA": ("PTS", "REB", "AST"),
+    "SB": ("STL", "BLK"),
+}
+_BOX_TOTALS = {
+    "PTS": "points",
+    "REB": "rebounds",
+    "AST": "assists",
+    "3PM": "threes_made",
+    "3PA": "threes_attempted",
+    "FGM": "field_goals_made",
+    "FGA": "field_goals_attempted",
+    "FTM": "free_throws_made",
+    "FTA": "free_throws_attempted",
+    "STL": "steals",
+    "BLK": "blocks",
+    "TOV": "turnovers",
+    "OREB": "offensive_rebounds",
+    "DREB": "defensive_rebounds",
+    "PF": "fouls",
+    "MIN": "minutes",
+}
+
+
+#: The Backtest's box-score field names and the game-log record attribute each
+#: one sums.
+BOX_FIELD_ATTRIBUTES = {
+    "points": "points",
+    "rebounds": "rebounds",
+    "assists": "assists",
+    "field_goals_made": "field_goals_made",
+    "field_goals_attempted": "field_goals_attempted",
+    "threes_made": "three_pointers_made",
+    "threes_attempted": "three_pointers_attempted",
+    "free_throws_made": "free_throws_made",
+    "free_throws_attempted": "free_throws_attempted",
+    "steals": "steals",
+    "blocks": "blocks",
+    "turnovers": "turnovers",
+    "offensive_rebounds": "offensive_rebounds",
+    "defensive_rebounds": "defensive_rebounds",
+    "fouls": "personal_fouls",
+    "minutes": "minutes",
+}
+
+
+def _ratio(numerator: float, denominator: float, multiplier: float = 1.0) -> float | None:
+    return numerator / denominator * multiplier if denominator > 0 else None
+
+
+def _total(stat: str, totals: Mapping[str, float]) -> float:
+    """One stat summed over a span: a box total, a combination or FG2A."""
+
+    if stat in _COMBINATIONS:
+        return sum(_total(part, totals) for part in _COMBINATIONS[stat])
+    if stat == "FG2A":
+        return totals["field_goals_attempted"] - totals["threes_attempted"]
+    return totals[_BOX_TOTALS[stat]]
+
+
+def season_stat(stat: str, totals: Mapping[str, float], games: int) -> float | None:
+    """Return a Target stat column over a season, from its box-score totals.
+
+    The same arithmetic the web app applies to ``season_totals``: a counting
+    stat is a per-game average, a /36 stat is the rate over total minutes, and
+    an efficiency stat is a ratio of totals (percentages scaled to 0-100).
+    ``None`` when the span has nothing to divide by.
+    """
+
+    if stat.endswith("/36"):
+        return _ratio(_total(stat[:-3], totals), totals["minutes"], 36.0)
+    if stat == "FG%":
+        return _ratio(totals["field_goals_made"], totals["field_goals_attempted"], 100.0)
+    if stat == "3P%":
+        return _ratio(totals["threes_made"], totals["threes_attempted"], 100.0)
+    if stat == "TS%":
+        return _ratio(
+            totals["points"],
+            2 * (totals["field_goals_attempted"] + 0.44 * totals["free_throws_attempted"]),
+            100.0,
+        )
+    if stat == "PTS/FGA":
+        return _ratio(totals["points"], totals["field_goals_attempted"])
+    return _ratio(_total(stat, totals), games)
+
+
+def season_average_value(stat: str, records: Sequence[object]) -> float | None:
+    """Return a Target stat column over a player's game-log records, or ``None``."""
+
+    totals = {
+        field: sum(getattr(record, attribute) for record in records)
+        for field, attribute in BOX_FIELD_ATTRIBUTES.items()
+    }
+    return season_stat(stat, totals, len(records))
 
 
 def validate_stat_preferences(value):

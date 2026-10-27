@@ -420,3 +420,105 @@ def test_a_slate_refusal_from_the_preview_keeps_its_own_error_envelope(
             "message": "The slate date must use YYYY-MM-DD.",
         }
     }
+
+
+def test_a_preview_applies_position_and_average_qualifiers_to_the_season_and_to_tonight():
+    league_logs, league_diets, league_catalog = bt._player_rules_league()
+    tonight_logs = bt.FakeLogs(
+        rows=[
+            row
+            for pid, attempts in {1: [8, 8], 2: [1, 1], 3: [9, 9]}.items()
+            for row in res._season_log(pid, attempts)
+        ]
+    )
+    reader = AdvancingPublicationReader()
+    matchups = SnapshotMatchups(res._rules_matchup())
+    draft = {
+        "opponent": "OKC",
+        "title": "OKC vs Wing/Big, 3PA avg ≥ 6",
+        "note": None,
+        "qualifiers": [bt.WING_BIG, bt._average("3PA", 6)],
+    }
+    service = TargetPreviewService(
+        backtests=TargetBacktestService(
+            targets=object(),
+            player_logs=league_logs,
+            player_diets=league_diets,
+            statistic_catalog=StatisticCatalog.load_default(),
+            settings=SETTINGS,
+            publication_reader=reader,
+            athlete_catalog=league_catalog,
+        ),
+        resolutions=TargetResolutionService(
+            targets=object(),
+            slates=res.FakeSlate(),
+            matchups=matchups,
+            settings=SETTINGS,
+            player_logs=tonight_logs,
+            athlete_catalog=bt.FakeCatalog({1: "Wing", 2: "Big", 3: None}),
+        ),
+        matchups=matchups,
+        injuries=None,
+        settings=SETTINGS,
+        publication_reader=reader,
+    )
+
+    payload = service.preview(draft)
+
+    assert [(player["name"], player["position"]) for player in payload["players"]] == [
+        ("Jayson Tatum", "Wing")
+    ]
+    assert payload["summary"]["players_without_position"] == 1
+    assert payload["today"]["fit_count"] == 1
+    # Tonight's average is read from the preview's one generation.
+    assert tonight_logs.snapshots == ["generation-1"] * len(tonight_logs.snapshots)
+    assert tonight_logs.snapshots
+
+
+@pytest.mark.parametrize(
+    "qualifiers",
+    [
+        [{"base": "position", "groups": []}],
+        [{"base": "season_average", "stat": "3PA", "comparator": "at_or_above", "threshold": -1}],
+        [
+            {"base": "position", "groups": ["Big"]},
+            {"base": "position", "groups": ["Wing"]},
+        ],
+    ],
+)
+def test_the_preview_route_refuses_an_unusable_position_or_average(
+    client, authenticate, preview_services, qualifiers
+):
+    headers = authenticate()
+
+    response = _preview(client, headers, {"opponent": "OKC", "qualifiers": qualifiers})
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["code"] == "invalid_input"
+    preview_services.target_preview_service.preview.assert_not_called()
+
+
+def test_the_preview_route_hands_a_position_and_an_average_to_the_preview_validated(
+    client, authenticate, preview_services
+):
+    headers = authenticate()
+
+    response = _preview(
+        client,
+        headers,
+        {
+            "opponent": "okc",
+            "qualifiers": [
+                {"base": "season_average", "stat": "3PA", "comparator": "at_or_above", "threshold": 0.3},
+                {"base": "position", "groups": ["Big", "Wing"]},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    draft = preview_services.target_preview_service.preview.call_args.args[0]
+    assert draft["title"] == "OKC vs Wing/Big, 3PA avg ≥ 0.3"
+    assert draft["qualifiers"] == [
+        {"base": "season_average", "stat": "3PA", "comparator": "at_or_above", "threshold": 0.3},
+        {"base": "position", "groups": ["Wing", "Big"]},
+    ]

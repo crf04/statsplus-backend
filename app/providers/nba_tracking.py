@@ -56,12 +56,21 @@ class NBATrackingProvider:
         An empty mapping means the game's tracking is not published yet.
         """
 
-        from nba_api.stats.endpoints import BoxScorePlayerTrackV3
+        from nba_api.stats.library.http import NBAStatsHTTP
 
+        # The raw response, not the BoxScorePlayerTrackV3 endpoint class: that
+        # class parses on construction and raises AttributeError on an
+        # unpublished game (no players, null team statistics), which this
+        # parser reads as "not published yet".
         payload = self._call(
-            lambda: BoxScorePlayerTrackV3(
-                game_id=game_id, headers=_standard_headers(), timeout=self.timeout
-            ).get_dict()
+            lambda: NBAStatsHTTP()
+            .send_api_request(
+                endpoint="boxscoreplayertrackv3",
+                parameters={"GameID": game_id},
+                headers=_standard_headers(),
+                timeout=self.timeout,
+            )
+            .get_dict()
         )
         return parse_box_score_player_track(payload)
 

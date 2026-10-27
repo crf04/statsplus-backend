@@ -5130,7 +5130,36 @@ item with either key or both and returns `200` with the same single-item
 envelope. `DELETE` returns
 `{"success": true, "message": "Target deleted"}`.
 
-A Qualifier is `{"base", "slice_key", "comparator", "threshold"}`:
+A Qualifier is any rule a player must meet to fit the Target: a Diet share, a
+Position, or a season average. `base` says which, and the object is one of
+three shapes:
+
+```jsonc
+// Diet
+{"base": "shot_zones|play_types|shot_types|assist_locations", "slice_key": "Corner 3", "comparator": "at_or_above|at_or_below", "threshold": 0.4}
+// Position
+{"base": "position", "groups": ["Wing", "Big"]}
+// Average
+{"base": "season_average", "stat": "3PA", "comparator": "at_or_above", "threshold": 0.3}
+```
+
+- A **Position** names a non-empty set of distinct groups from `Guard`, `Wing`
+  and `Big`. A Target holds at most one. Groups are stored and returned in
+  `Guard`, `Wing`, `Big` order whatever order was sent. A player's group is
+  NBA.com's listed position for the season, mapped by a fixed rule: `G` is
+  Guard; `G-F`, `F-G` and `F` are Wing; `F-C`, `C-F` and `C` are Big; any other
+  or empty value is no Position. A player with no Position never fits a
+  Position Qualifier.
+- An **Average** reads the player's Regular Season average of one Target stat
+  column (`stat` is any key of the stat catalogue, raw or `/36`, for example
+  `3PA` or `3PA/36`), with the same two comparators, both inclusive. Its
+  `threshold` is a number from 0 to 1000; it is not a share, so the 0-1
+  limit does not apply. Counting stats are per game, `/36` stats are rates over
+  total minutes, and efficiency stats (`FG%`, `3P%`, `TS%`, `PTS/FGA`) are
+  ratios of season totals, percentages scaled to 0-100. It is read from the same
+  season as the Diet shares.
+
+The rest of this list describes a Diet Qualifier:
 
 - `base` is one of the player diet bases: `assist_locations`, `play_types`,
   `shot_types`, `shot_zones`.
@@ -5150,8 +5179,11 @@ The `title` is always derived and is never submitted or stored: the opponent
 tricode, `vs`, then each Qualifier as its slice label, the comparator symbol
 (`≥` or `≤`), and the threshold as a percentage, comma-separated in the order
 the author entered them. Percentages drop a trailing `.0`, so `0.4` reads as
-`40%` and `0.405` reads as `40.5%`. Editing the Qualifiers changes the title;
-editing the note never does.
+`40%` and `0.405` reads as `40.5%`. A Position reads first as its groups joined
+by `/` (`Wing/Big`), and an Average as `<stat> avg <symbol> <threshold>` at the
+threshold's own precision, trailing zeros trimmed (`3PA avg ≥ 0.3`, `0.004`), so `MEM vs Wing/Big, Corner 3 ≥ 40%, 3PA
+avg ≥ 0.3`. Editing the Qualifiers changes the title; editing the note never
+does.
 
 `slice_key` is provider vocabulary and is what gets stored; the title renders
 its label instead. The backend holds one source for this mapping
@@ -5194,15 +5226,18 @@ Validation and conflicts:
 - `400 invalid_input` for an opponent that is not an NBA team, an empty or
   missing `qualifiers` list, more than 10 Qualifiers, a repeated Qualifier, an
   unknown base or slice, a comparator outside the two accepted values, a
-  threshold outside 0-1, a note over 280 characters, and a `PATCH` body that
+  Diet threshold outside 0-1, empty, repeated or unknown Position `groups`, a
+  second Position Qualifier, an unknown Average `stat`, a negative, non-finite,
+  above-1000 or non-numeric Average threshold, a note over 280 characters, and a `PATCH` body that
   changes none of Qualifiers, note, Conditions, or stat preferences. Invalid
   Conditions and stat preferences also return `400 invalid_input`; their
   schemas and validation are documented below.
 - `404 resource_not_found` for an id that does not exist or belongs to another
   account. Foreign ids are never reported as `403`.
 - `409 operation_conflict` when the account already aims the same Qualifier set
-  at the same opponent -- the set is compared order-insensitively, so
-  reordering does not create a second Target -- and when the account already
+  at the same opponent -- the set is compared order-insensitively (and Position
+  groups as a set, Average thresholds to two decimals), so reordering does not
+  create a second Target -- and when the account already
   holds its cap of 50 Targets.
 
 #### Resolve every Target against one Slate Date
@@ -5393,7 +5428,8 @@ side the Target aims at. Exactly one of `away`/`home` equals `opponent` and the
 other equals `opposing_team`; which way round depends on where the opponent is
 playing, so neither pair can be derived from the other.
 
-`context` is one entry per Qualifier, in the Target's own Qualifier order, and
+`context` is one entry per Qualifier of every kind, in the Target's own Qualifier order
+(a Position or Average entry has `slice_key`, `label` and `availability` null and `metrics` empty), and
 is empty for an idle Target -- a Defense Sheet window is read for a game, and
 an idle opponent has none. Each entry carries every Defense Sheet row for that
 Base and slice, with the opponent's window values, the league's, and the
@@ -5429,9 +5465,16 @@ Matchup's own order (Season scoring descending, canonical id breaking ties).
   `share <= threshold`.
 - A player with no stored fact for a Qualifier's slice does not fit: an absent
   share is unjudged, not a share of zero.
-- `shares` is one entry per Qualifier, in the Target's Qualifier order, holding
-  the player's Season `share` for that slice and its `league_average_share`.
-  Both are the unthresholded Matchup values.
+- A Position Qualifier fits a player whose Position is one of its groups; a
+  player with no Position never fits. An Average Qualifier is judged on the
+  player's Regular Season log; a player with none does not fit. A player whose
+  season is under the Matchup's minimum number of games is flagged `thin`, as a
+  thin Diet is, and kept.
+- `position` on every player is `"Guard"`, `"Wing"`, `"Big"` or `null`.
+- `shares` is one entry per Qualifier of every kind, in the Target's Qualifier
+  order, holding the player's Season `share` for that slice and its
+  `league_average_share` (unthresholded Matchup values). A Position or Average
+  entry is `{base, slice_key: null, share: null, league_average_share: null}`.
 - `thin` is the Matchup's own `diet_thin` verdict for the Bases this Target's
   Qualifiers name, so the flag here and the flag there are one value. It is
   `true` when **any** named Base is thin, since a fit resting on one unusable
@@ -5611,7 +5654,10 @@ box-score markets. Read `"PTS": 30` as thirty points, never as thirty corner
 threes.
 
 `stat_columns` is the union of the approved default columns for each
-Qualifier, deduplicated and in the Target's own Qualifier order.
+Qualifier, deduplicated and in the Target's own Qualifier order. An Average
+Qualifier adds its own stat when the Backtest can read it per game (the box
+score markets and their `/36` rates); a Target with no column that way
+(a Position-only Target, or an Average on `FG%`) shows `PTS` and `PTS/36`.
 `season_averages` and every game's `stats` carry exactly these columns, in this
 order.
 
@@ -5629,6 +5675,8 @@ derived from `FGA - 3PA`, and `3PA` is the Target display spelling for governed
 | `play_types` | the play's box score | `Transition` -> `PTS`, `FGA`, `PTS/36`, `FGA/36` |
 | `shot_types` | the shot type's attempts | `Catch and Shoot` -> `PTS`, `PTS/36`, `FGA`, `FGA/36` |
 | `assist_locations` | the slice's assists | `Corner3Assists` -> `AST`, `AST/36` |
+| `season_average` | the averaged stat itself, where readable per game | `3PA` -> `3PA`; `3PA/36` -> `3PA/36` |
+| `position` | none | `PTS`, `PTS/36` when no other Qualifier names columns |
 
 `summary` reduces every game listed below to one line per stat column, so the
 number that moves when a threshold moves is one glance away and the saved
@@ -5666,8 +5714,19 @@ scoring descending, canonical id breaking ties.
   backtest drops them, because a season-long production claim resting on an
   unusable Diet is worse than no claim. See `diet_thin` under
   [Get Matchup](#get-matchup) for what makes a Base thin.
-- `shares` is one entry per Qualifier, in Qualifier order, with the player's
-  Season `share` for the slice and its `league_average_share`.
+- A Position Qualifier lists only players whose Position is one of its
+  groups. A player with no Position never fits, and `summary.players_without_position`
+  (present only when the Target holds a Position Qualifier) counts the players
+  who met every other Qualifier but were left out for that reason. Positions
+  are read from the athlete catalog for the Backtest's own season.
+- An Average Qualifier is judged on the player's whole Regular Season (not only
+  the games against this opponent), and a player whose season is under the
+  Matchup's minimum number of games is left out under the same thin rule as a
+  Diet share. A Target with no Diet Qualifier reads no Diet at all.
+- `shares` is one entry per Qualifier of every kind, in Qualifier order, with
+  the player's Season `share` and `league_average_share` for a Diet slice and
+  nulls for a Position or Average entry.
+- `position` on every player is `"Guard"`, `"Wing"`, `"Big"` or `null`.
 - Identity (`name`, `team_id`, `tricode`) is the player's identity **as of the
   most recent game against this opponent**, not necessarily their current team:
   a trade after that meeting is not reflected here. `season_scoring` is their
