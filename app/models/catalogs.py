@@ -103,6 +103,8 @@ SUPPORTED_SELF_FILTER_STATS: tuple[str, ...] = (
     "STKS",
     "FD_PTS",
     "USG_PCT",
+    "REB_CHANCES",
+    "POTENTIAL_AST",
 )
 
 

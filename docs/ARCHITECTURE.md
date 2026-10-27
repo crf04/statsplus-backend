@@ -5447,6 +5447,32 @@ service and is also the season backfill. `RotationService` serves
 `GET /api/games/rotation`, computing every average and comparison from the
 stored centiseconds.
 
+### Player tracking (crf04/statsplus#349)
+
+`player_game_tracking` (migration 078, `app/models/player_tracking.py`) holds
+NBA.com rebound chances (total, offensive, defensive) and potential assists per
+(game, player), all nullable, with the season, game date and fetch time. It is a
+plain table outside the publication pipeline: tracking arrives separately from
+the box score and can lag it by hours, so it never holds up or alters ledger
+checksums or publications. `StoredGameLogsSource` joins it onto game-log rows by
+(game, player) when Game Logs is read; no stored row serves `null`, never `0`.
+Game Logs responses are not cached, so a row gains its values on the first read
+after collection (only the link-preview card facts cache for an hour).
+
+`app/providers/nba_tracking.py` fetches `boxscoreplayertrackv3` (one call per
+game) and the `leaguedashptstats` Passing day feed (one call per game day) with
+`nba_api`'s `STATS_HEADERS`, retrying empty bodies and timeouts. The `Rebounding`
+day feed is not used: it omits every player with 0 rebounds.
+`PlayerTrackingCollectionService` collects each completed regular-season Event
+Catalog game with no stored rows, oldest first, and stores a game only once both
+feeds have published for it (the box score has a player with minutes and the day
+feed lists one of them); otherwise the game is reported as `not_published` and a
+later run retries it. A player missing from the day feed stores
+`potential_ast = NULL`. `PlayerTrackingRepository.replace_game` rewrites one game
+in a single transaction and writes nothing when the values are unchanged, so
+reruns leave identical rows. `scripts/tracking_refresh.py` is the nightly step
+(`railway.tracking.json`, 10:30 and 14:30 UTC) and the season backfill.
+
 ### Season player stats (crf04/statsplus#277)
 
 `player_season_stats` (migration 074, `app/models/player_season_stats.py`) holds

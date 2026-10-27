@@ -129,6 +129,7 @@ from .player_game_log import (  # noqa: E402
 )
 from .player_pool_snapshot import PlayerPoolSnapshot  # noqa: E402
 from .player_season_stats import PlayerSeasonStats  # noqa: E402
+from .player_tracking import PlayerGameTracking  # noqa: E402
 from .projection_archive import (  # noqa: E402
     ClosingProjectionMembership,
     ClosingProjectionSet,
@@ -208,6 +209,7 @@ __all__ = [
     "PlayerGameLog",
     "PlayerGameLogRefresh",
     "PlayerGameLogSync",
+    "PlayerGameTracking",
     "PlayerPoolSnapshot",
     "PlayerSeasonStats",
     "ProjectionArchiveScopeLock",

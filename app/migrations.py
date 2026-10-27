@@ -2009,6 +2009,17 @@ def _create_rotation_tables(connection: Connection) -> None:
         model.__table__.create(connection, checkfirst=True)
 
 
+def _create_player_game_tracking_table(connection: Connection) -> None:
+    """Create the player-tracking table (crf04/statsplus-backend#604).
+
+    Repeatable: ``checkfirst`` skips an existing table and never touches its
+    rows.  Nothing is backfilled; ``scripts/tracking_refresh.py`` fills a season.
+    """
+    from app.models.player_tracking import PlayerGameTracking
+
+    PlayerGameTracking.__table__.create(connection, checkfirst=True)
+
+
 def _create_player_season_stats_table(connection: Connection) -> None:
     """Create the season player stats table (crf04/statsplus-backend#509).
 
@@ -3162,6 +3173,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     ),
     Migration(76, "076_create_reports", _create_reports_table),
     Migration(77, "077_user_public_handle", _add_user_public_handle),
+    Migration(78, "078_player_game_tracking", _create_player_game_tracking_table),
 )
 
 
