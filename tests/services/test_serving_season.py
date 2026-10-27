@@ -16,6 +16,7 @@ from app.services.serving_season import (
 
 TEAMS = sorted(NBA_TEAM_ID_TO_TRICODE)
 EVERY_TEAM_PLAYS_10 = "every team has played 10 games"
+EVERY_TEAM_PLAYS_ONE = "every team has played a game"
 
 
 def _games(per_team):
@@ -40,8 +41,8 @@ def test_the_readiness_rules_name_each_familys_streams_and_threshold():
                 "rebound_types_season",
                 "traditional_opponent_season",
             ],
-            10,
-            EVERY_TEAM_PLAYS_10,
+            1,
+            EVERY_TEAM_PLAYS_ONE,
         ),
         "synergy": (
             ["synergy_play_types", "synergy_play_types_opponent_season"],
@@ -62,16 +63,33 @@ def test_the_readiness_rules_name_each_familys_streams_and_threshold():
     }
 
 
-def test_a_rule_holds_once_all_thirty_teams_have_played_ten_games():
-    rule = readiness_rule("traditional_opponent_season")
+def test_player_diets_and_synergy_hold_once_all_thirty_teams_have_played_ten_games():
+    for stream in ("grouped_shot_types", "synergy_play_types"):
+        rule = readiness_rule(stream)
 
-    assert rule.holds(_games(dict.fromkeys(TEAMS, 10))) is True
-    assert rule.holds(_games({**dict.fromkeys(TEAMS, 12), TEAMS[7]: 9})) is False
-    assert rule.holds(_games(dict.fromkeys(TEAMS[1:], 10))) is False
-    assert rule.holds({}) is False
+        assert rule.holds(_games(dict.fromkeys(TEAMS, 10))) is True
+        assert rule.holds(_games({**dict.fromkeys(TEAMS, 12), TEAMS[7]: 9})) is False
+        assert rule.holds(_games(dict.fromkeys(TEAMS[1:], 10))) is False
+        assert rule.holds({}) is False
     # The cutover family and a stream in no family never wait.
     assert readiness_rule("player_game_logs").holds({}) is True
     assert readiness_rule("event_catalog") is None
+
+
+def test_team_defense_holds_once_all_thirty_teams_have_played_a_game():
+    for stream in (
+        "traditional_opponent_season",
+        "grouped_shot_types_opponent_season",
+        "exact_shot_zones_opponent_season",
+        "assist_locations_season",
+        "rebound_types_season",
+    ):
+        rule = readiness_rule(stream)
+
+        assert rule.holds(_games(dict.fromkeys(TEAMS, 1))) is True
+        assert rule.holds(_games({**dict.fromkeys(TEAMS, 1), TEAMS[7]: 0})) is False
+        assert rule.holds(_games(dict.fromkeys(TEAMS[1:], 3))) is False
+        assert rule.holds({}) is False
 
 
 def test_only_a_trailing_family_serves_the_season_just_before():
@@ -103,7 +121,7 @@ def test_trailing_lists_each_family_with_a_prior_season_read_once_in_table_order
     ]
 
     assert trailing(reads) == [
-        {"family": "team_defense", "serving_season": "2025-26", "rule": EVERY_TEAM_PLAYS_10},
+        {"family": "team_defense", "serving_season": "2025-26", "rule": EVERY_TEAM_PLAYS_ONE},
         {
             "family": "synergy",
             "serving_season": "2025-26",

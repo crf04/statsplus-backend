@@ -571,7 +571,7 @@ site only through one operator Season Cutover, never by composition alone.
 | --- | --- | --- |
 | `game_logs` | `player_game_logs`, `player_per36` | At the Season Cutover |
 | `player_diets` | `grouped_shot_types`, `exact_shot_zones`, `player_assist_locations`, `player_rebound_types` | Every team has played at least 10 games |
-| `team_defense` | `traditional_opponent_season`, `grouped_shot_types_opponent_season`, `exact_shot_zones_opponent_season`, `assist_locations_season`, `rebound_types_season` | Every team has played at least 10 games |
+| `team_defense` | `traditional_opponent_season`, `grouped_shot_types_opponent_season`, `exact_shot_zones_opponent_season`, `assist_locations_season`, `rebound_types_season` | Every team has played at least one game (crf04/statsplus#350) |
 | `synergy` | `synergy_play_types`, `synergy_play_types_opponent_season` | A candidate of the season exists (NBA has published) and every team has played at least 10 games |
 | `last_15` | the five `*_l15` streams | At its first composition in the season (unchanged until crf04/statsplus-backend#548) |
 

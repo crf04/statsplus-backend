@@ -83,8 +83,8 @@ READINESS_RULES: tuple[ReadinessRule, ...] = (
                 "rebound_types_season",
             }
         ),
-        min_team_games=10,
-        wording="every team has played 10 games",
+        min_team_games=1,
+        wording="every team has played a game",
     ),
     # A Synergy candidate exists only once NBA has published the season, so
     # the composition being gated is itself the first half of the rule.

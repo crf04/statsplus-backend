@@ -947,7 +947,7 @@ DIETS_TRAILING = {
 DEFENSE_TRAILING = {
     "family": "team_defense",
     "serving_season": "2025-26",
-    "rule": "every team has played 10 games",
+    "rule": "every team has played a game",
 }
 
 
