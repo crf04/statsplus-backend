@@ -336,20 +336,25 @@ def test_the_refresh_script_runs_the_collector_for_each_season_and_exits_1_on_a_
     ]
 
 
-class UnpublishedFeeds:
-    """Serves the recorded Walter game for ``TOR_GAME`` and an unpublished box score for any other."""
+class UnavailableFeeds:
+    """Serves the recorded Walter game for ``TOR_GAME``; any other game fails as ``outcome`` says."""
 
-    def __init__(self):
+    def __init__(self, outcome):
+        self.outcome = outcome
         self.requested = []
 
     def fetch_game_rebound_chances(self, game_id):
         self.requested.append(game_id)
         if game_id == TOR_GAME:
             return _provider_box(TOR_GAME)
-        return {WALTER: {"minutes": 0, "total": 0, "offensive": 0, "defensive": 0}}
+        if self.outcome == "failed_fetch":
+            raise ProviderResponseError("boxscoreplayertrackv3 is down")
+        minutes = 0 if self.outcome == "unpublished_box" else 1800
+        return {WALTER: {"minutes": minutes, "total": 0, "offensive": 0, "defensive": 0}}
 
     def fetch_day_potential_assists(self, season, day):
-        return {WALTER: 2}
+        # The empty Passing feed: nothing is listed for the unavailable games' days.
+        return {WALTER: 2} if day == DAY else {}
 
 
 def _provider_box(game_id):
@@ -358,14 +363,15 @@ def _provider_box(game_id):
     return parse_box_score_player_track(_box(game_id))
 
 
-def test_games_that_never_publish_cannot_starve_a_newer_available_game(tmp_path):
+@pytest.mark.parametrize("outcome", ["unpublished_box", "failed_fetch", "empty_passing_feed"])
+def test_games_that_never_publish_cannot_starve_a_newer_available_game(tmp_path, outcome):
     engine = create_engine(f"sqlite:///{tmp_path / 'starve.sqlite3'}")
     run_migrations(engine)
     repository = PlayerTrackingRepository(engine)
     # Three unpublished games older than the one that has published.
     events = [_event(f"002250100{n}", scheduled=f"2026-04-0{n}T23:00:00Z") for n in (1, 2, 3)]
     events.append(_event(TOR_GAME))
-    feeds = UnpublishedFeeds()
+    feeds = UnavailableFeeds(outcome)
     ticks = iter(range(10_000))
     service = PlayerTrackingCollectionService(
         feeds,

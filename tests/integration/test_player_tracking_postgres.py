@@ -115,3 +115,37 @@ def test_overlapping_writers_of_one_game_neither_raise_nor_duplicate(engine):
                 ).scalar()
                 == 2
             )
+
+
+def test_concurrent_first_attempts_on_one_game_all_succeed_and_leave_one_row(engine):
+    """The cron and a backfill both record the first failed attempt of a game."""
+
+    import threading
+
+    repository = PlayerTrackingRepository(engine)
+    for round_number in range(8):
+        game_id = f"002260{round_number:04d}"
+        barrier = threading.Barrier(4)
+        errors = []
+
+        def record(game_id=game_id, barrier=barrier, errors=errors):
+            barrier.wait()
+            try:
+                repository.record_attempt(SEASON, game_id, "failed", FETCHED)
+            except Exception as error:  # a duplicate key before the per-game lock
+                errors.append(error)
+
+        threads = [threading.Thread(target=record) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert errors == []
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT count(*) FROM player_tracking_attempts WHERE game_id = :g"), {"g": game_id}
+                ).scalar()
+                == 1
+            )

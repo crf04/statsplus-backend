@@ -283,3 +283,30 @@ def test_averages_are_null_when_no_game_is_tracked(dependencies, tmp_path, clien
 
     for key in ("REB_CHANCES", "REB_CONV_PCT", "POTENTIAL_AST", "AST_CONV_PCT"):
         assert body["averages"][0][key] is None and body["season_averages"][0][key] is None
+
+
+def test_filtered_averages_differ_from_season_averages_when_a_filter_narrows_the_games(
+    conversion_world, client
+):
+    # REB 15 keeps only the 10-23 game: chances 20 and 15/20 against the season's 15.0 and 20/30.
+    body = client.get(URL + "&self_filters[REB]=15,15").get_json()
+
+    filtered, season = body["averages"][0], body["season_averages"][0]
+    assert (filtered["REB_CHANCES"], filtered["REB_CONV_PCT"]) == (20.0, 0.75)
+    assert (season["REB_CHANCES"], season["REB_CONV_PCT"]) == (15.0, 0.667)
+
+
+def test_a_start_date_narrows_the_filtered_averages_only(conversion_world, client):
+    body = client.get(URL + "&date_filter=2026-10-23").get_json()
+
+    filtered, season = body["averages"][0], body["season_averages"][0]
+    assert (filtered["REB_CHANCES"], filtered["REB_CONV_PCT"]) == (20.0, 0.75)
+    assert (season["REB_CHANCES"], season["REB_CONV_PCT"]) == (15.0, 0.667)
+
+
+def test_a_date_to_cutoff_bounds_both_averages_to_the_season_so_far(conversion_world, client):
+    body = client.get(URL + "&date_to=2026-10-22").get_json()
+
+    for block in (body["averages"][0], body["season_averages"][0]):
+        assert (block["REB_CHANCES"], block["REB_CONV_PCT"]) == (10.0, 0.5)
+        assert (block["POTENTIAL_AST"], block["AST_CONV_PCT"]) == (4.0, 0.5)
