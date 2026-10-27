@@ -37,8 +37,9 @@ concurrency:
 # seconds per job for nothing.
 jobs:
   # The suite runs as twelve parallel shards of whole test files, balanced by the
-  # seconds recorded in tests/shard_weights.json (see tests/conftest.py). Each
-  # uploads its coverage data; `checks` combines it and enforces the floor.
+  # seconds recorded in tests/shard_weights.json (see tests/conftest.py;
+  # scripts/shard_weights.py rebuilds it from a run's logs). Each uploads its
+  # coverage data; `checks` combines it and enforces the floor.
   tests:
     name: tests (${{ matrix.shard }}/12)
     runs-on: ubuntu-latest
