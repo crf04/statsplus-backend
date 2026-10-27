@@ -4,8 +4,9 @@ Inert unless ``SENTRY_DSN`` is set: without it nothing is imported, patched,
 or sent.  Events carry the ``request_id`` tag (the full ``X-Request-ID``, whose
 first 8 characters the UI shows as ``(ref ...)``), the environment, and the
 release (``RAILWAY_GIT_COMMIT_SHA``).  Request bodies, cookies, credentials
-headers, query strings, users and breadcrumbs are never sent, and performance
-tracing is off.
+headers, query strings, users and breadcrumbs are never sent.  Performance
+tracing samples ``SENTRY_TRACES_SAMPLE_RATE`` of user requests (default 5%),
+and never collector ingestion, health checks or internal routes.
 
 Gunicorn preloads the app in a master that must stay single-threaded, and the
 SDK's transport runs a background thread, so ``gunicorn.conf.py`` calls
@@ -132,6 +133,35 @@ def scrub_event(event: dict[str, Any], hint: Any = None) -> dict[str, Any] | Non
     return event
 
 
+DEFAULT_TRACES_SAMPLE_RATE = 0.05
+# Collector ingestion is machine traffic (about 970 requests per 5 hours) and
+# health checks poll constantly; neither should spend the trace budget.
+_UNTRACED_PREFIXES = ("/api/collector/", "/api/health", "/api/internal/", "/health")
+
+
+def parse_traces_sample_rate(raw: str | None) -> float:
+    """Return ``raw`` as a rate in [0, 1]; anything else is the default."""
+
+    try:
+        rate = float((raw or "").strip())
+    except ValueError:
+        return DEFAULT_TRACES_SAMPLE_RATE
+    if not 0.0 <= rate <= 1.0:  # also rejects NaN
+        return DEFAULT_TRACES_SAMPLE_RATE
+    return rate
+
+
+def make_traces_sampler(rate: float):
+    def traces_sampler(sampling_context: Mapping[str, Any]) -> float:
+        wsgi_environ = sampling_context.get("wsgi_environ") or {}
+        path = wsgi_environ.get("PATH_INFO") or ""
+        if path.startswith(_UNTRACED_PREFIXES):
+            return 0.0
+        return rate
+
+    return traces_sampler
+
+
 def init_sentry(
     environ: Mapping[str, str] | None = None,
     *,
@@ -163,7 +193,9 @@ def init_sentry(
         max_request_body_size="never",
         include_local_variables=False,
         max_breadcrumbs=0,
-        traces_sample_rate=0.0,
+        traces_sampler=make_traces_sampler(
+            parse_traces_sample_rate(environ.get("SENTRY_TRACES_SAMPLE_RATE"))
+        ),
         # Auto-enabled integrations (SQLAlchemy, Redis, requests, ...) patch
         # libraries process-wide for spans and breadcrumbs this setup turns off.
         auto_enabling_integrations=False,
