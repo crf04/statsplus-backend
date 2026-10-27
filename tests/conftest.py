@@ -65,15 +65,16 @@ def pytest_configure(config):
     os.environ["TEST_DATABASE_URL"] = worker_url.render_as_string(hide_password=False)
 
 
-def _shard_files(rootpath, count):
+def _shard_files(rootpath, count, suite):
     """Assign every test file to a shard, balancing the recorded seconds per file.
 
     Longest first onto the least-loaded shard (ties to the lower index), so the
     split is a pure function of the file list and ``tests/shard_weights.json``
-    and every xdist worker agrees on it. A file with no recorded time weighs
-    one second.
+    and every xdist worker agrees on it. ``suite`` picks the recorded times
+    (``unit`` or ``integration``); a file with no recorded time weighs one
+    second.
     """
-    weights = json.loads((rootpath / "tests" / "shard_weights.json").read_text())
+    weights = json.loads((rootpath / "tests" / "shard_weights.json").read_text())[suite]
     files = sorted(path.relative_to(rootpath).as_posix() for path in (rootpath / "tests").rglob("test_*.py"))
     loads = [0.0] * count
     assignment = {}
@@ -95,7 +96,8 @@ def pytest_ignore_collect(collection_path, config):
         return None
     index, count = shard
     if not hasattr(config, "_statsplus_shard_files"):
-        config._statsplus_shard_files = _shard_files(config.rootpath, count)
+        suite = os.environ.get("STATSPLUS_TEST_SHARD_WEIGHTS", "unit")
+        config._statsplus_shard_files = _shard_files(config.rootpath, count, suite)
     name = collection_path.relative_to(config.rootpath).as_posix()
     return True if config._statsplus_shard_files.get(name, index) != index else None
 
