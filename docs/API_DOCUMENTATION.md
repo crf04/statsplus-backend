@@ -476,6 +476,9 @@ when a dependency is degraded.
 POST /api/nl-query
 ```
 
+`season` is the season the query names (for example `2024-25`), or `null`
+when it names none, so the reader applies its own default season.
+
 The default research season (including “this year”) follows the active,
 available player-game-log publication, so an October rollover does not select
 an unpublished season. Every read that serves published data uses the same
@@ -543,7 +546,7 @@ Response shape:
     }
   ],
   "rank_filter": ["5"],
-  "season": "2025-26",
+  "season": null,
   "confidence": 0.95,
   "intent": "game_logs",
   "time_period": null,

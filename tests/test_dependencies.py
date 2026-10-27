@@ -1017,7 +1017,8 @@ def test_query_defaults_to_published_season_after_calendar_rollover(monkeypatch)
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["player_name"] == "Jalen Johnson"
-    assert payload["season"] == "2025-26"
+    # A query naming no season leaves it to the reader's default.
+    assert payload["season"] is None
     assert payload["parsed_by"] == "nlp"
     assert dependencies.settings.nba.current_season == "2026-27"
     assert dependencies.game_service.settings.nba.current_season == "2026-27"
@@ -1101,5 +1102,5 @@ def test_query_defaults_to_published_season_after_calendar_rollover(monkeypatch)
     advanced = app.test_client().post("/api/nl-query", json={"query": "Published Season Rookie this year"})
     assert advanced.status_code == 200
     assert advanced.get_json()["player_name"] == "Published Season Rookie"
-    assert advanced.get_json()["season"] == "2026-27"
+    assert advanced.get_json()["season"] is None
     engine.dispose()
