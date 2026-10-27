@@ -3349,10 +3349,22 @@ class FakeCatalog:
     def __init__(self, positions, season=SEASON):
         self.rows = {season: [{"player_id": pid, "position": group} for pid, group in positions.items()]}
         self.calls = []
+        self.version = 1
 
     def get_catalog(self, season, *, active_only=False):
         self.calls.append(season)
         return self.rows.get(season, [])
+
+    def get_version(self, season):
+        return f"{len(self.rows.get(season, []))}:{self.version}"
+
+    def relabel(self, player_id, position, season=SEASON):
+        """What a refresh does: new position, newly published rows."""
+
+        for row in self.rows[season]:
+            if row["player_id"] == player_id:
+                row["position"] = position
+        self.version += 1
 
 
 def _player_rules_league():
@@ -3632,3 +3644,39 @@ def test_a_saved_position_target_files_and_serves_its_cached_summary(targets, bu
     assert second == first
     assert second["summary"]["players_without_position"] == 1
     assert [player["position"] for player in second["players"]] == ["Big"]
+
+
+def test_a_catalog_relabel_is_never_served_from_a_cached_backtest(targets, build_backtest):
+    big = _create(targets, qualifiers=[BIG])
+    diet_only = _create(targets, qualifiers=[{**CORNER_THREE, "threshold": 0.04}])
+    logs, diets, catalog = _player_rules_league()
+    reader = GenerationSnapshotReader(_available_reads(), _frozen_generation())
+    client = FakeRedis()
+    ticks = iter(float(i) for i in range(10_000))
+    service = build_backtest(
+        logs=logs,
+        diets=diets,
+        athlete_catalog=catalog,
+        publication_reader=reader,
+        redis_client=client,
+        cache_clock=lambda: next(ticks),
+    )
+
+    first, first_state = service.backtest(OWNER, big["id"])
+    assert (first_state, [p["name"] for p in first["players"]]) == ("miss", ["Joel Embiid"])
+    first_diet, _ = service.backtest(OWNER, diet_only["id"])
+    assert {p["name"]: p["position"] for p in first_diet["players"]}["Joel Embiid"] == "Big"
+    assert service.backtest(OWNER, big["id"])[1] == "hit"
+
+    catalog.relabel(EMBIID, "Wing")
+
+    relabelled, state = service.backtest(OWNER, big["id"])
+    assert state == "miss"
+    assert relabelled["players"] == []
+    assert relabelled["summary"]["players_without_position"] == 1
+    relabelled_diet, diet_state = service.backtest(OWNER, diet_only["id"])
+    assert diet_state == "miss"
+    assert {p["name"]: p["position"] for p in relabelled_diet["players"]}["Joel Embiid"] == "Wing"
+    # The batch read keys on the same version: nothing filed before the
+    # refresh is served after it, and what is filed after is.
+    assert service.backtest(OWNER, big["id"])[1] == "hit"

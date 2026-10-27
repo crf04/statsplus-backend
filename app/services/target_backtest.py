@@ -257,6 +257,7 @@ def backtest_cache_key(
     *,
     season: str,
     settings: RuntimeSettings,
+    catalog: str | None = None,
 ) -> str:
     """Build ``targets:backtest:v<schema>:<sha256>`` over the canonical key body.
 
@@ -275,6 +276,9 @@ def backtest_cache_key(
         "schema": TARGET_BACKTEST_CACHE_SCHEMA,
         "season": season,
         "opponent": target["opponent"],
+        # The athlete catalog's version for the season: every player row
+        # carries its Position, which no Publication names.
+        "catalog": catalog,
         "generation": [list(entry) for entry in generation],
         "qualifiers": [_qualifier_key_body(qualifier) for qualifier in target["qualifiers"]],
         "conditions": target.get("conditions"),
@@ -348,6 +352,8 @@ class PlayerDietReader(Protocol):
 
 class AthleteCatalogReader(Protocol):
     def get_catalog(self, season: str, *, active_only: bool = False) -> Sequence[Mapping[str, Any]]: ...
+
+    def get_version(self, season: str) -> str | None: ...
 
 
 class TargetBacktestService:
@@ -476,6 +482,7 @@ class TargetBacktestService:
                     session=session,
                 )
                 generation = identity if self._cache_enabled else None
+                catalog = self._catalog_version(choice.season) if generation is not None else None
             except (InvalidInputError, SeasonUnavailableError):
                 raise
             except Exception:
@@ -499,6 +506,7 @@ class TargetBacktestService:
                     self.settings.nba.current_season,
                 )
                 generation = None
+                catalog = None
 
         items = []
         for target in listed:
@@ -507,7 +515,7 @@ class TargetBacktestService:
                 evidence = (
                     None
                     if generation is None
-                    else self._cache_read(self._cache_key(target, choice.season, generation))
+                    else self._cache_read(self._cache_key(target, choice.season, generation, catalog))
                 )
                 if evidence is None:
                     items.append({"target_id": target_id, "status": "uncached"})
@@ -594,17 +602,28 @@ class TargetBacktestService:
             except SeasonUnavailableError:
                 continue
             if generation is not None:
-                work.append((choice, generation))
+                try:
+                    work.append((choice, generation, self._catalog_version(choice.season)))
+                except Exception:
+                    logger.warning(
+                        "Target backtest precompute skipped season=%s: catalog version unreadable",
+                        choice.season,
+                        exc_info=True,
+                    )
         counts = {
             "already_cached": 0,
             "computed": 0,
             "bypassed": 0,
             "failed": 0,
         }
-        entries = [(choice, generation, target) for choice, generation in work for target in targets]
+        entries = [
+            (choice, generation, catalog, target)
+            for choice, generation, catalog in work
+            for target in targets
+        ]
         remaining = 0
-        for index, (choice, generation, target) in enumerate(entries):
-            cached = self._cache_exists(self._cache_key(target, choice.season, generation))
+        for index, (choice, generation, catalog, target) in enumerate(entries):
+            cached = self._cache_exists(self._cache_key(target, choice.season, generation, catalog))
             if cached is None:
                 logger.warning("Target backtest precompute stopped: result cache unavailable")
                 counts["bypassed"] += len(entries) - index
@@ -628,7 +647,7 @@ class TargetBacktestService:
                 remaining = len(entries) - index - 1
                 break
         result = {
-            "seasons": [choice.season for choice, _generation in work],
+            "seasons": [choice.season for choice, _generation, _catalog in work],
             "eligible": len(entries),
             **counts,
             "remaining": remaining,
@@ -716,10 +735,10 @@ class TargetBacktestService:
         # whatever ``note`` or ``updated_at`` has since become.  The Lab
         # hands its own snapshot in for a Draft Target the cache must never
         # see.
-        cached_choice, cache_key = (
+        cached_choice, cache_key, catalog = (
             self._saved_backtest_cache_key(target, choice, session)
             if publication_snapshot is _OWN and target.get("id") is not None
-            else (None, None)
+            else (None, None, None)
         )
         if cache_key is not None:
             evidence = self._cache_read(cache_key)
@@ -826,7 +845,7 @@ class TargetBacktestService:
                     # generation, so the next request's pre-check key finds
                     # it or recomputes it -- never a torn hybrid.
                     self._cache_write(
-                        self._cache_key(target, season, identity),
+                        self._cache_key(target, season, identity, catalog),
                         {
                             "players": players,
                             "summary": summary,
@@ -922,8 +941,8 @@ class TargetBacktestService:
         target: Mapping[str, Any],
         choice: BacktestSeason | None,
         session: Session | None,
-    ) -> tuple[BacktestSeason | None, str | None]:
-        """Resolve the season and build its cache key, or ``(None, None)``.
+    ) -> tuple[BacktestSeason | None, str | None, str | None]:
+        """Resolve the season, its cache key and catalog version, or all ``None``.
 
         A ``None`` key is the cache deciding it has nothing to say: the
         feature flag off, no reader able to answer a generation, or a failed
@@ -933,7 +952,7 @@ class TargetBacktestService:
         """
 
         if not self._cache_enabled:
-            return None, None
+            return None, None, None
         try:
             if choice is None:
                 choice = self.seasons.resolve(None, session=session)
@@ -950,14 +969,15 @@ class TargetBacktestService:
                 projection_keys=_PROJECTION_ONLY_STREAM_KEYS,
                 session=session,
             )
+            catalog = self._catalog_version(choice.season)
         except Exception:
             # The pre-check must not turn a Redis-or-reader outage into a
             # failed request: answer as the uncached read answers, which
             # reports an unavailable season itself.
-            return None, None
+            return None, None, None
         if generation is None:
-            return None, None
-        return choice, self._cache_key(target, choice.season, generation)
+            return None, None, None
+        return choice, self._cache_key(target, choice.season, generation, catalog), catalog
 
     @staticmethod
     def _cache_identity(snapshot: Any) -> Sequence[tuple] | None:
@@ -979,8 +999,21 @@ class TargetBacktestService:
         target: Mapping[str, Any],
         season: str,
         generation: Sequence[tuple[str, str | None, int | None, int | None]],
+        catalog: str | None,
     ) -> str:
-        return backtest_cache_key(target, generation, season=season, settings=self.settings)
+        return backtest_cache_key(target, generation, season=season, settings=self.settings, catalog=catalog)
+
+    def _catalog_version(self, season: str) -> str | None:
+        """The athlete catalog's version for the season, or ``None`` with no catalog.
+
+        A refresh moves it, so a relabelled Position can never be served from
+        an entry filed before the refresh.  A failed read raises: every caller
+        treats that as the cache having nothing to say.
+        """
+
+        if self.athlete_catalog is None:
+            return None
+        return self.athlete_catalog.get_version(season)
 
     def _cache_read(self, key: str) -> dict[str, Any] | None:
         """Return one cached result's evidence, or ``None`` to compute.

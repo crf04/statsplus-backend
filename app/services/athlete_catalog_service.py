@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.engine import Engine
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
@@ -108,6 +108,23 @@ def _read_catalog_rows(
     return [{column: row[column] for column in ROSTER_COLUMNS} for row in rows]
 
 
+def _read_catalog_version(engine: Engine, season: str) -> str | None:
+    """Name one season's published catalog: its row count and newest publication.
+
+    Every refresh, on either write path, republishes the season's rows, so the
+    value moves with it; ``None`` when the season has no rows.
+    """
+
+    season = validate_canonical_season(season)
+    with engine.connect() as connection:
+        count, newest = connection.execute(
+            select(func.count(), func.max(AthleteCatalog.published_at)).where(AthleteCatalog.season == season)
+        ).one()
+    if not count:
+        return None
+    return f"{count}:{_iso(newest)}"
+
+
 class AthleteCatalogReader:
     """The one Athlete Catalog capability the game-log path needs.
 
@@ -130,6 +147,9 @@ class AthleteCatalogReader:
         active_only: bool = False,
     ) -> list[dict[str, Any]]:
         return _read_catalog_rows(self._engine, season, active_only=active_only)
+
+    def get_version(self, season: str) -> str | None:
+        return _read_catalog_version(self._engine, season)
 
 
 class AthleteCatalogService:

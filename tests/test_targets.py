@@ -1449,7 +1449,7 @@ def test_editing_to_a_position_changes_the_title_and_the_stored_rows(targets):
 _POSITION_REFUSAL = "A position qualifier needs a non-empty list of distinct groups from Guard, Wing and Big."
 _AVERAGE_REFUSAL = (
     "An average qualifier needs a known stat, a comparator of at_or_above or "
-    "at_or_below, and a finite threshold of 0 or more."
+    "at_or_below, and a finite threshold from 0 to 1000."
 )
 
 
@@ -1475,6 +1475,11 @@ _AVERAGE_REFUSAL = (
         ([{**THREE_PA_AVERAGE, "threshold": -0.1}], _AVERAGE_REFUSAL),
         ([{**THREE_PA_AVERAGE, "threshold": float("nan")}], _AVERAGE_REFUSAL),
         ([{**THREE_PA_AVERAGE, "threshold": float("inf")}], _AVERAGE_REFUSAL),
+        ([{**THREE_PA_AVERAGE, "threshold": 1000.01}], _AVERAGE_REFUSAL),
+        ([{**THREE_PA_AVERAGE, "threshold": 1001}], _AVERAGE_REFUSAL),
+        ([{**THREE_PA_AVERAGE, "threshold": 1e308}], _AVERAGE_REFUSAL),
+        ([{**THREE_PA_AVERAGE, "threshold": 10**400}], _AVERAGE_REFUSAL),
+        ([{**THREE_PA_AVERAGE, "threshold": -(10**400)}], _AVERAGE_REFUSAL),
         ([{**THREE_PA_AVERAGE, "threshold": "0.3"}], _AVERAGE_REFUSAL),
         ([{**THREE_PA_AVERAGE, "threshold": True}], _AVERAGE_REFUSAL),
         ([{**THREE_PA_AVERAGE, "threshold": None}], _AVERAGE_REFUSAL),
@@ -1578,4 +1583,54 @@ def test_position_and_average_targets_walk_end_to_end_over_http(
     assert edited.get_json()["target"]["title"] == "MEM vs Guard/Wing"
     listed = client.get("/api/user/targets", headers=headers).get_json()["targets"]
     assert [entry["qualifiers"] for entry in listed] == [[{"base": "position", "groups": ["Guard", "Wing"]}]]
+    get_engine.cache_clear()
+
+
+def test_an_average_threshold_of_exactly_one_thousand_is_accepted(targets):
+    created = targets.create_target(
+        OWNER, opponent="MEM", qualifiers=[{**THREE_PA_AVERAGE, "threshold": 1000}], note=None
+    )
+
+    assert created["qualifiers"][0]["threshold"] == 1000.0
+
+
+def test_ten_average_qualifiers_at_the_threshold_limit_still_fit_the_stored_signature(targets):
+    stats = ["PTS", "REB", "AST", "3PM", "FG2A", "3PA", "FGM", "FGA", "FTM", "FTA"]
+    qualifiers = [{**THREE_PA_AVERAGE, "stat": stat, "threshold": 1000} for stat in stats]
+
+    created = targets.create_target(OWNER, opponent="MEM", qualifiers=qualifiers, note=None)
+
+    assert len(created["qualifiers"]) == TARGET_QUALIFIER_LIMIT
+
+
+def test_an_oversized_or_unbounded_threshold_is_a_400_over_http(
+    tmp_path, make_client, authenticate, make_db_user
+):
+    from app.utils.db import get_engine
+
+    database_url = f"sqlite:///{tmp_path / 'targets-bounds.sqlite3'}"
+    get_engine.cache_clear()
+    engine = create_engine(database_url)
+    run_migrations(engine)
+    engine.dispose()
+    client = make_client(database_url)
+    headers = authenticate(claims={"uid": OWNER}, db_user=make_db_user(firebase_uid=OWNER))
+    # ``json=`` would reject nothing here; the literal body is what a client sends.
+    for literal in ("1" + "0" * 400, "-" + "1" + "0" * 400, "1e999", "-1e999", "1000.5"):
+        body = (
+            '{"opponent": "MEM", "qualifiers": [{"base": "season_average", "stat": "3PA", '
+            f'"comparator": "at_or_above", "threshold": {literal}}}]}}'
+        )
+        for path in ("/api/user/targets", "/api/user/targets/preview"):
+            response = client.post(path, headers=headers, data=body, content_type="application/json")
+            assert response.status_code == 400, (path, literal, response.get_json())
+            assert response.get_json()["error"]["code"] == "invalid_input"
+        diet = (
+            '{"opponent": "MEM", "qualifiers": [{"base": "shot_zones", "slice_key": "Corner 3", '
+            f'"comparator": "at_or_above", "threshold": {literal}}}]}}'
+        )
+        response = client.post(
+            "/api/user/targets", headers=headers, data=diet, content_type="application/json"
+        )
+        assert response.status_code == 400, ("diet", literal, response.get_json())
     get_engine.cache_clear()

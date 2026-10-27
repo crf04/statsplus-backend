@@ -5119,7 +5119,7 @@ three shapes:
 - An **Average** reads the player's Regular Season average of one Target stat
   column (`stat` is any key of the stat catalogue, raw or `/36`, for example
   `3PA` or `3PA/36`), with the same two comparators, both inclusive. Its
-  `threshold` is a finite number of 0 or more; it is not a share, so the 0-1
+  `threshold` is a number from 0 to 1000; it is not a share, so the 0-1
   limit does not apply. Counting stats are per game, `/36` stats are rates over
   total minutes, and efficiency stats (`FG%`, `3P%`, `TS%`, `PTS/FGA`) are
   ratios of season totals, percentages scaled to 0-100. It is read from the same
@@ -5193,8 +5193,8 @@ Validation and conflicts:
   missing `qualifiers` list, more than 10 Qualifiers, a repeated Qualifier, an
   unknown base or slice, a comparator outside the two accepted values, a
   Diet threshold outside 0-1, empty, repeated or unknown Position `groups`, a
-  second Position Qualifier, an unknown Average `stat`, a negative, non-finite
-  or non-numeric Average threshold, a note over 280 characters, and a `PATCH` body that
+  second Position Qualifier, an unknown Average `stat`, a negative, non-finite,
+  above-1000 or non-numeric Average threshold, a note over 280 characters, and a `PATCH` body that
   changes none of Qualifiers, note, Conditions, or stat preferences. Invalid
   Conditions and stat preferences also return `400 invalid_input`; their
   schemas and validation are documented below.

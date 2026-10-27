@@ -8,7 +8,6 @@ including creating, updating, and retrieving user information.
 import logging
 import re
 from datetime import UTC, datetime, timedelta
-from math import isfinite
 from typing import Any
 
 from flask import g, has_request_context
@@ -268,9 +267,12 @@ _TARGET_QUALIFIER_MESSAGE = (
 _TARGET_POSITION_QUALIFIER_MESSAGE = (
     "A position qualifier needs a non-empty list of distinct groups from Guard, Wing and Big."
 )
+#: No season average or per-36 rate comes near this, and it keeps ten Average
+#: signatures inside the stored signature column.
+TARGET_AVERAGE_THRESHOLD_MAX = 1000
 _TARGET_AVERAGE_QUALIFIER_MESSAGE = (
     "An average qualifier needs a known stat, a comparator of at_or_above or "
-    "at_or_below, and a finite threshold of 0 or more."
+    f"at_or_below, and a finite threshold from 0 to {TARGET_AVERAGE_THRESHOLD_MAX}."
 )
 _TARGET_SECOND_POSITION_MESSAGE = "A target may hold at most one position qualifier."
 
@@ -297,10 +299,11 @@ def _validated_target_threshold(value: Any) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise InvalidInputError(_TARGET_QUALIFIER_MESSAGE)
 
-    threshold = float(value)
-    if not isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+    # Compared as given: an integer too large for a float must be refused,
+    # not raise OverflowError, and NaN fails the chain.
+    if not 0 <= value <= 1:
         raise InvalidInputError(_TARGET_QUALIFIER_MESSAGE)
-    return threshold
+    return float(value)
 
 
 def _validated_position_qualifier(value: dict[str, Any]) -> dict[str, Any]:
@@ -330,8 +333,10 @@ def _validated_average_qualifier(value: dict[str, Any]) -> dict[str, Any]:
         or comparator not in TARGET_COMPARATORS
         or isinstance(threshold, bool)
         or not isinstance(threshold, (int, float))
-        or not isfinite(float(threshold))
-        or float(threshold) < 0.0
+        # Compared as given, never through ``float``: an integer too large for
+        # a float is refused here instead of raising OverflowError, and NaN
+        # fails the chain.
+        or not 0 <= threshold <= TARGET_AVERAGE_THRESHOLD_MAX
     ):
         raise InvalidInputError(_TARGET_AVERAGE_QUALIFIER_MESSAGE)
     return {

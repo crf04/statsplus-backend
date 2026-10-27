@@ -520,3 +520,45 @@ def exercise_position_and_average_targets(world):
 
 def test_position_and_average_targets_precompute_and_serve_from_the_cache(world):
     exercise_position_and_average_targets(world)
+
+
+def test_a_catalog_relabel_makes_the_precompute_and_the_batch_read_recompute(world, monkeypatch):
+    with world.engine.begin() as connection:
+        connection.execute(
+            AthleteCatalog.__table__.insert().values(
+                season=LAST,
+                player_id=bt.LEBRON,
+                display_name="LeBron James",
+                roster_status="active",
+                is_active=True,
+                is_active_for_season=True,
+                team_id=bt.LAL,
+                team_name="Los Angeles Lakers",
+                team_abbreviation="LAL",
+                position="Wing",
+                published_at=NOW,
+            )
+        )
+    diet_only = world.saved_target()
+    service = world.backtests(
+        redis_client=CountingRedis(), athlete_catalog=AthleteCatalogReader(world.engine)
+    )
+    assert _without_duration(service.precompute(now=NOW)) == _counts(eligible=1, computed=1)
+    assert service.backtest(OWNER, diet_only["id"])[0]["players"][0]["position"] == "Wing"
+    assert _statuses(service) == ["ok"]
+
+    # A refresh republishes the season's rows with LeBron relabelled.
+    with world.engine.begin() as connection:
+        connection.execute(
+            AthleteCatalog.__table__.update()
+            .where(AthleteCatalog.player_id == bt.LEBRON)
+            .values(position="Big", published_at=NOW + timedelta(days=1))
+        )
+
+    assert _statuses(service) == ["uncached"]
+    assert _without_duration(service.precompute(now=NOW)) == _counts(eligible=1, computed=1)
+    body, state = service.backtest(OWNER, diet_only["id"])
+    assert (state, body["players"][0]["position"]) == ("hit", "Big")
+    # With the relabel filed, a rerun finds it by its own key and computes nothing.
+    monkeypatch.setattr(service, "_backtest_stateful", lambda *a, **k: pytest.fail("computed"))
+    assert _without_duration(service.precompute(now=NOW)) == _counts(eligible=1, already_cached=1)
