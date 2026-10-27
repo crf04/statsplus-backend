@@ -86,6 +86,7 @@ from app.services.request_reads import request_read_scope
 from app.services.research_season import (
     event_season,
     focal_game_read,
+    game_capture,
     published_capture,
     refuse_evidence_after_game,
     research_season,
@@ -677,6 +678,13 @@ class MatchupService:
 
         return assume_utc(self._clock())
 
+    def game_snapshot(
+        self, publication_snapshot: Any, scheduled_at: str, *, session: Session | None = None
+    ) -> Any:
+        """``publication_snapshot`` as the game scheduled at ``scheduled_at`` reads it (``game_capture``)."""
+
+        return game_capture(self.publication_reader, publication_snapshot, scheduled_at, session=session)
+
     def stats_freshness_block(self, season: str) -> dict[str, Any]:
         """``freshness.stats`` as a compose reports it, without composing."""
 
@@ -1029,6 +1037,12 @@ class MatchupService:
         schedule_season = event_season(self.settings, game_id, season)
         observed_at = assume_utc(self._clock())
         event = self._event(schedule_season, game_id, connection=connection)
+        scheduled_at = parse_utc_iso(str(event["scheduled_at"]))
+        publication_snapshot = game_capture(
+            self.publication_reader, publication_snapshot, event["scheduled_at"], session=session
+        )
+        # A game read as of its tip finds its own box score only in the newest capture.
+        latest = getattr(publication_snapshot, "latest", None)
         schedule_freshness = self._schedule_freshness(
             schedule_season, observed_at=observed_at, connection=connection
         )
@@ -1063,9 +1077,11 @@ class MatchupService:
                 game_id,
                 team_ids,
                 evidence_season=season,
-                publication_snapshot=publication_snapshot,
+                publication_snapshot=latest or publication_snapshot,
                 connection=connection,
             )
+            if latest is not None and players:
+                retained_reads = (*retained_reads, latest.read("player_game_logs"))
         else:
             # A matched Out entry removes a targetable player; a game-log
             # participant already played, so injuries never remove one.
@@ -1113,7 +1129,6 @@ class MatchupService:
         )
 
         slate_date = self._event_date(event)
-        scheduled_at = parse_utc_iso(str(event["scheduled_at"]))
         team_as_of = slate_date if scheduled_at <= observed_at else None
         windows, metric_indexes = self._defense_windows(
             season,

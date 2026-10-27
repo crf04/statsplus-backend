@@ -244,6 +244,7 @@ class ComposedMatchupCache:
         retained: Any = (),
         pool: Mapping[str, Any] | None = None,
         started: bool = False,
+        as_of: Any = None,
     ) -> str | None:
         """``matchup:composed:v<schema>:<sha256>``, or ``None`` when uncacheable.
 
@@ -257,9 +258,11 @@ class ComposedMatchupCache:
         new poll misses though the oldest stamp holds), each stream's freshness
         label in the snapshot (a fresh capture and a stale one of one
         generation compose different freshness sections), and every setting
-        the scores read.  Only an injury change the Slate's counts do not show
-        can lag, by the TTL.  The user is
-        not in it: a Matchup is the same for everyone.
+        the scores read.  ``as_of`` is the capture a past game reads in place
+        of ``snapshot`` (``MatchupService.game_snapshot``), keyed beside it:
+        the game's evidence is ``as_of``'s, its own box score ``snapshot``'s.
+        Only an injury change the Slate's counts do not show can lag, by the
+        TTL.  The user is not in it: a Matchup is the same for everyone.
         """
 
         if self._redis is None or settings is None or not settings.cache.matchup_enabled or season is None:
@@ -291,6 +294,13 @@ class ComposedMatchupCache:
                 "pinned_season": (settings.nba.current_season if season_is_pinned(settings) else None),
             },
         }
+        if as_of is not None:
+            body["as_of"] = {
+                "generation": [list(entry) for entry in as_of.generation],
+                "labels": sorted(
+                    [stream, read.freshness, read.status] for stream, read in as_of.reads.items()
+                ),
+            }
         digest = hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode("utf-8")).hexdigest()
         return f"matchup:composed:v{MATCHUP_CACHE_SCHEMA}:{digest}"
 

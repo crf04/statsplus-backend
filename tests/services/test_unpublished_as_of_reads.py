@@ -11,13 +11,14 @@ opening week's instead; a game before any 2026-27 composition trails on
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import text
 
 from app.config.settings import CacheSettings
+from app.models.player_game_log import PlayerGameLogSync
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 from app.services.matchup_reuse import ComposedMatchupCache
 from app.services.matchup_snapshot import capture_matchup_snapshot, request_matchups
@@ -140,10 +141,16 @@ def _status(world, publication_id):
         )
 
 
-def _game_at(world, scheduled_at):
-    event = {**_game_event(), "scheduled_at": scheduled_at, "status_text": "Final", "status_code": 3}
+def _game_at(world, scheduled_at, game_id=GAME_ID):
+    event = {
+        **_game_event(),
+        "nba_game_id": game_id,
+        "scheduled_at": scheduled_at,
+        "status_text": "Final",
+        "status_code": 3,
+    }
     world.service.event_catalog = world.selections.event_catalog = SimpleNamespace(
-        get_event=lambda season, game_id: event if (season, game_id) == (NEW, GAME_ID) else None,
+        get_event=lambda season, requested: event if (season, requested) == (NEW, game_id) else None,
         get_freshness=lambda season, *, now: {"last_success_at": NOW.isoformat(), "fresh": True},
     )
     return event
@@ -321,10 +328,19 @@ def test_a_cached_past_game_matchup_reports_what_it_served(world):
     cached = settings().model_copy(update={"cache": CacheSettings(enabled=True, matchup_enabled=True)})
     cache = ComposedMatchupCache(FakeRedis())
     reader = world.reader.for_season(NEW)
+    composer = season_scoped(world.service, NEW)
+    composed = []
+    compose = composer.get_matchup_from_snapshot
+
+    def counted(**kwargs):
+        composed.append(kwargs["game_id"])
+        return compose(**kwargs)
+
+    composer.get_matchup_from_snapshot = counted
 
     def read():
         matchups = request_matchups(
-            composer=season_scoped(world.service, NEW),
+            composer=composer,
             publication_reader=reader,
             injuries=_StoredInjuries(),
             settings=cached,
@@ -333,6 +349,8 @@ def test_a_cached_past_game_matchup_reports_what_it_served(world):
         return matchups.get_matchup(game_id=GAME_ID, game={**game, "game_id": GAME_ID})
 
     miss, hit = read(), read()
+
+    assert composed == [GAME_ID]
 
     for matchup in (miss, hit):
         assert _served(matchup, SEASON_STREAM, PLAYER_LOGS) == {
@@ -344,6 +362,89 @@ def test_a_cached_past_game_matchup_reports_what_it_served(world):
     # The capture the cache shares still holds the newest candidates.
     _season, captured = capture_matchup_snapshot(cached, reader)
     assert captured.read(SEASON_STREAM).cutoff == NEW_CUTOFF.isoformat()
+
+
+def test_a_cached_past_game_matchup_recomposes_when_what_it_read_goes_stale(world):
+    opening_week, _ten_games = _hold_a_week_then_ten_games(world)
+    # Every other version was written ninety minutes later, so two hours on
+    # only the opening week's reads, the ones this game reads, are stale.
+    with world.engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE publication_versions SET created_at = :later WHERE publication_id NOT IN (:logs, :defense)"
+            ),
+            {
+                "later": NOW + timedelta(minutes=90),
+                "logs": world.opening_week_logs.publication_id,
+                "defense": opening_week.publication_id,
+            },
+        )
+    game = _game_at(world, AFTER_THE_OPENING_WEEK)
+    cached = settings().model_copy(update={"cache": CacheSettings(enabled=True, matchup_enabled=True)})
+    cache = ComposedMatchupCache(FakeRedis())
+
+    def read():
+        matchups = request_matchups(
+            composer=season_scoped(world.service, NEW),
+            publication_reader=world.reader.for_season(NEW),
+            injuries=_StoredInjuries(),
+            settings=cached,
+            cache=cache,
+        )
+        return matchups.get_matchup(game_id=GAME_ID, game={**game, "game_id": GAME_ID})
+
+    assert read()["freshness"]["player_game_logs"]["status"] == "fresh"
+    world.reader.clock = lambda: NOW + timedelta(hours=2)
+    assert read()["freshness"]["player_game_logs"]["status"] == "stale"
+
+
+def test_a_past_game_with_no_player_pool_lists_who_played_from_the_newest_game_logs(world):
+    _hold_a_week_then_ten_games(world)
+    # Round two's first game: only the ten-game logs hold its box score.
+    played = NEW_GAMES[len(THIN_GAMES)][0]
+    game = {**_game_at(world, AFTER_THE_OPENING_WEEK, played), "game_id": played}
+    with world.engine.begin() as connection:
+        connection.execute(
+            PlayerGameLogSync.__table__.insert().values(
+                season=NEW,
+                game_id=played,
+                season_type="Regular Season",
+                status="complete",
+                checksum="0" * 64,
+                row_count=2,
+                source_provider="nba_live_data",
+                retrieved_at=NEW_CUTOFF,
+            )
+        )
+    world.service.player_pool = SimpleNamespace(get_pool_for_game=lambda **_kwargs: None)
+    composer = season_scoped(world.service, NEW)
+    cached = settings().model_copy(update={"cache": CacheSettings(enabled=True, matchup_enabled=True)})
+    cache = ComposedMatchupCache(FakeRedis())
+
+    def read():
+        matchups = request_matchups(
+            composer=composer,
+            publication_reader=world.reader.for_season(NEW),
+            injuries=_StoredInjuries(),
+            settings=cached,
+            cache=cache,
+        )
+        return matchups.get_matchup(game_id=played, game=game)
+
+    for matchup in (composer.get_matchup(game_id=played), read(), read()):
+        assert matchup["experience"]["mode"] == "historical"
+        assert [player["name"] for player in matchup["players"]] == ["Player 30", "Player 31"]
+        # The evidence is the opening week's; the box score is the newest logs'.
+        assert sorted(
+            (entry["publication_id"], entry["coverage_cutoff"])
+            for entry in matchup["provenance"]["generation"]
+            if entry["stream_key"] == PLAYER_LOGS
+        ) == sorted(
+            [
+                (world.opening_week_logs.publication_id, THIN_CUTOFF.isoformat()),
+                (world.ten_games_logs.publication_id, NEW_CUTOFF.isoformat()),
+            ]
+        )
 
 
 def _cut_over_and_revert_the_opening_week(world):

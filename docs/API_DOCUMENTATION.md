@@ -2544,13 +2544,15 @@ rules. Without `season` every response is byte for byte what it was.
   its held candidates as if its Season Cutover had run. A family that is not
   ready serves its previous season labelled `prior_season` and is listed in
   `trailing` with its `team_games` sample.
-- A Matchup of a game on an earlier slate day reads each Defense Sheet window
-  (Season and Last 15) of that held season as of the game: the newest
-  version composed before the slate day ended that passes the same checks,
-  never one cut after it (crf04/statsplus-backend#626). With none, the window
-  reads as with no composition of the season (a trailing family serves its
-  previous season). `provenance` and `trailing` still describe the newest
-  candidates.
+- A Matchup or selection of a game on an earlier slate day reads every
+  stream of that held season (game logs, Diets, Defense Sheet windows) as of
+  the game: the newest version cut before it tipped that passes the same
+  checks, never one cut after the tip and never one a reverted cutover
+  withdrew (crf04/statsplus-backend#626). With none, a stream reads as with no
+  composition of the season: a trailing family serves its previous season,
+  and game logs read `window_not_ready`. `provenance`, `coverage` and
+  `trailing` describe those reads. A past game with no Player Pool still
+  lists who played from the newest game logs, which `provenance` lists too.
 - The response adds `season_context: {selected_season, published_season}`.
   `/api/players/profile`, whose body can be an array, instead answers
   `{data: <today's body>, season_context, trailing}`, `trailing` naming each

@@ -328,8 +328,6 @@ class TeamMatchupQueryService:
         if as_of is not None and as_of > current_date:
             raise ValueError("future as_of dates cannot be queried")
         cutoff = as_of or current_date
-        # A past day reads each Defense Sheet stream as composed before it ended.
-        reads_as_of = as_of if as_of is not None and as_of < current_date else None
         if (
             bases is not None
             and set(bases) <= NBA_PUBLICATION_BASES
@@ -345,8 +343,6 @@ class TeamMatchupQueryService:
                 legacy=None,
                 strict_as_of=strict_as_of,
                 publication_snapshot=publication_snapshot,
-                reads_as_of=reads_as_of,
-                connection=connection,
                 bases=bases,
             )
         observation_scope = self.repository.get_latest_scope(
@@ -363,8 +359,6 @@ class TeamMatchupQueryService:
                 legacy=None,
                 strict_as_of=strict_as_of,
                 publication_snapshot=publication_snapshot,
-                reads_as_of=reads_as_of,
-                connection=connection,
             )
         observation_snapshot = self.repository.get_snapshot(observation_scope, connection=connection)
         observations = observation_snapshot.observations
@@ -398,8 +392,6 @@ class TeamMatchupQueryService:
             legacy=legacy_window,
             strict_as_of=strict_as_of,
             publication_snapshot=publication_snapshot,
-            reads_as_of=reads_as_of,
-            connection=connection,
         )
 
     def get_window(self, scope: TeamMatchupSnapshotScope, *, publication_snapshot=None) -> TeamMatchupWindow:
@@ -428,14 +420,8 @@ class TeamMatchupQueryService:
         strict_as_of: bool = False,
         publication_snapshot=None,
         bases: Collection[str] | None = None,
-        reads_as_of: date | None = None,
-        connection: Connection | None = None,
     ) -> TeamMatchupWindow | None:
-        """Overlay only activated windows; inactive bases remain legacy-backed.
-
-        ``reads_as_of`` is a past slate day: a captured snapshot's reads are
-        then the reader's ``as_of_reads`` of that day.
-        """
+        """Overlay only activated windows; inactive bases remain legacy-backed."""
 
         if self._publication_reader is None:
             return legacy
@@ -454,15 +440,7 @@ class TeamMatchupQueryService:
         )
         if bases is not None:
             stream_by_base = {base: key for base, key in stream_by_base.items() if base in bases}
-        as_of_reads = getattr(self._publication_reader, "as_of_reads", None)
-        if publication_snapshot is not None and reads_as_of is not None and callable(as_of_reads):
-            publication_reads = as_of_reads(
-                publication_snapshot,
-                tuple(stream_by_base.values()),
-                as_of=reads_as_of,
-                connection=connection,
-            )
-        elif publication_snapshot is not None:
+        if publication_snapshot is not None:
             publication_reads = {
                 stream_key: publication_snapshot.read(stream_key) for stream_key in stream_by_base.values()
             }

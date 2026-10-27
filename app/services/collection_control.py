@@ -112,7 +112,7 @@ from app.services.publication_authority import (
     verify_publication_authority,
 )
 from app.services.rebound_types_identity import rebound_identity_failures
-from app.services.serving_season import NOT_READY_REASON, read_as_of, readiness_rule
+from app.services.serving_season import NOT_READY_REASON, readiness_rule
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
     PublicationGovernanceUnavailable,
@@ -2214,6 +2214,22 @@ def _revoke_pointer_history(
             PublicationPointerHistory.revoked_at.is_(None),
         )
         .values(revoked_at=now, revoked_fence=int(fence))
+    )
+
+
+def publication_withdrawn(publication_id: Any) -> Any:
+    """SQL: the publication ``publication_id`` names activated, and every activation was withdrawn.
+
+    A reverted cutover or a same-season rollback revokes a version's
+    pointer-history row; a candidate that never activated has none.
+    """
+
+    history = PublicationPointerHistory
+    return (
+        select(history.history_id).where(history.publication_id == publication_id).exists()
+        & ~select(history.history_id)
+        .where(history.publication_id == publication_id, history.revoked_at.is_(None))
+        .exists()
     )
 
 
@@ -8345,8 +8361,9 @@ class PublicationService(_SessionService):
         pointer's active or previous (rollback target) publication, a candidate
         awaiting activation, the latest eligible (activated, unrevoked,
         unretired) version of its season, or a superseded version of a season
-        after the active one of a stream a past game reads as of that game
-        (``read_as_of``), which an Unpublished Season read may still serve.
+        after the stream's active one that was never withdrawn
+        (``publication_withdrawn``), which an Unpublished Season read of a
+        past game may still serve.
         The keep set is computed per stream across all seasons even when
         ``season`` narrows what may be deleted.
         A history row whose publication is already gone never shadows an older
@@ -8422,12 +8439,15 @@ class PublicationService(_SessionService):
                 PublicationVersion.stream_key,
                 PublicationVersion.status,
                 PublicationVersion.season,
+                publication_withdrawn(PublicationVersion.publication_id),
             ).where(PublicationVersion.stream_key.in_(locked_streams))
             if season is not None:
                 version_query = version_query.where(PublicationVersion.season == season)
             restore_targets = _reversible_cutover_targets(session)
             doomed: list[str] = []
-            for publication_id, stream, status, version_season in session.execute(version_query).all():
+            for publication_id, stream, status, version_season, withdrawn in session.execute(
+                version_query
+            ).all():
                 pointer = pointers.get(stream)
                 if pointer is not None and pointer.active_publication_id == publication_id:
                     reason = "active"
@@ -8441,7 +8461,7 @@ class PublicationService(_SessionService):
                     reason = "cutover_restore"
                 elif (
                     status == "superseded"
-                    and read_as_of(stream)
+                    and not withdrawn
                     and stream in active_seasons
                     and version_season > active_seasons[stream]
                 ):
@@ -10523,5 +10543,6 @@ __all__ = [
     "SurfaceDefinition",
     "composing_ledger_manifest",
     "decompress_gzip_limited",
+    "publication_withdrawn",
     "reconciliation_item_view",
 ]

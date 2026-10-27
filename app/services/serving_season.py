@@ -123,16 +123,6 @@ def readiness_rule(stream_key: str) -> ReadinessRule | None:
     return _RULE_BY_STREAM.get(stream_key)
 
 
-#: The Defense Sheet windows: a read for a game never serves one cut after it.
-_READ_AS_OF_FAMILIES = frozenset({"team_defense", "last_15"})
-
-
-def read_as_of(stream_key: str) -> bool:
-    """Whether a read for a past game takes ``stream_key``'s composition as of that game."""
-
-    return getattr(readiness_rule(stream_key), "family", None) in _READ_AS_OF_FAMILIES
-
-
 def previous_season(season: str) -> str:
     """``2026-27`` -> ``2025-26``."""
 
@@ -218,7 +208,6 @@ __all__ = [
     "merge_trailing",
     "next_season",
     "previous_season",
-    "read_as_of",
     "readiness_rule",
     "serves_prior_season",
     "snapshot_trailing",
