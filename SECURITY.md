@@ -20,9 +20,10 @@ deployment provider's secret store.
 Use `.env.example` for variable names and safe defaults only. Keep real local
 values in `.env` or another gitignored file.
 
-Every pull request and push to `main` or `master` runs Gitleaks against the full
-repository history. A finding fails the `Security / Scan repository history for
-secrets` check; inspect the workflow log for the file and rule. Treat a matched
+Gitleaks scans the full repository history daily (and on manual dispatch of the
+Security workflow), not on each pull request, so a committed secret is caught
+within a day of landing. A finding fails the `Security / Scan repository history
+for secrets` run; inspect the workflow log for the file and rule. Treat a matched
 credential as compromised even if it was removed in a later commit: revoke or
 rotate it first, then remove it from history when appropriate. Use a narrowly
 scoped `.gitleaks.toml` allowlist only for a confirmed false positive, and note
@@ -37,7 +38,7 @@ generated `requirements-lock.txt`; regenerate the lock with the command in
 pull request before merging.
 
 The `Security` workflow audits the hashed lock file with `pip-audit` on every
-pull request, push to the default branches, and weekly schedule. A known
+pull request, push to the default branches, and daily schedule. A known
 vulnerability fails the `Security / Audit locked Python dependencies` check and
 lists its advisory and fixed versions in the log. Prefer upgrading to a fixed
 version. If no fix exists and the vulnerable code is demonstrably unreachable,

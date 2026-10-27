@@ -7,7 +7,7 @@ on:
       - master
       - main
   schedule:
-    - cron: "23 7 * * 1"
+    - cron: "23 7 * * *"
   workflow_dispatch:
 
 permissions:
@@ -52,8 +52,12 @@ jobs:
       - name: Scan locked dependencies
         run: .venv/bin/python -m pip_audit --local
 
+  # The history scan runs daily rather than on every pull request and push, to
+  # save Actions minutes on the private repository. A leaked secret is
+  # therefore caught within a day of landing, not before merge.
   secret-scan:
     name: Scan repository history for secrets
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
