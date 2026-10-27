@@ -396,6 +396,7 @@ def build_backtest(targets, backtest_settings):
         settings=None,
         redis_client=None,
         cache_clock=None,
+        athlete_catalog=None,
     ):
         return TargetBacktestService(
             targets=targets,
@@ -408,6 +409,7 @@ def build_backtest(targets, backtest_settings):
             publication_reader=publication_reader,
             redis_client=redis_client,
             cache_clock=cache_clock,
+            athlete_catalog=athlete_catalog,
         )
 
     return _service
@@ -483,6 +485,7 @@ def test_a_qualifying_player_reports_shares_averages_and_every_game(targets, bac
             "name": "LeBron James",
             "team_id": LAL,
             "tricode": "LAL",
+            "position": None,
             "season_scoring": 25.0,
             "shares": [
                 {
@@ -2422,7 +2425,7 @@ def test_a_miss_files_its_field_under_the_generation_key(targets, build_backtest
     assert [player["canonical_id"] for player in payload["players"]] == [LEBRON]
     assert len(client.sets) == 1
     cache_key, ttl = client.sets[0]
-    assert cache_key.startswith("targets:backtest:v2:")
+    assert cache_key.startswith("targets:backtest:v3:")
     assert cache_key in client.gets
     assert ttl == 86400
     evidence = json.loads(zlib.decompress(client.store[cache_key]).decode("utf-8"))
@@ -2613,7 +2616,7 @@ def test_a_schema_bump_changes_the_key(monkeypatch):
             matchup_scores=MatchupScoreSettings(),
         ),
     )
-    monkeypatch.setattr("app.services.target_backtest.TARGET_BACKTEST_CACHE_SCHEMA", 3)
+    monkeypatch.setattr("app.services.target_backtest.TARGET_BACKTEST_CACHE_SCHEMA", 4)
     bumped = backtest_cache_key(
         {"id": 1, "opponent": "OKC", "qualifiers": [CORNER_THREE], "conditions": None},
         _frozen_generation(),
@@ -2627,8 +2630,8 @@ def test_a_schema_bump_changes_the_key(monkeypatch):
     assert bumped != original
     # One version knob: the schema constant is the namespace, so bumping it
     # is not just a payload change but a different key prefix entirely.
-    assert original.startswith("targets:backtest:v2:")
-    assert bumped.startswith("targets:backtest:v3:")
+    assert original.startswith("targets:backtest:v3:")
+    assert bumped.startswith("targets:backtest:v4:")
 
 
 def test_a_note_only_edit_still_hits_with_the_new_note(targets, build_backtest):
@@ -3325,3 +3328,307 @@ def test_the_batch_items_equal_the_single_routes_bodies_over_http(
     for item in body["backtests"]:
         assert item["status"] == "ok"
         assert item["backtest"] == singles[item["target_id"]]
+
+
+# --- Position and Average Qualifiers (crf04/statsplus#351) -----------------
+
+NOCODE = 999001  # a player NBA.com lists no mappable position for
+WING_BIG = {"base": "position", "groups": ["Wing", "Big"]}
+WING = {"base": "position", "groups": ["Wing"]}
+BIG = {"base": "position", "groups": ["Big"]}
+GUARD = {"base": "position", "groups": ["Guard"]}
+
+
+def _average(stat, threshold, comparator="at_or_above"):
+    return {"base": "season_average", "stat": stat, "comparator": comparator, "threshold": threshold}
+
+
+class FakeCatalog:
+    """The athlete catalog's Position column, by season."""
+
+    def __init__(self, positions, season=SEASON):
+        self.rows = {season: [{"player_id": pid, "position": group} for pid, group in positions.items()]}
+        self.calls = []
+
+    def get_catalog(self, season, *, active_only=False):
+        self.calls.append(season)
+        return self.rows.get(season, [])
+
+
+def _player_rules_league():
+    """Four players who faced OKC, with season averages unlike their OKC games.
+
+    Season 3PA per game: Lebron 5.0 (OKC games 8 and 8, other games 3 and 1),
+    Tatum 10.0, Embiid 0.5, and the unlisted player 9.0.  Every game is 34
+    minutes and 12 of 20 shooting.
+    """
+
+    def games(pid, name, vs_okc, elsewhere):
+        opponent = [
+            _row(
+                pid,
+                name=name,
+                game_id=f"okc-{pid}-{index}",
+                game_date=date(2026, 1, 10 + index),
+                three_pointers_attempted=attempts,
+            )
+            for index, attempts in enumerate(vs_okc)
+        ]
+        other = [
+            _row(
+                pid,
+                name=name,
+                game_id=f"bos-{pid}-{index}",
+                game_date=date(2026, 1, 20 + index),
+                opponent_team_id=BOS,
+                opponent_team_tricode="BOS",
+                three_pointers_attempted=attempts,
+            )
+            for index, attempts in enumerate(elsewhere)
+        ]
+        return opponent, other
+
+    league = {
+        LEBRON: games(LEBRON, "LeBron James", [8, 8], [3, 1]),
+        TATUM: games(TATUM, "Jayson Tatum", [10], [10]),
+        EMBIID: games(EMBIID, "Joel Embiid", [1], [0, 1, 0]),
+        NOCODE: games(NOCODE, "Unlisted Player", [9], [9]),
+    }
+    logs = FakeLogs(
+        rows=[row for opponent, _other in league.values() for row in opponent],
+        scoring={LEBRON: 25.0, TATUM: 27.0, EMBIID: 30.0, NOCODE: 10.0},
+    )
+    logs.season_rows = tuple(row for opponent, other in league.values() for row in (*opponent, *other))
+    diets = FakeDiets(
+        zones={
+            LEBRON: _zone_diet(0.42, 0.2),
+            TATUM: _zone_diet(0.45, 0.2),
+            EMBIID: _zone_diet(0.05, 0.5),
+            NOCODE: _zone_diet(0.5, 0.2),
+        }
+    )
+    catalog = FakeCatalog({LEBRON: "Wing", TATUM: "Wing", EMBIID: "Big", NOCODE: None})
+    return logs, diets, catalog
+
+
+def _names(payload):
+    return [player["name"] for player in payload["players"]]
+
+
+@pytest.mark.parametrize(
+    ("qualifiers", "names", "without_position"),
+    [
+        ([BIG], ["Joel Embiid"], 1),
+        ([WING_BIG], ["Joel Embiid", "Jayson Tatum", "LeBron James"], 1),
+        ([WING], ["Jayson Tatum", "LeBron James"], 1),
+        ([GUARD], [], 1),
+        # The count is the players a Position alone left out, not everyone unlisted.
+        ([WING, CORNER_THREE], ["Jayson Tatum", "LeBron James"], 1),
+        ([WING, {**CORNER_THREE, "threshold": 0.45}], ["Jayson Tatum"], 1),
+        ([WING, {**CORNER_THREE, "threshold": 0.9}], [], 0),
+        ([GUARD, _average("3PA", 6)], [], 1),
+    ],
+)
+def test_a_position_qualifier_keeps_its_groups_and_counts_the_unlisted_it_alone_left_out(
+    targets, backtest, qualifiers, names, without_position
+):
+    created = _create(targets, qualifiers=qualifiers)
+    logs, diets, catalog = _player_rules_league()
+
+    payload = backtest(created["id"], logs=logs, diets=diets, athlete_catalog=catalog)
+
+    assert _names(payload) == names
+    assert payload["summary"]["players_without_position"] == without_position
+    assert payload["summary"]["players"] == len(names)
+
+
+def test_every_player_row_carries_its_position_and_a_diet_only_summary_has_no_count(targets, backtest):
+    created = _create(targets, qualifiers=[{**CORNER_THREE, "threshold": 0.04}])
+    logs, diets, catalog = _player_rules_league()
+
+    payload = backtest(created["id"], logs=logs, diets=diets, athlete_catalog=catalog)
+
+    assert {player["name"]: player["position"] for player in payload["players"]} == {
+        "Joel Embiid": "Big",
+        "Jayson Tatum": "Wing",
+        "LeBron James": "Wing",
+        "Unlisted Player": None,
+    }
+    assert "players_without_position" not in payload["summary"]
+
+
+def test_without_a_catalog_every_position_is_null_and_a_position_qualifier_fits_nobody(targets, backtest):
+    logs, diets, _catalog = _player_rules_league()
+    plain = _create(targets, qualifiers=[{**CORNER_THREE, "threshold": 0.04}])
+    only_big = _create(targets, opponent="OKC", qualifiers=[BIG])
+
+    assert {p["position"] for p in backtest(plain["id"], logs=logs, diets=diets)["players"]} == {None}
+    payload = backtest(only_big["id"], logs=logs, diets=diets)
+    assert payload["players"] == []
+    assert payload["summary"]["players_without_position"] == 4
+
+
+def test_a_position_comes_from_the_backtests_own_season(targets, backtest):
+    created = _create(targets, qualifiers=[BIG])
+    logs, diets, _catalog = _player_rules_league()
+    other_season_only = FakeCatalog({EMBIID: "Big"}, season="2024-25")
+
+    payload = backtest(created["id"], logs=logs, diets=diets, athlete_catalog=other_season_only)
+
+    assert other_season_only.calls == [SEASON]
+    assert payload["players"] == []
+
+
+@pytest.mark.parametrize(
+    ("qualifier", "names"),
+    [
+        # Season averages (5.0, 10.0, 0.5, 9.0), never the OKC games alone (8.0 for LeBron).
+        (_average("3PA", 6), ["Jayson Tatum", "Unlisted Player"]),
+        (_average("3PA", 5), ["Jayson Tatum", "LeBron James", "Unlisted Player"]),
+        (_average("3PA", 5, "at_or_below"), ["Joel Embiid", "LeBron James"]),
+        (_average("3PA", 0.5, "at_or_below"), ["Joel Embiid"]),
+        (_average("3PA", 11), []),
+        # Per 36 is the rate over total minutes: Lebron 5.29, Tatum 10.59, Embiid 0.53, Unlisted 9.53.
+        (_average("3PA/36", 7), ["Jayson Tatum", "Unlisted Player"]),
+        (_average("3PA/36", 5.3, "at_or_below"), ["Joel Embiid", "LeBron James"]),
+        # Per game minutes, and ratio stats scaled as the web app scales them.
+        (_average("MIN", 34), ["Joel Embiid", "Jayson Tatum", "LeBron James", "Unlisted Player"]),
+        (_average("MIN", 34.1), []),
+        (_average("FG%", 59.9), ["Joel Embiid", "Jayson Tatum", "LeBron James", "Unlisted Player"]),
+        (_average("FG%", 60.1), []),
+        (_average("3P%", 0), ["Joel Embiid", "Jayson Tatum", "LeBron James", "Unlisted Player"]),
+        # A combination reads its parts: points 30 + assists 9 each game.
+        (_average("PA", 39), ["Joel Embiid", "Jayson Tatum", "LeBron James", "Unlisted Player"]),
+        (_average("PA", 39.1), []),
+        # Two-point attempts are FGA less 3PA: 15.0, 10.0, 19.5, 11.0.
+        (_average("FG2A", 15), ["Joel Embiid", "LeBron James"]),
+    ],
+)
+def test_an_average_qualifier_reads_the_whole_regular_season(targets, backtest, qualifier, names):
+    created = _create(targets, qualifiers=[qualifier])
+    logs, diets, catalog = _player_rules_league()
+
+    payload = backtest(created["id"], logs=logs, diets=diets, athlete_catalog=catalog)
+
+    assert sorted(_names(payload)) == sorted(names)
+    # No Diet share is read for a Target with no Diet Qualifier, and no
+    # Position count is reported for one with no Position.
+    assert diets.calls == []
+    assert "players_without_position" not in payload["summary"]
+
+
+def test_a_player_with_too_few_games_is_left_out_of_an_average(targets, backtest):
+    created = _create(targets, qualifiers=[_average("3PA", 6)])
+    logs, diets, catalog = _player_rules_league()
+    logs.game_counts = {TATUM: 3}
+
+    payload = backtest(created["id"], logs=logs, diets=diets, athlete_catalog=catalog)
+
+    assert _names(payload) == ["Unlisted Player"]
+
+
+def test_the_playoffs_do_not_feed_a_season_average(targets, backtest):
+    created = _create(targets, qualifiers=[_average("3PA", 6, "at_or_below")])
+    logs, diets, catalog = _player_rules_league()
+    playoff = _row(
+        EMBIID,
+        name="Joel Embiid",
+        season_type="Playoffs",
+        game_id="playoff-1",
+        opponent_team_id=BOS,
+        opponent_team_tricode="BOS",
+        three_pointers_attempted=40,
+    )
+    logs.season_rows = (*logs.season_rows, playoff)
+
+    payload = backtest(created["id"], logs=logs, diets=diets, athlete_catalog=catalog)
+
+    assert "Joel Embiid" in _names(payload)
+
+
+def test_position_average_and_diet_qualifiers_must_all_hold(targets, backtest):
+    created = _create(
+        targets,
+        qualifiers=[WING_BIG, _average("3PA", 6), {**CORNER_THREE, "threshold": 0.4}],
+    )
+    logs, diets, catalog = _player_rules_league()
+
+    payload = backtest(created["id"], logs=logs, diets=diets, athlete_catalog=catalog)
+
+    # Tatum: Wing, 10.0 attempts, 45% corner.  Unlisted meets the other two but has no Position.
+    assert _names(payload) == ["Jayson Tatum"]
+    assert payload["summary"]["players_without_position"] == 1
+    # One entry per Qualifier of every kind, in order; only the Diet one has numbers.
+    assert payload["players"][0]["shares"] == [
+        {"base": "position", "slice_key": None, "share": None, "league_average_share": None},
+        {"base": "season_average", "slice_key": None, "share": None, "league_average_share": None},
+        {"base": "shot_zones", "slice_key": "Corner 3", "share": 0.45, "league_average_share": 0.2},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("qualifiers", "columns"),
+    [
+        ([BIG], ["PTS", "PTS/36"]),
+        ([_average("3PA", 0.3)], ["3PA"]),
+        ([_average("3PA/36", 2)], ["3PA/36"]),
+        ([_average("TS%", 55)], ["PTS", "PTS/36"]),
+        ([BIG, CORNER_THREE, _average("AST", 3)], ["PTS", "PTS/36", "3PA", "3PA/36", "AST"]),
+        ([CORNER_THREE], CORNER_THREE_COLUMNS),
+    ],
+)
+def test_a_player_rule_target_still_has_columns_to_read(targets, backtest, qualifiers, columns):
+    created = _create(targets, qualifiers=qualifiers)
+    logs, diets, catalog = _player_rules_league()
+
+    payload = backtest(created["id"], logs=logs, diets=diets, athlete_catalog=catalog)
+
+    assert payload["stat_columns"] == columns
+    for player in payload["players"]:
+        assert list(player["season_averages"]) == columns
+
+
+def test_the_cache_key_separates_every_player_rule():
+    generation = _frozen_generation()
+    keys = {
+        _key(generation, qualifiers=qualifiers)
+        for qualifiers in (
+            [CORNER_THREE],
+            [WING],
+            [BIG],
+            [WING_BIG],
+            [_average("3PA", 0.3)],
+            [_average("3PA", 0.31)],
+            [_average("3PA", 0.3, "at_or_below")],
+            [_average("3PA/36", 0.3)],
+            [BIG, _average("3PA", 0.3)],
+        )
+    }
+    assert len(keys) == 9
+    assert _key(generation, qualifiers=[BIG, _average("3PA", 0.3)]) == _key(
+        generation, qualifiers=[BIG, _average("3PA", 0.3)]
+    )
+
+
+def test_a_saved_position_target_files_and_serves_its_cached_summary(targets, build_backtest):
+    created = _create(targets, qualifiers=[BIG])
+    logs, diets, catalog = _player_rules_league()
+    reader = GenerationSnapshotReader(_available_reads(), _frozen_generation())
+    client = FakeRedis()
+    ticks = iter(float(i) for i in range(10_000))
+    service = build_backtest(
+        logs=logs,
+        diets=diets,
+        athlete_catalog=catalog,
+        publication_reader=reader,
+        redis_client=client,
+        cache_clock=lambda: next(ticks),
+    )
+
+    first, first_state = service.backtest(OWNER, created["id"])
+    second, second_state = service.backtest(OWNER, created["id"])
+
+    assert (first_state, second_state) == ("miss", "hit")
+    assert second == first
+    assert second["summary"]["players_without_position"] == 1
+    assert [player["position"] for player in second["players"]] == ["Big"]

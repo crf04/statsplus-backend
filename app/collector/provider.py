@@ -514,7 +514,9 @@ class _StandaloneNBAProvider:
     def get_player_roster(self, *, season: str) -> Any:
         from nba_api.stats import endpoints
 
-        return self._request(
+        from .rehearsal import NBA_TEAM_IDS  # rehearsal imports this module
+
+        roster = self._request(
             lambda: endpoints.commonallplayers.CommonAllPlayers(
                 is_only_current_season=0,
                 season=season,
@@ -522,6 +524,29 @@ class _StandaloneNBAProvider:
                 proxy=self.proxy,
             )
         )
+        # CommonAllPlayers carries no listed position, so each team's roster
+        # for the season (about 30 calls) supplies it, joined on player id.
+        listed: dict[int, str] = {}
+        for team_id in NBA_TEAM_IDS:
+            team_roster = self._request(
+                lambda team_id=team_id: endpoints.commonteamroster.CommonTeamRoster(
+                    team_id=team_id,
+                    season=season,
+                    timeout=self.timeout,
+                    proxy=self.proxy,
+                )
+            )
+            for player_id, position in zip(
+                team_roster.get("PLAYER_ID", ()), team_roster.get("POSITION", ()), strict=False
+            ):
+                if isinstance(position, str) and position.strip() and player_id == player_id:
+                    listed.setdefault(int(player_id), position.strip())
+        roster = roster.copy()
+        id_column = "PERSON_ID" if "PERSON_ID" in roster.columns else "PLAYER_ID"
+        roster["POSITION"] = [
+            listed.get(int(player_id)) if player_id == player_id else None for player_id in roster[id_column]
+        ]
+        return roster
 
     def fetch_synergy_play_types(
         self,

@@ -287,7 +287,7 @@ not counted twice:
 
 | Provider | Seam | Operations |
 | --- | --- | --- |
-| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_season`, `player_game_logs_recorded`, `player_diets_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `team_game_log`, `league_player_shot_type`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_totals_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
+| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_season`, `player_game_logs_recorded`, `player_diets_recorded`, `player_roster`, `team_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `team_game_log`, `league_player_shot_type`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_totals_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
 | NBA LiveData | `NBALiveDataBoxscoreAdapter` | `game_boxscore`; every governed ledger game reads its final score here, and the box score becomes evidence only after primary PBP evidence fails validation, with both source documents retained in the accepted composite observation. `game_playbyplay` for every 2026-27 ledger game, to exclude heaves from attempts; the same box score checks the corrected attempts of a game with heaves |
 | PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_player_diet`, `get_totals_opponent`, `health_probe`, `player_game_logs`, `game_player_stats`, `team_game_log` |
 | Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests share one pooled Requests session built once per adapter (pool sized for the capped detail fan-out); explicitly injected sessions serialize only their `get` call. The shared DFS transport owns one safe-GET retry. Dabble names a multi-player offering (first scorer, `to_score_25_plus_points`) with one `marketId` for every player, so a repeated market id with different content is excluded as `conflicting_source_identity` (skipped, warning kept) rather than malformed; it leaves the snapshot complete. |
@@ -3839,6 +3839,15 @@ normalizes stable NBA player IDs, official display names, roster status,
 season, and team identity. A `(season, player_id)` key lets a later official
 display-name update replace that season's label without rewriting prior
 history. Active, inactive, and historical rows remain distinguishable.
+
+Each row also carries a nullable `position` (Guard, Wing or Big), the player's
+Position for that season. `CommonAllPlayers` has no listed position, so the
+roster pull also requests `CommonTeamRoster` for every team (`team_roster`, about
+30 calls a season) and joins `POSITION` on player id, in the direct service and
+in the residential collector alike. The listed position maps to a group by one
+fixed rule (`G` Guard; `G-F`, `F-G`, `F` Wing; `F-C`, `C-F`, `C` Big; anything
+else none), and each refresh overwrites it. Target Position Qualifiers read it
+(ADR 0005 in the coordination repository).
 
 Provider collection happens before publication. Each requested season's
 catalog rows and success metadata are written in one transaction, so an

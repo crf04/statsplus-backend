@@ -19,7 +19,9 @@ import redis
 from sqlalchemy import create_engine, text
 
 from app.config.settings import CacheSettings
+from app.models.athlete_catalog import AthleteCatalog
 from app.models.user import User
+from app.services.athlete_catalog_service import AthleteCatalogReader
 from scripts import player_shooting_refresh
 from tests import test_target_backtest as bt
 from tests.services import test_backtest_seasons as seasons
@@ -458,3 +460,63 @@ def test_the_precompute_is_reachable_only_from_the_cron_command():
                 if name in {"precompute", "_precompute_target_backtests"}:
                     callers.add(str(path.relative_to(root)))
     assert callers == {"scripts/player_shooting_refresh.py"}
+
+
+def exercise_position_and_average_targets(world):
+    """Position and Average Targets, over the real catalog table and log seams.
+
+    LeBron plays five games averaging eight three-point attempts and is
+    listed as a Wing.  Shared with the PostgreSQL run, where the migrated
+    ``athlete_catalog.position`` and ``target_qualifiers`` columns are real.
+    """
+
+    with world.engine.begin() as connection:
+        connection.execute(
+            AthleteCatalog.__table__.insert().values(
+                season=LAST,
+                player_id=bt.LEBRON,
+                display_name="LeBron James",
+                roster_status="active",
+                is_active=True,
+                is_active_for_season=True,
+                team_id=bt.LAL,
+                team_name="Los Angeles Lakers",
+                team_abbreviation="LAL",
+                position="Wing",
+                published_at=NOW,
+            )
+        )
+    wing_shooter = world.users.create_target(
+        OWNER,
+        opponent="OKC",
+        qualifiers=[bt.WING, bt._average("3PA", 7.5)],
+    )
+    big = world.users.create_target(OWNER, opponent="OKC", qualifiers=[bt.BIG])
+    heavy_shooter = world.users.create_target(OWNER, opponent="OKC", qualifiers=[bt._average("3PA", 8.5)])
+    service = world.backtests(
+        redis_client=CountingRedis(), athlete_catalog=AthleteCatalogReader(world.engine)
+    )
+
+    result = service.precompute(now=NOW)
+
+    assert _without_duration(result) == _counts(eligible=3, computed=3)
+    results = {
+        name: service.backtest(OWNER, target["id"])
+        for name, target in (("wing", wing_shooter), ("big", big), ("heavy", heavy_shooter))
+    }
+    assert {name: state for name, (_body, state) in results.items()} == {
+        "wing": "hit",
+        "big": "hit",
+        "heavy": "hit",
+    }
+    wing = results["wing"][0]
+    assert [(p["name"], p["position"]) for p in wing["players"]] == [("LeBron James", "Wing")]
+    assert wing["summary"]["players_without_position"] == 0
+    assert results["big"][0]["players"] == []
+    assert results["big"][0]["summary"]["players_without_position"] == 0
+    assert results["heavy"][0]["players"] == []
+    assert "players_without_position" not in results["heavy"][0]["summary"]
+
+
+def test_position_and_average_targets_precompute_and_serve_from_the_cache(world):
+    exercise_position_and_average_targets(world)

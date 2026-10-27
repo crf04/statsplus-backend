@@ -816,6 +816,10 @@ def build_dependencies(
         settings=settings,
         snapshot_reuse=snapshot_reuse,
         matchup_cache=matchup_cache,
+        # A Position and a season average are read from the engine-bound
+        # catalog and the Regular Season logs, never from a provider.
+        player_logs=player_game_log_repository,
+        athlete_catalog=athlete_catalog_reader,
     )
     # The home page's slate edges compose the same two documents under the same
     # promises: one Publication snapshot, stored-only injuries, no provider.
@@ -846,6 +850,7 @@ def build_dependencies(
         publication_reader=research_publications,
         engine=engine,
         redis_client=redis_client,
+        athlete_catalog=athlete_catalog_reader,
     )
     # A preview composes the two Target reads from one Publication snapshot
     # and reads injuries stored-only: the Matchup route may refresh them from

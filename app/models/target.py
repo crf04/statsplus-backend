@@ -7,6 +7,11 @@ those Qualifiers on every read so it can never drift from the filter it names.
 Per-account uniqueness reads the Qualifiers as a set rather than a sequence:
 ``qualifier_signature`` is the sorted, canonically formatted join of the
 Qualifiers, so reordering them does not buy a second copy of the same Target.
+
+A Qualifier is any rule a player must meet (ADR 0005): a Diet share, a Position
+(one or more of Guard, Wing and Big) or an Average Qualifier on a season stat
+average.  The ``base`` says which; the other columns are null where the kind
+does not use them.
 """
 
 from types import MappingProxyType
@@ -24,7 +29,12 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 
 from ..domain.player_diet_taxonomy import PLAYER_DIET_SLICE_LABELS
+from ..domain.player_position import POSITION_GROUPS
 from . import Base
+
+#: The ``base`` values of the two Qualifier kinds that are not a Diet share.
+POSITION_QUALIFIER_BASE = "position"
+SEASON_AVERAGE_QUALIFIER_BASE = "season_average"
 
 # The stored width and the accepted width are the same limit; the service
 # validates against these so a column can never quietly outgrow its check.
@@ -67,21 +77,37 @@ def _share_as_percentage(threshold: float) -> str:
     return f"{percentage:.1f}"
 
 
+def _average_threshold(threshold: float) -> str:
+    """Render an Average threshold at its own precision, without trailing zeros."""
+
+    return f"{float(threshold):.10f}".rstrip("0").rstrip(".")
+
+
+def _qualifier_clause(qualifier) -> str:
+    base = qualifier["base"]
+    if base == POSITION_QUALIFIER_BASE:
+        return "/".join(qualifier["groups"])
+    symbol = TARGET_COMPARATOR_SYMBOLS[qualifier["comparator"]]
+    if base == SEASON_AVERAGE_QUALIFIER_BASE:
+        return f"{qualifier['stat']} avg {symbol} {_average_threshold(qualifier['threshold'])}"
+    return (
+        f"{PLAYER_DIET_SLICE_LABELS[qualifier['slice_key']]} "
+        f"{symbol} {_share_as_percentage(qualifier['threshold'])}%"
+    )
+
+
 def derive_target_title(opponent, qualifiers) -> str:
     """Build the title a Target reads as, from its opponent and Qualifiers.
 
-    Each Qualifier reads as its slice's display label rather than the stored
-    provider key, so ``PRBallHandler`` renders as ``P&R ball handler``.  The
-    labels come from the diet taxonomy, which is the one backend source the
-    frontend shares, so the two cannot drift.
+    The Position reads first, then the other Qualifiers in the order the user
+    entered them.  A Diet Qualifier reads as its slice's display label rather
+    than the stored provider key, so ``PRBallHandler`` renders as ``P&R ball
+    handler``.  The labels come from the diet taxonomy, which is the one backend
+    source the frontend shares, so the two cannot drift.
     """
 
-    clauses = ", ".join(
-        f"{PLAYER_DIET_SLICE_LABELS[qualifier['slice_key']]} "
-        f"{TARGET_COMPARATOR_SYMBOLS[qualifier['comparator']]} "
-        f"{_share_as_percentage(qualifier['threshold'])}%"
-        for qualifier in qualifiers
-    )
+    ordered = sorted(qualifiers, key=lambda qualifier: qualifier["base"] != POSITION_QUALIFIER_BASE)
+    clauses = ", ".join(_qualifier_clause(qualifier) for qualifier in ordered)
     return f"{opponent} vs {clauses}"
 
 
@@ -91,10 +117,17 @@ def target_qualifier_part(qualifier) -> str:
     This is the single definition of when two Qualifiers are the same one: it
     is both a field of the stored signature and what the in-request repeat
     check compares, so the duplicate rule cannot mean one thing within a
-    request and another across them.  The threshold is formatted to a fixed
-    width so ``0.4`` and ``0.40`` are one value.
+    request and another across them.  A Diet threshold is formatted to a fixed
+    width so ``0.4`` and ``0.40`` are one value; an Average threshold is
+    compared to two decimals, and Position groups as a set.
     """
 
+    base = qualifier["base"]
+    if base == POSITION_QUALIFIER_BASE:
+        groups = sorted(set(qualifier["groups"]), key=POSITION_GROUPS.index)
+        return f"{base}:{'+'.join(groups)}"
+    if base == SEASON_AVERAGE_QUALIFIER_BASE:
+        return f"{base}:{qualifier['stat']}:{qualifier['comparator']}:" f"{float(qualifier['threshold']):.2f}"
     return (
         f"{qualifier['base']}:{qualifier['slice_key']}:"
         f"{qualifier['comparator']}:{float(qualifier['threshold']):.6f}"
@@ -230,18 +263,33 @@ class TargetQualifier(Base):
     )
     slice_key = Column(
         String(64),
-        nullable=False,
-        comment="A slice of that base, e.g. Corner 3",
+        nullable=True,
+        comment="A slice of that base, e.g. Corner 3; null for Position and Average",
     )
     comparator = Column(
         String(16),
-        nullable=False,
-        comment="at_or_above or at_or_below",
+        nullable=True,
+        comment="at_or_above or at_or_below; null for Position",
     )
     threshold = Column(
         Float,
-        nullable=False,
-        comment="Share of the base the player must meet, 0-1 inclusive",
+        nullable=True,
+        comment=(
+            "Diet: the share the player must meet, 0-1 inclusive.  Average: the "
+            "season average, 0 or more.  Null for Position"
+        ),
+    )
+    stat = Column(
+        "average_stat",
+        String(16),
+        nullable=True,
+        comment="Average Qualifier: the Target stat column it reads, e.g. 3PA/36",
+    )
+    groups = Column(
+        "position_groups",
+        JSON,
+        nullable=True,
+        comment="Position Qualifier: the Guard/Wing/Big groups it names, in that order",
     )
 
     target = relationship("Target", back_populates="qualifiers")
@@ -253,13 +301,22 @@ class TargetQualifier(Base):
 
     def __repr__(self):
         return (
-            f"<TargetQualifier(target_id={self.target_id}, "
+            f"<TargetQualifier(target_id={self.target_id}, base='{self.base}', "
             f"slice_key='{self.slice_key}', comparator='{self.comparator}', "
             f"threshold={self.threshold})>"
         )
 
     def to_dict(self):
         """Convert to the public JSON shape used by the user API."""
+        if self.base == POSITION_QUALIFIER_BASE:
+            return {"base": self.base, "groups": list(self.groups or ())}
+        if self.base == SEASON_AVERAGE_QUALIFIER_BASE:
+            return {
+                "base": self.base,
+                "stat": self.stat,
+                "comparator": self.comparator,
+                "threshold": self.threshold,
+            }
         return {
             "base": self.base,
             "slice_key": self.slice_key,

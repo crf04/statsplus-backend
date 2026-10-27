@@ -2161,6 +2161,93 @@ def downgrade_user_public_handle(connection: Connection) -> None:
     connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 77))
 
 
+def _rebuild_sqlite_target_qualifiers(connection: Connection) -> None:
+    """Rebuild ``target_qualifiers`` on SQLite so its Diet columns may be null.
+
+    SQLite cannot drop a NOT NULL.  The rename, create, copy and drop run in one
+    explicit transaction, so an interruption leaves the original table.  A
+    ``target_qualifiers__078`` left by an interrupted run is reconciled on
+    retry: its rows are copied into the current table, ignoring any already
+    there, and it is dropped.  Every step is therefore safe to repeat.
+    """
+
+    from app.models.target import TargetQualifier
+
+    table = TargetQualifier.__table__
+    preparer = connection.dialect.identifier_preparer
+    quoted = preparer.quote(table.name)
+    leftover_name = f"{table.name}__078"
+    legacy = preparer.quote(leftover_name)
+    leftover_sql = _sqlite_table_sql(connection, leftover_name)
+    driver = connection.connection.driver_connection
+    if not getattr(driver, "in_transaction", True):
+        connection.exec_driver_sql("BEGIN")
+    if leftover_sql is None:
+        # The index travels with the renamed table, so it is dropped first and
+        # the create below makes it again under its own name.
+        connection.execute(text("DROP INDEX IF EXISTS idx_target_qualifiers_target"))
+        connection.execute(text(f"ALTER TABLE {quoted} RENAME TO {legacy}"))
+    table.create(connection, checkfirst=True)
+    shared = [
+        column["name"]
+        for column in inspect(connection).get_columns(leftover_name)
+        if column["name"] in table.columns
+    ]
+    columns = ", ".join(preparer.quote(name) for name in shared)
+    connection.execute(text(f"INSERT OR IGNORE INTO {quoted} ({columns}) SELECT {columns} FROM {legacy}"))
+    connection.execute(text(f"DROP TABLE {legacy}"))
+
+
+def _add_position_qualifiers(connection: Connection) -> None:
+    """Store a player's Position and the Position and Average Qualifiers (#607).
+
+    ``athlete_catalog.position`` is the Guard/Wing/Big group mapped from
+    NBA.com's listed position, null until a refresh writes it.  The
+    ``target_qualifiers`` Diet columns (slice, comparator, threshold) become
+    nullable because a Position Qualifier has none of them and an Average
+    Qualifier has no slice, and two columns are added: ``average_stat`` and
+    ``position_groups``.  Existing rows keep every value.
+
+    Rerun-safe: each step looks at the current schema first, and a fresh
+    database already has the final shape from its model-created tables.
+    """
+
+    from app.models.athlete_catalog import AthleteCatalog
+    from app.models.target import Target, TargetQualifier
+
+    AthleteCatalog.__table__.create(connection, checkfirst=True)
+    Target.__table__.create(connection, checkfirst=True)
+    if connection.dialect.name == "sqlite" and _sqlite_table_sql(connection, "target_qualifiers__078"):
+        # An interrupted rebuild: finish it before anything else creates the
+        # current table empty beside the leftover's rows.
+        _rebuild_sqlite_target_qualifiers(connection)
+    TargetQualifier.__table__.create(connection, checkfirst=True)
+    preparer = connection.dialect.identifier_preparer
+
+    catalog_columns = {column["name"] for column in inspect(connection).get_columns("athlete_catalog")}
+    if "position" not in catalog_columns:
+        connection.execute(text("ALTER TABLE athlete_catalog ADD COLUMN position VARCHAR(8)"))
+
+    qualifier_columns = {
+        column["name"]: column for column in inspect(connection).get_columns("target_qualifiers")
+    }
+    diet_columns = ("slice_key", "comparator", "threshold")
+    required = [name for name in diet_columns if not qualifier_columns[name]["nullable"]]
+    if required:
+        if connection.dialect.name == "sqlite":
+            _rebuild_sqlite_target_qualifiers(connection)
+        else:
+            for name in required:
+                connection.execute(
+                    text(f"ALTER TABLE target_qualifiers ALTER COLUMN {preparer.quote(name)} DROP NOT NULL")
+                )
+    existing = {column["name"] for column in inspect(connection).get_columns("target_qualifiers")}
+    if "average_stat" not in existing:
+        connection.execute(text("ALTER TABLE target_qualifiers ADD COLUMN average_stat VARCHAR(16)"))
+    if "position_groups" not in existing:
+        connection.execute(text("ALTER TABLE target_qualifiers ADD COLUMN position_groups JSON"))
+
+
 #: The indexes migration 075 adds for projection retention, by table: the
 #: date-ordered walk, then one per foreign key a delete must check.
 _PROJECTION_RETENTION_INDEXES: Final[tuple[tuple[str, str], ...]] = (
@@ -3162,6 +3249,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     ),
     Migration(76, "076_create_reports", _create_reports_table),
     Migration(77, "077_user_public_handle", _add_user_public_handle),
+    Migration(78, "078_position_qualifiers", _add_position_qualifiers),
 )
 
 
