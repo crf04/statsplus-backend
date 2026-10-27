@@ -1128,6 +1128,22 @@ def test_a_reader_offering_no_snapshot_at_all_reads_the_durable_tables(targets, 
     assert [player["canonical_id"] for player in payload["players"]] == [LEBRON]
 
 
+def test_a_migrated_database_with_no_streams_registered_reads_the_durable_tables(
+    targets, backtest, backtest_engine
+):
+    from app.services.database_first_activation import DatabaseFirstPublicationReader
+
+    created = _create(targets)
+    logs = FakeLogs(rows=(_row(LEBRON),))
+    diets = FakeDiets(zones={LEBRON: _zone_diet(0.42, 0.2)})
+    reader = DatabaseFirstPublicationReader(backtest_engine, clock=lambda: datetime(2026, 1, 16, tzinfo=UTC))
+
+    payload = backtest(created["id"], logs=logs, diets=diets, publication_reader=reader)
+
+    assert (payload["season"], payload["season_reason"]) == (SEASON, "default")
+    assert [player["canonical_id"] for player in payload["players"]] == [LEBRON]
+
+
 def test_repeated_backtests_reuse_cached_publication_decode_and_keep_response_stable(
     targets, backtest_settings, backtest_engine
 ):

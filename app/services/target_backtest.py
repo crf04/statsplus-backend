@@ -73,10 +73,10 @@ from app.services.backtest_season import (
     DEFAULT_BACKTEST_SEASON,
     SEASON_REASON_DEFAULT,
     SEASON_REASON_PUBLISHED,
+    BacktestMode,
     BacktestSeason,
     BacktestSeasons,
 )
-from app.services.database_first_activation import SeasonMode
 from app.services.matchup import (
     diet_evidence_thin,
     observed_diet_share,
@@ -510,7 +510,7 @@ class TargetBacktestService:
                     DEFAULT_BACKTEST_SEASON,
                     SEASON_REASON_DEFAULT,
                     self.settings.nba.current_season,
-                    SeasonMode.PUBLISHED,
+                    BacktestMode.PUBLISHED,
                 )
                 generation = None
                 catalog = None
@@ -596,7 +596,7 @@ class TargetBacktestService:
         targets = self.targets.list_recently_used_targets(now - PRECOMPUTE_RECENT_OWNER_WINDOW)
         choices = sorted(
             (self.seasons.resolve(season) for season in BACKTEST_SEASONS),
-            key=lambda choice: choice.mode is not SeasonMode.PUBLISHED,
+            key=lambda choice: choice.past,
         )
         work = []
         for choice in choices:
@@ -731,7 +731,7 @@ class TargetBacktestService:
             # A caller's own generation without a resolved season reads in
             # the published season, as it always has.
             published = research_season(self.settings, self.publication_reader)
-            choice = BacktestSeason(published, SEASON_REASON_PUBLISHED, published, SeasonMode.PUBLISHED)
+            choice = BacktestSeason(published, SEASON_REASON_PUBLISHED, published, BacktestMode.PUBLISHED)
         elif choice is None and requested_season is not None:
             choice = self.seasons.resolve(requested_season, session=session)
         qualifiers = list(target["qualifiers"])

@@ -57,7 +57,6 @@ from app.models.target import (
 from app.models.user import ACCESS_ACTIVE, ACCESS_WAITLISTED, storable_photo_url
 from app.models.user_attribution import ATTRIBUTION_VALUE_MAX_LENGTH
 from app.services.backtest_season import BacktestSeasons
-from app.services.database_first_activation import SeasonMode
 from app.services.research_activity import report_id
 from app.services.target_conditions import (
     require_defender_fielded,
@@ -1232,23 +1231,12 @@ class UserService:
             if self.player_logs is None:
                 raise InvalidConfigurationError("Target defender validation is unavailable.")
             choice = self.backtest_seasons.resolve(season)
-            # The game logs the Backtest itself reads: the live pointer's in
-            # the published season, else the season's own capture.
             require_defender_fielded(
                 self.player_logs,
                 conditions["defender"],
                 opponent,
                 choice.season,
-                publication_snapshot=(
-                    None
-                    if choice.mode is SeasonMode.PUBLISHED
-                    else self.backtest_seasons.evidence(
-                        choice,
-                        None,
-                        ("player_game_logs",),
-                        projection_only_keys=frozenset({"player_game_logs"}),
-                    )
-                ),
+                publication_snapshot=self.backtest_seasons.defender_game_logs(choice),
             )
         return conditions
 

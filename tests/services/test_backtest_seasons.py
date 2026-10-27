@@ -1076,6 +1076,29 @@ def test_a_published_preview_reading_a_retained_stream_has_no_today(world):
     assert body["provenance"]["sources"] == {}
 
 
+def test_a_default_preview_pinned_behind_live_game_logs_reads_its_diets_live(world):
+    """2026-27's game logs activate while the pin holds 2025-26: only they are retained."""
+
+    _open_new_season(world)
+    _pin(world, LAST)
+
+    body = _preview(world, None)
+
+    assert (*_season(body), body["published_season"]) == (LAST, "default", LAST)
+    assert _fitting(body) == [bt.LEBRON]
+    assert body["games_considered"] == {"played": 2, "kept": 2}
+    assert body["today"] is None
+    assert [
+        (entry["stream_key"], entry["season"], entry["status"]) for entry in body["provenance"]["generation"]
+    ] == [
+        ("exact_shot_zones", LAST, "active"),
+        ("grouped_shot_types", LAST, "active"),
+        ("player_assist_locations", LAST, "active"),
+        ("player_game_logs", LAST, "retained"),
+        ("synergy_play_types", LAST, "active"),
+    ]
+
+
 def test_a_preview_of_an_unretained_season_is_unavailable(world):
     _activate_new_season(world)
     world.revoke("exact_shot_zones", LAST)

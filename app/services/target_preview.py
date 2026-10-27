@@ -39,7 +39,6 @@ from typing import Any, Protocol
 
 from app.config.settings import RuntimeSettings
 from app.services.backtest_season import BacktestSeason, BacktestSeasons
-from app.services.database_first_activation import SeasonMode
 from app.services.matchup import (
     MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
     MATCHUP_PUBLICATION_STREAM_KEYS,
@@ -146,10 +145,10 @@ class TargetPreviewService:
                 publication_snapshot=snapshot,
             )
         previewed = self.backtests.backtest_target(draft, publication_snapshot=snapshot, season=choice)
-        if choice.mode is not SeasonMode.PUBLISHED or getattr(snapshot, "retained_history", ()):
+        if choice.past or getattr(snapshot, "retained_history", ()):
             # A season that is not the published one says nothing about
-            # tonight's players, and a retained or held read is not the
-            # Generation tonight's Matchup is in.  No Slate is read, so no source is.
+            # tonight's players, and a retained read is not the Generation
+            # tonight's Matchup is in.  No Slate is read, so no source is.
             return {
                 **previewed,
                 "today": None,
