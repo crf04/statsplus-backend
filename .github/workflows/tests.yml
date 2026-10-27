@@ -36,20 +36,20 @@ concurrency:
 # installed packages, and restoring the wheel cache beside it cost about six
 # seconds per job for nothing.
 jobs:
-  # The suite runs as five parallel shards of whole test files, balanced by the
+  # The suite runs as eight parallel shards of whole test files, balanced by the
   # seconds recorded in tests/shard_weights.json (see tests/conftest.py). Each
   # uploads its coverage data; `checks` combines it and enforces the floor.
   tests:
-    name: tests (${{ matrix.shard }}/5)
+    name: tests (${{ matrix.shard }}/8)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
       CHECK_MODE: shard
-      STATSPLUS_TEST_SHARD: ${{ matrix.shard }}/5
+      STATSPLUS_TEST_SHARD: ${{ matrix.shard }}/8
       COVERAGE_FILE: ${{ github.workspace }}/.coverage.shard${{ matrix.shard }}
 
     steps:
@@ -161,7 +161,7 @@ jobs:
         run: ./scripts/bootstrap.sh
 
       - name: Verify shards cover the suite exactly once
-        run: .venv/bin/python scripts/verify_test_shards.py 5
+        run: .venv/bin/python scripts/verify_test_shards.py 8
 
   # Lint, format check, migrations and the demo database need no test
   # results, so they run beside the shards instead of after them.
