@@ -169,3 +169,117 @@ def test_the_batched_read_joins_the_same_values(world):
     assert lebron["REB_CHANCES"].tolist()[:4] == [9, 3, 0, 6]
     assert lebron["POTENTIAL_AST"].isna().tolist() == [False, False, False, True, True]
     assert frames[12345].empty
+
+
+def _serve_custom(dependencies, tmp_path, rows, tracked, player_id, name):
+    """A world holding ``rows`` and the ``tracked`` (game_id, date, counts) tuples for ``player_id``."""
+
+    built = seasons.World(create_engine(f"sqlite:///{tmp_path / 'custom.sqlite3'}"))
+    built.compose("player_game_logs", NEW, {"rows": rows})
+    with built.engine.begin() as connection:
+        connection.execute(
+            AthleteCatalog.__table__.insert(),
+            {
+                "season": NEW,
+                "player_id": player_id,
+                "display_name": name,
+                "roster_status": "active",
+                "is_active": True,
+                "is_active_for_season": True,
+                "published_at": seasons.NOW,
+            },
+        )
+    tracking = PlayerTrackingRepository(built.engine)
+    for game_id, day, counts in tracked:
+        tracking.replace_game(NEW, game_id, day, [{"player_id": player_id, **_stored(counts)}], FETCHED)
+    dependencies.game_service = GameService(
+        built.engine,
+        Mock(),
+        settings=built.settings.model_copy(
+            update={"cache": built.settings.cache.model_copy(update={"enabled": False})}
+        ),
+        game_logs_source=StoredGameLogsSource(built.logs, tracking=tracking),
+        publication_reader=built.reader,
+        game_log_seasons=built.logs,
+        athlete_catalog=AthleteCatalogReader(built.engine),
+    )
+    return built
+
+
+def test_walter_serves_zero_rebounds_and_two_chances_in_the_same_row(dependencies, tmp_path, client):
+    # TOR vs BKN, game 0022501192: Ja'Kobe Walter had 0 REB, 2 chances, 1 AST, 2 potential assists.
+    walter = 1642266
+    row = seasons._log(walter, "Ja'Kobe Walter", NEW, "0022501192", date(2026, 4, 12), seasons.bt.BOS, "BKN")
+    row.update(rebounds=0, assists=1)
+    built = _serve_custom(
+        dependencies,
+        tmp_path,
+        [row],
+        [("0022501192", date(2026, 4, 12), (2, 0, 2, 2))],
+        walter,
+        "Ja'Kobe Walter",
+    )
+    try:
+        response = client.get("/api/games/game_logs?player_name=Ja%27Kobe+Walter&season_filter=" + NEW)
+        [served_row] = response.get_json()["game_logs"]
+    finally:
+        built.engine.dispose()
+
+    assert (served_row["REB"], served_row["REB_CHANCES"]) == (0, 2)
+    assert (served_row["REB_CONV_PCT"], served_row["AST_CONV_PCT"]) == (0.0, 0.5)
+    assert served_row["POTENTIAL_AST"] == 2
+
+
+@pytest.fixture
+def conversion_world(dependencies, tmp_path):
+    """Chances [10, 20, null] against REB [5, 15, 9] and AST [2, 0, 4] / potential [4, 0, null]."""
+
+    rows = seasons._season_logs(NEW, okc_games=0)[:3]
+    for row, rebounds, assists in zip(rows, (5, 15, 9), (2, 0, 4), strict=True):
+        row.update(rebounds=rebounds, assists=assists)
+    tracked = [
+        ("0022600000", date(2026, 10, 22), (10, 0, 10, 4)),
+        ("0022600001", date(2026, 10, 23), (20, 0, 20, 0)),
+    ]
+    built = _serve_custom(dependencies, tmp_path, rows, tracked, seasons.bt.LEBRON, "LeBron James")
+    yield
+    built.engine.dispose()
+
+
+def test_conversion_rates_are_per_game_ratios_and_null_without_chances(conversion_world, client):
+    # Newest first: 10-24 untracked, 10-23 has 0 potential assists, 10-22 is 5/10 and 2/4.
+    assert _rows(client.get(URL), "REB_CONV_PCT", "AST_CONV_PCT") == [
+        ("2026-10-24", None, None),
+        ("2026-10-23", 0.75, None),
+        ("2026-10-22", 0.5, 0.5),
+    ]
+
+
+def test_conversion_ranges_use_the_zero_to_one_scale_and_null_fails_them(conversion_world, client):
+    assert _rows(client.get(URL + "&self_filters[REB_CONV_PCT]=0.6,1"), "REB_CONV_PCT") == [
+        ("2026-10-23", 0.75)
+    ]
+    assert _rows(client.get(URL + "&self_filters[AST_CONV_PCT]=0,1"), "AST_CONV_PCT") == [("2026-10-22", 0.5)]
+
+
+def test_averages_are_a_ratio_of_sums_over_tracked_games(conversion_world, client):
+    body = client.get(URL).get_json()
+
+    for block in (body["averages"][0], body["season_averages"][0]):
+        # REB [5, 15] over chances [10, 20] is 20/30, not the mean of 0.5 and 0.75.
+        assert (block["REB_CHANCES"], block["REB_CONV_PCT"]) == (15.0, 0.667)
+        # Potential assists [4, 0]: the zero is a tracked game; AST [2, 0] over 4 is 0.5.
+        assert (block["POTENTIAL_AST"], block["AST_CONV_PCT"]) == (2.0, 0.5)
+
+
+def test_averages_are_null_when_no_game_is_tracked(dependencies, tmp_path, client):
+    built = _serve_custom(
+        dependencies, tmp_path, seasons._season_logs(NEW, okc_games=0), [], seasons.bt.LEBRON, "LeBron James"
+    )
+    try:
+        body = client.get(URL).get_json()
+    finally:
+        built.engine.dispose()
+
+    for key in ("REB_CHANCES", "REB_CONV_PCT", "POTENTIAL_AST", "AST_CONV_PCT"):
+        assert body["averages"][0][key] is None and body["season_averages"][0][key] is None

@@ -2015,9 +2015,10 @@ def _create_player_game_tracking_table(connection: Connection) -> None:
     Repeatable: ``checkfirst`` skips an existing table and never touches its
     rows.  Nothing is backfilled; ``scripts/tracking_refresh.py`` fills a season.
     """
-    from app.models.player_tracking import PlayerGameTracking
+    from app.models.player_tracking import PlayerGameTracking, PlayerTrackingAttempt
 
-    PlayerGameTracking.__table__.create(connection, checkfirst=True)
+    for model in (PlayerGameTracking, PlayerTrackingAttempt):
+        model.__table__.create(connection, checkfirst=True)
 
 
 def _create_player_season_stats_table(connection: Connection) -> None:

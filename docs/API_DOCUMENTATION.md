@@ -2741,10 +2741,19 @@ player-tracking counts, each an integer or `null`:
   ledger, and joined onto rows at read time; they never change a publication or
   a ledger checksum. A game not yet collected, or a player absent from a feed,
   serves `null`, never `0`. Regular-season games of 2025-26 and 2026-27 only.
-* `self_filters[REB_CHANCES]=min,max` and `self_filters[POTENTIAL_AST]=min,max`
-  filter on them; a `null` value fails any range. The offensive and defensive
-  counts are served but not filterable, and none of the four is an average or
-  an opponent-defense category.
+* Two derived per-game conversion rates on a 0-1 scale, like `FG_PCT`:
+  `REB_CONV_PCT` = `REB` / `REB_CHANCES` and `AST_CONV_PCT` = `AST` /
+  `POTENTIAL_AST`. Each is `null` when its denominator is `null` or 0.
+* `self_filters[REB_CHANCES]`, `[POTENTIAL_AST]`, `[REB_CONV_PCT]` and
+  `[AST_CONV_PCT]` (`=min,max`) filter on them, with the conversion ranges on
+  the 0-1 scale; a `null` value fails any range. The offensive and defensive
+  counts are served but not filterable, and none is an opponent-defense category.
+* Both `averages` and `season_averages` gain `REB_CHANCES` and `POTENTIAL_AST`
+  (mean over games where the stat is not `null`, 2 decimals) and `REB_CONV_PCT`
+  and `AST_CONV_PCT` (a ratio of sums over games whose chances are not `null`,
+  3 decimals, not the mean of per-game ratios). Chances `[10, 20, null]` with
+  `REB` `[5, 15, 9]` average `REB_CHANCES` 15.0 and `REB_CONV_PCT` 0.667. Each
+  is `null` when no game qualifies.
 * `python scripts/tracking_refresh.py --season <season> [--season ...]
   --database-url "$DATABASE_URL" [--max-games N] [--throttle SECONDS]
   [--game-id ID]` collects every completed regular-season game without stored
@@ -2969,7 +2978,7 @@ Query parameters:
 | `season_filter` | No | Canonical NBA season in `YYYY-YY` form, with `YY` equal to the following calendar year's final two digits (for example, `2024-25`). Whitespace is trimmed. Default is the current season. A season before the active Publication's season is read from that season's latest retained, unrevoked, unretired Publication (the seasons [`GET /api/games/seasons`](#get-seasons) lists): the logs, averages, `season_game_count`, Diets, rankings and `provenance` all come from that one retained generation. A revoked, retired, pruned or projection-less season, or a disabled stream, reads no games with an unavailable `provenance` entry. The active season and an omitted `season_filter` are unchanged. An explicit `season_filter` is a Selected Season (crf04/statsplus#330): the response adds `season_context: {selected_season, published_season}`, and the season after the Published Season reads its held candidates as if the Season Cutover had run (game logs from its candidate, a family not ready, Last 15 included until a window of the selected season serves, from its previous season labelled `prior_season`; `provenance.generation[].status` may be `candidate`). A selected season that is not offered (the next season before `GET /api/games/seasons` lists it, or any later one) is `503 season_unavailable` with `details: {selected_season, published_season}`, never another season's answer |
 | `playstyle_RTG_min` | No | Finite numeric lower bound on `PLAYTYPE_RTG`. Default `0` |
 | `playstyle_RTG_max` | No | Finite numeric upper bound on `PLAYTYPE_RTG`. Default `200` |
-| `self_filters[STAT]` | No | Ordered inclusive stat range as `min,max` (normalized to a typed `between` filter); repeat the parameter to combine multiple constraints for one stat. Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FG2M`, `FG2A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, `FD_PTS`, `USG_PCT` (0-100), `REB_CHANCES`, and `POTENTIAL_AST`. `PLUS_MINUS` is not supported per the #66 contract amendment |
+| `self_filters[STAT]` | No | Ordered inclusive stat range as `min,max` (normalized to a typed `between` filter); repeat the parameter to combine multiple constraints for one stat. Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FG2M`, `FG2A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, `FD_PTS`, `USG_PCT` (0-100), `REB_CHANCES`, `POTENTIAL_AST`, `REB_CONV_PCT` and `AST_CONV_PCT` (both 0-1). `PLUS_MINUS` is not supported per the #66 contract amendment |
 
 Example:
 
@@ -6185,7 +6194,7 @@ self_filters[STAT]=min,max
 self_filters[STAT]=min,max
 ```
 
-Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FG2M`, `FG2A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, `FD_PTS`, `USG_PCT` (0-100), `REB_CHANCES`, and `POTENTIAL_AST`. `PLUS_MINUS` is not supported per the #66 contract amendment.
+Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FG2M`, `FG2A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, `FD_PTS`, `USG_PCT` (0-100), `REB_CHANCES`, `POTENTIAL_AST`, `REB_CONV_PCT` and `AST_CONV_PCT` (both 0-1). `PLUS_MINUS` is not supported per the #66 contract amendment.
 
 The query-string form is retained for compatibility and means an inclusive
 `between` comparison. Natural-language and typed executor inputs use an

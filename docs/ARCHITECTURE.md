@@ -5467,7 +5467,7 @@ day feed is not used: it omits every player with 0 rebounds.
 Catalog game with no stored rows, oldest first, and stores a game only once both
 feeds have published for it (the box score has a player with minutes and the day
 feed lists one of them); otherwise the game is reported as `not_published` and a
-later run retries it. A player missing from the day feed stores
+later run retries it. Each unsuccessful attempt is remembered in `player_tracking_attempts` (also migration 078); candidates run never-tried first, then least recently tried, so games whose tracking never publishes cannot starve newer ones under `--max-games`. `replace_game` takes a per-game Postgres advisory lock, so a backfill overlapping the cron serializes instead of raising a duplicate key. A player missing from the day feed stores
 `potential_ast = NULL`. `PlayerTrackingRepository.replace_game` rewrites one game
 in a single transaction and writes nothing when the values are unchanged, so
 reruns leave identical rows. `scripts/tracking_refresh.py` is the nightly step

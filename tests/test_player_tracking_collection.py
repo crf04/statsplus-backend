@@ -144,6 +144,7 @@ def test_requests_send_the_standard_nba_api_headers_and_the_game_day(nba_api):
 
     (_, box_call), (_, day_call) = nba_api.calls
     assert box_call["headers"] == STATS_HEADERS and day_call["headers"] == STATS_HEADERS
+    assert day_call["season"] == SEASON
     assert day_call["pt_measure_type"] == "Passing"
     assert day_call["per_mode_simple"] == "Totals"
     assert day_call["season_type_all_star"] == "Regular Season"
@@ -333,3 +334,94 @@ def test_the_refresh_script_runs_the_collector_for_each_season_and_exits_1_on_a_
         ("2025-26", {"max_games": 5, "throttle_seconds": 0.0, "game_ids": None}),
         ("2026-27", {"max_games": 5, "throttle_seconds": 0.0, "game_ids": None}),
     ]
+
+
+class UnpublishedFeeds:
+    """Serves the recorded Walter game for ``TOR_GAME`` and an unpublished box score for any other."""
+
+    def __init__(self):
+        self.requested = []
+
+    def fetch_game_rebound_chances(self, game_id):
+        self.requested.append(game_id)
+        if game_id == TOR_GAME:
+            return _provider_box(TOR_GAME)
+        return {WALTER: {"minutes": 0, "total": 0, "offensive": 0, "defensive": 0}}
+
+    def fetch_day_potential_assists(self, season, day):
+        return {WALTER: 2}
+
+
+def _provider_box(game_id):
+    from app.providers.nba_tracking import parse_box_score_player_track
+
+    return parse_box_score_player_track(_box(game_id))
+
+
+def test_games_that_never_publish_cannot_starve_a_newer_available_game(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'starve.sqlite3'}")
+    run_migrations(engine)
+    repository = PlayerTrackingRepository(engine)
+    # Three unpublished games older than the one that has published.
+    events = [_event(f"002250100{n}", scheduled=f"2026-04-0{n}T23:00:00Z") for n in (1, 2, 3)]
+    events.append(_event(TOR_GAME))
+    feeds = UnpublishedFeeds()
+    ticks = iter(range(10_000))
+    service = PlayerTrackingCollectionService(
+        feeds,
+        repository,
+        lambda season: events,
+        clock=lambda: datetime(2026, 4, 13, 10, tzinfo=UTC) + timedelta(minutes=next(ticks)),
+    )
+
+    first = service.collect(SEASON, max_games=3)
+    second = service.collect(SEASON, max_games=3)
+
+    assert first["stored"] == 0 and first["remaining"] == 1
+    assert feeds.requested[:3] == ["0022501001", "0022501002", "0022501003"]
+    # The second run tries the never-tried game before retrying any of the three.
+    assert feeds.requested[3] == TOR_GAME
+    assert second["stored_game_ids"] == [TOR_GAME]
+    # The unavailable games stay retryable, least recently tried first.
+    third = service.collect(SEASON, max_games=2)
+    # 003 was tried before the second run retried 001 and 002.
+    assert feeds.requested[-2:] == ["0022501003", "0022501001"]
+    assert third["remaining"] == 1
+
+
+def test_a_stored_game_loses_its_attempt_record(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'attempts.sqlite3'}")
+    run_migrations(engine)
+    repository = PlayerTrackingRepository(engine)
+    repository.record_attempt(SEASON, TOR_GAME, "not_published", datetime(2026, 4, 13, tzinfo=UTC))
+
+    repository.replace_game(
+        SEASON,
+        TOR_GAME,
+        DAY,
+        [{"player_id": WALTER, "reb_chances": 2, "oreb_chances": 0, "dreb_chances": 2, "potential_ast": 2}],
+        datetime(2026, 4, 14, tzinfo=UTC),
+    )
+
+    assert repository.attempts(SEASON) == {}
+
+
+def test_reads_are_scoped_to_the_season(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'seasons.sqlite3'}")
+    run_migrations(engine)
+    repository = PlayerTrackingRepository(engine)
+    counts = {"reb_chances": 2, "oreb_chances": 0, "dreb_chances": 2, "potential_ast": 2}
+    repository.replace_game(
+        SEASON, TOR_GAME, DAY, [{"player_id": WALTER, **counts}], datetime(2026, 4, 14, tzinfo=UTC)
+    )
+    repository.replace_game(
+        "2026-27",
+        "0022600001",
+        date(2026, 10, 23),
+        [{"player_id": WALTER, **counts, "reb_chances": 9}],
+        datetime(2026, 10, 24, tzinfo=UTC),
+    )
+
+    assert repository.for_player(SEASON, WALTER) == {TOR_GAME: counts}
+    assert repository.for_player("2026-27", WALTER) == {"0022600001": {**counts, "reb_chances": 9}}
+    assert repository.stored_game_ids("2026-27") == {"0022600001"}

@@ -81,3 +81,37 @@ def test_a_changed_value_replaces_the_game_whole(engine):
     assert repository.for_players(SEASON, [1642266, 1629651]) == {
         1642266: {"0022501192": {"reb_chances": 2, "oreb_chances": 0, "dreb_chances": 2, "potential_ast": 3}}
     }
+
+
+def test_overlapping_writers_of_one_game_neither_raise_nor_duplicate(engine):
+    """A backfill overlapping the cron: both read an absent game, then both write it."""
+
+    import threading
+
+    repository = PlayerTrackingRepository(engine)
+    for round_number in range(8):
+        game_id = f"002250{round_number:04d}"
+        barrier = threading.Barrier(4)
+        outcomes = []
+
+        def write(game_id=game_id, barrier=barrier, outcomes=outcomes):
+            barrier.wait()
+            try:
+                outcomes.append(repository.replace_game(SEASON, game_id, date(2026, 4, 12), _rows(), FETCHED))
+            except Exception as error:  # the race raised IntegrityError before the per-game lock
+                outcomes.append(error)
+
+        threads = [threading.Thread(target=write) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert sorted(outcomes, key=str) == [False, False, False, True]
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT count(*) FROM player_game_tracking WHERE game_id = :g"), {"g": game_id}
+                ).scalar()
+                == 2
+            )

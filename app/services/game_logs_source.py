@@ -155,6 +155,14 @@ TRACKING_FRAME_COLUMNS = {
 }
 
 
+#: Per-game 0-1 conversion rates: (column, made, chances).  Null when the
+#: chances are null or 0.
+CONVERSION_FRAME_COLUMNS = (
+    ("REB_CONV_PCT", "REB", "REB_CHANCES"),
+    ("AST_CONV_PCT", "AST", "POTENTIAL_AST"),
+)
+
+
 def _with_tracking(frame: pd.DataFrame, tracking: dict[str, dict[str, int | None]]) -> pd.DataFrame:
     game_ids = frame["GAME_ID"] if "GAME_ID" in frame else pd.Series([], dtype=object)
     for column, stored in TRACKING_FRAME_COLUMNS.items():
@@ -163,6 +171,9 @@ def _with_tracking(frame: pd.DataFrame, tracking: dict[str, dict[str, int | None
             index=frame.index,
             dtype="Int64",
         )
+    for conversion, made, chances in CONVERSION_FRAME_COLUMNS:
+        denominator = frame[chances].astype("Float64")
+        frame[conversion] = frame[made].astype("Float64") / denominator.where(denominator != 0)
     return frame
 
 

@@ -30,3 +30,20 @@ class PlayerGameTracking(Base):
         Index("ix_player_game_tracking_season_player", "season", "player_id"),
         Index("ix_player_game_tracking_season_game", "season", "game_id"),
     )
+
+
+class PlayerTrackingAttempt(Base):
+    """The last unsuccessful collection attempt for a game with no stored tracking.
+
+    Orders retries least-recently-tried first, so games whose tracking never
+    publishes cannot starve newer ones under a bounded run.
+    """
+
+    __tablename__ = "player_tracking_attempts"
+
+    game_id = Column(String(10), primary_key=True)
+    season = Column(String(7), nullable=False)
+    outcome = Column(String(16), nullable=False)
+    last_attempt_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (Index("ix_player_tracking_attempts_season", "season"),)

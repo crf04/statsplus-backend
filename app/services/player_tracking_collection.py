@@ -77,7 +77,11 @@ class PlayerTrackingCollectionService:
         eligible = self._eligible(season)
         if game_ids is None:
             stored = self.repository.stored_game_ids(season)
+            attempts = self.repository.attempts(season)
             pending = [game_id for game_id in eligible if game_id not in stored]
+            # Never-tried games first (oldest first), then least recently tried,
+            # so games that never publish cannot starve newer ones.
+            pending.sort(key=lambda game_id: attempts[game_id].isoformat() if game_id in attempts else "")
         else:
             pending = list(dict.fromkeys(str(game_id) for game_id in game_ids))
             invalid = [g for g in pending if _REGULAR_SEASON_GAME_ID.match(g) is None or g not in eligible]
@@ -98,16 +102,19 @@ class PlayerTrackingCollectionService:
                 played = [player_id for player_id, line in box.items() if line["minutes"]]
                 if not played:
                     not_published.append(game_id)
+                    self.repository.record_attempt(season, game_id, "not_published", self._clock())
                     continue
                 if game_date not in day_feeds:
                     day_feeds[game_date] = self.provider.fetch_day_potential_assists(season, game_date)
             except (OSError, ProviderResponseError, ValueError) as error:
                 logger.warning("tracking fetch failed for %s: %s", game_id, error)
                 failed.append({"game_id": game_id, "error": sanitize_public_value(str(error))})
+                self.repository.record_attempt(season, game_id, "failed", self._clock())
                 continue
             day = day_feeds[game_date]
             if not any(player_id in day for player_id in played):
                 not_published.append(game_id)
+                self.repository.record_attempt(season, game_id, "not_published", self._clock())
                 continue
             rows = [
                 {

@@ -12,13 +12,14 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, insert, select, text, update
 from sqlalchemy.engine import Connection, Engine
 
-from app.models.player_tracking import PlayerGameTracking
+from app.models.player_tracking import PlayerGameTracking, PlayerTrackingAttempt
 from app.services.request_reads import read_connection
 
 _TABLE = PlayerGameTracking.__table__
+_ATTEMPTS = PlayerTrackingAttempt.__table__
 VALUE_COLUMNS = ("reb_chances", "oreb_chances", "dreb_chances", "potential_ast")
 
 
@@ -44,10 +45,17 @@ class PlayerTrackingRepository:
 
         wanted = {int(row["player_id"]): {name: row[name] for name in VALUE_COLUMNS} for row in rows}
         with self.engine.begin() as connection:
+            if connection.dialect.name == "postgresql":
+                # Serialize writers of one game (cron against a backfill): the
+                # second waits, then sees the first's rows and finds them equal.
+                connection.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": f"tracking:{game_id}"}
+                )
             existing = {
                 row["player_id"]: {name: row[name] for name in VALUE_COLUMNS}
                 for row in connection.execute(select(_TABLE).where(_TABLE.c.game_id == game_id)).mappings()
             }
+            connection.execute(delete(_ATTEMPTS).where(_ATTEMPTS.c.game_id == game_id))
             if existing == wanted:
                 return False
             connection.execute(delete(_TABLE).where(_TABLE.c.game_id == game_id))
@@ -67,6 +75,34 @@ class PlayerTrackingRepository:
                     ],
                 )
         return True
+
+    def record_attempt(self, season: str, game_id: str, outcome: str, at: datetime) -> None:
+        """Remember an attempt that stored nothing (``not_published`` or ``failed``)."""
+
+        values = {"season": season, "outcome": outcome, "last_attempt_at": at}
+        with self.engine.begin() as connection:
+            if connection.dialect.name == "postgresql":
+                connection.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": f"tracking:{game_id}"}
+                )
+            changed = connection.execute(
+                update(_ATTEMPTS).where(_ATTEMPTS.c.game_id == game_id).values(**values)
+            )
+            if not changed.rowcount:
+                connection.execute(insert(_ATTEMPTS).values(game_id=game_id, **values))
+
+    def attempts(self, season: str) -> dict[str, datetime]:
+        """Last attempt time of each unstored game already tried this season."""
+
+        with self.engine.connect() as connection:
+            return {
+                row[0]: row[1]
+                for row in connection.execute(
+                    select(_ATTEMPTS.c.game_id, _ATTEMPTS.c.last_attempt_at).where(
+                        _ATTEMPTS.c.season == season
+                    )
+                )
+            }
 
     def stored_game_ids(self, season: str) -> set[str]:
         with self.engine.connect() as connection:
