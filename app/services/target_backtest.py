@@ -772,12 +772,20 @@ class TargetBacktestService:
                     None,
                     lambda season: self._publication_snapshot(season, session=session),
                     _PUBLICATION_STREAM_KEYS,
-                    choice=choice,
+                    # Pinned to the season the cache precheck resolved and read
+                    # its Positions for, so the season, its Positions and the
+                    # digest filed under come from one snapshot.
+                    choice=cached_choice if cached_choice is not None else choice,
                     projection_only_keys=_PROJECTION_ONLY_STREAM_KEYS,
                     decoded_only_keys=BACKTEST_DECODED_ONLY_STREAM_KEYS,
                     session=session,
                 )
             season = choice.season
+            if catalog_read is not None and cached_choice is not None and season != cached_choice.season:
+                # Defensive: a capture that resolved another season must not
+                # evaluate with this one's Positions or file under its key.
+                catalog_read = self._catalog_snapshot(season)
+                cache_key = None
             opponent_team_id = NBA_TEAM_TRICODE_TO_ID[target["opponent"]]
             rows = tuple(
                 record

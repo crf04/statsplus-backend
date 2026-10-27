@@ -687,3 +687,56 @@ def test_a_refresh_landing_between_two_reads_cannot_file_a_result_under_the_wron
         "hit",
         [("LeBron James", "Big")],
     )
+
+
+def test_a_serving_season_advancing_after_the_position_read_cannot_mix_seasons(world):
+    """The season, its Positions and the digest filed under come from one snapshot.
+
+    LeBron is Big in 2025-26 and Wing in 2026-27.  2026-27 is published right
+    after the cache precheck read the 2025-26 Positions; the Big Target must
+    not come back as a 2026-27 Backtest holding 2025-26's Positions.
+    """
+
+    target = world.users.create_target(OWNER, opponent="OKC", qualifiers=[bt.BIG])
+    with world.engine.begin() as connection:
+        connection.execute(
+            AthleteCatalog.__table__.insert(),
+            [
+                {
+                    "season": season,
+                    "player_id": bt.LEBRON,
+                    "display_name": "LeBron James",
+                    "roster_status": "active",
+                    "is_active": True,
+                    "is_active_for_season": True,
+                    "position": position,
+                    "published_at": NOW,
+                }
+                for season, position in [(LAST, "Big"), (NEW, "Wing")]
+            ],
+        )
+
+    class AdvancingCatalog(AthleteCatalogReader):
+        armed = True
+
+        def get_positions(self, season):
+            positions = super().get_positions(season)
+            if self.armed:
+                self.armed = False
+                world.publish_season(NEW, okc_games=1, corner_three=0.1)
+            return positions
+
+    catalog = AdvancingCatalog(world.engine)
+    redis_client = CountingRedis()
+    service = world.backtests(redis_client=redis_client, athlete_catalog=catalog)
+
+    body, state = service.backtest(OWNER, target["id"])
+
+    pairs = [(p["name"], p["position"]) for p in body["players"]]
+    # The request answers for the season it started in, with that season's Positions.
+    assert (body["season"], state, pairs) == (LAST, "miss", [("LeBron James", "Big")])
+
+    later, later_state = service.backtest(OWNER, target["id"])
+
+    # The next request serves 2026-27, where LeBron is a Wing and no Big fits.
+    assert (later["season"], later_state, later["players"]) == (NEW, "miss", [])
