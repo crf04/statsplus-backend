@@ -2,8 +2,9 @@
 
 One real control plane (``tests/support/season_cutover``) publishes 2025-26
 and collects 2026-27.  The game logs cut over in the opening week, when every
-team has played one game; team defense and the player's Diet are not ready
-and keep serving 2025-26.  The Matchup is composed by the real
+team has played one game.  Team defense is ready then but has no 2026-27
+composition yet, and the player's Diet is not ready, so both keep serving
+2025-26.  The Matchup is composed by the real
 ``MatchupService`` over the real Publication reader, game-log and Diet
 repositories and team-matchup query, and only its response is asserted.
 
@@ -39,9 +40,6 @@ from app.services.team_matchup_repository import TeamMatchupRepository
 from tests.support.season_cutover import (
     L15_STREAM,
     NEW,
-    NEW_CUTOFF,
-    NEW_GAMES,
-    NEW_PROVENANCE,
     NOW,
     OLD,
     OLD_CUTOFF,
@@ -54,8 +52,6 @@ from tests.support.season_cutover import (
     THIN_GAMES,
     THIN_PROVENANCE,
     TRICODES,
-    accept_ledger,
-    compose_thin,
     log_rows,
     open_opening_week,
     pointers,
@@ -85,7 +81,7 @@ TRAILING_DIETS = {
 TRAILING_TEAM_DEFENSE = {
     "family": "team_defense",
     "serving_season": OLD,
-    "rule": "every team has played 10 games",
+    "rule": "every team has played a game",
 }
 
 
@@ -309,7 +305,7 @@ class World:
             return version.publication_id
 
     def opening_week_cutover(self):
-        """Cut over with one game a team: the game logs move, the rest trail."""
+        """Cut over with one game a team and only the game logs composed."""
 
         open_opening_week(self.engine)
         self.publications.recompose_ledger(
@@ -320,14 +316,7 @@ class World:
             provenance=THIN_PROVENANCE,
             reason="2026-27 ledger composition",
         )
-        compose_thin(self.publications, SEASON_STREAM)
-        plan = self.operations.cutover_season(NEW, actor=ACTOR, reason="open 2026-27", dry_run=True)
-        return self.operations.cutover_season(
-            NEW,
-            actor=ACTOR,
-            reason="open 2026-27",
-            leave_behind=[item["stream_key"] for item in plan.to_dict()["leave_behind"]],
-        )
+        return self.operations.cutover_season(NEW, actor=ACTOR, reason="open 2026-27")
 
     def compose_defense(self, games, *, cutoff, provenance):
         return self.publications.recompose_ledger(
@@ -398,9 +387,7 @@ def test_after_an_opening_week_cutover_a_matchup_serves_trailing_inputs_labelled
 
     matchup = world.matchup()
 
-    assert [dict(item) for item in cutover.resource.left_behind] == [
-        {"stream_key": SEASON_STREAM, "reason": "serving_season_not_ready"}
-    ]
+    assert [dict(item) for item in cutover.resource.left_behind] == []
     assert matchup["as_of"]["season"] == NEW
     assert matchup["experience"]["sections"]["season_defense"] == _season_defense(OLD)
     assert matchup["league"]["surface_availability"]["traditional"]["season"] == {
@@ -455,15 +442,15 @@ def test_a_mixed_season_score_is_pinned(world):
     assert _score(matchup, "STKS") == 2.71875
 
 
-def test_when_team_defense_is_ready_its_next_composition_activates_and_the_section_reports_2026_27(world):
+def test_team_defenses_first_composition_with_a_game_a_team_activates_and_the_section_reports_2026_27(world):
     world.opening_week_cutover()
-    # Still one game a team: this composition is held, and nothing changes.
-    world.compose_defense(THIN_GAMES, cutoff=THIN_CUTOFF, provenance=THIN_PROVENANCE)
-    held = world.matchup()
-    assert (held["trailing"], _score(held, "STKS")) == ([TRAILING_DIETS, TRAILING_TEAM_DEFENSE], 2.71875)
+    trailing = world.matchup()
+    assert (trailing["trailing"], _score(trailing, "STKS")) == (
+        [TRAILING_DIETS, TRAILING_TEAM_DEFENSE],
+        2.71875,
+    )
 
-    accept_ledger(world.engine, NEW_GAMES[:15], "pbp")
-    ready = world.compose_defense(NEW_GAMES, cutoff=NEW_CUTOFF, provenance=NEW_PROVENANCE)
+    ready = world.compose_defense(THIN_GAMES, cutoff=THIN_CUTOFF, provenance=THIN_PROVENANCE)
 
     matchup = world.matchup()
 

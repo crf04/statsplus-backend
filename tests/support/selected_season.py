@@ -198,7 +198,7 @@ class SelectedWorld(World):
                 {"k": stream_key},
             )
 
-    def hold_opening_week(self):
+    def hold_opening_week(self, *, defense=True):
         """Hold 2026-27 candidates from the opening week: one game a team."""
 
         open_opening_week(self.engine)
@@ -210,6 +210,8 @@ class SelectedWorld(World):
             provenance=THIN_PROVENANCE,
             reason="2026-27 ledger composition",
         )
+        if not defense:
+            return logs, None
         defense = self.compose_new_defense(THIN_GAMES, cutoff=THIN_CUTOFF, provenance=THIN_PROVENANCE)
         return logs, defense
 
