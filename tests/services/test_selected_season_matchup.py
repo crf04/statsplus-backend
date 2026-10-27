@@ -34,6 +34,7 @@ from tests.support.season_cutover import (
     THIN_PROVENANCE,
 )
 from tests.support.selected_season import (
+    _PLAY_TYPE_PAYLOADS,
     GAME_ID,
     OLD_GAME_ID,
     OLD_SLATE_DATE,
@@ -75,6 +76,7 @@ def served(world, dependencies):
     dependencies.slate_edges_service = world.edges
     dependencies.player_service = world.profiles
     dependencies.diet_baselines_service = world.baselines
+    dependencies.team_service = world.teams
     return world
 
 
@@ -86,9 +88,10 @@ ROUTES = {
     "profile": "/api/players/profile?player_name=Player+0&category=Shooting+Type",
     "diet_baselines": "/api/diet/baselines?",
     "unscheduled": f"/api/matchups/unscheduled?player_id={PLAYER_ID}&opponent={TRICODES[BOS]}",
+    "team_stats": "/api/teams/stats?category=Traditional&team=Boston+Celtics",
 }
-#: Slate, edges and profile also answer anonymous callers.
-ANONYMOUS = ("slate", "slate_edges", "profile")
+#: Slate, edges, profile and team stats also answer anonymous callers.
+ANONYMOUS = ("slate", "slate_edges", "profile", "team_stats")
 
 
 def _with_season(path):
@@ -645,6 +648,51 @@ def test_baselines_selected_after_the_cutover_still_name_their_trailing_diets(se
 
 
 # --- game logs (B1) carry the sample too ----------------------------------------
+
+
+# --- Opposing Team Profile (crf04/statsplus#369) --------------------------------
+
+PLAY_TYPE_POINTS = "/api/teams/stats?category=Playtype+Points&team=Boston+Celtics"
+
+
+def _isolation(body):
+    return {key: body[key] for key in ("Isolation", "Isolation_RANK", "Cut", "Cut_RANK")}
+
+
+def test_a_selected_2026_27_team_profile_ranks_its_held_play_type_defense(served, client, authenticate):
+    served.publish_play_types()
+    served.hold_opening_week()
+    held = _PLAY_TYPE_PAYLOADS[PLAY_TYPE_DEFENSE](THIN_GAMES)
+    for row in held["rows"]:
+        if row["team_id"] == BOS:
+            row["per48"] = {**row["per48"], "Isolation_PTS": 4.0}
+    served.publications.recompose_ledger(
+        PLAY_TYPE_DEFENSE,
+        season=NEW,
+        cutoff=THIN_CUTOFF,
+        payload=held,
+        provenance=THIN_PROVENANCE,
+        reason="2026-27 ledger composition",
+    )
+
+    selected = client.get(f"{PLAY_TYPE_POINTS}&season={NEW}", headers=authenticate()).get_json()
+    omitted = client.get(PLAY_TYPE_POINTS).get_json()
+
+    # The 2026-27 candidate passes governance: BOS allows the most isolation points.
+    assert _isolation(selected["data"]) == {"Isolation": 4.0, "Isolation_RANK": 30, "Cut": 1.0, "Cut_RANK": 1}
+    assert (selected["season_context"], selected["trailing"]) == (CONTEXT, [])
+    # No season reads today's bare 2025-26 body.
+    assert _isolation(omitted) == {"Isolation": 1.0, "Isolation_RANK": 1, "Cut": 1.0, "Cut_RANK": 1}
+
+
+def test_a_selected_2026_27_team_profile_trails_team_defense_on_2025_26(served, client, authenticate):
+    served.publish_play_types()
+    served.hold_opening_week()
+
+    body = client.get(f"{PLAY_TYPE_POINTS}&season={NEW}", headers=authenticate()).get_json()
+
+    assert _isolation(body["data"]) == {"Isolation": 1.0, "Isolation_RANK": 1, "Cut": 1.0, "Cut_RANK": 1}
+    assert (body["season_context"], body["trailing"]) == (CONTEXT, [TEAM_DEFENSE])
 
 
 def test_selected_game_logs_list_their_trailing_families_with_their_sample(served):

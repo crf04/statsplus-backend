@@ -27,6 +27,7 @@ from app.domain.team_matchup_taxonomy import NBA_PUBLICATION_TAXONOMY
 from app.services.diet_baselines import DietBaselinesService
 from app.services.game_logs_source import StoredGameLogsSource
 from app.services.game_service import GameService
+from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 from app.services.matchup_injuries import unavailable_injury_result
 from app.services.matchup_reuse import ComposedMatchupCache, PublicationSnapshotReuse
 from app.services.matchup_selection import MatchupSelectionService
@@ -36,6 +37,8 @@ from app.services.player_service import PlayerProfileReader, PlayerService
 from app.services.slate_edges import SlateEdgesService
 from app.services.slate_service import SlateService
 from app.services.statistic_catalog import StatisticCatalog
+from app.services.team_filter_rankings import TeamFilterRankingService
+from app.services.team_service import TeamService
 from tests.services.test_serving_season_matchup import (
     ATL,
     BOS,
@@ -237,6 +240,15 @@ class SelectedWorld(World):
         )
         self.baselines = DietBaselinesService(
             player_diets=self.service.player_diets, settings=settings(), publication_reader=self.reader
+        )
+        self.teams = TeamService(
+            settings=settings(),
+            publication_reader=self.reader,
+            season_publications=TeamFilterRankingService(
+                self.reader,
+                governance_resolver=ActiveManifestLedgerGovernanceReader(self.engine, clock=lambda: NOW),
+                clock=lambda: NOW,
+            ),
         )
 
     def live(self, stream_key):

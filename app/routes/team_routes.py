@@ -6,6 +6,7 @@ from ..errors import (
     route_error_boundary,
 )
 from ..utils.auth import require_auth, require_auth_optional
+from ._selected_season import season_argument, season_refusals, selected
 from ._service_proxy import CurrentAppService
 
 # Initialize blueprint and services
@@ -25,7 +26,9 @@ def get_team_stats():
     if not category or not team:
         raise InvalidInputError("team and category are required.")
 
-    team_stats = team_service.get_team_stats(category, team, date)
+    service = selected(team_service, "team", season_argument(), anonymous=True)
+    with season_refusals():
+        team_stats = service.get_team_stats(category, team, date)
     if not team_stats:
         raise ResourceNotFoundError("No data found for the specified team and category.")
     return jsonify(team_stats)
