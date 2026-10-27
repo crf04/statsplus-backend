@@ -79,18 +79,19 @@ READINESS_RULES: tuple[ReadinessRule, ...] = (
                 "traditional_opponent_season",
                 "grouped_shot_types_opponent_season",
                 "exact_shot_zones_opponent_season",
+                "synergy_play_types_opponent_season",
                 "assist_locations_season",
                 "rebound_types_season",
             }
         ),
-        min_team_games=10,
-        wording="every team has played 10 games",
+        min_team_games=1,
+        wording="every team has played a game",
     ),
     # A Synergy candidate exists only once NBA has published the season, so
     # the composition being gated is itself the first half of the rule.
     ReadinessRule(
         "synergy",
-        frozenset({"synergy_play_types", "synergy_play_types_opponent_season"}),
+        frozenset({"synergy_play_types"}),
         min_team_games=10,
         wording="NBA has published the season and every team has played 10 games",
     ),

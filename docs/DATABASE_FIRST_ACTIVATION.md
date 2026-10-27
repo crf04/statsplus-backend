@@ -571,8 +571,8 @@ site only through one operator Season Cutover, never by composition alone.
 | --- | --- | --- |
 | `game_logs` | `player_game_logs`, `player_per36` | At the Season Cutover |
 | `player_diets` | `grouped_shot_types`, `exact_shot_zones`, `player_assist_locations`, `player_rebound_types` | Every team has played at least 10 games |
-| `team_defense` | `traditional_opponent_season`, `grouped_shot_types_opponent_season`, `exact_shot_zones_opponent_season`, `assist_locations_season`, `rebound_types_season` | Every team has played at least 10 games |
-| `synergy` | `synergy_play_types`, `synergy_play_types_opponent_season` | A candidate of the season exists (NBA has published) and every team has played at least 10 games |
+| `team_defense` | `traditional_opponent_season`, `grouped_shot_types_opponent_season`, `exact_shot_zones_opponent_season`, `synergy_play_types_opponent_season`, `assist_locations_season`, `rebound_types_season` | Every team has played at least one game (crf04/statsplus#350) |
+| `synergy` | `synergy_play_types` | A candidate of the season exists (NBA has published) and every team has played at least 10 games |
 | `last_15` | the five `*_l15` streams | At its first composition in the season (unchanged until crf04/statsplus-backend#548) |
 
 A family with a game count is *trailing* until its rule holds: its streams
@@ -634,6 +634,17 @@ after the rule holds activates.
   completed regular-season game's starters and on-court stints for
   `GET /api/games/rotation` (crf04/statsplus#223); it runs whatever the ledger
   step's outcome, and the run fails if either step failed.
+- `tracking-refresh` (settings in `railway.tracking.json`, plus `DATABASE_URL`)
+  runs `scripts/tracking_refresh.py --season 2025-26 --season 2026-27
+  --max-games 80` at 10:30 and 14:30 UTC (crf04/statsplus-backend#604). It
+  stores NBA.com rebound chances and potential assists for each completed
+  regular-season game without them; a game whose tracking is not published yet
+  is retried by the next run, and the run fails only when a feed could not be
+  fetched. Backfill a season by hand, repeating until `remaining` is 0:
+  `python scripts/tracking_refresh.py --season 2025-26 --database-url
+  "$DATABASE_URL" --max-games 400 --throttle 0.6` (about 1,230 box-score calls
+  and 164 day calls, roughly 20 minutes). It needs only `DATABASE_URL` and
+  egress to `stats.nba.com`.
 
 A game's identity, including its date, never changes once accepted, so a
 recheck that observes a different date fails that game on every run. Before

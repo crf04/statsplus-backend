@@ -22,6 +22,8 @@ from app.config.settings import (
     NBASeasonSettings,
     RuntimeSettings,
 )
+from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
+from app.domain.team_matchup_taxonomy import NBA_PUBLICATION_TAXONOMY
 from app.services.diet_baselines import DietBaselinesService
 from app.services.game_logs_source import StoredGameLogsSource
 from app.services.game_service import GameService
@@ -54,6 +56,9 @@ from tests.support.season_cutover import (
     NEW_PROVENANCE,
     NOW,
     OLD,
+    OLD_CUTOFF,
+    OLD_GAMES,
+    OLD_PROVENANCE,
     PLAYER_LOGS,
     SEASON_STREAM,
     THIN_CUTOFF,
@@ -67,6 +72,8 @@ from tests.test_game_log_preview import FakeRedis
 from tests.test_published_season_reads import ScheduleCatalog
 
 PLAYER_NAME = "Player 0"
+PLAY_TYPE_DEFENSE = "synergy_play_types_opponent_season"
+PLAYER_SYNERGY = "synergy_play_types"
 #: A 2025-26 ATL @ BOS game, final: a 2026-27 selection for it is refused.
 OLD_GAME_ID = "0022500900"
 OLD_SLATE_DATE = "2026-03-10"
@@ -115,6 +122,49 @@ def _old_game_event():
             "tricode": TRICODES[team_id],
         }
     return event
+
+
+def _play_type_defense_payload(games):
+    by_team = {}
+    for game_id, home, away in games:
+        by_team.setdefault(int(home), []).append(game_id)
+        by_team.setdefault(int(away), []).append(game_id)
+    metrics = dict.fromkeys(sorted(NBA_PUBLICATION_TAXONOMY["play_types"]), 1.0)
+    return {
+        "rows": [
+            {
+                "team_id": team_id,
+                "team_tricode": TRICODES[team_id],
+                "game_ids": sorted(game_ids),
+                "game_count": len(game_ids),
+                "per48": metrics,
+            }
+            for team_id, game_ids in sorted(by_team.items())
+        ]
+    }
+
+
+def _player_synergy_payload(_games):
+    slices = PLAYER_DIET_QUALIFIER_SLICES["play_types"]
+    return {
+        "base": "play_types",
+        "rows": [
+            {
+                "player_id": player_id,
+                "slice_key": slice_key,
+                "share": 1 / len(slices),
+                "volume": 100.0,
+                "games_played": 10,
+                "volume_unit": "possessions",
+                "provider": "nba_synergy",
+            }
+            for player_id in (PLAYER_ID, PLAYER_ID + 1)
+            for slice_key in slices
+        ],
+    }
+
+
+_PLAY_TYPE_PAYLOADS = {PLAY_TYPE_DEFENSE: _play_type_defense_payload, PLAYER_SYNERGY: _player_synergy_payload}
 
 
 class _NoPeers:
@@ -198,7 +248,7 @@ class SelectedWorld(World):
                 {"k": stream_key},
             )
 
-    def hold_opening_week(self):
+    def hold_opening_week(self, *, defense=True):
         """Hold 2026-27 candidates from the opening week: one game a team."""
 
         open_opening_week(self.engine)
@@ -210,6 +260,8 @@ class SelectedWorld(World):
             provenance=THIN_PROVENANCE,
             reason="2026-27 ledger composition",
         )
+        if not defense:
+            return logs, None
         defense = self.compose_new_defense(THIN_GAMES, cutoff=THIN_CUTOFF, provenance=THIN_PROVENANCE)
         return logs, defense
 
@@ -238,6 +290,55 @@ class SelectedWorld(World):
             reason="2026-27 ledger composition",
         )
 
+    def publish_play_types(self):
+        """Activate 2025-26 play-type defense and player Synergy.
+
+        Both stand in as ledger compositions, like the fixture's other
+        streams: a Readiness Rule reads only the stream key, so NBA's
+        observation pipeline is left out.  An NBA stream's read verifies its
+        manifest authority, which an active ledger composition does not bind,
+        so each takes ``manifest-old``'s.
+        """
+
+        for stream_key in _PLAY_TYPE_PAYLOADS:
+            self.publications.register_stream(
+                stream_key,
+                provider="ledger",
+                owner="railway",
+                required_observations=["canonical_game_ledger"],
+                publication_strategy="ledger_compose",
+                enabled=True,
+            )
+            self.publications.recompose_ledger(
+                stream_key,
+                season=OLD,
+                cutoff=OLD_CUTOFF,
+                payload=_PLAY_TYPE_PAYLOADS[stream_key](OLD_GAMES),
+                provenance=OLD_PROVENANCE,
+                reason="2025-26 ledger composition",
+            )
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE publication_versions SET manifest_id = m.manifest_id,"
+                    " event_catalog_publication_id = m.event_catalog_publication_id,"
+                    " event_catalog_checksum = m.event_catalog_checksum"
+                    " FROM collection_manifests AS m"
+                    " WHERE m.manifest_id = 'manifest-old' AND publication_versions.stream_key IN (:a, :b)"
+                ),
+                {"a": PLAY_TYPE_DEFENSE, "b": PLAYER_SYNERGY},
+            )
+
+    def compose_new_play_types(self, stream_key, games, *, cutoff, provenance):
+        return self.publications.recompose_ledger(
+            stream_key,
+            season=NEW,
+            cutoff=cutoff,
+            payload=_PLAY_TYPE_PAYLOADS[stream_key](games),
+            provenance=provenance,
+            reason="2026-27 ledger composition",
+        )
+
     def compose_new_l15(self, games, *, cutoff, provenance):
         return self.publications.recompose_ledger(
             L15_STREAM,
@@ -256,6 +357,8 @@ __all__ = [
     "OLD_SLATE_DATE",
     "PLAYER_ID",
     "PLAYER_NAME",
+    "PLAYER_SYNERGY",
+    "PLAY_TYPE_DEFENSE",
     "SelectedWorld",
     "settings",
 ]

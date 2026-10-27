@@ -72,7 +72,7 @@ def _revert_to_the_pre_078_shape(engine):
                 "SELECT id, 0, 'shot_zones', 'Corner 3', 'at_or_above', 0.4 FROM targets"
             )
         )
-        connection.execute(text("DELETE FROM schema_migrations WHERE version = 78"))
+        connection.execute(text("DELETE FROM schema_migrations WHERE version = 79"))
 
 
 def exercise_upgrade(engine, settings):
@@ -82,7 +82,7 @@ def exercise_upgrade(engine, settings):
     assert "position" not in {column["name"] for column in inspector.get_columns("athlete_catalog")}
     assert not inspector.get_columns("target_qualifiers")[4]["nullable"]
 
-    assert run_migrations(engine).applied == ("078_position_qualifiers",)
+    assert run_migrations(engine).applied == ("079_position_qualifiers",)
     assert run_migrations(engine).applied == ()
 
     inspector = inspect(engine)
@@ -123,7 +123,7 @@ def exercise_upgrade(engine, settings):
 
 
 def test_migration_078_upgrades_a_database_with_the_old_target_and_catalog_shapes(tmp_path, runtime_settings):
-    assert MIGRATIONS[-1].name == "078_position_qualifiers"
+    assert MIGRATIONS[-1].name == "079_position_qualifiers"
     engine = create_engine(f"sqlite:///{tmp_path / 'at-077.sqlite3'}")
     try:
         exercise_upgrade(engine, runtime_settings)
@@ -139,12 +139,12 @@ def test_migration_078_finishes_a_rebuild_an_earlier_run_left_half_done(tmp_path
         # An interrupted run renamed the table and stopped before the copy.
         with engine.begin() as connection:
             connection.execute(text("DROP INDEX idx_target_qualifiers_target"))
-            connection.execute(text("ALTER TABLE target_qualifiers RENAME TO target_qualifiers__078"))
+            connection.execute(text("ALTER TABLE target_qualifiers RENAME TO target_qualifiers__079"))
 
-        assert run_migrations(engine).applied == ("078_position_qualifiers",)
+        assert run_migrations(engine).applied == ("079_position_qualifiers",)
 
         [existing] = UserService(engine, settings=runtime_settings).list_targets(OWNER)
         assert existing["qualifiers"] == [CORNER_THREE]
-        assert "target_qualifiers__078" not in inspect(engine).get_table_names()
+        assert "target_qualifiers__079" not in inspect(engine).get_table_names()
     finally:
         engine.dispose()

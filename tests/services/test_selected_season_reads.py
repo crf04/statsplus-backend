@@ -18,6 +18,7 @@ from sqlalchemy import text
 from app.models.game_logs import GameLogQuery
 from app.services.database_first_activation import ReadSeason, SeasonMode, SeasonUnavailable
 from app.services.research_season import season_scoped
+from app.services.serving_season import trailing
 from tests.support.season_cutover import (
     L15_STREAM,
     NEW,
@@ -27,10 +28,13 @@ from tests.support.season_cutover import (
     OLD,
     PLAYER_LOGS,
     SEASON_STREAM,
+    THIN_CUTOFF,
     THIN_GAMES,
+    THIN_PROVENANCE,
     accept_ledger,
+    team_defense_waits_for_ten_games,
 )
-from tests.support.selected_season import PLAYER_NAME, SelectedWorld
+from tests.support.selected_season import PLAY_TYPE_DEFENSE, PLAYER_NAME, PLAYER_SYNERGY, SelectedWorld
 from tests.test_game_log_preview import FakeRedis
 
 KEYS = (PLAYER_LOGS, SEASON_STREAM, L15_STREAM)
@@ -65,8 +69,8 @@ def _logs(world, season, *, selected):
 # --- the reader ------------------------------------------------------------
 
 
-def test_an_opening_week_selection_reads_logs_from_2026_27_and_trails_team_defense(world):
-    logs, _defense = world.hold_opening_week()
+def test_an_opening_week_selection_reads_logs_and_team_defense_from_2026_27(world):
+    logs, defense = world.hold_opening_week()
 
     snapshot = world.reader.for_season(NEW).snapshot(KEYS, season=ReadSeason(OLD))
 
@@ -77,11 +81,134 @@ def test_an_opening_week_selection_reads_logs_from_2026_27_and_trails_team_defen
     )
     assert _reads(snapshot) == {
         PLAYER_LOGS: ("candidate", NEW, None, logs.publication_id),
-        # One game a team: team defense is not ready, so it keeps 2025-26.
-        SEASON_STREAM: ("prior_season", OLD, None, _live(world, SEASON_STREAM)),
+        # One game a team is all team defense waits for.
+        SEASON_STREAM: ("candidate", NEW, None, defense.publication_id),
         # No 2026-27 Last 15 composed yet: it keeps 2025-26 until one serves.
         L15_STREAM: ("prior_season", OLD, None, _live(world, L15_STREAM)),
     }
+
+
+def test_an_opening_week_selection_with_no_team_defense_composition_keeps_2025_26(world):
+    world.hold_opening_week(defense=False)
+
+    snapshot = world.reader.for_season(NEW).snapshot(KEYS, season=ReadSeason(OLD))
+
+    assert _reads(snapshot)[SEASON_STREAM] == ("prior_season", OLD, None, _live(world, SEASON_STREAM))
+    assert world.games.list_seasons()["choices"][0]["families"]["team_defense"] == {
+        "served_season": OLD,
+        "state": "trailing",
+        "reason": "season_not_composed",
+    }
+
+
+def test_a_family_whose_rule_does_not_hold_keeps_2025_26_until_it_does(world, monkeypatch):
+    team_defense_waits_for_ten_games(monkeypatch)
+    world.hold_opening_week()
+
+    reads = _reads(world.reader.for_season(NEW).snapshot(KEYS, season=ReadSeason(OLD)))
+    families = world.games.list_seasons()["choices"][0]["families"]
+
+    assert reads[SEASON_STREAM] == ("prior_season", OLD, None, _live(world, SEASON_STREAM))
+    assert families["team_defense"] == {
+        "served_season": OLD,
+        "state": "trailing",
+        "reason": "readiness_not_met",
+    }
+
+
+# --- play-type defense follows team defense (crf04/statsplus-backend#610) ---
+
+PLAY_TYPE_KEYS = (*KEYS, PLAY_TYPE_DEFENSE, PLAYER_SYNERGY)
+SYNERGY_RULE = "NBA has published the season and every team has played 10 games"
+
+
+def _play_type_selection(world):
+    snapshot = world.reader.for_season(NEW).snapshot(PLAY_TYPE_KEYS, season=ReadSeason(OLD))
+    return (
+        _reads(snapshot),
+        trailing(snapshot.reads.values()),
+        world.games.list_seasons()["choices"][0]["families"],
+    )
+
+
+def test_an_opening_week_selection_serves_play_type_defense_from_2026_27_and_player_synergy_from_2025_26(
+    world,
+):
+    world.publish_play_types()
+    world.hold_opening_week()
+    defense = world.compose_new_play_types(
+        PLAY_TYPE_DEFENSE, THIN_GAMES, cutoff=THIN_CUTOFF, provenance=THIN_PROVENANCE
+    )
+
+    reads, trailing_families, families = _play_type_selection(world)
+
+    assert reads[PLAY_TYPE_DEFENSE] == ("candidate", NEW, None, defense.publication_id)
+    assert reads[PLAYER_SYNERGY] == ("prior_season", OLD, None, _live(world, PLAYER_SYNERGY))
+    assert [entry for entry in trailing_families if entry["family"] != "last_15"] == [
+        {"family": "synergy", "serving_season": OLD, "rule": SYNERGY_RULE},
+    ]
+    assert (families["team_defense"], families["synergy"]) == (
+        {"served_season": NEW, "state": "serving"},
+        {"served_season": OLD, "state": "trailing", "reason": "upstream_missing"},
+    )
+
+
+def test_an_opening_week_selection_with_no_play_type_defense_composition_trails_team_defense(world):
+    world.publish_play_types()
+    world.hold_opening_week()
+
+    reads, trailing_families, families = _play_type_selection(world)
+
+    assert reads[PLAY_TYPE_DEFENSE] == ("prior_season", OLD, None, _live(world, PLAY_TYPE_DEFENSE))
+    assert [entry for entry in trailing_families if entry["family"] != "last_15"] == [
+        {"family": "team_defense", "serving_season": OLD, "rule": "every team has played a game"},
+        {"family": "synergy", "serving_season": OLD, "rule": SYNERGY_RULE},
+    ]
+    assert families["team_defense"] == {
+        "served_season": OLD,
+        "state": "trailing",
+        "reason": "season_not_composed",
+    }
+
+
+def test_player_synergy_still_waits_for_ten_games_a_team(world):
+    world.publish_play_types()
+    world.hold_opening_week()
+    world.compose_new_play_types(PLAYER_SYNERGY, THIN_GAMES, cutoff=THIN_CUTOFF, provenance=THIN_PROVENANCE)
+
+    reads, _trailing, families = _play_type_selection(world)
+
+    assert reads[PLAYER_SYNERGY] == ("prior_season", OLD, None, _live(world, PLAYER_SYNERGY))
+    assert families["synergy"] == {"served_season": OLD, "state": "trailing", "reason": "readiness_not_met"}
+
+    world.hold_ten_games()
+    ready = world.compose_new_play_types(
+        PLAYER_SYNERGY, NEW_GAMES, cutoff=NEW_CUTOFF, provenance=NEW_PROVENANCE
+    )
+
+    reads, _trailing, families = _play_type_selection(world)
+
+    assert reads[PLAYER_SYNERGY] == ("candidate", NEW, None, ready.publication_id)
+    assert families["synergy"] == {"served_season": NEW, "state": "serving"}
+
+
+def test_after_an_opening_week_cutover_play_type_defense_activates_and_player_synergy_is_held(world):
+    world.publish_play_types()
+    synergy_2025_26 = world.live(PLAYER_SYNERGY)
+    world.opening_week_cutover()
+
+    defense = world.compose_new_play_types(
+        PLAY_TYPE_DEFENSE, THIN_GAMES, cutoff=THIN_CUTOFF, provenance=THIN_PROVENANCE
+    )
+    synergy = world.compose_new_play_types(
+        PLAYER_SYNERGY, THIN_GAMES, cutoff=THIN_CUTOFF, provenance=THIN_PROVENANCE
+    )
+
+    assert (defense.status, synergy.status) == ("active", "candidate")
+    assert (world.live(PLAY_TYPE_DEFENSE), world.live(PLAYER_SYNERGY)) == (
+        defense.publication_id,
+        synergy_2025_26,
+    )
 
 
 def test_ten_games_a_team_serve_the_team_defense_candidate(world):
@@ -253,7 +380,7 @@ def test_choices_list_2026_27_only_while_its_game_logs_serve(world):
             "game_logs": {"served_season": NEW, "state": "serving"},
             # The Diet has no 2026-27 composition; team defense has one with a game a team.
             "player_diets": {"served_season": OLD, "state": "trailing", "reason": "season_not_composed"},
-            "team_defense": {"served_season": OLD, "state": "trailing", "reason": "readiness_not_met"},
+            "team_defense": {"served_season": NEW, "state": "serving"},
             "last_15": {"served_season": OLD, "state": "trailing", "reason": "season_not_composed"},
         },
         "team_games": {"min": 1, "max": 1},

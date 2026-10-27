@@ -1,0 +1,9 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "deploy": {
+    "startCommand": "python scripts/tracking_refresh.py --season 2025-26 --season 2026-27 --database-url \"$DATABASE_URL\" --max-games 80",
+    "preDeployCommand": "python scripts/migrate.py",
+    "cronSchedule": "30 10,14 * * *",
+    "restartPolicyType": "NEVER"
+  }
+}

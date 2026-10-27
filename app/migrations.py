@@ -2009,6 +2009,18 @@ def _create_rotation_tables(connection: Connection) -> None:
         model.__table__.create(connection, checkfirst=True)
 
 
+def _create_player_game_tracking_table(connection: Connection) -> None:
+    """Create the player-tracking table (crf04/statsplus-backend#604).
+
+    Repeatable: ``checkfirst`` skips an existing table and never touches its
+    rows.  Nothing is backfilled; ``scripts/tracking_refresh.py`` fills a season.
+    """
+    from app.models.player_tracking import PlayerGameTracking, PlayerTrackingAttempt
+
+    for model in (PlayerGameTracking, PlayerTrackingAttempt):
+        model.__table__.create(connection, checkfirst=True)
+
+
 def _create_player_season_stats_table(connection: Connection) -> None:
     """Create the season player stats table (crf04/statsplus-backend#509).
 
@@ -2166,7 +2178,7 @@ def _rebuild_sqlite_target_qualifiers(connection: Connection) -> None:
 
     SQLite cannot drop a NOT NULL.  The rename, create, copy and drop run in one
     explicit transaction, so an interruption leaves the original table.  A
-    ``target_qualifiers__078`` left by an interrupted run is reconciled on
+    ``target_qualifiers__079`` left by an interrupted run is reconciled on
     retry: its rows are copied into the current table, ignoring any already
     there, and it is dropped.  Every step is therefore safe to repeat.
     """
@@ -2176,7 +2188,7 @@ def _rebuild_sqlite_target_qualifiers(connection: Connection) -> None:
     table = TargetQualifier.__table__
     preparer = connection.dialect.identifier_preparer
     quoted = preparer.quote(table.name)
-    leftover_name = f"{table.name}__078"
+    leftover_name = f"{table.name}__079"
     legacy = preparer.quote(leftover_name)
     leftover_sql = _sqlite_table_sql(connection, leftover_name)
     driver = connection.connection.driver_connection
@@ -2217,7 +2229,7 @@ def _add_position_qualifiers(connection: Connection) -> None:
 
     AthleteCatalog.__table__.create(connection, checkfirst=True)
     Target.__table__.create(connection, checkfirst=True)
-    if connection.dialect.name == "sqlite" and _sqlite_table_sql(connection, "target_qualifiers__078"):
+    if connection.dialect.name == "sqlite" and _sqlite_table_sql(connection, "target_qualifiers__079"):
         # An interrupted rebuild: finish it before anything else creates the
         # current table empty beside the leftover's rows.
         _rebuild_sqlite_target_qualifiers(connection)
@@ -3249,7 +3261,8 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     ),
     Migration(76, "076_create_reports", _create_reports_table),
     Migration(77, "077_user_public_handle", _add_user_public_handle),
-    Migration(78, "078_position_qualifiers", _add_position_qualifiers),
+    Migration(78, "078_player_game_tracking", _create_player_game_tracking_table),
+    Migration(79, "079_position_qualifiers", _add_position_qualifiers),
 )
 
 
