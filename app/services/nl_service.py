@@ -11,8 +11,8 @@ from app.services.llm_service import LLMBudgetExhausted, LLMParsedQuery, LLMServ
 from app.services.nl_query.parser import BaseQueryParser, PlayerReference
 from app.services.research_season import research_service
 
-# A season written the NBA's way, e.g. "2024-25".
-NAMED_SEASON = re.compile(r"\b(\d{4})-(\d{2})\b")
+# A season written the NBA's way, e.g. "2024-25", but not the start of a date.
+NAMED_SEASON = re.compile(r"\b(\d{4})-(\d{2})\b(?!-\d)")
 
 
 def named_season(query_text: str) -> str | None:

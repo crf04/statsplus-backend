@@ -145,6 +145,15 @@ def test_a_date_range_is_not_read_as_a_season():
     assert result["season"] is None
 
 
+def test_a_full_date_is_not_read_as_a_season():
+    parser = StubParser(components(player_name="LeBron James"))
+    service = make_service(parser=parser)
+
+    result = service.process_query("LeBron James after 2011-12-25")
+
+    assert result["season"] is None
+
+
 def test_a_query_naming_no_season_leaves_the_season_to_the_reader():
     parser = StubParser(components(player_name="LeBron James"))
     service = make_service(parser=parser)
