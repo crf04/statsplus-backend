@@ -3782,7 +3782,10 @@ when a `season` argument narrows what may be deleted. The method returns a
 `PruneResult` with `deleted` and `kept` (the maintenance command prints both as
 `publications_pruned` and `publications_kept`), where `kept` counts survivors by the
 first matching reason (`active`, `previous`, `candidate`, `season_latest`,
-`cutover_restore`). Pruning takes the pointer row locks first, in stream
+`cutover_restore`, `as_of`). `as_of` keeps a superseded version of a Defense
+Sheet stream (`team_defense` and `last_15` families) in a season after the
+stream's active one: an Unpublished Season read of a past game serves the
+newest such version cut before that game (crf04/statsplus-backend#626). Pruning takes the pointer row locks first, in stream
 order, then touches versions, the same stream, pointer, version order as every
 other writer, so it waits for a concurrent rollback (or makes it wait) and
 cannot delete a target the rollback is reading. History rows carry no foreign

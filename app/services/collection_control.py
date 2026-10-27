@@ -112,7 +112,7 @@ from app.services.publication_authority import (
     verify_publication_authority,
 )
 from app.services.rebound_types_identity import rebound_identity_failures
-from app.services.serving_season import NOT_READY_REASON, readiness_rule
+from app.services.serving_season import NOT_READY_REASON, read_as_of, readiness_rule
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
     PublicationGovernanceUnavailable,
@@ -5169,6 +5169,7 @@ PRUNE_KEEP_REASONS: Final[tuple[str, ...]] = (
     "candidate",
     "season_latest",
     "cutover_restore",
+    "as_of",
 )
 
 
@@ -8342,9 +8343,12 @@ class PublicationService(_SessionService):
 
         A publication keeps its payload and projection only while it is the
         pointer's active or previous (rollback target) publication, a candidate
-        awaiting activation, or the latest eligible (activated, unrevoked,
-        unretired) version of its season.  The keep set is computed per stream
-        across all seasons even when ``season`` narrows what may be deleted.
+        awaiting activation, the latest eligible (activated, unrevoked,
+        unretired) version of its season, or a superseded version of a season
+        after the active one of a stream a past game reads as of that game
+        (``read_as_of``), which an Unpublished Season read may still serve.
+        The keep set is computed per stream across all seasons even when
+        ``season`` narrows what may be deleted.
         A history row whose publication is already gone never shadows an older
         row that still exists.  The stream row, then the pointer, are locked first
         in the order every writer uses, so a concurrent rollback finishes before
@@ -8400,16 +8404,30 @@ class PublicationService(_SessionService):
                 )
             ):
                 season_latest.setdefault(stream, set()).add(publication_id)
+            active_seasons = dict(
+                session.execute(
+                    select(PublicationVersion.stream_key, PublicationVersion.season).where(
+                        PublicationVersion.publication_id.in_(
+                            sorted(
+                                pointer.active_publication_id
+                                for pointer in pointers.values()
+                                if pointer.active_publication_id
+                            )
+                        )
+                    )
+                ).all()
+            )
             version_query = select(
                 PublicationVersion.publication_id,
                 PublicationVersion.stream_key,
                 PublicationVersion.status,
+                PublicationVersion.season,
             ).where(PublicationVersion.stream_key.in_(locked_streams))
             if season is not None:
                 version_query = version_query.where(PublicationVersion.season == season)
             restore_targets = _reversible_cutover_targets(session)
             doomed: list[str] = []
-            for publication_id, stream, status in session.execute(version_query).all():
+            for publication_id, stream, status, version_season in session.execute(version_query).all():
                 pointer = pointers.get(stream)
                 if pointer is not None and pointer.active_publication_id == publication_id:
                     reason = "active"
@@ -8421,6 +8439,13 @@ class PublicationService(_SessionService):
                     reason = "season_latest"
                 elif publication_id in restore_targets:
                     reason = "cutover_restore"
+                elif (
+                    status == "superseded"
+                    and read_as_of(stream)
+                    and stream in active_seasons
+                    and version_season > active_seasons[stream]
+                ):
+                    reason = "as_of"
                 else:
                     doomed.append(publication_id)
                     continue

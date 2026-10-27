@@ -27,11 +27,13 @@ from tests.support.season_cutover import (
     NOW,
     OLD,
     OLD_CUTOFF,
+    OLD_PROVENANCE,
     PLAYER_LOGS,
     SEASON_STREAM,
     THIN_CUTOFF,
     THIN_GAMES,
     accept_ledger,
+    payload_for,
     provenance,
 )
 from tests.support.selected_season import SelectedWorld
@@ -42,16 +44,20 @@ AFTER_THE_OPENING_WEEK = "2026-10-23T23:30:00+00:00"
 BEFORE_ANY_COMPOSITION = "2026-10-19T23:30:00+00:00"
 
 
-@pytest.fixture
-def world(tmp_path, monkeypatch):
-    # This fixture's 2026-27 Event Catalogs list only final games; the real
-    # season has most of its games still to play.
+def season_in_progress(monkeypatch):
+    """2026-27 has games to play: the fixture's Event Catalogs list only final ones."""
+
     complete = ActiveManifestLedgerGovernanceReader.resolve_season_is_complete
     monkeypatch.setattr(
         ActiveManifestLedgerGovernanceReader,
         "resolve_season_is_complete",
         lambda self, season, *args, **kwargs: season != NEW and complete(self, season, *args, **kwargs),
     )
+
+
+@pytest.fixture
+def world(tmp_path, monkeypatch):
+    season_in_progress(monkeypatch)
     built = SelectedWorld(tmp_path)
     yield built
     built.engine.dispose()
@@ -60,11 +66,13 @@ def world(tmp_path, monkeypatch):
 def _hold_a_week_then_ten_games(world):
     """``(opening_week, ten_games)`` team defense; the newer supersedes the older.
 
+    Game logs move the same way; ``world.opening_week_logs`` is the superseded one.
+
     The opening week's games keep their ledger source, so the older
     composition still proves the ledger's accepted evidence.
     """
 
-    _logs, opening_week = world.hold_opening_week()
+    world.opening_week_logs, opening_week = world.hold_opening_week()
     accept_ledger(world.engine, NEW_GAMES[len(THIN_GAMES) :], "pbp")
     both = {**provenance(THIN_GAMES, "thin"), **provenance(NEW_GAMES[len(THIN_GAMES) :])}
     world.publications.recompose_ledger(
@@ -109,7 +117,11 @@ def _traditional_lineage(world, slate_date):
         NEW, as_of=slate_date, publication_snapshot=snapshot, bases=("traditional",)
     )
     [observation] = [item for item in window.observations if item.surface == "traditional"]
-    return observation.publication.publication_id, observation.publication.cutoff, window.scope.season
+    return (
+        observation.publication.publication_id,
+        observation.publication.cutoff,
+        window.fact_scopes["traditional"].season,
+    )
 
 
 def test_a_past_game_reads_the_newest_2026_27_defense_composed_before_it(world):
@@ -130,7 +142,37 @@ def test_a_past_game_reads_the_newest_2026_27_defense_composed_before_it(world):
 def test_todays_game_still_reads_the_newest_2026_27_defense(world):
     _opening_week, ten_games = _hold_a_week_then_ten_games(world)
 
-    assert _traditional_lineage(world, date(2026, 10, 25))[:2] == (ten_games.publication_id, NEW_CUTOFF.isoformat())
+    assert _traditional_lineage(world, date(2026, 10, 25))[:2] == (
+        ten_games.publication_id,
+        NEW_CUTOFF.isoformat(),
+    )
+
+
+def _corrupt(world, publication):
+    with world.engine.begin() as connection:
+        connection.execute(
+            text("UPDATE publication_versions SET checksum = :c WHERE publication_id = :p"),
+            {"c": "0" * 64, "p": publication.publication_id},
+        )
+
+
+def test_a_past_game_skips_a_refused_version_for_the_next_older_one(world):
+    opening_week, ten_games = _hold_a_week_then_ten_games(world)
+    _corrupt(world, ten_games)
+
+    # The ten-game composition is cut inside the 2026-10-24 slate day.
+    assert _traditional_lineage(world, date(2026, 10, 24))[0] == opening_week.publication_id
+
+
+def test_todays_game_never_falls_back_to_an_older_version_when_the_newest_is_refused(world):
+    _opening_week, ten_games = _hold_a_week_then_ten_games(world)
+    _corrupt(world, ten_games)
+
+    assert _traditional_lineage(world, date(2026, 10, 25)) == (
+        world.live(SEASON_STREAM),
+        OLD_CUTOFF.isoformat(),
+        OLD,
+    )
 
 
 def test_a_game_before_every_2026_27_composition_trails_on_2025_26(world):
@@ -147,9 +189,34 @@ def test_a_game_before_every_2026_27_composition_trails_on_2025_26(world):
 
 def test_prune_keeps_the_superseded_2026_27_defense_a_past_game_reads(world):
     opening_week, _ten_games = _hold_a_week_then_ten_games(world)
-    _final_game_at(world, AFTER_THE_OPENING_WEEK)
 
     world.publications.prune_history(season=NEW)
 
     assert _status(world, opening_week.publication_id) == "superseded"
     assert _traditional_lineage(world, date(2026, 10, 23))[0] == opening_week.publication_id
+    # Game logs are never read as of a game: their superseded candidate goes.
+    assert _status(world, world.opening_week_logs.publication_id) is None
+
+
+def test_prune_still_deletes_a_superseded_defense_of_the_published_season(world):
+    # The world composed 2025-26 team defense twice; a third leaves the first
+    # neither active nor the rollback target.
+    with world.engine.connect() as connection:
+        [first] = connection.execute(
+            text(
+                "SELECT publication_id FROM publication_versions WHERE stream_key = :k AND status = 'superseded'"
+            ),
+            {"k": SEASON_STREAM},
+        ).scalars()
+    world.publications.recompose_ledger(
+        SEASON_STREAM,
+        season=OLD,
+        cutoff=OLD_CUTOFF,
+        payload=payload_for(SEASON_STREAM, OLD, points=11),
+        provenance=OLD_PROVENANCE,
+        reason="2025-26 ledger recomposition",
+    )
+
+    world.publications.prune_history(stream_key=SEASON_STREAM)
+
+    assert _status(world, first) is None

@@ -10,6 +10,7 @@ unless ``TEST_DATABASE_URL`` names a disposable database.
 from __future__ import annotations
 
 import os
+from datetime import date
 
 import pandas as pd
 import pytest
@@ -20,6 +21,14 @@ from app.models.game_logs import GameLogQuery
 from app.services.player_service import _ARCHETYPE_RATE_COLUMNS
 from app.services.research_season import season_scoped
 from tests.services.test_serving_season_matchup import BOS
+from tests.services.test_unpublished_as_of_reads import (
+    AFTER_THE_OPENING_WEEK,
+    _final_game_at,
+    _hold_a_week_then_ten_games,
+    _season_defense,
+    _traditional_lineage,
+    season_in_progress,
+)
 from tests.support.season_cutover import NEW, OLD
 from tests.support.selected_season import GAME_ID, PLAYER_ID, PLAYER_NAME, SelectedWorld
 
@@ -252,3 +261,14 @@ def test_a_selected_profile_and_unscheduled_matchup_only_read(world):
 
     assert statements
     assert set(statements) <= {"SELECT", "WITH", "SAVEPOINT", "RELEASE", "ROLLBACK"}
+
+
+def test_a_past_game_reads_the_2026_27_defense_composed_before_it_through_a_prune(world, monkeypatch):
+    season_in_progress(monkeypatch)
+    opening_week, _ten_games = _hold_a_week_then_ten_games(world)
+    _final_game_at(world, AFTER_THE_OPENING_WEEK)
+
+    world.publications.prune_history(season=NEW)
+
+    assert _season_defense(world) == ("available", NEW)
+    assert _traditional_lineage(world, date(2026, 10, 23))[0] == opening_week.publication_id
