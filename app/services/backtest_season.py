@@ -9,14 +9,19 @@ season -- the one ``research_season`` names: the ``NBA_CURRENT_SEASON`` pin
 when set, else the active player-game-log publication's season -- is reported
 as metadata and decides where a season's Publications are read from.
 
-The live pointers name only one season's Publications.  A season other than
-the published one reads every stream's retained Publication through the
-pointer history, so its Generation is fixed until a row is revoked, whatever
-the live pointers do.  The published season reads each stream's live pointer
-when it names that season, and its retained Publication otherwise (a pin
-behind the pointer, or one stream activating a new season before the others).
-A stream the season has in neither place fails the request with
-``season_unavailable`` naming it: unavailable is not empty.
+The live pointers name only one season's Publications, so each choice reads
+in one ``SeasonMode``.  The published season reads each stream's live pointer
+when it names that season, and its retained Publication otherwise (one stream
+activating a new season before the others).  An earlier season, or a
+published season the live game-log pointer does not name (a pin behind it),
+reads every stream's retained Publication through the pointer history, so
+its Generation is fixed until a row is revoked, whatever the live pointers
+do.  A requested season after the published one, before its game logs
+activate, reads as an Unpublished Season: each stream's held candidate, as if
+the Season Cutover had run (crf04/statsplus-backend#625).  A stream that does
+not serve exactly the chosen season fails the request with
+``season_unavailable`` naming it: unavailable is not empty, and a Backtest
+never mixes two seasons.
 """
 
 from __future__ import annotations
@@ -26,10 +31,11 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from app.errors import InvalidInputError, SeasonUnavailableError
+from app.services.database_first_activation import ReadSeason, SeasonMode, SeasonUnavailable
 from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS
 from app.services.publication_snapshot_calls import accepts_keyword
 from app.services.research_season import published_capture
-from app.services.serving_season import previous_season
+from app.services.serving_season import next_season, previous_season
 
 SEASON_REASON_REQUESTED = "requested"
 SEASON_REASON_DEFAULT = "default"
@@ -47,23 +53,17 @@ _GAME_LOG_KEYS = frozenset({_GAME_LOGS})
 
 @dataclass(frozen=True, slots=True)
 class BacktestSeason:
-    """The season one Backtest reads, why, and where its game logs live.
+    """The season one Backtest reads, why, and where its Publications live.
 
-    ``retained`` is true when the season's game logs are read from the
-    pointer history: always for a season other than the published one, and
-    for the published season when the live game-log pointer names another.
+    ``mode`` is ``PUBLISHED`` for the live pointers, ``RETAINED`` for the
+    pointer history, and ``UNPUBLISHED`` for the held candidates of the
+    season after the published one.
     """
 
     season: str
     reason: str
     published: str
-    retained: bool = False
-
-    @property
-    def past(self) -> bool:
-        """Whether this season is not the published one, so is read retained."""
-
-        return self.season != self.published
+    mode: SeasonMode
 
 
 class BacktestSeasons:
@@ -95,7 +95,8 @@ class BacktestSeasons:
         A requested season must be one of ``BACKTEST_SEASONS``; with none,
         the Diets' Serving Season is read, as ``diets`` (else ``live``)
         captured them.  ``published`` and ``live`` also say where the
-        season's Publications are read from.
+        season's Publications are read from: only a requested season after
+        the published one whose game logs have not activated is Unpublished.
         """
 
         if requested is None:
@@ -105,12 +106,14 @@ class BacktestSeasons:
             season, reason = requested, SEASON_REASON_REQUESTED
         else:
             raise InvalidInputError(f"season must be {BACKTEST_SEASONS[0]} or {BACKTEST_SEASONS[1]}.")
-        return BacktestSeason(
-            season,
-            reason,
-            published,
-            retained=season != published or season != _live_season(live, published),
-        )
+        live_season = _live_season(live, published)
+        if season == published == live_season:
+            mode = SeasonMode.PUBLISHED
+        elif season == next_season(published) != live_season:
+            mode = SeasonMode.UNPUBLISHED
+        else:
+            mode = SeasonMode.RETAINED
+        return BacktestSeason(season, reason, published, mode)
 
     def _game_log_capture(self, season: Any, session: Any | None) -> Any:
         """Capture the game logs and, pointer-only, the Diets' seasons."""
@@ -153,7 +156,7 @@ class BacktestSeasons:
             captured, live = published_capture(self.settings, self.publication_reader, live_capture)
             diets = self._game_log_capture(captured, session) if _lacks_diets(live) else None
             choice = self.choose(captured, live, diets=diets)
-        if not choice.past and choice.season != captured:
+        if choice.mode is SeasonMode.PUBLISHED and choice.season != captured:
             live = live_capture(choice.season)
         return choice, self.evidence(
             choice,
@@ -176,8 +179,8 @@ class BacktestSeasons:
     ) -> Any:
         """The one capture a Backtest of ``choice`` reads, or raise naming a stream.
 
-        ``live`` is a live capture in ``choice.season`` (unused for a season
-        other than the published one, whose every stream is retained).  A
+        ``live`` is a live capture in ``choice.season``, read only in the
+        ``PUBLISHED`` mode; the others capture their own.  A
         published-season stream the live pointer has no Publication for in
         that season (a ``missing`` read) is replaced by its retained read; the
         result's ``retained_history`` names the rows that were.  A live
@@ -187,14 +190,17 @@ class BacktestSeasons:
         """
 
         keys = tuple(stream_keys)
-        if choice.past:
-            return self.retained_snapshot(
-                choice,
-                keys,
-                projection_only_keys=projection_only_keys,
-                decoded_only_keys=decoded_only_keys,
-                session=session,
-            )
+        shape = {
+            "projection_only_keys": projection_only_keys,
+            "decoded_only_keys": decoded_only_keys,
+            "session": session,
+        }
+        if choice.mode is SeasonMode.RETAINED:
+            return self.retained_snapshot(choice, keys, **shape)
+        if choice.mode is SeasonMode.UNPUBLISHED:
+            snapshot = self._unpublished_capture(choice, keys, **shape)
+            _refuse_unserved(choice, snapshot, keys, frozenset(keys))
+            return snapshot
         read_stream = getattr(live, "read", None)
         if not callable(read_stream):
             return live
@@ -205,13 +211,7 @@ class BacktestSeasons:
         absent = tuple(key for key in keys if _absent(read_stream(key), choice.season))
         if not absent:
             return live
-        retained = self.retained_snapshot(
-            choice,
-            absent,
-            projection_only_keys=projection_only_keys,
-            decoded_only_keys=decoded_only_keys,
-            session=session,
-        )
+        retained = self.retained_snapshot(choice, absent, **shape)
         reads = {**live.reads, **retained.reads}
         return replace(
             live,
@@ -243,15 +243,23 @@ class BacktestSeasons:
         The identity is that of the Publications just checked, so a cache
         lookup keyed on it cannot reach one a concurrent revocation or pointer
         move put in their place: the retained history-row ids for a retained
-        season, else the live capture's generation.  ``None`` is a reader that
-        captures no Generation.
+        season, the held candidates' generation for an Unpublished one (a
+        newer candidate is a new key, and one a ledger correction withdrew is
+        refused here), else the live capture's generation.  ``None`` is a
+        reader that captures no Generation.
         """
 
         keys = tuple(stream_keys)
         pointer_only = frozenset(keys)
+        if choice.mode is SeasonMode.UNPUBLISHED:
+            snapshot = self._unpublished_capture(
+                choice, keys, projection_only_keys=pointer_only, session=session
+            )
+            _refuse_unserved(choice, snapshot, keys, projection_keys)
+            return tuple(snapshot.generation)
         absent = keys
         identity = None
-        if not choice.retained:
+        if choice.mode is SeasonMode.PUBLISHED:
             capture = getattr(self.publication_reader, "snapshot", None)
             if not callable(capture):
                 return None
@@ -275,7 +283,7 @@ class BacktestSeasons:
             if retained is None:
                 raise _unavailable(choice, absent[0])
             self._refuse_unreadable(choice, retained, absent, projection_keys, missing_allowed=False)
-            if choice.retained:
+            if choice.mode is SeasonMode.RETAINED:
                 identity = tuple(retained.retained_history)
         return identity
 
@@ -331,6 +339,36 @@ class BacktestSeasons:
                 raise _unavailable(choice, key)
         return snapshot
 
+    def _unpublished_capture(
+        self,
+        choice: BacktestSeason,
+        keys: tuple[str, ...],
+        *,
+        projection_only_keys: frozenset[str] = frozenset(),
+        decoded_only_keys: frozenset[str] = frozenset(),
+        session: Any | None = None,
+    ) -> Any:
+        """Capture the season's held candidates through a reader scoped to it.
+
+        The scoped reader judges each candidate as the cutover would, its
+        ledger lineage on every capture; game logs that cannot move refuse
+        the season naming them.
+        """
+
+        scoped = getattr(self.publication_reader, "for_season", None)
+        if not callable(scoped):
+            raise _unavailable(choice, _GAME_LOGS)
+        try:
+            return scoped(choice.season).snapshot(
+                keys,
+                season=ReadSeason(choice.published, requested=choice.season),
+                projection_only_keys=projection_only_keys,
+                decoded_only_keys=decoded_only_keys,
+                session=session,
+            )
+        except SeasonUnavailable:
+            raise _unavailable(choice, _GAME_LOGS) from None
+
     def _retained_capture(
         self,
         season: str,
@@ -350,6 +388,25 @@ class BacktestSeasons:
             decoded_only_keys=decoded_only_keys,
             session=session,
         )
+
+
+def _refuse_unserved(
+    choice: BacktestSeason, snapshot: Any, keys: tuple[str, ...], projection_keys: frozenset[str]
+) -> None:
+    """Raise naming the first stream that does not serve ``choice.season`` itself.
+
+    A trailing family's previous-season read, an unopened window and an
+    unreadable candidate all refuse; only a narrowed read's missing
+    projection on a stream outside ``projection_keys`` does not.
+    """
+
+    for key in keys:
+        read = snapshot.read(key)
+        if read.season != choice.season or not (
+            read.available
+            or (read.unavailable_reason == "publication_projection_missing" and key not in projection_keys)
+        ):
+            raise _unavailable(choice, key)
 
 
 def _diet_serving_season(published: str, live: Any) -> str:
@@ -414,8 +471,13 @@ def _readable(read: Any) -> bool:
 
 
 def _unavailable(choice: BacktestSeason, stream_key: str) -> SeasonUnavailableError:
+    cause = (
+        f"its held {stream_key} candidate does not serve it yet"
+        if choice.mode is SeasonMode.UNPUBLISHED
+        else f"no retained {stream_key} Publication can be read"
+    )
     return SeasonUnavailableError(
-        f"The {choice.season} season is unavailable: no retained {stream_key} " "Publication can be read.",
+        f"The {choice.season} season is unavailable: {cause}.",
         season=choice.season,
         published_season=choice.published,
         stream=stream_key,

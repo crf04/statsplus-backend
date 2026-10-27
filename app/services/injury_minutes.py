@@ -20,6 +20,7 @@ from typing import Any
 from app.domain.nba_events import REGULAR_SEASON_TYPE
 from app.errors import SeasonUnavailableError
 from app.services.backtest_season import SEASON_REASON_PUBLISHED, BacktestSeason, BacktestSeasons
+from app.services.database_first_activation import SeasonMode
 from app.services.publication_snapshot_calls import call_with_read_scope
 from app.services.research_season import previous_nba_season, published_capture
 
@@ -67,7 +68,7 @@ class InjuryMinutesService:
                 self.publication_reader,
                 lambda season: self._live(season),
             )
-            choice = BacktestSeason(published, SEASON_REASON_PUBLISHED, published)
+            choice = BacktestSeason(published, SEASON_REASON_PUBLISHED, published, SeasonMode.PUBLISHED)
             snapshot = self.seasons.evidence(choice, live, _GAME_LOGS, projection_only_keys=_PROJECTION_ONLY)
             current = self._averages(published, wanted, snapshot)
         except SeasonUnavailableError:
@@ -87,7 +88,7 @@ class InjuryMinutesService:
             return InjuryMinutes(result, published)
         prior = previous_nba_season(published)
         try:
-            retained = BacktestSeason(prior, SEASON_REASON_PUBLISHED, published)
+            retained = BacktestSeason(prior, SEASON_REASON_PUBLISHED, published, SeasonMode.RETAINED)
             snapshot = self.seasons.evidence(
                 retained, None, _GAME_LOGS, projection_only_keys=_PROJECTION_ONLY
             )

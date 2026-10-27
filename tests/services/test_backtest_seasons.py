@@ -172,6 +172,26 @@ def _diet_rows(base, season, corner_three):
     }
 
 
+class CutoverChecks:
+    """The cutover's per-publication verdicts on held candidates, set per stream.
+
+    The reader's real checks (authority, every governed game of all thirty
+    teams, Readiness Rules) are covered by ``test_selected_season_reads``; this
+    world's five-game season could never pass them, so every candidate here
+    passes unless a test refuses its stream or withdraws its ledger lineage.
+    """
+
+    def __init__(self):
+        self.refused = {}
+        self.withdrawn = set()
+
+    def season_candidate_refusal(self, session, stream, candidate, *, season, ledger_lineage):
+        return self.refused.get(candidate.stream_key)
+
+    def season_candidate_lineage_refusal(self, session, stream, candidate):
+        return "ledger_lineage_withdrawn" if candidate.stream_key in self.withdrawn else None
+
+
 class World:
     """One database whose Publications move through a season rollover."""
 
@@ -202,7 +222,10 @@ class World:
                 enabled=True,
                 freshness_rule="cutoff_current",
             )
-        self.reader = DatabaseFirstPublicationReader(self.engine, clock=lambda: NOW)
+        self.checks = CutoverChecks()
+        self.reader = DatabaseFirstPublicationReader(
+            self.engine, clock=lambda: NOW, season_candidates=self.checks
+        )
         self.settings = _unpinned()
         self.logs = PlayerGameLogRepository(
             self.engine,
@@ -317,6 +340,29 @@ def _open_new_season(world):
     """Cut over to 2026-27 with the Diets trailing: only the game logs move."""
 
     world.compose("player_game_logs", NEW, {"rows": _season_logs(NEW, okc_games=1)})
+
+
+def _hold_new_season(world, *, okc_games=1):
+    """Hold a 2026-27 candidate of every Backtest stream, as before its cutover.
+
+    LeBron's 2026-27 Corner 3 share is 0.5, so he fits ``CORNER_THREE`` in
+    both seasons and the shares say which season served.  Tatum plays for
+    OKC in 2026-27's first game, so he is a defender only 2026-27 fielded.
+    """
+
+    rows = _season_logs(NEW, okc_games=okc_games)
+    first = rows[0]
+    rows.append(
+        {
+            **_log(bt.TATUM, "Jayson Tatum", NEW, first["game_id"], date(2026, 10, 22), bt.LAL, "LAL"),
+            "team_id": bt.OKC,
+            "team_tricode": "OKC",
+            "is_home": False,
+        }
+    )
+    world.compose("player_game_logs", NEW, {"rows": rows}, hold=True)
+    for base, (stream, *_rest) in DIET_STREAMS.items():
+        world.compose(stream, NEW, _diet_rows(base, NEW, 0.5), hold=True)
 
 
 def _pin(world, season):
@@ -455,31 +501,156 @@ def test_the_default_follows_the_diets_serving_season(world):
     assert _fitting(switched) == []
 
 
-def test_held_2026_27_candidates_never_serve_a_backtest_before_its_cutover(world):
-    """statsplus#330 AC4: a Backtest reads exactly the season chosen, never a held candidate.
+# --- 2026-27 before its cutover (crf04/statsplus-backend#625) ----------------
 
-    Every Backtest stream holds a 2026-27 candidate, its Diets included, yet
-    2025-26 is still the Published Season: 2026-27 stays unavailable rather
-    than mixing 2026-27 logs with 2025-26 Diets or serving the candidates.
-    """
 
+def _assert_held_2026_27(body, *, okc_games=1):
+    """2026-27's held shares, baseline and games, never 2025-26's."""
+
+    assert (*_season(body), body["published_season"]) == (NEW, "requested", LAST)
+    assert _fitting(body) == [bt.LEBRON]
+    assert body["games_considered"] == {"played": okc_games, "kept": okc_games}
+    lebron = body["players"][0]
+    # 2025-26 read 0.42 against a 0.36 baseline.
+    assert lebron["shares"][0]["share"] == 0.5
+    assert lebron["shares"][0]["league_average_share"] == 0.3
+    assert lebron["season_averages"]["PTS"] == 12.0
+    assert [game["stats"]["PTS"] for game in lebron["games"]] == [12.0] * okc_games
+
+
+@pytest.mark.parametrize("redis_client", [None, bt.FakeRedis], ids=("no-cache", "cache"))
+def test_a_2026_27_backtest_reads_its_held_candidates_once_every_stream_serves(world, redis_client):
     target = world.saved_target()
-    world.compose("player_game_logs", NEW, {"rows": _season_logs(NEW, okc_games=1)}, hold=True)
-    for base, (stream, *_rest) in DIET_STREAMS.items():
-        world.compose(stream, NEW, _diet_rows(base, NEW, 0.1), hold=True)
-    service = world.backtests()
+    _hold_new_season(world)
 
-    with pytest.raises(SeasonUnavailableError, match="2026-27.*player_game_logs") as refused:
+    body, _ = world.backtests(redis_client=redis_client and redis_client()).backtest(
+        OWNER, target["id"], season=NEW
+    )
+
+    _assert_held_2026_27(body)
+
+
+@pytest.mark.parametrize("redis_client", [None, bt.FakeRedis], ids=("no-cache", "cache"))
+@pytest.mark.parametrize("stream", BACKTEST_PUBLICATION_STREAM_KEYS)
+def test_a_2026_27_backtest_with_one_stream_trailing_is_unavailable_naming_it(world, redis_client, stream):
+    target = world.saved_target()
+    world.checks.refused[stream] = "serving_season_not_ready"
+    _hold_new_season(world)
+    service = world.backtests(redis_client=redis_client and redis_client())
+
+    with pytest.raises(SeasonUnavailableError, match=f"2026-27.*{stream}") as refused:
         service.backtest(OWNER, target["id"], season=NEW)
-    default, _ = service.backtest(OWNER, target["id"])
+    with pytest.raises(SeasonUnavailableError, match=stream):
+        service.backtest_all(OWNER, season=NEW)
 
-    assert refused.value.public_details == {
-        "season": NEW,
-        "published_season": LAST,
-        "stream": "player_game_logs",
-    }
+    assert (refused.value.status_code, refused.value.code) == (503, "season_unavailable")
+    assert refused.value.public_details == {"season": NEW, "published_season": LAST, "stream": stream}
+
+
+def test_held_2026_27_candidates_leave_the_default_on_2025_26(world):
+    target = world.saved_target()
+    _hold_new_season(world)
+    redis = bt.FakeRedis()
+    service = world.backtests(redis_client=redis)
+
+    default, default_state = service.backtest(OWNER, target["id"])
+    selected, selected_state = service.backtest(OWNER, target["id"], season=NEW)
+    again, again_state = service.backtest(OWNER, target["id"])
+
+    assert (default_state, selected_state, again_state) == ("miss", "miss", "hit")
     assert (*_season(default), default["published_season"]) == (LAST, "default", LAST)
     assert default["games_considered"] == {"played": 2, "kept": 2}
+    assert default["players"][0]["shares"][0]["share"] == 0.42
+    assert again == default
+    _assert_held_2026_27(selected)
+
+
+def test_a_superseded_2026_27_candidate_never_serves_from_the_cache(world):
+    target = world.saved_target()
+    _hold_new_season(world)
+    redis = bt.FakeRedis()
+    service = world.backtests(redis_client=redis)
+
+    first, first_state = service.backtest(OWNER, target["id"], season=NEW)
+    again, again_state = service.backtest(OWNER, target["id"], season=NEW)
+    # A newer game-log composition is the candidate a cutover would move.
+    world.compose("player_game_logs", NEW, {"rows": _season_logs(NEW, okc_games=2)}, hold=True)
+    newer, newer_state = service.backtest(OWNER, target["id"], season=NEW)
+
+    assert (first_state, again_state, newer_state) == ("miss", "hit", "miss")
+    assert again == first
+    _assert_held_2026_27(first)
+    _assert_held_2026_27(newer, okc_games=2)
+    assert len({key for key, _ttl in redis.sets}) == 2
+
+
+@pytest.mark.parametrize("stream", ["player_game_logs", "exact_shot_zones"])
+def test_a_withdrawn_2026_27_candidate_never_serves_from_the_cache(world, stream):
+    target = world.saved_target()
+    _hold_new_season(world)
+    redis = bt.FakeRedis()
+    service = world.backtests(redis_client=redis)
+    _first, first_state = service.backtest(OWNER, target["id"], season=NEW)
+    _listed, listed_state = service.backtest_all(OWNER, season=NEW)
+
+    # A ledger correction withdraws games the candidate was composed from.
+    world.checks.withdrawn.add(stream)
+
+    with pytest.raises(SeasonUnavailableError, match=f"2026-27.*{stream}"):
+        service.backtest(OWNER, target["id"], season=NEW)
+    with pytest.raises(SeasonUnavailableError, match=stream):
+        service.backtest_all(OWNER, season=NEW)
+    assert (first_state, listed_state) == ("miss", "hit")
+
+
+def test_a_2026_27_defender_is_validated_against_its_held_game_logs(world):
+    """Tatum played for OKC in 2026-27 only; Embiid in 2025-26 only."""
+
+    _hold_new_season(world)
+    tatum, embiid = _defender(bt.TATUM), _defender(bt.EMBIID)
+
+    assert _draft(world, NEW, tatum)["conditions"]["defender"]["player_id"] == bt.TATUM
+    assert _draft(world, None, embiid)["conditions"]["defender"]["player_id"] == bt.EMBIID
+    with pytest.raises(InvalidInputError, match="defender must appear"):
+        _draft(world, NEW, embiid)
+    with pytest.raises(InvalidInputError, match="defender must appear"):
+        _draft(world, None, tatum)
+    world.checks.withdrawn.add("player_game_logs")
+    with pytest.raises(SeasonUnavailableError, match="2026-27.*player_game_logs"):
+        _draft(world, NEW, tatum)
+
+
+def test_2026_27_season_minutes_list_its_held_opponent_roster(world):
+    _hold_new_season(world)
+
+    assert _minutes(world, NEW) == {
+        "season": NEW,
+        "season_reason": "requested",
+        "published_season": LAST,
+        "players": [
+            {"player_id": bt.TATUM, "name": "Jayson Tatum", "games_played": 1, "average_minutes": 34.0},
+        ],
+    }
+
+
+def test_a_2026_27_preview_reads_its_held_candidates_and_has_no_today(world):
+    """The Lab's and MCP ``backtest_draft_target``'s read."""
+
+    _hold_new_season(world)
+
+    body = _preview(world, NEW)
+
+    _assert_held_2026_27(body)
+    assert body["today"] is None
+    assert [
+        (entry["stream_key"], entry["season"], entry["status"]) for entry in body["provenance"]["generation"]
+    ] == [
+        ("exact_shot_zones", NEW, "candidate"),
+        ("grouped_shot_types", NEW, "candidate"),
+        ("player_assist_locations", NEW, "candidate"),
+        ("player_game_logs", NEW, "candidate"),
+        ("synergy_play_types", NEW, "candidate"),
+    ]
 
 
 def test_last_season_reads_its_own_retained_generation_after_the_new_one_activates(
