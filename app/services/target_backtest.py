@@ -230,6 +230,13 @@ def aggregate_cache_state(statuses: Iterable[str], *, cache_enabled: bool = True
     return "-"
 
 
+def catalog_digest(positions: Mapping[int, str]) -> str:
+    """Name a season's Positions by their content, so a cache key follows them exactly."""
+
+    body = ",".join(f"{player_id}:{position}" for player_id, position in sorted(positions.items()))
+    return hashlib.md5(body.encode("utf-8"), usedforsecurity=False).hexdigest()
+
+
 def rule_share(base: str) -> dict[str, Any]:
     """The `shares` entry of a Qualifier that reads no Diet slice: all nulls."""
 
@@ -351,9 +358,7 @@ class PlayerDietReader(Protocol):
 
 
 class AthleteCatalogReader(Protocol):
-    def get_catalog(self, season: str, *, active_only: bool = False) -> Sequence[Mapping[str, Any]]: ...
-
-    def get_version(self, season: str) -> str | None: ...
+    def get_positions(self, season: str) -> Mapping[int, str]: ...
 
 
 class TargetBacktestService:
@@ -482,7 +487,7 @@ class TargetBacktestService:
                     session=session,
                 )
                 generation = identity if self._cache_enabled else None
-                catalog = self._catalog_version(choice.season) if generation is not None else None
+                catalog = self._catalog_snapshot(choice.season)[1] if generation is not None else None
             except (InvalidInputError, SeasonUnavailableError):
                 raise
             except Exception:
@@ -603,7 +608,7 @@ class TargetBacktestService:
                 continue
             if generation is not None:
                 try:
-                    work.append((choice, generation, self._catalog_version(choice.season)))
+                    work.append((choice, generation, self._catalog_snapshot(choice.season)[1]))
                 except Exception:
                     logger.warning(
                         "Target backtest precompute skipped season=%s: catalog version unreadable",
@@ -735,7 +740,7 @@ class TargetBacktestService:
         # whatever ``note`` or ``updated_at`` has since become.  The Lab
         # hands its own snapshot in for a Draft Target the cache must never
         # see.
-        cached_choice, cache_key, catalog = (
+        cached_choice, cache_key, catalog_read = (
             self._saved_backtest_cache_key(target, choice, session)
             if publication_snapshot is _OWN and target.get("id") is not None
             else (None, None, None)
@@ -820,6 +825,8 @@ class TargetBacktestService:
                 kept,
                 player_minutes=player_minutes,
                 connection=connection,
+                # The Positions the cache key was derived from, when it was.
+                positions=None if catalog_read is None else catalog_read[0],
             )
             summary = self._summary(players, markets)
             if any(qualifier["base"] == POSITION_QUALIFIER_BASE for qualifier in qualifiers):
@@ -845,7 +852,7 @@ class TargetBacktestService:
                     # generation, so the next request's pre-check key finds
                     # it or recomputes it -- never a torn hybrid.
                     self._cache_write(
-                        self._cache_key(target, season, identity, catalog),
+                        self._cache_key(target, season, identity, catalog_read[1]),
                         {
                             "players": players,
                             "summary": summary,
@@ -941,7 +948,7 @@ class TargetBacktestService:
         target: Mapping[str, Any],
         choice: BacktestSeason | None,
         session: Session | None,
-    ) -> tuple[BacktestSeason | None, str | None, str | None]:
+    ) -> tuple[BacktestSeason | None, str | None, tuple[dict[int, str], str | None] | None]:
         """Resolve the season, its cache key and catalog version, or all ``None``.
 
         A ``None`` key is the cache deciding it has nothing to say: the
@@ -969,7 +976,7 @@ class TargetBacktestService:
                 projection_keys=_PROJECTION_ONLY_STREAM_KEYS,
                 session=session,
             )
-            catalog = self._catalog_version(choice.season)
+            catalog = self._catalog_snapshot(choice.season)
         except Exception:
             # The pre-check must not turn a Redis-or-reader outage into a
             # failed request: answer as the uncached read answers, which
@@ -977,7 +984,7 @@ class TargetBacktestService:
             return None, None, None
         if generation is None:
             return None, None, None
-        return choice, self._cache_key(target, choice.season, generation, catalog), catalog
+        return choice, self._cache_key(target, choice.season, generation, catalog[1]), catalog
 
     @staticmethod
     def _cache_identity(snapshot: Any) -> Sequence[tuple] | None:
@@ -1003,17 +1010,19 @@ class TargetBacktestService:
     ) -> str:
         return backtest_cache_key(target, generation, season=season, settings=self.settings, catalog=catalog)
 
-    def _catalog_version(self, season: str) -> str | None:
-        """The athlete catalog's version for the season, or ``None`` with no catalog.
+    def _catalog_snapshot(self, season: str) -> tuple[dict[int, str], str | None]:
+        """Read the season's Positions once: the map and the digest naming it.
 
-        A refresh moves it, so a relabelled Position can never be served from
-        an entry filed before the refresh.  A failed read raises: every caller
-        treats that as the cache having nothing to say.
+        The cache key and the evaluation both take this one read, so a result
+        is always filed under the digest of the Positions it was computed
+        from.  A failed read raises: every caller treats that as the cache
+        having nothing to say.
         """
 
         if self.athlete_catalog is None:
-            return None
-        return self.athlete_catalog.get_version(season)
+            return {}, None
+        positions = dict(self.athlete_catalog.get_positions(season))
+        return positions, catalog_digest(positions)
 
     def _cache_read(self, key: str) -> dict[str, Any] | None:
         """Return one cached result's evidence, or ``None`` to compute.
@@ -1132,6 +1141,7 @@ class TargetBacktestService:
         *,
         player_minutes: int | None = None,
         connection: Connection | None = None,
+        positions: Mapping[int, str] | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """Return the qualifying players and how many lacked a Position.
 
@@ -1182,7 +1192,8 @@ class TargetBacktestService:
             connection=connection,
         )
 
-        positions = self._positions(season)
+        if positions is None:
+            positions = self._catalog_snapshot(season)[0]
         wants_position = next(
             (qualifier for qualifier in qualifiers if qualifier["base"] == POSITION_QUALIFIER_BASE),
             None,
@@ -1225,17 +1236,6 @@ class TargetBacktestService:
             )
         )
         return players, without_position
-
-    def _positions(self, season: str) -> dict[int, str]:
-        """Return each player's Position group for the season, where listed."""
-
-        if self.athlete_catalog is None:
-            return {}
-        return {
-            int(row["player_id"]): row["position"]
-            for row in self.athlete_catalog.get_catalog(season, active_only=False)
-            if row.get("position")
-        }
 
     def _fit(
         self,

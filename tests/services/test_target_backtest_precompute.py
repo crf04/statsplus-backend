@@ -620,3 +620,70 @@ def test_a_collector_relabel_stamped_before_a_later_tombstone_still_invalidates_
     assert str(newest).startswith("2026-08-12 00:00:02")
     body, state = service.backtest(OWNER, target["id"])
     assert (state, body["players"], body["summary"]["players_without_position"]) == ("miss", [], 0)
+
+
+def test_a_refresh_landing_between_two_reads_cannot_file_a_result_under_the_wrong_positions(world):
+    """Digest and Positions come from one read, so ABA cannot cache an empty Backtest.
+
+    A Wing publication lands right after the first catalog read.  Were the
+    Positions read again, the Big Target would compute against Wing and file an
+    empty result under the Big digest, which the restored Big would then hit.
+    """
+
+    from datetime import UTC, datetime
+
+    from app.services.collection_control import CollectionControlService
+    from tests.services.test_collection_control import (
+        _catalog_payload,
+        _roster_payload,
+        _seed_governed_catalog_evidence,
+    )
+
+    _seed_governed_catalog_evidence(world.engine)
+    with world.engine.begin() as connection:
+        connection.execute(AthleteCatalog.__table__.delete())
+    start = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    clock = {"now": start}
+    control = CollectionControlService(world.engine, clock=lambda: clock["now"])
+    control.activate_season(LAST, actor="operator")
+    event_request = control.create_bootstrap_request(LAST, "event", cutoff=cutoff)
+    assert control.publish_catalog(
+        event_request.request_id, _catalog_payload("event"), version="event"
+    ).complete
+
+    def publish(version, position, tick):
+        clock["now"] = start + timedelta(seconds=tick)
+        roster = _roster_payload([1, bt.LEBRON, 11, 12])
+        for identity in roster["identities"]:
+            identity["position"] = position if int(identity["player_id"]) == bt.LEBRON else None
+        request = control.create_bootstrap_request(LAST, "athlete", cutoff=cutoff)
+        assert control.publish_catalog(request.request_id, roster, version=version).complete
+
+    publish("big-initial", "Big", 0)
+    target = world.users.create_target(OWNER, opponent="OKC", qualifiers=[bt.BIG])
+
+    class InterleavedReader(AthleteCatalogReader):
+        armed = True
+
+        def get_positions(self, season):
+            positions = super().get_positions(season)
+            if self.armed:
+                self.armed = False
+                publish("wing-interleaved", "Wing", 1)
+            return positions
+
+    service = world.backtests(redis_client=CountingRedis(), athlete_catalog=InterleavedReader(world.engine))
+
+    body, state = service.backtest(OWNER, target["id"])
+    assert (state, [(p["name"], p["position"]) for p in body["players"]]) == (
+        "miss",
+        [("LeBron James", "Big")],
+    )
+
+    publish("big-restored", "Big", 2)
+    body, state = service.backtest(OWNER, target["id"])
+    assert (state, [(p["name"], p["position"]) for p in body["players"]]) == (
+        "hit",
+        [("LeBron James", "Big")],
+    )

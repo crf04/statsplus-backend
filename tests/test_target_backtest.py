@@ -3349,14 +3349,14 @@ class FakeCatalog:
     def __init__(self, positions, season=SEASON):
         self.rows = {season: [{"player_id": pid, "position": group} for pid, group in positions.items()]}
         self.calls = []
-        self.version = 1
 
     def get_catalog(self, season, *, active_only=False):
         self.calls.append(season)
         return self.rows.get(season, [])
 
-    def get_version(self, season):
-        return f"{len(self.rows.get(season, []))}:{self.version}"
+    def get_positions(self, season):
+        self.calls.append(season)
+        return {row["player_id"]: row["position"] for row in self.rows.get(season, []) if row["position"]}
 
     def relabel(self, player_id, position, season=SEASON):
         """What a refresh does: new position, newly published rows."""
@@ -3364,7 +3364,6 @@ class FakeCatalog:
         for row in self.rows[season]:
             if row["player_id"] == player_id:
                 row["position"] = position
-        self.version += 1
 
 
 def _player_rules_league():

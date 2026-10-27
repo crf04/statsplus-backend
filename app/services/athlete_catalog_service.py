@@ -9,7 +9,6 @@ transaction while leaving the last successful rows untouched.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
@@ -109,13 +108,8 @@ def _read_catalog_rows(
     return [{column: row[column] for column in ROSTER_COLUMNS} for row in rows]
 
 
-def _read_catalog_version(engine: Engine, season: str) -> str:
-    """Name the content of one season's catalog that Position reads depend on.
-
-    A digest of every ``(player_id, position)`` pair, in player order, so it
-    changes exactly when a player's Position does, whichever writer ran and
-    whatever timestamps it stamped.
-    """
+def _read_catalog_positions(engine: Engine, season: str) -> dict[int, str]:
+    """Read one season's listed Positions in a single query: ``{player_id: group}``."""
 
     season = validate_canonical_season(season)
     with engine.connect() as connection:
@@ -124,8 +118,7 @@ def _read_catalog_version(engine: Engine, season: str) -> str:
             .where(AthleteCatalog.season == season, AthleteCatalog.position.is_not(None))
             .order_by(AthleteCatalog.player_id)
         ).all()
-    body = ",".join(f"{player_id}:{position}" for player_id, position in rows)
-    return hashlib.md5(body.encode("utf-8"), usedforsecurity=False).hexdigest()
+    return {int(player_id): position for player_id, position in rows}
 
 
 class AthleteCatalogReader:
@@ -151,8 +144,8 @@ class AthleteCatalogReader:
     ) -> list[dict[str, Any]]:
         return _read_catalog_rows(self._engine, season, active_only=active_only)
 
-    def get_version(self, season: str) -> str | None:
-        return _read_catalog_version(self._engine, season)
+    def get_positions(self, season: str) -> dict[int, str]:
+        return _read_catalog_positions(self._engine, season)
 
 
 class AthleteCatalogService:
