@@ -127,6 +127,24 @@ def test_self_filters_are_passed_through_unchanged():
     assert result["self_filters"] == [self_filter]
 
 
+def test_a_season_the_query_names_is_kept():
+    parser = StubParser(components(player_name="LeBron James"))
+    service = make_service(parser=parser)
+
+    result = service.process_query("LeBron James in 2024-25")
+
+    assert result["season"] == "2024-25"
+
+
+def test_a_date_range_is_not_read_as_a_season():
+    parser = StubParser(components(player_name="LeBron James"))
+    service = make_service(parser=parser)
+
+    result = service.process_query("LeBron James 2024-11")
+
+    assert result["season"] is None
+
+
 def test_a_query_naming_no_season_leaves_the_season_to_the_reader():
     parser = StubParser(components(player_name="LeBron James"))
     service = make_service(parser=parser)

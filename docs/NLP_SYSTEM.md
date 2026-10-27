@@ -42,7 +42,7 @@ The backend turns free-text NBA stat questions into structured API parameters. I
     }
   ],
   "rank_filter": [],
-  "season": "2025-26",
+  "season": null,
   "confidence": 0.9,
   "intent": "game_logs",
   "time_period": null,
