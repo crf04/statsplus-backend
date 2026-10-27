@@ -236,7 +236,8 @@ class NLService:
             "date_to": None,
             "self_filters": self_filters,
             "rank_filter": rank_filter,
-            "season": llm_query.season or self.settings.nba.current_season,
+            # A season the query does not name is left to the reader's own default.
+            "season": llm_query.season,
             "confidence": llm_query.confidence,
             "intent": llm_query.intent or "game_logs",
             "time_period": llm_query.time_period,
@@ -297,7 +298,8 @@ class NLService:
             "date_to": parsed_components.date_to,
             "self_filters": parsed_components.self_filters,
             "rank_filter": rank_filter,
-            "season": getattr(parsed_components, "season", self.settings.nba.current_season),
+            # The NLP parser reads no season, so the reader's own default applies.
+            "season": None,
             "confidence": parsed_components.confidence,
             "intent": parsed_components.intent,
             "time_period": parsed_components.time_period,

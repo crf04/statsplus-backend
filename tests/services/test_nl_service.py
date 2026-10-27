@@ -127,13 +127,13 @@ def test_self_filters_are_passed_through_unchanged():
     assert result["self_filters"] == [self_filter]
 
 
-def test_the_season_defaults_to_the_configured_current_season():
+def test_a_query_naming_no_season_leaves_the_season_to_the_reader():
     parser = StubParser(components(player_name="LeBron James"))
     service = make_service(parser=parser)
 
     result = service.process_query("LeBron last 10 games")
 
-    assert result["season"] == service.settings.nba.current_season
+    assert result["season"] is None
 
 
 # --- LLM routing -----------------------------------------------------------
@@ -376,8 +376,17 @@ def test_llm_results_keep_the_response_contract():
     result = service.process_query("kobe at home")
 
     assert set(result) == nlp_keys
-    assert result["season"] == service.settings.nba.current_season
+    assert result["season"] is None
     assert result["location"] == "home"
+
+
+def test_a_season_the_llm_reads_from_the_query_is_kept():
+    llm = StubLLM(llm_parse(player_name="Kobe Bryant", season="2024-25"))
+    service = make_service(llm_service=llm, parser=RosterParser(components(should_use_llm=True)))
+
+    result = service.process_query("kobe in 2024-25")
+
+    assert result["season"] == "2024-25"
 
 
 # --- routing settings ------------------------------------------------------
