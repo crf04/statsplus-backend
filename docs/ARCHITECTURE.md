@@ -287,7 +287,7 @@ not counted twice:
 
 | Provider | Seam | Operations |
 | --- | --- | --- |
-| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_season`, `player_game_logs_recorded`, `player_diets_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `team_game_log`, `league_player_shot_type`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_totals_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
+| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_season`, `player_game_logs_recorded`, `player_diets_recorded`, `player_roster`, `team_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `team_game_log`, `league_player_shot_type`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_totals_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
 | NBA LiveData | `NBALiveDataBoxscoreAdapter` | `game_boxscore`; every governed ledger game reads its final score here, and the box score becomes evidence only after primary PBP evidence fails validation, with both source documents retained in the accepted composite observation. `game_playbyplay` for every 2026-27 ledger game, to exclude heaves from attempts; the same box score checks the corrected attempts of a game with heaves |
 | PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_player_diet`, `get_totals_opponent`, `health_probe`, `player_game_logs`, `game_player_stats`, `team_game_log` |
 | Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests share one pooled Requests session built once per adapter (pool sized for the capped detail fan-out); explicitly injected sessions serialize only their `get` call. The shared DFS transport owns one safe-GET retry. Dabble names a multi-player offering (first scorer, `to_score_25_plus_points`) with one `marketId` for every player, so a repeated market id with different content is excluded as `conflicting_source_identity` (skipped, warning kept) rather than malformed; it leaves the snapshot complete. |
@@ -3840,6 +3840,15 @@ season, and team identity. A `(season, player_id)` key lets a later official
 display-name update replace that season's label without rewriting prior
 history. Active, inactive, and historical rows remain distinguishable.
 
+Each row also carries a nullable `position` (Guard, Wing or Big), the player's
+Position for that season. `CommonAllPlayers` has no listed position, so the
+roster pull also requests `CommonTeamRoster` for every team (`team_roster`, about
+30 calls a season) and joins `POSITION` on player id, in the direct service and
+in the residential collector alike. The listed position maps to a group by one
+fixed rule (`G` Guard; `G-F`, `F-G`, `F` Wing; `F-C`, `C-F`, `C` Big; anything
+else none), and each refresh overwrites it. Target Position Qualifiers read it
+(ADR 0005 in the coordination repository).
+
 Provider collection happens before publication. Each requested season's
 catalog rows and success metadata are written in one transaction, so an
 interrupted publication rolls back to the prior catalog. Failure metadata is
@@ -5446,6 +5455,32 @@ runs nightly after `scripts/ledger_refresh.py` in the `ledger-refresh` Railway
 service and is also the season backfill. `RotationService` serves
 `GET /api/games/rotation`, computing every average and comparison from the
 stored centiseconds.
+
+### Player tracking (crf04/statsplus#349)
+
+`player_game_tracking` (migration 078, `app/models/player_tracking.py`) holds
+NBA.com rebound chances (total, offensive, defensive) and potential assists per
+(game, player), all nullable, with the season, game date and fetch time. It is a
+plain table outside the publication pipeline: tracking arrives separately from
+the box score and can lag it by hours, so it never holds up or alters ledger
+checksums or publications. `StoredGameLogsSource` joins it onto game-log rows by
+(game, player) when Game Logs is read; no stored row serves `null`, never `0`.
+Game Logs responses are not cached, so a row gains its values on the first read
+after collection (only the link-preview card facts cache for an hour).
+
+`app/providers/nba_tracking.py` fetches `boxscoreplayertrackv3` (one call per
+game) and the `leaguedashptstats` Passing day feed (one call per game day) with
+`nba_api`'s `STATS_HEADERS`, retrying empty bodies and timeouts. The `Rebounding`
+day feed is not used: it omits every player with 0 rebounds.
+`PlayerTrackingCollectionService` collects each completed regular-season Event
+Catalog game with no stored rows, oldest first, and stores a game only once both
+feeds have published for it (the box score has a player with minutes and the day
+feed lists one of them); otherwise the game is reported as `not_published` and a
+later run retries it. Each unsuccessful attempt is remembered in `player_tracking_attempts` (also migration 078); candidates run never-tried first, then least recently tried, so games whose tracking never publishes cannot starve newer ones under `--max-games`. `replace_game` takes a per-game Postgres advisory lock, so a backfill overlapping the cron serializes instead of raising a duplicate key. A player missing from the day feed stores
+`potential_ast = NULL`. `PlayerTrackingRepository.replace_game` rewrites one game
+in a single transaction and writes nothing when the values are unchanged, so
+reruns leave identical rows. `scripts/tracking_refresh.py` is the nightly step
+(`railway.tracking.json`, 10:30 and 14:30 UTC) and the season backfill.
 
 ### Season player stats (crf04/statsplus#277)
 

@@ -22,56 +22,172 @@ def _settings() -> RuntimeSettings:
     )
 
 
+#: One CommonTeamRoster response, with the columns NBA.com sends, for each
+#: listed-position code a team can carry.  Lakers: the codes that map; Celtics:
+#: the codes that do not (blank, a fine position, a missing listing).
+_TEAM_ROSTER_COLUMNS = [
+    "TeamID",
+    "SEASON",
+    "LeagueID",
+    "PLAYER",
+    "NICKNAME",
+    "PLAYER_SLUG",
+    "NUM",
+    "POSITION",
+    "HEIGHT",
+    "WEIGHT",
+    "BIRTH_DATE",
+    "AGE",
+    "EXP",
+    "SCHOOL",
+    "PLAYER_ID",
+    "HOW_ACQUIRED",
+]
+LAKERS, CELTICS = 1610612747, 1610612738
+#: (player id, name, listed position, team id)
+LISTED = [
+    (1, "Guard Only", "G", LAKERS),
+    (2, "Guard Forward", "G-F", LAKERS),
+    (3, "Forward Guard", "F-G", LAKERS),
+    (4, "Forward", "F", LAKERS),
+    (5, "Forward Center", "F-C", LAKERS),
+    (6, "Center Forward", "C-F", LAKERS),
+    (7, "Center", "C", LAKERS),
+    (8, "Blank Listing", "", CELTICS),
+    (9, "Fine Position", "PG", CELTICS),
+    (10, "Missing Listing", None, CELTICS),
+]
+
+
+def _team_roster(team_id):
+    rows = [
+        [
+            team_id,
+            "2024",
+            "00",
+            name,
+            name,
+            name.lower(),
+            "0",
+            position,
+            "6-6",
+            "200",
+            "",
+            25,
+            "3",
+            "",
+            pid,
+            "",
+        ]
+        for pid, name, position, team in LISTED
+        if team == team_id
+    ]
+    return pd.DataFrame(rows, columns=_TEAM_ROSTER_COLUMNS)
+
+
+def _all_players():
+    return pd.DataFrame(
+        [
+            {
+                "PERSON_ID": pid,
+                "DISPLAY_FIRST_LAST": name,
+                "ROSTERSTATUS": 1,
+                "FROM_YEAR": 2020,
+                "TO_YEAR": 2025,
+                "TEAM_ID": team,
+                "TEAM_NAME": "Team",
+                "TEAM_ABBREVIATION": "TM",
+            }
+            for pid, name, _position, team in LISTED
+        ]
+    )
+
+
 def test_roster_fetch_is_season_scoped_and_emits_closed_telemetry_operation():
     captured: dict[str, object] = {}
+    team_calls: list[dict[str, object]] = []
 
     class RecordedRosterEndpoint:
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
         def get_data_frames(self):
-            return [
-                pd.DataFrame(
-                    [
-                        {
-                            "PERSON_ID": 23,
-                            "DISPLAY_FIRST_LAST": "LeBron James",
-                            "ROSTERSTATUS": 1,
-                            "FROM_YEAR": 2003,
-                            "TO_YEAR": 2025,
-                            "TEAM_ID": 1610612747,
-                            "TEAM_NAME": "Los Angeles Lakers",
-                            "TEAM_ABBREVIATION": "LAL",
-                        }
-                    ]
-                )
-            ]
+            return [_all_players()]
+
+    class RecordedTeamRosterEndpoint:
+        def __init__(self, **kwargs):
+            team_calls.append(kwargs)
+            self.frame = _team_roster(kwargs["team_id"])
+
+        def get_data_frames(self):
+            return [self.frame]
 
     clear_recorded_provider_events()
     adapter = NBAStatsAdapter(
         settings=_settings(),
         roster_endpoint_factory=RecordedRosterEndpoint,
+        team_roster_endpoint_factory=RecordedTeamRosterEndpoint,
     )
 
     frame = adapter.get_player_roster(season="2024-25")
 
     assert captured["season"] == "2024-25"
     assert captured["is_only_current_season"] == 0
-    assert frame.to_dict(orient="records") == [
-        {
-            "player_id": 23,
-            "display_name": "LeBron James",
-            "roster_status": "active",
-            "is_active": True,
-            "is_active_for_season": True,
-            "season": "2024-25",
-            "team_id": 1610612747,
-            "team_name": "Los Angeles Lakers",
-            "team_abbreviation": "LAL",
-        }
+    # One roster call per team, all for the requested season.
+    assert len(team_calls) == 30
+    assert {call["season"] for call in team_calls} == {"2024-25"}
+    assert len({call["team_id"] for call in team_calls}) == 30
+    # Each listed code lands on its player as the group the fixed rule gives it.
+    assert frame.set_index("player_id")["position"].to_dict() == {
+        1: "Guard",
+        2: "Wing",
+        3: "Wing",
+        4: "Wing",
+        5: "Big",
+        6: "Big",
+        7: "Big",
+        8: None,
+        9: None,
+        10: None,
+    }
+    assert list(frame.columns) == [
+        "player_id",
+        "display_name",
+        "roster_status",
+        "is_active",
+        "is_active_for_season",
+        "season",
+        "team_id",
+        "team_name",
+        "team_abbreviation",
+        "position",
     ]
     events = get_recorded_provider_events()
-    assert [event["operation"] for event in events] == ["player_roster"]
+    assert [event["operation"] for event in events] == ["player_roster"] + ["team_roster"] * 30
+
+
+def test_a_player_the_team_rosters_never_list_has_no_position():
+    class OnePlayerRoster:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_data_frames(self):
+            return [_all_players().iloc[[0]]]
+
+    class EmptyTeamRoster:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_data_frames(self):
+            return [pd.DataFrame(columns=_TEAM_ROSTER_COLUMNS)]
+
+    adapter = NBAStatsAdapter(
+        settings=_settings(),
+        roster_endpoint_factory=OnePlayerRoster,
+        team_roster_endpoint_factory=EmptyTeamRoster,
+    )
+
+    assert adapter.get_player_roster(season="2024-25")["position"].tolist() == [None]
 
 
 def test_roster_normalization_distinguishes_inactive_and_historical_players():

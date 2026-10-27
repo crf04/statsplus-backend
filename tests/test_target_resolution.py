@@ -516,6 +516,7 @@ def test_a_live_target_lists_the_opposing_pool_members_meeting_the_qualifier(tar
         "name": "Corner Sniper",
         "team_id": LAL,
         "tricode": "LAL",
+        "position": None,
         "posted_markets": ["PTS"],
         "injury_badge_ref": None,
         "season_scoring": 20.0,
@@ -2347,3 +2348,204 @@ def test_resolve_hands_the_slates_schedule_and_pool_blocks_to_the_matchup_reader
     ).resolve(OWNER, requested_date=SLATE_DATE)
 
     assert Spy.seen == [({"status": "fresh", "providers": {}}, {"status": "fresh", "retrieved_at": "S"})]
+
+
+# --- Position and Average Qualifiers (crf04/statsplus#351) -----------------
+
+BOS_ID = 1610612738
+WING = {"base": "position", "groups": ["Wing"]}
+BIG = {"base": "position", "groups": ["Big"]}
+WING_BIG = {"base": "position", "groups": ["Wing", "Big"]}
+
+
+def _average(stat, threshold, comparator="at_or_above"):
+    return {"base": "season_average", "stat": stat, "comparator": comparator, "threshold": threshold}
+
+
+def _rules_matchup():
+    """Three Lakers: a Wing shooting 8 threes, a Big shooting 1, an unlisted shooting 9."""
+
+    matchup = _matchup(
+        players=[
+            _player(1, "Corner Sniper", shot_zones=_zone_diet(0.4, 0.2), season_scoring=22.0),
+            _player(2, "Rim Runner", shot_zones=_zone_diet(0.1, 0.5), season_scoring=14.0),
+            _player(3, "Unlisted Guy", shot_zones=_zone_diet(0.5, 0.2), season_scoring=8.0),
+        ]
+    )
+    matchup["as_of"] = {"season": "2025-26"}
+    return matchup
+
+
+def _season_log(player_id, three_attempts):
+    from tests import test_target_backtest as bt
+
+    return [
+        bt._row(
+            player_id,
+            game_id=f"{player_id}-{index}",
+            team_id=LAL,
+            opponent_team_id=BOS_ID,
+            three_pointers_attempted=attempts,
+        )
+        for index, attempts in enumerate(three_attempts)
+    ]
+
+
+@pytest.fixture
+def resolve_rules(targets, runtime_settings):
+    """Resolve every saved Target with the Position catalog and season logs wired in."""
+
+    from tests import test_target_backtest as bt
+
+    def _resolve(
+        *,
+        positions=None,
+        three_attempts=None,
+        game_counts=None,
+        with_logs=True,
+        with_catalog=True,
+    ):
+        positions = {1: "Wing", 2: "Big", 3: None} if positions is None else positions
+        attempts = {1: [8, 8], 2: [1, 1], 3: [9, 9]} if three_attempts is None else three_attempts
+        logs = bt.FakeLogs(
+            rows=[row for pid, values in attempts.items() for row in _season_log(pid, values)],
+            game_counts=game_counts,
+        )
+        service = TargetResolutionService(
+            targets=targets,
+            slates=FakeSlate(),
+            matchups=FakeMatchups({GAME_ID: _rules_matchup()}),
+            settings=runtime_settings,
+            player_logs=logs if with_logs else None,
+            athlete_catalog=bt.FakeCatalog(positions) if with_catalog else None,
+        )
+        resolved = service.resolve(OWNER, requested_date=SLATE_DATE)["targets"]
+        return {entry["target"]["title"]: entry for entry in resolved}
+
+    return _resolve
+
+
+def _fit_names(entry):
+    return [player["name"] for player in entry["players"]]
+
+
+@pytest.mark.parametrize(
+    ("qualifiers", "names"),
+    [
+        ([BIG], ["Rim Runner"]),
+        ([WING], ["Corner Sniper"]),
+        ([WING_BIG], ["Corner Sniper", "Rim Runner"]),
+        ([{"base": "position", "groups": ["Guard"]}], []),
+        # An unlisted player meets the Diet rule but never a Position.
+        ([CORNER_THREE], ["Corner Sniper", "Unlisted Guy"]),
+        ([WING_BIG, CORNER_THREE], ["Corner Sniper"]),
+        ([_average("3PA", 5)], ["Corner Sniper", "Unlisted Guy"]),
+        ([_average("3PA", 8)], ["Corner Sniper", "Unlisted Guy"]),
+        ([_average("3PA", 8.5)], ["Unlisted Guy"]),
+        ([_average("3PA", 5, "at_or_below")], ["Rim Runner"]),
+        # Per 36 over 34-minute games: 8.47, 0.53 and 9.53.
+        ([_average("3PA/36", 8.4)], ["Corner Sniper", "Unlisted Guy"]),
+        ([_average("3PA/36", 8.5)], ["Unlisted Guy"]),
+        ([WING, _average("3PA", 5)], ["Corner Sniper"]),
+        ([BIG, _average("3PA", 5)], []),
+        ([WING_BIG, _average("3PA", 0.5), CORNER_THREE], ["Corner Sniper"]),
+    ],
+)
+def test_a_live_target_lists_the_players_meeting_position_and_average_qualifiers(
+    targets, resolve_rules, qualifiers, names
+):
+    created = _create(targets, qualifiers=qualifiers)
+
+    assert _fit_names(resolve_rules()[created["title"]]) == names
+
+
+def test_each_fit_carries_its_position_and_a_diet_only_fit_is_otherwise_unchanged(targets, resolve_rules):
+    created = _create(targets, qualifiers=[CORNER_THREE])
+
+    players = resolve_rules()[created["title"]]["players"]
+
+    assert [(player["name"], player["position"]) for player in players] == [
+        ("Corner Sniper", "Wing"),
+        ("Unlisted Guy", None),
+    ]
+    assert players[0] == {
+        "canonical_id": 1,
+        "name": "Corner Sniper",
+        "team_id": LAL,
+        "tricode": "LAL",
+        "position": "Wing",
+        "posted_markets": ["PTS"],
+        "injury_badge_ref": None,
+        "season_scoring": 22.0,
+        "thin": False,
+        "shares": [
+            {"base": "shot_zones", "slice_key": "Corner 3", "share": 0.4, "league_average_share": 0.2}
+        ],
+    }
+
+
+def test_every_qualifier_kind_has_a_share_and_a_context_entry_with_nulls_for_diet_only_fields(
+    targets, resolve_rules
+):
+    mixed = _create(targets, qualifiers=[WING_BIG, _average("3PA", 5), CORNER_THREE])
+    only_rules = _create(targets, qualifiers=[BIG, _average("3PA", 0)])
+
+    resolved = resolve_rules()
+
+    entry = resolved[mixed["title"]]
+    assert [(c["base"], c["slice_key"]) for c in entry["context"]] == [
+        ("position", None),
+        ("season_average", None),
+        ("shot_zones", "Corner 3"),
+    ]
+    assert entry["context"][0] == {
+        "base": "position",
+        "slice_key": None,
+        "label": None,
+        "availability": None,
+        "metrics": [],
+    }
+    assert entry["context"][2]["metrics"]
+    assert [player["shares"] for player in entry["players"]] == [
+        [
+            {"base": "position", "slice_key": None, "share": None, "league_average_share": None},
+            {"base": "season_average", "slice_key": None, "share": None, "league_average_share": None},
+            {"base": "shot_zones", "slice_key": "Corner 3", "share": 0.4, "league_average_share": 0.2},
+        ]
+    ]
+    entry = resolved[only_rules["title"]]
+    assert [c["base"] for c in entry["context"]] == ["position", "season_average"]
+    assert [(p["name"], [s["base"] for s in p["shares"]]) for p in entry["players"]] == [
+        ("Rim Runner", ["position", "season_average"])
+    ]
+
+
+def test_a_season_average_over_too_few_games_is_flagged_thin_not_dropped(targets, resolve_rules):
+    created = _create(targets, qualifiers=[_average("3PA", 5)])
+
+    players = resolve_rules(game_counts={1: 3})[created["title"]]["players"]
+
+    assert [(player["name"], player["thin"]) for player in players] == [
+        ("Corner Sniper", True),
+        ("Unlisted Guy", False),
+    ]
+
+
+def test_a_player_with_no_season_log_never_fits_an_average(targets, resolve_rules):
+    created = _create(targets, qualifiers=[_average("3PA", 0)])
+
+    entry = resolve_rules(three_attempts={1: [8, 8], 2: [1, 1]})[created["title"]]
+
+    assert _fit_names(entry) == ["Corner Sniper", "Rim Runner"]
+
+
+def test_without_the_readers_no_player_has_a_position_or_a_judged_average(targets, resolve_rules):
+    diet = _create(targets, qualifiers=[CORNER_THREE])
+    big = _create(targets, qualifiers=[BIG])
+    average = _create(targets, qualifiers=[_average("3PA", 0)])
+
+    resolved = resolve_rules(with_logs=False, with_catalog=False)
+
+    assert [player["position"] for player in resolved[diet["title"]]["players"]] == [None, None]
+    assert resolved[big["title"]]["players"] == []
+    assert resolved[average["title"]]["players"] == []

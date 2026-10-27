@@ -31,7 +31,13 @@ from typing import Any, Protocol
 
 from app.config.settings import RuntimeSettings
 from app.domain.player_diet_taxonomy import PLAYER_DIET_SLICE_LABELS
-from app.models.target import TARGET_COMPARATOR_TESTS
+from app.domain.target_statistics import season_average_value
+from app.models.target import (
+    POSITION_QUALIFIER_BASE,
+    SEASON_AVERAGE_QUALIFIER_BASE,
+    TARGET_COMPARATOR_TESTS,
+)
+from app.services.matchup import season_sample_thin
 from app.services.matchup_reuse import ComposedMatchupCache, PublicationSnapshotReuse
 from app.services.matchup_snapshot import (
     SnapshotMatchups,
@@ -44,9 +50,13 @@ from app.services.response_provenance import (
     target_sources,
 )
 from app.services.slate_fallback import read_slate
+from app.services.target_backtest import rule_share
 from app.services.target_conditions import date_is_kept, minutes_are_kept
 
 _WINDOW_NAMES = ("season", "last_15")
+
+#: The Qualifier kinds that read the player, not a Diet slice.
+_PLAYER_RULE_BASES = (POSITION_QUALIFIER_BASE, SEASON_AVERAGE_QUALIFIER_BASE)
 
 #: An idle opponent has no game, so no evidence named participants for it and
 #: there is no source to report.
@@ -70,6 +80,16 @@ class MatchupReader(Protocol):
     def get_matchup(self, *, game_id: str) -> Mapping[str, Any]: ...
 
 
+class SeasonSummaryReader(Protocol):
+    def get_player_summaries(
+        self, season: str, player_ids: Sequence[int], *, publication_snapshot: Any | None = None
+    ) -> Mapping[int, Any]: ...
+
+
+class CatalogReader(Protocol):
+    def get_catalog(self, season: str, *, active_only: bool = False) -> Sequence[Mapping[str, Any]]: ...
+
+
 class TargetResolutionService:
     """Evaluate one account's Targets against one ET Slate Date."""
 
@@ -84,7 +104,15 @@ class TargetResolutionService:
         settings: RuntimeSettings | None = None,
         snapshot_reuse: PublicationSnapshotReuse | None = None,
         matchup_cache: ComposedMatchupCache | None = None,
+        player_logs: SeasonSummaryReader | None = None,
+        athlete_catalog: CatalogReader | None = None,
     ) -> None:
+        # Both optional readers serve the player rules Diet shares do not:
+        # a Position comes from the athlete catalog and a season average from
+        # the player's Regular Season log.  Without them no player has a
+        # Position and no season average can be judged.
+        self.player_logs = player_logs
+        self.athlete_catalog = athlete_catalog
         self.targets = targets
         self.slates = slates
         self.matchups = matchups
@@ -121,6 +149,7 @@ class TargetResolutionService:
         slate = read_slate(self.slates.get_slate, requested_date, fallback)
         games = self._games_by_tricode(slate["games"])
         read_matchups: dict[str, Mapping[str, Any]] = {}
+        positions: dict[str, Mapping[int, str]] = {}
         matchups = self._request_matchups()
 
         live: list[dict[str, Any]] = []
@@ -131,6 +160,7 @@ class TargetResolutionService:
                 games,
                 read_matchups,
                 matchups=matchups,
+                positions=positions,
                 slate_date=slate["slate_date"],
                 pool=(slate.get("freshness") or {}).get("pool"),
                 schedule=(slate.get("freshness") or {}).get("schedule"),
@@ -221,6 +251,7 @@ class TargetResolutionService:
             self._games_by_tricode(slate["games"]),
             read_matchups,
             matchups=self.matchups if matchups is None else matchups,
+            positions={},
             slate_date=slate["slate_date"],
         )
         sources = target_sources(slate, read_matchups.values())
@@ -240,6 +271,7 @@ class TargetResolutionService:
         read_matchups: dict[str, Mapping[str, Any]],
         *,
         matchups: MatchupReader,
+        positions: dict[str, Mapping[int, str]],
         slate_date: str,
         pool: Mapping[str, Any] | None = None,
         schedule: Mapping[str, Any] | None = None,
@@ -257,7 +289,16 @@ class TargetResolutionService:
         game_id = game["game_id"]
         if game_id not in read_matchups:
             read_matchups[game_id] = read_game_matchup(matchups, game, pool, schedule)
-        return self._live(target, game, opponent_side, filtered_side, read_matchups[game_id], slate_date)
+        return self._live(
+            target,
+            game,
+            opponent_side,
+            filtered_side,
+            read_matchups[game_id],
+            slate_date,
+            snapshot=getattr(matchups, "snapshot", None),
+            positions=positions,
+        )
 
     @staticmethod
     def _games_by_tricode(
@@ -305,6 +346,9 @@ class TargetResolutionService:
         filtered_side: str,
         matchup: Mapping[str, Any],
         slate_date: str,
+        *,
+        snapshot: Any | None,
+        positions: dict[str, Mapping[int, str]],
     ) -> dict[str, Any]:
         opponent_team_id = int(game[opponent_side]["team_id"])
         opponent_sheet = next(
@@ -341,12 +385,26 @@ class TargetResolutionService:
                 "away": self._team(game["away_team"]),
                 "home": self._team(game["home_team"]),
             },
-            "context": [self._context(qualifier, opponent_sheet, league) for qualifier in qualifiers],
+            # One entry per Qualifier; Position and Average name no slice, so
+            # theirs carry nulls for the defense-sheet fields.
+            "context": [
+                self._rule_context(qualifier)
+                if qualifier["base"] in _PLAYER_RULE_BASES
+                else self._context(qualifier, opponent_sheet, league)
+                for qualifier in qualifiers
+            ],
             "availability": availability,
             "players": (
                 []
                 if availability["status"] != "available" or not condition_kept
-                else self._players(qualifiers, matchup["players"], opponent_team_id)
+                else self._players(
+                    qualifiers,
+                    matchup["players"],
+                    opponent_team_id,
+                    season=(matchup.get("as_of") or {}).get("season"),
+                    snapshot=snapshot,
+                    positions=positions,
+                )
             ),
         }
 
@@ -374,6 +432,16 @@ class TargetResolutionService:
         experience = matchup["experience"]
         participants = experience["sections"]["participants"]
         return {**participants, "source": experience["player_source"]}
+
+    @staticmethod
+    def _rule_context(qualifier: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "base": qualifier["base"],
+            "slice_key": None,
+            "label": None,
+            "availability": None,
+            "metrics": [],
+        }
 
     @classmethod
     def _context(
@@ -429,34 +497,97 @@ class TargetResolutionService:
         qualifiers: Sequence[Mapping[str, Any]],
         players: Sequence[Mapping[str, Any]],
         opponent_team_id: int,
+        *,
+        season: str | None,
+        snapshot: Any | None,
+        positions: dict[str, Mapping[int, str]],
     ) -> list[dict[str, Any]]:
         """Name the opposing participants meeting every Qualifier.
 
         The Matchup already orders its players by Season scoring descending,
-        so preserving its order is that ordering.  A thin diet is flagged, not
-        excluded: the Target list never disagrees with the Matchup about who
-        is in the game.  A game-log participant carries no posted markets, as
-        on the Matchup page.
+        so preserving its order is that ordering.  A thin diet, or a season
+        average over too few games, is flagged, not excluded: the Target list
+        never disagrees with the Matchup about who is in the game.  A
+        game-log participant carries no posted markets, as on the Matchup page.
         """
 
+        opposing = [player for player in players if int(player["team_id"]) != opponent_team_id]
+        listed = self._positions(season, positions)
+        summaries = self._summaries(qualifiers, opposing, season, snapshot)
         fits = []
-        for player in players:
-            if int(player["team_id"]) == opponent_team_id:
-                continue
-            fit = self._fit(qualifiers, player)
+        for player in opposing:
+            canonical_id = int(player["canonical_id"])
+            fit = self._fit(qualifiers, player, listed.get(canonical_id), summaries.get(canonical_id))
             if fit is not None:
                 fits.append(fit)
         return fits
+
+    def _positions(self, season: str | None, memo: dict[str, Mapping[int, str]]) -> Mapping[int, str]:
+        """Each player's Position group for the season, read once per request."""
+
+        if season is None or self.athlete_catalog is None:
+            return {}
+        if season not in memo:
+            memo[season] = {
+                int(row["player_id"]): row["position"]
+                for row in self.athlete_catalog.get_catalog(season, active_only=False)
+                if row.get("position")
+            }
+        return memo[season]
+
+    def _summaries(
+        self,
+        qualifiers: Sequence[Mapping[str, Any]],
+        players: Sequence[Mapping[str, Any]],
+        season: str | None,
+        snapshot: Any | None,
+    ) -> Mapping[int, Any]:
+        """The players' Regular Season logs, read only for an Average Qualifier."""
+
+        if (
+            season is None
+            or self.player_logs is None
+            or not players
+            or not any(qualifier["base"] == SEASON_AVERAGE_QUALIFIER_BASE for qualifier in qualifiers)
+        ):
+            return {}
+        return self.player_logs.get_player_summaries(
+            season,
+            [int(player["canonical_id"]) for player in players],
+            publication_snapshot=snapshot,
+        )
 
     def _fit(
         self,
         qualifiers: Sequence[Mapping[str, Any]],
         player: Mapping[str, Any],
+        position: str | None,
+        summary: Any | None,
     ) -> dict[str, Any] | None:
         shares = []
         thin = False
         for qualifier in qualifiers:
-            base_facts = player["diet_shares"].get(qualifier["base"]) or ()
+            base = qualifier["base"]
+            if base == POSITION_QUALIFIER_BASE:
+                # A player with no listed Position never fits one.
+                if position is None or position not in qualifier["groups"]:
+                    return None
+                shares.append(rule_share(base))
+                continue
+            if base == SEASON_AVERAGE_QUALIFIER_BASE:
+                if summary is None or summary.season_rate is None:
+                    return None
+                value = season_average_value(qualifier["stat"], summary.rate_rows)
+                if value is None or not TARGET_COMPARATOR_TESTS[qualifier["comparator"]](
+                    value, qualifier["threshold"]
+                ):
+                    return None
+                thin = thin or (
+                    self.settings is not None and season_sample_thin(summary, self.settings.matchup_scores)
+                )
+                shares.append(rule_share(base))
+                continue
+            base_facts = player["diet_shares"].get(base) or ()
             fact = next(
                 (item for item in base_facts if item["key"] == qualifier["slice_key"]),
                 None,
@@ -470,18 +601,19 @@ class TargetResolutionService:
                 return None
             shares.append(
                 {
-                    "base": qualifier["base"],
+                    "base": base,
                     "slice_key": qualifier["slice_key"],
                     "share": season["share"],
                     "league_average_share": season["league_average_share"],
                 }
             )
-            thin = thin or player["diet_thin"][qualifier["base"]]
+            thin = thin or player["diet_thin"][base]
         return {
             "canonical_id": int(player["canonical_id"]),
             "name": player["name"],
             "team_id": int(player["team_id"]),
             "tricode": player["tricode"],
+            "position": position,
             "posted_markets": list(player["posted_markets"]),
             "injury_badge_ref": player["injury_badge_ref"],
             "season_scoring": player["season_scoring"],

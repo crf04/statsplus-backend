@@ -263,7 +263,7 @@ class World:
         base = next(base for base, (key, *_) in DIET_STREAMS.items() if key == stream)
         self.compose(stream, season, _diet_rows(base, season, corner_three))
 
-    def backtests(self, *, redis_client=None):
+    def backtests(self, *, redis_client=None, athlete_catalog=None):
         return TargetBacktestService(
             targets=self.users,
             player_logs=self.logs,
@@ -273,6 +273,7 @@ class World:
             publication_reader=self.reader,
             engine=self.engine,
             redis_client=redis_client,
+            athlete_catalog=athlete_catalog,
         )
 
     def saved_target(self, **conditions):
