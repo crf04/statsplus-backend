@@ -68,13 +68,21 @@ def nba_api(monkeypatch):
         calls=[],
     )
 
-    def box(**kwargs):
-        return FakeEndpoint(Tracking.boxes[kwargs["game_id"]], Tracking.calls, "box")(**kwargs)
+    from nba_api.stats.library.http import NBAStatsHTTP
+
+    def box(_http, endpoint, parameters, headers=None, timeout=None, **_kwargs):
+        # The box score is fetched as a raw response; replacing the transport
+        # (not the endpoint class) keeps nba_api's own parsing in the path.
+        assert endpoint == "boxscoreplayertrackv3"
+        game_id = parameters["GameID"]
+        return FakeEndpoint(Tracking.boxes[game_id], Tracking.calls, "box")(
+            game_id=game_id, headers=headers, timeout=timeout
+        )
 
     def day(**kwargs):
         return FakeEndpoint(Tracking.passing, Tracking.calls, "day")(**kwargs)
 
-    monkeypatch.setattr(endpoints, "BoxScorePlayerTrackV3", box)
+    monkeypatch.setattr(NBAStatsHTTP, "send_api_request", box)
     monkeypatch.setattr(endpoints, "LeagueDashPtStats", day)
     return Tracking
 
@@ -246,6 +254,28 @@ def test_a_game_with_no_tracking_yet_is_collected_on_the_next_run(tmp_path, nba_
 
     assert second["stored"] == 1
     assert {(row[1], row[2]) for row in _rows(engine)} >= {(WALTER, 2)}
+
+
+UNPUBLISHED_GAME = "0022600119"
+
+
+def test_a_box_score_nba_com_has_not_published_is_retried_not_a_crash(tmp_path, nba_api):
+    # Recorded 2026-10-27 11:00 UTC, the morning after the game: no players and
+    # null team statistics. nba_api's BoxScorePlayerTrackV3 class raised
+    # AttributeError on it and killed the first production cron run.
+    nba_api.boxes[UNPUBLISHED_GAME] = [
+        _document(f"boxscoreplayertrackv3_{UNPUBLISHED_GAME}_unpublished.json")
+    ]
+
+    assert _provider().fetch_game_rebound_chances(UNPUBLISHED_GAME) == {}
+
+    service, _repository, engine = _service(tmp_path, [_event(UNPUBLISHED_GAME), _event(TOR_GAME)], nba_api)
+    result = service.collect(SEASON)
+
+    assert result["not_published"] == [UNPUBLISHED_GAME]
+    assert result["failed"] == []
+    assert result["stored_game_ids"] == [TOR_GAME]
+    assert {row[0] for row in _rows(engine)} == {TOR_GAME}
 
 
 def test_a_game_the_day_feed_does_not_list_yet_waits_for_a_later_run(tmp_path, nba_api):
