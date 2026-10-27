@@ -594,12 +594,11 @@ PRUNED_AT = datetime(2026, 10, 28, 12, tzinfo=UTC)
 EASTERN = ZoneInfo("America/New_York")
 
 
-def _daily_defense_history(world, template, *, days):
-    """A superseded 2026-27 team defense cut at 08:45 UTC each of the ``days`` days to PRUNED_AT."""
+def _defense_history(world, template, cutoffs):
+    """A superseded, never activated 2026-27 team defense cut at each of ``cutoffs``."""
 
     with world.engine.begin() as connection:
-        for day in range(days):
-            cutoff = PRUNED_AT.replace(hour=8, minute=45) - timedelta(days=day)
+        for day, cutoff in enumerate(cutoffs):
             connection.execute(
                 text(
                     "INSERT INTO publication_versions (publication_id, stream_key, season, cutoff, version,"
@@ -610,9 +609,9 @@ def _daily_defense_history(world, template, *, days):
                     " reason, fence FROM publication_versions WHERE publication_id = :template"
                 ),
                 {
-                    "id": f"daily-{day:02d}",
+                    "id": f"history-{day:02d}",
                     "cutoff": cutoff,
-                    "offset": 100 + days - day,
+                    "offset": 100 + day,
                     "template": template.publication_id,
                 },
             )
@@ -635,7 +634,11 @@ def _kept_defense_days(world):
 
 def test_prune_keeps_the_last_fourteen_days_then_the_newest_version_of_each_week(world):
     withdrawn, _logs = _cut_over_and_revert_the_opening_week(world)
-    _daily_defense_history(world, withdrawn, days=40)
+    # Forty nightly versions cut at 02:00 UTC, the evening before in US/Eastern,
+    # the last on 2026-10-28.
+    _defense_history(
+        world, withdrawn, [datetime(2026, 9, 19, 2, tzinfo=UTC) + timedelta(days=day) for day in range(40)]
+    )
     world.publications.clock = lambda: PRUNED_AT
 
     first = world.publications.prune_history(season=NEW)
@@ -643,13 +646,13 @@ def test_prune_keeps_the_last_fourteen_days_then_the_newest_version_of_each_week
 
     assert _status(world, withdrawn.publication_id) is None
     assert _kept_defense_days(world) == [
-        # Sundays, the last day of each ISO week before the horizon.
+        # Sundays, the last Eastern day of each ISO week before the horizon.
         "2026-09-20",
         "2026-09-27",
         "2026-10-04",
         "2026-10-11",
-        # 2026-10-12 to 2026-10-14 share a week with 2026-10-18, which is kept.
-        *(f"2026-10-{day}" for day in range(15, 29)),
+        # 2026-10-12 and 2026-10-13 share a week with 2026-10-18, which is kept.
+        *(f"2026-10-{day}" for day in range(14, 28)),
     ]
     assert first.kept["as_of"] == 18
     assert (second.deleted, second.kept) == (0, first.kept)
@@ -674,6 +677,8 @@ def test_a_game_older_than_fourteen_days_reads_its_weeks_newest_version_once_pru
 
     assert _status(world, opening_week.publication_id) is None
     assert _status(world, ten_games.publication_id) == "superseded"
+    # The ten-game logs are still the candidate, and the newest of that week.
+    assert _status(world, world.opening_week_logs.publication_id) is None
     _game_at(world, TIPPED)
     matchup = _matchup(world)
     assert _served(matchup, SEASON_STREAM) == {
@@ -685,6 +690,18 @@ def test_a_game_older_than_fourteen_days_reads_its_weeks_newest_version_once_pru
     assert _served(_matchup(world), SEASON_STREAM) == {
         SEASON_STREAM: ("prior_season", OLD, world.live(SEASON_STREAM), OLD_CUTOFF.isoformat())
     }
+
+
+def test_a_withdrawn_version_is_never_its_weeks_newest(world):
+    withdrawn, _logs = _cut_over_and_revert_the_opening_week(world)
+    # The day before the withdrawn opening week, in the same week.
+    _defense_history(world, withdrawn, [datetime(2026, 10, 20, 8, 45, tzinfo=UTC)])
+    world.publications.clock = lambda: datetime(2026, 11, 15, 12, tzinfo=UTC)
+
+    world.publications.prune_history(season=NEW)
+
+    assert _status(world, withdrawn.publication_id) is None
+    assert _kept_defense_days(world) == ["2026-10-20"]
 
 
 def test_a_past_slate_names_the_families_its_games_matchups_trail(world):

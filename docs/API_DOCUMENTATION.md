@@ -649,8 +649,10 @@ block: an empty `generation` and the `schedule`, `pool` and `injuries` sources.
 
 `trailing` lists the input families the Slate's game Matchups read from their
 previous season, in the [Matchup `trailing`](#trailing-inputs) shape and order.
-It is read from the same Publication capture those Matchups share, so the two
-cannot disagree; `[]` when nothing trails or the Slate has no game.
+It is read from the same Publication capture those Matchups read, each game's
+as of its tip when a past game of an Unpublished Season reads an earlier
+version, so the two cannot disagree; `[]` when nothing trails or the Slate has
+no game.
 
 ```json
 {
@@ -2551,7 +2553,9 @@ rules. Without `season` every response is byte for byte what it was.
   withdrew (crf04/statsplus-backend#626). With none, a stream reads as with no
   composition of the season: a trailing family serves its previous season,
   and game logs read `window_not_ready`. `provenance`, `coverage` and
-  `trailing` describe those reads. A past game with no Player Pool still
+  `trailing` describe those reads. Superseded versions older than 14 days are
+  kept only as the newest of each week, so such a game reads the newest kept
+  version cut before its tip. A past game with no Player Pool still
   lists who played from the newest game logs, which `provenance` lists too.
 - The response adds `season_context: {selected_season, published_season}`.
   `/api/players/profile`, whose body can be an array, instead answers
