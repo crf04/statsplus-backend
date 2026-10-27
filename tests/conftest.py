@@ -12,8 +12,8 @@ migration code on an empty database opts out explicitly with
 for a whole module); ``tests/test_migration_template.py`` guards equivalence.
 """
 
+import json
 import os
-import zlib
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -65,22 +65,41 @@ def pytest_configure(config):
     os.environ["TEST_DATABASE_URL"] = worker_url.render_as_string(hide_password=False)
 
 
-def pytest_collection_modifyitems(config, items):
-    """Keep only this shard's tests so CI can run the suite as parallel jobs.
+def _shard_files(rootpath, count, suite):
+    """Assign every test file to a shard, balancing the recorded seconds per file.
 
-    The shard is a pure function of the node id (crc32 mod count), so every test
-    lands in exactly one shard and every xdist worker agrees on the split.
+    Longest first onto the least-loaded shard (ties to the lower index), so the
+    split is a pure function of the file list and ``tests/shard_weights.json``
+    and every xdist worker agrees on it. ``suite`` picks the recorded times
+    (``unit`` or ``integration``); a file with no recorded time weighs one
+    second.
+    """
+    weights = json.loads((rootpath / "tests" / "shard_weights.json").read_text())[suite]
+    files = sorted(path.relative_to(rootpath).as_posix() for path in (rootpath / "tests").rglob("test_*.py"))
+    loads = [0.0] * count
+    assignment = {}
+    for name in sorted(files, key=lambda name: (-weights.get(name, 1.0), name)):
+        shard = loads.index(min(loads))
+        assignment[name] = shard + 1
+        loads[shard] += weights.get(name, 1.0)
+    return assignment
+
+
+def pytest_ignore_collect(collection_path, config):
+    """Collect only this shard's test files so CI can run the suite as parallel jobs.
+
+    Whole files are sharded, so a worker never imports another shard's test
+    modules.
     """
     shard = _shard_from_env()
-    if shard is None:
-        return
+    if shard is None or not collection_path.is_file() or not collection_path.name.startswith("test_"):
+        return None
     index, count = shard
-    selected = [i for i in items if zlib.crc32(i.nodeid.encode()) % count == index - 1]
-    chosen = {id(i) for i in selected}
-    dropped = [i for i in items if id(i) not in chosen]
-    if dropped:
-        config.hook.pytest_deselected(items=dropped)
-    items[:] = selected
+    if not hasattr(config, "_statsplus_shard_files"):
+        suite = os.environ.get("STATSPLUS_TEST_SHARD_WEIGHTS", "unit")
+        config._statsplus_shard_files = _shard_files(config.rootpath, count, suite)
+    name = collection_path.relative_to(config.rootpath).as_posix()
+    return True if config._statsplus_shard_files.get(name, index) != index else None
 
 
 @pytest.hookimpl(wrapper=True)

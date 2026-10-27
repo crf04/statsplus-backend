@@ -3,7 +3,8 @@
 
 Collects the whole suite once and each STATSPLUS_TEST_SHARD slice, then fails
 unless every collected node id lands in exactly one shard. Run from the
-repository root: ``python scripts/verify_test_shards.py [shard-count]``.
+repository root: ``python scripts/verify_test_shards.py [shard-count] [unit|integration]``;
+the second argument picks the suite and its recorded shard weights.
 """
 
 from __future__ import annotations
@@ -13,9 +14,12 @@ import subprocess
 import sys
 from collections import Counter
 
+MARKERS = {"unit": "not live and not integration", "integration": "integration"}
 
-def collect(shard: str | None) -> list[str]:
+
+def collect(shard: str | None, suite: str) -> list[str]:
     env = {k: v for k, v in os.environ.items() if k != "STATSPLUS_TEST_SHARD"}
+    env["STATSPLUS_TEST_SHARD_WEIGHTS"] = suite
     if shard:
         env["STATSPLUS_TEST_SHARD"] = shard
     result = subprocess.run(
@@ -32,7 +36,7 @@ def collect(shard: str | None) -> list[str]:
             "-o",
             "addopts=",
             "-m",
-            "not live and not integration",
+            MARKERS[suite],
         ],
         capture_output=True,
         text=True,
@@ -47,8 +51,9 @@ def collect(shard: str | None) -> list[str]:
 
 def main() -> int:
     count = int(sys.argv[1]) if len(sys.argv) > 1 else 3
-    full = collect(None)
-    shards = {i: collect(f"{i}/{count}") for i in range(1, count + 1)}
+    suite = sys.argv[2] if len(sys.argv) > 2 else "unit"
+    full = collect(None, suite)
+    shards = {i: collect(f"{i}/{count}", suite) for i in range(1, count + 1)}
     seen = Counter(nodeid for ids in shards.values() for nodeid in ids)
     missing = sorted(set(full) - set(seen))
     extra = sorted(set(seen) - set(full))
