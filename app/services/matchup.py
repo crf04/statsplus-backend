@@ -536,9 +536,23 @@ def diet_evidence_thin(
         or any(fact.games_played < settings.min_games for fact in selected_facts)
         or sum(fact.volume / fact.games_played for fact in selected_facts)
         < settings.minimum_volume_per_game(base)
-        or summary is None
-        or summary.season_rate is None
-        or summary.season_rate.game_count < settings.min_games
+        or season_sample_thin(summary, settings)
+    )
+
+
+def season_sample_thin(
+    summary: PlayerSeasonLogSummary | None,
+    settings: MatchupScoreSettings,
+) -> bool:
+    """Whether a player's season log is too short to lean on.
+
+    The season-sample clause of the Diet thin rule, stated once so a season
+    average (an Average Qualifier) is thin exactly when a Diet share is thin
+    for want of games: no summary, no rate, or fewer games than the floor.
+    """
+
+    return (
+        summary is None or summary.season_rate is None or summary.season_rate.game_count < settings.min_games
     )
 
 

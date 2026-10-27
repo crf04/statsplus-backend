@@ -11,7 +11,12 @@ import pytest
 import sentry_sdk
 from sentry_sdk.transport import Transport
 
-from app.utils.sentry_setup import init_sentry, scrub_event
+from app.utils.sentry_setup import (
+    init_sentry,
+    make_traces_sampler,
+    parse_traces_sample_rate,
+    scrub_event,
+)
 
 DSN = "https://publickey@o0.ingest.sentry.io/0"
 SHA = "0123456789abcdef0123456789abcdef01234567"
@@ -213,11 +218,62 @@ def _sqlalchemy_hook():
     return _before_cursor_execute
 
 
-def test_tracing_is_off(transport):
-    init_sentry(_environ(), transport=transport)
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, 0.05),
+        ("", 0.05),
+        ("0.2", 0.2),
+        (" 1 ", 1.0),
+        ("0", 0.0),
+        ("abc", 0.05),
+        ("-0.1", 0.05),
+        ("1.5", 0.05),
+        ("nan", 0.05),
+    ],
+)
+def test_traces_sample_rate_parsing(raw, expected):
+    assert parse_traces_sample_rate(raw) == expected
 
-    assert sentry_sdk.get_client().options["traces_sample_rate"] == 0.0
-    assert sentry_sdk.get_client().options["send_default_pii"] is False
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/collector/token",
+        "/api/collector/bootstrap/abc/status",
+        "/api/health/db",
+        "/health",
+        "/api/internal/anything",
+    ],
+)
+def test_sampler_skips_ingestion_health_and_internal_routes(path):
+    sampler = make_traces_sampler(0.5)
+
+    assert sampler({"wsgi_environ": {"PATH_INFO": path}}) == 0.0
+
+
+@pytest.mark.parametrize("path", ["/api/players/search", "/api/matchups/today", "/"])
+def test_sampler_samples_user_routes_at_the_configured_rate(path):
+    sampler = make_traces_sampler(0.5)
+
+    assert sampler({"wsgi_environ": {"PATH_INFO": path}}) == 0.5
+    assert sampler({}) == 0.5
+
+
+def test_tracing_defaults_to_five_percent_and_skips_collector(transport):
+    init_sentry(_environ(), transport=transport)
+    options = sentry_sdk.get_client().options
+
+    assert options["traces_sampler"]({"wsgi_environ": {"PATH_INFO": "/api/x"}}) == 0.05
+    assert options["traces_sampler"]({"wsgi_environ": {"PATH_INFO": "/api/collector/token"}}) == 0.0
+    assert options["send_default_pii"] is False
+
+
+def test_tracing_rate_comes_from_the_environment(transport):
+    init_sentry(_environ(SENTRY_TRACES_SAMPLE_RATE="0.25"), transport=transport)
+    sampler = sentry_sdk.get_client().options["traces_sampler"]
+
+    assert sampler({"wsgi_environ": {"PATH_INFO": "/api/x"}}) == 0.25
 
 
 def test_environment_prefers_the_explicit_sentry_setting(transport):

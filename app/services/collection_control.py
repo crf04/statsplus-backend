@@ -53,6 +53,7 @@ from app.domain.nba_teams import (
     canonical_nba_team_abbreviation,
 )
 from app.domain.player_diet_taxonomy import PLAYER_DIET_OBSERVATION_STREAM_KEYS
+from app.domain.player_position import POSITION_GROUPS
 from app.domain.publication_integrity import (
     canonical_publication_json,
     publication_payload_checksum,
@@ -3321,6 +3322,12 @@ class CollectionControlService(_SessionService):
         return game_id
 
     @staticmethod
+    def _catalog_position(value: Any) -> str | None:
+        """Keep a Position group; anything else is no Position."""
+
+        return value if value in POSITION_GROUPS else None
+
+    @staticmethod
     def _upsert_athlete_catalog_row(
         session: Session, season: str, row: Mapping[str, Any], now: datetime
     ) -> str:
@@ -3346,6 +3353,8 @@ class CollectionControlService(_SessionService):
                 row.get("team_abbreviation", row.get("tricode", row.get("team"))),
                 team_id=team_id,
             ),
+            # Overwritten on every refresh, so a relabel follows NBA.com.
+            "position": CollectionControlService._catalog_position(row.get("position")),
             "published_at": now,
         }
         if existing is None:

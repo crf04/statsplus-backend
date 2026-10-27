@@ -4776,3 +4776,95 @@ def test_l15_nba_release_transition_publishes_after_the_last_team_reaches_15(
         observation.unavailable_reason != "insufficient_governed_games"
         for observation in season_window.observations
     )
+
+
+#: The listed-position codes a CommonAllPlayers row can carry once the
+#: collector joins each team's CommonTeamRoster POSITION onto it.
+_LISTED_POSITION_GROUPS = {
+    "G": "Guard",
+    "G-F": "Wing",
+    "F-G": "Wing",
+    "F": "Wing",
+    "F-C": "Big",
+    "C-F": "Big",
+    "C": "Big",
+    "": None,
+    "PG": None,
+    None: None,
+}
+
+
+def test_roster_normalizer_stores_the_group_for_each_listed_position():
+    rows = [
+        {
+            "PERSON_ID": index,
+            "DISPLAY_FIRST_LAST": f"Player {index}",
+            "ROSTERSTATUS": 1,
+            "FROM_YEAR": "2020",
+            "TO_YEAR": "2025",
+            "TEAM_ID": 1610612737,
+            "POSITION": code,
+        }
+        for index, code in enumerate(_LISTED_POSITION_GROUPS, start=1)
+    ]
+
+    records = normalize_roster_response(rows, season="2025-26", cutoff=NOW).payload["records"]
+
+    assert {record["player_id"]: record["position"] for record in records} == dict(
+        enumerate(_LISTED_POSITION_GROUPS.values(), start=1)
+    )
+
+
+def test_the_collector_and_backend_map_listed_positions_identically():
+    from app.collector.normalizers import LISTED_POSITION_GROUPS
+    from app.domain.player_position import position_group
+
+    for code, group in _LISTED_POSITION_GROUPS.items():
+        assert position_group(code) == group
+    assert {code: position_group(code) for code in LISTED_POSITION_GROUPS} == LISTED_POSITION_GROUPS
+
+
+def test_the_standalone_provider_joins_each_teams_listed_position_onto_the_roster(monkeypatch):
+    from nba_api.stats import endpoints
+
+    team_calls = []
+
+    class AllPlayers:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_data_frames(self):
+            return [
+                pd.DataFrame(
+                    {
+                        "PERSON_ID": [1, 2, 3],
+                        "DISPLAY_FIRST_LAST": ["A", "B", "C"],
+                        "TEAM_ID": [1610612737, 1610612738, 0],
+                    }
+                )
+            ]
+
+    class TeamRoster:
+        def __init__(self, *, team_id, season, **_kwargs):
+            team_calls.append((team_id, season))
+            self.team_id = team_id
+
+        def get_data_frames(self):
+            listed = {1610612737: [(1, "C")], 1610612738: [(2, "G-F")]}.get(self.team_id, [])
+            return [
+                pd.DataFrame(
+                    {
+                        "PLAYER_ID": [player for player, _position in listed],
+                        "POSITION": [position for _player, position in listed],
+                    }
+                )
+            ]
+
+    monkeypatch.setattr(endpoints.commonallplayers, "CommonAllPlayers", AllPlayers)
+    monkeypatch.setattr(endpoints.commonteamroster, "CommonTeamRoster", TeamRoster)
+
+    roster = _StandaloneNBAProvider().get_player_roster(season="2025-26")
+
+    assert roster["POSITION"].tolist() == ["C", "G-F", None]
+    assert len(team_calls) == 30
+    assert {season for _team, season in team_calls} == {"2025-26"}

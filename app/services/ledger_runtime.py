@@ -82,18 +82,13 @@ class LedgerGovernance:
 
     @property
     def expected_season_game_ids(self) -> dict[int, frozenset[str]]:
-        return {
-            team_id: frozenset(
-                str(event["nba_game_id"])
-                for event in self.events
-                if team_id
-                in {
-                    int(event["home_team_id"]),
-                    int(event["away_team_id"]),
-                }
-            )
-            for team_id in self.team_ids
-        }
+        # One pass over the events, not one per team (crf04/statsplus-backend#612).
+        game_ids: dict[int, set[str]] = {team_id: set() for team_id in self.team_ids}
+        for event in self.events:
+            for team_id in {int(event["home_team_id"]), int(event["away_team_id"])}:
+                if team_id in game_ids:
+                    game_ids[team_id].add(str(event["nba_game_id"]))
+        return {team_id: frozenset(game_ids[team_id]) for team_id in self.team_ids}
 
     @property
     def expected_l15_date_from_by_team(self) -> dict[int, str]:
@@ -377,14 +372,12 @@ class ActiveManifestLedgerGovernanceReader:
             int(team_id) for event in events for team_id in (event["home_team_id"], event["away_team_id"])
         )
         expected = frozenset(str(event["nba_game_id"]) for event in events)
-        by_team = {
-            team_id: tuple(
-                str(event["nba_game_id"])
-                for event in reversed(events)
-                if team_id in {event["home_team_id"], event["away_team_id"]}
-            )
-            for team_id in team_ids
-        }
+        newest_first: dict[int, list[str]] = {team_id: [] for team_id in team_ids}
+        for event in reversed(events):
+            for team_id in {event["home_team_id"], event["away_team_id"]}:
+                if team_id in newest_first:
+                    newest_first[team_id].append(str(event["nba_game_id"]))
+        by_team = {team_id: tuple(newest_first[team_id]) for team_id in team_ids}
         return LedgerGovernance(
             season=season,
             cutoff=cutoff,

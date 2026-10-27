@@ -76,6 +76,19 @@ PLAYER_ZONE_PROFILE_IDENTITY = (
     "AGE",
     "NICKNAME",
 )
+# NBA.com's listed position, mapped to the Position group a Target may name
+# (crf04/statsplus#351).  ``app.domain.player_position`` owns the backend copy;
+# this package ships as a standalone wheel, so the rule is repeated here and
+# pinned equal by the collector tests.  Anything else maps to no Position.
+LISTED_POSITION_GROUPS = {
+    "G": "Guard",
+    "G-F": "Wing",
+    "F-G": "Wing",
+    "F": "Wing",
+    "F-C": "Big",
+    "C-F": "Big",
+    "C": "Big",
+}
 REGULAR_SEASON_TYPE = "Regular Season"
 _GAME_TYPE_BY_ID_PREFIX = {
     "001": "Preseason",
@@ -84,6 +97,14 @@ _GAME_TYPE_BY_ID_PREFIX = {
     "004": "Playoffs",
     "005": "Play-In",
 }
+
+
+def listed_position_group(listed_position: Any) -> str | None:
+    """Return the Position group for one listed position, or ``None``."""
+
+    if not isinstance(listed_position, str):
+        return None
+    return LISTED_POSITION_GROUPS.get(listed_position.strip().upper())
 
 
 def _canonical_event_kind(game_id: str, provider_classification: str) -> str:
@@ -508,6 +529,7 @@ def normalize_roster_response(
                 "team_abbreviation": _value(row, "team_abbreviation", "TEAM_ABBREVIATION", "TEAM_ABBR"),
                 "roster_status": "active",
                 "status": "active",
+                "position": listed_position_group(_value(row, "position", "POSITION")),
                 "season_coverage": season,
                 "event_ids": [str(item) for item in coverage_ids if str(item).strip()],
             }

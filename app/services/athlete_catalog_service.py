@@ -108,6 +108,19 @@ def _read_catalog_rows(
     return [{column: row[column] for column in ROSTER_COLUMNS} for row in rows]
 
 
+def _read_catalog_positions(engine: Engine, season: str) -> dict[int, str]:
+    """Read one season's listed Positions in a single query: ``{player_id: group}``."""
+
+    season = validate_canonical_season(season)
+    with engine.connect() as connection:
+        rows = connection.execute(
+            select(AthleteCatalog.player_id, AthleteCatalog.position)
+            .where(AthleteCatalog.season == season, AthleteCatalog.position.is_not(None))
+            .order_by(AthleteCatalog.player_id)
+        ).all()
+    return {int(player_id): position for player_id, position in rows}
+
+
 class AthleteCatalogReader:
     """The one Athlete Catalog capability the game-log path needs.
 
@@ -130,6 +143,9 @@ class AthleteCatalogReader:
         active_only: bool = False,
     ) -> list[dict[str, Any]]:
         return _read_catalog_rows(self._engine, season, active_only=active_only)
+
+    def get_positions(self, season: str) -> dict[int, str]:
+        return _read_catalog_positions(self._engine, season)
 
 
 class AthleteCatalogService:
