@@ -2,7 +2,7 @@
 
 import json
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -10,18 +10,21 @@ import pytest
 from scripts import shard_weights
 
 COMMITTED = json.loads((Path(__file__).parent / "shard_weights.json").read_text())
-BASE = datetime(2026, 10, 26, tzinfo=timezone.utc)
+BASE = datetime(2026, 10, 26, tzinfo=UTC)
 SHARDS = {"unit": ("tests", 12), "integration": ("integration", 2)}
+
+
+def _stamp(moment):
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.%f") + "0Z"
 
 
 def _log(weights):
     """A shard log in which one xdist worker spends ``weights[file]`` seconds on each file."""
-    stamp = lambda moment: moment.strftime("%Y-%m-%dT%H:%M:%S.%f") + "0Z"
-    lines = [f"{stamp(BASE)} model name\t: AMD EPYC 9V45", f"{stamp(BASE)} tests/first.py::collected"]
+    lines = [f"{_stamp(BASE)} model name\t: AMD EPYC 9V45", f"{_stamp(BASE)} tests/first.py::collected"]
     moment = BASE
     for name, seconds in weights.items():
         moment += timedelta(seconds=seconds)
-        lines.append(f"{stamp(moment)} [gw0] [ 50%] PASSED {name}::test")
+        lines.append(f"{_stamp(moment)} [gw0] [ 50%] PASSED {name}::test")
     return "\n".join(lines)
 
 
@@ -116,7 +119,9 @@ def test_a_partial_rerun_attempt_writes_nothing(rebuild, tmp_path):
 
 def test_a_run_missing_a_collected_file_writes_nothing(rebuild, tmp_path):
     forgotten = "tests/test_utc.py"
-    observed = {suite: {n: s for n, s in files.items() if n != forgotten} for suite, files in COMMITTED.items()}
+    observed = {
+        suite: {n: s for n, s in files.items() if n != forgotten} for suite, files in COMMITTED.items()
+    }
     jobs, logs = _complete_run(observed)
     weights_file = tmp_path / "shard_weights.json"
     before = weights_file.read_text()

@@ -91,7 +91,9 @@ def shard_job_problems(jobs: list[dict]) -> list[str]:
     problems = []
     for suite, found in shards.items():
         if len(counts[suite]) != 1:
-            problems.append(f"{suite}: expected one shard count, found {sorted(counts[suite]) or 'no shard jobs'}")
+            problems.append(
+                f"{suite}: expected one shard count, found {sorted(counts[suite]) or 'no shard jobs'}"
+            )
             continue
         for index in range(1, counts[suite].pop() + 1):
             result = found.get(index, "missing")
@@ -127,7 +129,9 @@ def main() -> int:
                     run_problems.append(f"{suite}: no time recorded for {', '.join(unseen)}")
         problems += [f"run {arg}: {problem}" for problem in run_problems]
     if problems:
-        sys.exit("refusing to write " + str(WEIGHTS) + ", the sample is incomplete:\n  " + "\n  ".join(problems))
+        sys.exit(
+            "refusing to write " + str(WEIGHTS) + ", the sample is incomplete:\n  " + "\n  ".join(problems)
+        )
     weights = json.loads(WEIGHTS.read_text())
     for suite, files in samples.items():
         weights[suite] = {path: round(sum(values) / len(values), 1) for path, values in sorted(files.items())}
