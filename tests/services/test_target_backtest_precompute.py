@@ -19,7 +19,9 @@ import redis
 from sqlalchemy import create_engine, text
 
 from app.config.settings import CacheSettings
+from app.models.athlete_catalog import AthleteCatalog
 from app.models.user import User
+from app.services.athlete_catalog_service import AthleteCatalogReader
 from scripts import player_shooting_refresh
 from tests import test_target_backtest as bt
 from tests.services import test_backtest_seasons as seasons
@@ -383,7 +385,7 @@ def test_the_cron_command_fills_the_cache_after_an_idle_tick(world, cron, monkey
     assert player_shooting_refresh.main([]) == 0
 
     assert _tick_line(capsys) == '{"composed_jobs": 0, "state": "no_active_season"}'
-    service = world.backtests(redis_client=cron)
+    service = world.backtests(redis_client=cron, athlete_catalog=AthleteCatalogReader(world.engine))
     assert _statuses(service) == ["ok", "ok"]
 
 
@@ -458,3 +460,283 @@ def test_the_precompute_is_reachable_only_from_the_cron_command():
                 if name in {"precompute", "_precompute_target_backtests"}:
                     callers.add(str(path.relative_to(root)))
     assert callers == {"scripts/player_shooting_refresh.py"}
+
+
+def exercise_position_and_average_targets(world):
+    """Position and Average Targets, over the real catalog table and log seams.
+
+    LeBron plays five games averaging eight three-point attempts and is
+    listed as a Wing.  Shared with the PostgreSQL run, where the migrated
+    ``athlete_catalog.position`` and ``target_qualifiers`` columns are real.
+    """
+
+    with world.engine.begin() as connection:
+        connection.execute(
+            AthleteCatalog.__table__.insert().values(
+                season=LAST,
+                player_id=bt.LEBRON,
+                display_name="LeBron James",
+                roster_status="active",
+                is_active=True,
+                is_active_for_season=True,
+                team_id=bt.LAL,
+                team_name="Los Angeles Lakers",
+                team_abbreviation="LAL",
+                position="Wing",
+                published_at=NOW,
+            )
+        )
+    wing_shooter = world.users.create_target(
+        OWNER,
+        opponent="OKC",
+        qualifiers=[bt.WING, bt._average("3PA", 7.5)],
+    )
+    big = world.users.create_target(OWNER, opponent="OKC", qualifiers=[bt.BIG])
+    heavy_shooter = world.users.create_target(OWNER, opponent="OKC", qualifiers=[bt._average("3PA", 8.5)])
+    service = world.backtests(
+        redis_client=CountingRedis(), athlete_catalog=AthleteCatalogReader(world.engine)
+    )
+
+    result = service.precompute(now=NOW)
+
+    assert _without_duration(result) == _counts(eligible=3, computed=3)
+    results = {
+        name: service.backtest(OWNER, target["id"])
+        for name, target in (("wing", wing_shooter), ("big", big), ("heavy", heavy_shooter))
+    }
+    assert {name: state for name, (_body, state) in results.items()} == {
+        "wing": "hit",
+        "big": "hit",
+        "heavy": "hit",
+    }
+    wing = results["wing"][0]
+    assert [(p["name"], p["position"]) for p in wing["players"]] == [("LeBron James", "Wing")]
+    assert wing["summary"]["players_without_position"] == 0
+    assert results["big"][0]["players"] == []
+    assert results["big"][0]["summary"]["players_without_position"] == 0
+    assert results["heavy"][0]["players"] == []
+    assert "players_without_position" not in results["heavy"][0]["summary"]
+
+
+def test_position_and_average_targets_precompute_and_serve_from_the_cache(world):
+    exercise_position_and_average_targets(world)
+
+
+def test_a_catalog_relabel_makes_the_precompute_and_the_batch_read_recompute(world, monkeypatch):
+    with world.engine.begin() as connection:
+        connection.execute(
+            AthleteCatalog.__table__.insert().values(
+                season=LAST,
+                player_id=bt.LEBRON,
+                display_name="LeBron James",
+                roster_status="active",
+                is_active=True,
+                is_active_for_season=True,
+                team_id=bt.LAL,
+                team_name="Los Angeles Lakers",
+                team_abbreviation="LAL",
+                position="Wing",
+                published_at=NOW,
+            )
+        )
+    diet_only = world.saved_target()
+    service = world.backtests(
+        redis_client=CountingRedis(), athlete_catalog=AthleteCatalogReader(world.engine)
+    )
+    assert _without_duration(service.precompute(now=NOW)) == _counts(eligible=1, computed=1)
+    assert service.backtest(OWNER, diet_only["id"])[0]["players"][0]["position"] == "Wing"
+    assert _statuses(service) == ["ok"]
+
+    # A refresh republishes the season's rows with LeBron relabelled.
+    with world.engine.begin() as connection:
+        connection.execute(
+            AthleteCatalog.__table__.update()
+            .where(AthleteCatalog.player_id == bt.LEBRON)
+            .values(position="Big", published_at=NOW + timedelta(days=1))
+        )
+
+    assert _statuses(service) == ["uncached"]
+    assert _without_duration(service.precompute(now=NOW)) == _counts(eligible=1, computed=1)
+    body, state = service.backtest(OWNER, diet_only["id"])
+    assert (state, body["players"][0]["position"]) == ("hit", "Big")
+    # With the relabel filed, a rerun finds it by its own key and computes nothing.
+    monkeypatch.setattr(service, "_backtest_stateful", lambda *a, **k: pytest.fail("computed"))
+    assert _without_duration(service.precompute(now=NOW)) == _counts(eligible=1, already_cached=1)
+
+
+def test_a_collector_relabel_stamped_before_a_later_tombstone_still_invalidates_the_cache(world):
+    """The reviewer's scenario, through the real collector writer.
+
+    The roster is published, then a later snapshot cuts an athlete, then a
+    relabel arrives stamped between the two.  The newest ``published_at`` does
+    not move, so only the content of the catalog can tell the cache.
+    """
+
+    from datetime import UTC, datetime
+
+    from app.services.collection_control import CollectionControlService
+    from tests.services.test_collection_control import (
+        _catalog_payload,
+        _roster_payload,
+        _seed_governed_catalog_evidence,
+    )
+
+    _seed_governed_catalog_evidence(world.engine)
+    with world.engine.begin() as connection:
+        connection.execute(AthleteCatalog.__table__.delete())
+    start = datetime(2026, 8, 12, tzinfo=UTC)
+    clock = {"now": start}
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(world.engine, clock=lambda: clock["now"])
+    control.activate_season(LAST, actor="operator")
+    event_request = control.create_bootstrap_request(LAST, "event", cutoff=cutoff)
+    assert control.publish_catalog(
+        event_request.request_id, _catalog_payload("event"), version="event"
+    ).complete
+
+    def publish(version, positions, *, at):
+        clock["now"] = at
+        roster = _roster_payload(list(positions))
+        for identity in roster["identities"]:
+            identity["position"] = positions[int(identity["player_id"])]
+        request = control.create_bootstrap_request(LAST, "athlete", cutoff=cutoff)
+        assert control.publish_catalog(request.request_id, roster, version=version).complete
+
+    lebron = bt.LEBRON
+    publish("first", {1: None, lebron: "Big", 11: None, 12: None}, at=start)
+    publish("cut", {1: None, lebron: "Big", 11: None}, at=start + timedelta(seconds=2))
+    target = world.users.create_target(OWNER, opponent="OKC", qualifiers=[bt.BIG])
+    service = world.backtests(
+        redis_client=CountingRedis(), athlete_catalog=AthleteCatalogReader(world.engine)
+    )
+    body, state = service.backtest(OWNER, target["id"])
+    assert (state, [p["position"] for p in body["players"]]) == ("miss", ["Big"])
+    assert service.backtest(OWNER, target["id"])[1] == "hit"
+
+    publish("relabel", {1: None, lebron: "Wing", 11: None}, at=start + timedelta(seconds=1))
+
+    with world.engine.connect() as connection:
+        newest = connection.execute(text("SELECT MAX(published_at) FROM athlete_catalog")).scalar_one()
+    assert str(newest).startswith("2026-08-12 00:00:02")
+    body, state = service.backtest(OWNER, target["id"])
+    assert (state, body["players"], body["summary"]["players_without_position"]) == ("miss", [], 0)
+
+
+def test_a_refresh_landing_between_two_reads_cannot_file_a_result_under_the_wrong_positions(world):
+    """Digest and Positions come from one read, so ABA cannot cache an empty Backtest.
+
+    A Wing publication lands right after the first catalog read.  Were the
+    Positions read again, the Big Target would compute against Wing and file an
+    empty result under the Big digest, which the restored Big would then hit.
+    """
+
+    from datetime import UTC, datetime
+
+    from app.services.collection_control import CollectionControlService
+    from tests.services.test_collection_control import (
+        _catalog_payload,
+        _roster_payload,
+        _seed_governed_catalog_evidence,
+    )
+
+    _seed_governed_catalog_evidence(world.engine)
+    with world.engine.begin() as connection:
+        connection.execute(AthleteCatalog.__table__.delete())
+    start = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    clock = {"now": start}
+    control = CollectionControlService(world.engine, clock=lambda: clock["now"])
+    control.activate_season(LAST, actor="operator")
+    event_request = control.create_bootstrap_request(LAST, "event", cutoff=cutoff)
+    assert control.publish_catalog(
+        event_request.request_id, _catalog_payload("event"), version="event"
+    ).complete
+
+    def publish(version, position, tick):
+        clock["now"] = start + timedelta(seconds=tick)
+        roster = _roster_payload([1, bt.LEBRON, 11, 12])
+        for identity in roster["identities"]:
+            identity["position"] = position if int(identity["player_id"]) == bt.LEBRON else None
+        request = control.create_bootstrap_request(LAST, "athlete", cutoff=cutoff)
+        assert control.publish_catalog(request.request_id, roster, version=version).complete
+
+    publish("big-initial", "Big", 0)
+    target = world.users.create_target(OWNER, opponent="OKC", qualifiers=[bt.BIG])
+
+    class InterleavedReader(AthleteCatalogReader):
+        armed = True
+
+        def get_positions(self, season):
+            positions = super().get_positions(season)
+            if self.armed:
+                self.armed = False
+                publish("wing-interleaved", "Wing", 1)
+            return positions
+
+    service = world.backtests(redis_client=CountingRedis(), athlete_catalog=InterleavedReader(world.engine))
+
+    body, state = service.backtest(OWNER, target["id"])
+    assert (state, [(p["name"], p["position"]) for p in body["players"]]) == (
+        "miss",
+        [("LeBron James", "Big")],
+    )
+
+    publish("big-restored", "Big", 2)
+    body, state = service.backtest(OWNER, target["id"])
+    assert (state, [(p["name"], p["position"]) for p in body["players"]]) == (
+        "hit",
+        [("LeBron James", "Big")],
+    )
+
+
+def test_a_serving_season_advancing_after_the_position_read_cannot_mix_seasons(world):
+    """The season, its Positions and the digest filed under come from one snapshot.
+
+    LeBron is Big in 2025-26 and Wing in 2026-27.  2026-27 is published right
+    after the cache precheck read the 2025-26 Positions; the Big Target must
+    not come back as a 2026-27 Backtest holding 2025-26's Positions.
+    """
+
+    target = world.users.create_target(OWNER, opponent="OKC", qualifiers=[bt.BIG])
+    with world.engine.begin() as connection:
+        connection.execute(
+            AthleteCatalog.__table__.insert(),
+            [
+                {
+                    "season": season,
+                    "player_id": bt.LEBRON,
+                    "display_name": "LeBron James",
+                    "roster_status": "active",
+                    "is_active": True,
+                    "is_active_for_season": True,
+                    "position": position,
+                    "published_at": NOW,
+                }
+                for season, position in [(LAST, "Big"), (NEW, "Wing")]
+            ],
+        )
+
+    class AdvancingCatalog(AthleteCatalogReader):
+        armed = True
+
+        def get_positions(self, season):
+            positions = super().get_positions(season)
+            if self.armed:
+                self.armed = False
+                world.publish_season(NEW, okc_games=1, corner_three=0.1)
+            return positions
+
+    catalog = AdvancingCatalog(world.engine)
+    redis_client = CountingRedis()
+    service = world.backtests(redis_client=redis_client, athlete_catalog=catalog)
+
+    body, state = service.backtest(OWNER, target["id"])
+
+    pairs = [(p["name"], p["position"]) for p in body["players"]]
+    # The request answers for the season it started in, with that season's Positions.
+    assert (body["season"], state, pairs) == (LAST, "miss", [("LeBron James", "Big")])
+
+    later, later_state = service.backtest(OWNER, target["id"])
+
+    # The next request serves 2026-27, where LeBron is a Wing and no Big fits.
+    assert (later["season"], later_state, later["players"]) == (NEW, "miss", [])

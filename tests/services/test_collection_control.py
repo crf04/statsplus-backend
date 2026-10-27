@@ -4886,3 +4886,43 @@ def test_a_replaced_candidate_never_serves_a_past_seasons_focal_game(control_db)
     rows = focal_game_rows(repository, "2025-26", "game-1", evidence_season="2026-27")
 
     assert [row.points for row in rows] == [25]
+
+
+def test_roster_publication_stores_each_players_position_and_a_relabel_overwrites_it(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+    event_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
+    assert control.publish_catalog(
+        event_request.request_id, _catalog_payload("event"), version="event"
+    ).complete
+
+    def publish(positions, version):
+        roster = _roster_payload(list(positions))
+        for identity in roster["identities"]:
+            identity["position"] = positions[int(identity["player_id"])]
+        request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
+        assert control.publish_catalog(request.request_id, roster, version=version).complete
+        with control_db.connect() as connection:
+            return dict(
+                connection.execute(
+                    select(AthleteCatalog.player_id, AthleteCatalog.position).where(
+                        AthleteCatalog.season == "2025-26"
+                    )
+                ).all()
+            )
+
+    assert publish({1: "Guard", 2: "Big", 3: None, 4: "Point Guard"}, "first") == {
+        1: "Guard",
+        2: "Big",
+        3: None,
+        4: None,
+    }
+    # NBA.com relabels player 2; the next refresh follows it.
+    assert publish({1: "Guard", 2: "Wing", 3: "Wing", 4: "Big"}, "second") == {
+        1: "Guard",
+        2: "Wing",
+        3: "Wing",
+        4: "Big",
+    }

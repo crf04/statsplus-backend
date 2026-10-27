@@ -24,6 +24,7 @@ from nba_api.stats import endpoints
 
 from app.config.settings import RuntimeSettings
 from app.domain.nba_events import REGULAR_SEASON_TYPE
+from app.domain.player_position import position_group
 from app.errors import ProviderUnavailableError
 from app.services.nba_stats_adapter import (
     CANONICAL_SCHEDULE_COLUMNS,
@@ -51,6 +52,7 @@ ROSTER_COLUMNS = (
     "team_id",
     "team_name",
     "team_abbreviation",
+    "position",
 )
 
 _ROSTER_COLUMN_ALIASES = {
@@ -68,6 +70,7 @@ _ROSTER_COLUMN_ALIASES = {
     "TEAM_NAME": "team_name",
     "TEAM_ABBREVIATION": "team_abbreviation",
     "TEAM_ABBR": "team_abbreviation",
+    "POSITION": "listed_position",
 }
 
 
@@ -134,7 +137,15 @@ def _canonicalize_roster_columns(raw_frame: pd.DataFrame) -> pd.DataFrame:
     missing = [column for column in ("player_id", "display_name") if column not in frame.columns]
     if missing:
         raise ProviderResponseError("NBA Stats returned an unsupported roster schema.")
-    for column in ("roster_status_raw", "from_year", "to_year", "team_id", "team_name", "team_abbreviation"):
+    for column in (
+        "roster_status_raw",
+        "from_year",
+        "to_year",
+        "team_id",
+        "team_name",
+        "team_abbreviation",
+        "listed_position",
+    ):
         if column not in frame.columns:
             frame[column] = None
     return frame
@@ -170,6 +181,8 @@ def _roster_record(row: dict[str, Any], season: str, start_year: int) -> dict[st
         "team_id": _nullable_int(row.get("team_id")),
         "team_name": _nullable_text(row.get("team_name")),
         "team_abbreviation": _nullable_text(row.get("team_abbreviation")),
+        # Stored as the group, not the listed code (ADR 0005).
+        "position": position_group(row.get("listed_position")),
         "_status_rank": {"active": 0, "inactive": 1, "historical": 2}[roster_status],
     }
 
@@ -539,12 +552,14 @@ class NBAStatsAdapter(_InstrumentedNBAStatsAdapter):
         *,
         endpoint_factory: Callable[..., Any] | None = None,
         roster_endpoint_factory: Callable[..., Any] | None = None,
+        team_roster_endpoint_factory: Callable[..., Any] | None = None,
         team_game_log_endpoint_factory: Callable[..., Any] | None = None,
     ) -> None:
         super().__init__(
             settings=settings,
             endpoint_factory=endpoint_factory,
             roster_endpoint_factory=roster_endpoint_factory,
+            team_roster_endpoint_factory=team_roster_endpoint_factory,
             team_game_log_endpoint_factory=team_game_log_endpoint_factory,
         )
         self._endpoint_factory = endpoint_factory or endpoints.playergamelogs.PlayerGameLogs
