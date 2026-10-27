@@ -130,6 +130,26 @@ def mock_redis_client():
     return mock_client
 
 
+@pytest.fixture(autouse=True, scope="session")
+def no_real_redis():
+    """Refuse every real Redis connection at once.
+
+    No test has a Redis server. Against an absent one, redis-py retries with
+    backoff for about eight seconds per client before the app falls back, and
+    every test that builds the app paid that wait. Session-scoped so it never
+    reorders a test's own ``monkeypatch`` teardown.
+    """
+    import redis
+    import redis.connection
+
+    def refuse(self):
+        raise redis.ConnectionError("tests have no Redis server")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(redis.connection.AbstractConnection, "connect", refuse)
+        yield
+
+
 @pytest.fixture
 def mock_db_engine():
     """Mock database engine for testing"""
