@@ -105,8 +105,12 @@ jobs:
           [[ "$(cat /tmp/poppler-utils.status)" == 0 ]]
           command -v pdftotext
 
+      # Hosted runners differ in CPU, and a slow one sets the wall time; the
+      # model in the log explains a slow shard.
       - name: Run this shard
-        run: ./scripts/check.sh
+        run: |
+          grep -m1 'model name' /proc/cpuinfo
+          ./scripts/check.sh
 
       # Uploaded even when this shard's tests fail, so the coverage data
       # survives for diagnosis; the aggregate `checks` job still goes red.
@@ -356,4 +360,6 @@ jobs:
       # Four workers, each on its own database (tests/conftest.py creates
       # <database>_<worker>), because every test rebuilds the schema.
       - name: Run Postgres integration tests
-        run: .venv/bin/python -m pytest -m integration -n 4 --dist worksteal
+        run: |
+          grep -m1 'model name' /proc/cpuinfo
+          .venv/bin/python -m pytest -m integration -n 4 --dist worksteal
