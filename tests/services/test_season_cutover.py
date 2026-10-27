@@ -67,6 +67,7 @@ from tests.support.season_cutover import (
     payload_for,
     pointers,
     seed_world,
+    team_defense_waits_for_ten_games,
 )
 
 ACTOR = "operator@example.com"
@@ -1977,6 +1978,11 @@ def test_a_composition_racing_the_cutover_waits_and_adopts_the_new_season():
 # --- Rule 4: trailing families (crf04/statsplus#304) -------------------------
 
 
+@pytest.fixture
+def ten_game_defense(monkeypatch):
+    team_defense_waits_for_ten_games(monkeypatch)
+
+
 def _opening_week_cutover(operations, publications):
     """Cut over in the opening week: every team has played one game."""
 
@@ -2002,7 +2008,7 @@ def _snapshot_reads(engine):
     }
 
 
-def test_an_opening_week_cutover_plans_a_not_ready_family_as_left_behind(world):
+def test_an_opening_week_cutover_plans_a_not_ready_family_as_left_behind(world, ten_game_defense):
     engine, publications, operations, _before = world
     open_opening_week(engine)
     logs = compose_thin(publications, PLAYER_LOGS)
@@ -2024,7 +2030,7 @@ def test_an_opening_week_cutover_plans_a_not_ready_family_as_left_behind(world):
     assert refused.value.reason == "cutover_leave_behind_mismatch"
 
 
-def test_an_opening_week_cutover_moves_the_game_logs_and_leaves_team_defense_trailing(world):
+def test_an_opening_week_cutover_leaves_a_not_ready_family_trailing(world, ten_game_defense):
     engine, publications, operations, before = world
 
     logs, season, _plan, cutover = _opening_week_cutover(operations, publications)
@@ -2049,7 +2055,7 @@ def test_an_opening_week_cutover_moves_the_game_logs_and_leaves_team_defense_tra
     )
 
 
-def test_a_not_ready_composition_is_held_and_the_first_ready_one_activates(world):
+def test_a_not_ready_composition_is_held_and_the_first_ready_one_activates(world, ten_game_defense):
     engine, publications, operations, before = world
     _opening_week_cutover(operations, publications)
 
@@ -2068,6 +2074,44 @@ def test_a_not_ready_composition_is_held_and_the_first_ready_one_activates(world
     assert _snapshot_reads(engine)[1][SEASON_STREAM] == ("active", None, NEW, ready.publication_id, True)
 
 
+def test_an_opening_week_cutover_moves_team_defense_once_every_team_has_played_a_game(world):
+    engine, publications, operations, before = world
+    open_opening_week(engine)
+    logs = compose_thin(publications, PLAYER_LOGS)
+    season = compose_thin(publications, SEASON_STREAM)
+
+    plan = operations.cutover_season(NEW, actor=ACTOR, reason=REASON, dry_run=True).to_dict()
+    operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
+
+    assert plan["leave_behind"] == []
+    assert pointers(engine) == {
+        PLAYER_LOGS: (logs.publication_id, NEW, "active", 2),
+        SEASON_STREAM: (season.publication_id, NEW, "active", 2),
+        L15_STREAM: before[L15_STREAM],
+    }
+    assert _snapshot_reads(engine)[1][SEASON_STREAM] == ("active", None, NEW, season.publication_id, True)
+
+
+def test_an_opening_week_cutover_with_no_team_defense_composition_keeps_serving_2025_26(world):
+    engine, publications, operations, before = world
+    open_opening_week(engine)
+    logs = compose_thin(publications, PLAYER_LOGS)
+
+    plan = operations.cutover_season(NEW, actor=ACTOR, reason=REASON, dry_run=True).to_dict()
+    operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
+
+    assert plan["leave_behind"] == []
+    assert pointers(engine)[SEASON_STREAM] == before[SEASON_STREAM]
+    assert _snapshot_reads(engine) == (
+        NEW,
+        {
+            PLAYER_LOGS: ("active", None, NEW, logs.publication_id, True),
+            SEASON_STREAM: ("prior_season", None, OLD, _id(before, SEASON_STREAM), True),
+            L15_STREAM: ("missing", "window_not_ready", OLD, _id(before, L15_STREAM), False),
+        },
+    )
+
+
 def test_before_the_cutover_a_read_of_the_next_season_serves_no_trailing_family(world):
     engine, _publications, _operations, _before = world
 
@@ -2081,7 +2125,7 @@ def test_before_the_cutover_a_read_of_the_next_season_serves_no_trailing_family(
     }
 
 
-def test_reverting_an_opening_week_cutover_restores_every_read_to_the_old_season(world):
+def test_reverting_an_opening_week_cutover_restores_every_read_to_the_old_season(world, ten_game_defense):
     engine, publications, operations, before = world
     _logs, _season, _plan, cutover = _opening_week_cutover(operations, publications)
 
@@ -2099,7 +2143,7 @@ def _aware_cutoff(publication):
     return publication.cutoff.replace(tzinfo=UTC) if publication.cutoff.tzinfo is None else publication.cutoff
 
 
-def test_an_opening_week_cutover_and_the_first_ready_composition_on_postgres():
+def test_an_opening_week_cutover_and_the_first_ready_composition_on_postgres(ten_game_defense):
     import os
 
     from sqlalchemy import create_engine, text

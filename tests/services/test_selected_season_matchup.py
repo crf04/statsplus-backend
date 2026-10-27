@@ -43,7 +43,7 @@ def _trailing(family, rule, team_games=ONE_GAME_A_TEAM):
 
 
 DIETS = _trailing("player_diets", "every team has played 10 games")
-TEAM_DEFENSE = _trailing("team_defense", "every team has played 10 games")
+TEAM_DEFENSE = _trailing("team_defense", "every team has played a game")
 LAST_15 = _trailing("last_15", "its first window of the season is composed")
 SYNERGY = _trailing("synergy", "NBA has published the season and every team has played 10 games")
 
@@ -137,15 +137,17 @@ def test_an_anonymous_caller_cannot_select_a_held_season(served, client, route):
 
 
 def test_a_selected_2026_27_matchup_scores_from_its_game_logs_and_trails_the_rest(served, client):
-    logs, _defense = served.hold_opening_week()
+    logs, defense = served.hold_opening_week()
 
     body = client.get(f"{ROUTES['matchup']}&season={NEW}").get_json()
 
     assert body["season_context"] == CONTEXT
     assert _generation(body, PLAYER_LOGS) == [(logs.publication_id, "candidate")]
-    # One game a team: no family but the game logs is ready, so each trails
-    # on 2025-26, whose game logs have one game a team.
-    assert body["trailing"] == [DIETS, TEAM_DEFENSE, LAST_15]
+    # One game a team: team defense serves its 2026-27 candidate; the Diet and
+    # Last 15 trail on 2025-26, whose game logs have one game a team.
+    assert body["trailing"] == [DIETS, LAST_15]
+    assert _generation(body, "traditional_opponent_season") == [(defense.publication_id, "candidate")]
+    assert body["experience"]["sections"]["season_defense"]["season"] == NEW
     # The game's own schedule facts are still the 2026-27 game's.
     assert body["game"]["game_id"] == GAME_ID
 
@@ -160,7 +162,7 @@ def test_a_selected_2026_27_unscheduled_matchup_reads_like_a_game_matchup(served
     assert _web_app_decodes(body)
     assert body["as_of"]["season"] == OLD
     assert _generation(body, PLAYER_LOGS) == [(logs.publication_id, "candidate")]
-    assert body["trailing"] == [DIETS, TEAM_DEFENSE, LAST_15]
+    assert body["trailing"] == [DIETS, LAST_15]
     # 2026-27's one game: 12 points, where 2025-26 averages 30.
     [player] = body["players"]
     assert player["season_scoring"] == 12.0
@@ -189,7 +191,7 @@ def _web_app_decodes(body):
 @pytest.mark.parametrize(
     ("state", "published", "season_defense"),
     [
-        ("hold_opening_week", OLD, OLD),
+        ("hold_opening_week", OLD, NEW),
         ("hold_ten_games", OLD, NEW),
         ("opening_week_cutover", NEW, OLD),
     ],
@@ -208,6 +210,15 @@ def test_a_selected_2026_27_matchup_keeps_as_of_on_the_published_season(
     )
     # Each input names the season it serves on its own section.
     assert body["experience"]["sections"]["season_defense"]["season"] == season_defense
+
+
+def test_a_selected_2026_27_with_no_team_defense_composition_trails_it_on_2025_26(served, client):
+    served.hold_opening_week(defense=False)
+
+    body = client.get(f"{ROUTES['matchup']}&season={NEW}").get_json()
+
+    assert body["trailing"] == [DIETS, TEAM_DEFENSE, LAST_15]
+    assert body["experience"]["sections"]["season_defense"]["season"] == OLD
 
 
 def test_ten_games_a_team_serve_team_defense_and_the_rest_trail_with_their_own_sample(served, client):
@@ -323,7 +334,7 @@ def test_a_selected_2026_27_slate_lists_its_trailing_families_with_their_sample(
     selected = client.get(f"{ROUTES['slate']}&season={NEW}", headers=authenticate()).get_json()
     omitted = client.get(ROUTES["slate"]).get_json()
 
-    assert (selected["season_context"], selected["trailing"]) == (CONTEXT, [DIETS, TEAM_DEFENSE, LAST_15])
+    assert (selected["season_context"], selected["trailing"]) == (CONTEXT, [DIETS, LAST_15])
     assert [game["game_id"] for game in selected["games"]] == [GAME_ID]
     assert (omitted["trailing"], "season_context" in omitted) == ([], False)
 
@@ -333,7 +344,7 @@ def test_selected_slate_edges_compose_2026_27_and_list_its_trailing_families(ser
 
     body = client.get(f"{ROUTES['slate_edges']}&season={NEW}", headers=authenticate()).get_json()
 
-    assert (body["season_context"], body["trailing"]) == (CONTEXT, [DIETS, TEAM_DEFENSE, LAST_15])
+    assert (body["season_context"], body["trailing"]) == (CONTEXT, [DIETS, LAST_15])
 
 
 def test_an_anonymous_caller_may_name_the_published_season(served, client):
@@ -360,7 +371,7 @@ def test_slate_edges_never_serve_one_seasons_answer_to_the_other(served, client,
 
     bodies = {path: client.get(path, headers=authenticate()).get_json() for path in order}
 
-    assert bodies[selected_path]["trailing"] == [DIETS, TEAM_DEFENSE, LAST_15]
+    assert bodies[selected_path]["trailing"] == [DIETS, LAST_15]
     assert bodies[ROUTES["slate_edges"]]["trailing"] == []
     assert "season_context" not in bodies[ROUTES["slate_edges"]]
 

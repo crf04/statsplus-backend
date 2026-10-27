@@ -102,11 +102,7 @@ def test_choices_and_a_selected_read_on_postgres(world):
         "unpublished",
         {"min": 1, "max": 1},
     )
-    assert unpublished["families"]["team_defense"] == {
-        "served_season": OLD,
-        "state": "trailing",
-        "reason": "readiness_not_met",
-    }
+    assert unpublished["families"]["team_defense"] == {"served_season": NEW, "state": "serving"}
     assert (published["season"], published["mode"]) == (OLD, "published")
     assert answer[2] == logs.publication_id
 

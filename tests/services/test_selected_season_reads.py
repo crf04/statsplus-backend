@@ -29,6 +29,7 @@ from tests.support.season_cutover import (
     SEASON_STREAM,
     THIN_GAMES,
     accept_ledger,
+    team_defense_waits_for_ten_games,
 )
 from tests.support.selected_season import PLAYER_NAME, SelectedWorld
 from tests.test_game_log_preview import FakeRedis
@@ -65,8 +66,8 @@ def _logs(world, season, *, selected):
 # --- the reader ------------------------------------------------------------
 
 
-def test_an_opening_week_selection_reads_logs_from_2026_27_and_trails_team_defense(world):
-    logs, _defense = world.hold_opening_week()
+def test_an_opening_week_selection_reads_logs_and_team_defense_from_2026_27(world):
+    logs, defense = world.hold_opening_week()
 
     snapshot = world.reader.for_season(NEW).snapshot(KEYS, season=ReadSeason(OLD))
 
@@ -77,10 +78,38 @@ def test_an_opening_week_selection_reads_logs_from_2026_27_and_trails_team_defen
     )
     assert _reads(snapshot) == {
         PLAYER_LOGS: ("candidate", NEW, None, logs.publication_id),
-        # One game a team: team defense is not ready, so it keeps 2025-26.
-        SEASON_STREAM: ("prior_season", OLD, None, _live(world, SEASON_STREAM)),
+        # One game a team is all team defense waits for.
+        SEASON_STREAM: ("candidate", NEW, None, defense.publication_id),
         # No 2026-27 Last 15 composed yet: it keeps 2025-26 until one serves.
         L15_STREAM: ("prior_season", OLD, None, _live(world, L15_STREAM)),
+    }
+
+
+def test_an_opening_week_selection_with_no_team_defense_composition_keeps_2025_26(world):
+    world.hold_opening_week(defense=False)
+
+    snapshot = world.reader.for_season(NEW).snapshot(KEYS, season=ReadSeason(OLD))
+
+    assert _reads(snapshot)[SEASON_STREAM] == ("prior_season", OLD, None, _live(world, SEASON_STREAM))
+    assert world.games.list_seasons()["choices"][0]["families"]["team_defense"] == {
+        "served_season": OLD,
+        "state": "trailing",
+        "reason": "season_not_composed",
+    }
+
+
+def test_a_family_whose_rule_does_not_hold_keeps_2025_26_until_it_does(world, monkeypatch):
+    team_defense_waits_for_ten_games(monkeypatch)
+    world.hold_opening_week()
+
+    reads = _reads(world.reader.for_season(NEW).snapshot(KEYS, season=ReadSeason(OLD)))
+    families = world.games.list_seasons()["choices"][0]["families"]
+
+    assert reads[SEASON_STREAM] == ("prior_season", OLD, None, _live(world, SEASON_STREAM))
+    assert families["team_defense"] == {
+        "served_season": OLD,
+        "state": "trailing",
+        "reason": "readiness_not_met",
     }
 
 
@@ -253,7 +282,7 @@ def test_choices_list_2026_27_only_while_its_game_logs_serve(world):
             "game_logs": {"served_season": NEW, "state": "serving"},
             # The Diet has no 2026-27 composition; team defense has one with a game a team.
             "player_diets": {"served_season": OLD, "state": "trailing", "reason": "season_not_composed"},
-            "team_defense": {"served_season": OLD, "state": "trailing", "reason": "readiness_not_met"},
+            "team_defense": {"served_season": NEW, "state": "serving"},
             "last_15": {"served_season": OLD, "state": "trailing", "reason": "season_not_composed"},
         },
         "team_games": {"min": 1, "max": 1},

@@ -4,9 +4,9 @@ Each season has its own completed Event Catalog, ``canonical_game_ledger``
 manifest, accepted ledger observations, and canonical games.  2025-26 has
 fifteen final games, one for each of the thirty NBA teams; 2026-27's
 ``manifest-new`` has ten rounds of them, so every team has played the ten
-games a trailing family's Readiness Rule asks for.  ``manifest-thin``, three
-days earlier, governs only the first round: the opening week, when every
-trailing family is not ready.  Payloads name exactly the governed games and
+games the ten-game Readiness Rules ask for.  ``manifest-thin``, three days
+earlier, governs only the first round: the opening week, when team defense is
+ready and the ten-game families are not.  Payloads name exactly the governed games and
 the real team identities, and ``PublicationService`` resolves governance
 through the production ``ActiveManifestLedgerGovernanceReader``, so every
 publication rests on the same kind of authority production uses.
@@ -19,6 +19,7 @@ other authority.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
@@ -38,6 +39,7 @@ from app.models.collection_control import (
     PublicationPointer,
     PublicationVersion,
 )
+from app.services import serving_season
 from app.services.collection_control import NBA_TEAM_IDS, PublicationService
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 from tests.services.test_matchup_selection_service import _log_row
@@ -419,3 +421,19 @@ def pointers(engine):
             )
         ).all()
     return {row[0]: tuple(row[1:]) for row in rows}
+
+
+def team_defense_waits_for_ten_games(monkeypatch) -> None:
+    """Give team defense the ten-game rule Player Diets and Synergy keep.
+
+    Team defense's own rule (a game a team) holds for any authority a cutover
+    or Unpublished Season read accepts, since both require all thirty teams.
+    The not-ready path is exercised on this fixture's one ledger-built family
+    by lending it the rule of the families that still reach it.
+    """
+
+    for stream_key in serving_season.readiness_rule(SEASON_STREAM).streams:
+        rule = serving_season.readiness_rule(stream_key)
+        monkeypatch.setitem(
+            serving_season._RULE_BY_STREAM, stream_key, dataclasses.replace(rule, min_team_games=10)
+        )

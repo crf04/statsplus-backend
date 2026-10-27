@@ -2007,14 +2007,14 @@ the [Unscheduled Matchup](#get-unscheduled-matchup) carry a top-level
 ```json
 "trailing": [
   {"family": "player_diets", "serving_season": "2025-26", "rule": "every team has played 10 games"},
-  {"family": "team_defense", "serving_season": "2025-26", "rule": "every team has played 10 games"}
+  {"family": "team_defense", "serving_season": "2025-26", "rule": "every team has played a game"}
 ]
 ```
 
 `family` is `player_diets`, `team_defense` or `synergy`, in that order;
 `serving_season` is the season it serves; `rule` is the Readiness Rule it
-waits on (`synergy`: `"NBA has published the season and every team has played
-10 games"`). Each family switches at its first composition after its rule
+waits on (`team_defense`: `"every team has played a game"`; `synergy`: `"NBA
+has published the season and every team has played 10 games"`). Each family switches at its first composition after its rule
 holds, so `trailing` shrinks with no operator action. Last 15 never trails: it
 reads `window_not_ready` until its first new-season composition. The exception
 is a selected Unpublished Season (crf04/statsplus#330), where `last_15` trails
