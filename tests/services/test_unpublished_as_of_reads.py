@@ -13,11 +13,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from app.config.settings import CacheSettings
+from app.models.collection_control import PublicationVersion
 from app.models.player_game_log import PlayerGameLogSync
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 from app.services.matchup_reuse import ComposedMatchupCache
@@ -52,6 +54,7 @@ from tests.support.season_cutover import (
 )
 from tests.support.selected_season import PLAYER_ID, SelectedWorld, _StoredInjuries, settings
 from tests.test_game_log_preview import FakeRedis
+from tests.test_published_season_reads import ScheduleCatalog
 
 #: A final 2026-27 game on the 2026-10-23 slate, after the opening week's composition.
 AFTER_THE_OPENING_WEEK = "2026-10-23T23:30:00+00:00"
@@ -63,6 +66,9 @@ TODAY = "2026-10-25T23:30:00+00:00"
 #: minutes after it tipped, before that slate day ended.
 TIPPED = "2026-10-24T23:30:00+00:00"
 AFTER_THE_TIP = datetime(2026, 10, 24, 23, 45, tzinfo=UTC)
+#: A second final game of the 2026-10-24 slate, tipped after that composition.
+LATE_GAME_ID = "0022600161"
+TIPPED_LATER = "2026-10-25T00:30:00+00:00"
 BOTH = {**provenance(THIN_GAMES, "thin"), **provenance(NEW_GAMES[len(THIN_GAMES) :])}
 
 
@@ -528,3 +534,165 @@ def test_prune_still_deletes_a_superseded_defense_of_the_published_season(world)
     world.publications.prune_history(stream_key=SEASON_STREAM)
 
     assert _status(world, first) is None
+
+
+def _two_games_either_side_of_a_composition(world):
+    """``(opening_week, after_the_tip)``: GAME_ID tipped before ``after_the_tip`` was cut, LATE_GAME_ID after."""
+
+    with world.engine.begin() as connection:
+        _authority(
+            connection,
+            season=NEW,
+            manifest_id="manifest-late",
+            cutoff=AFTER_THE_TIP,
+            games=(),
+            catalog_games=NEW_GAMES,
+        )
+    opening_week, after_the_tip = _hold_a_week_then_ten_games(world, cutoff=AFTER_THE_TIP)
+    events = {
+        game_id: {
+            **_game_event(),
+            "nba_game_id": game_id,
+            "scheduled_at": tip,
+            "status_text": "Final",
+            "status_code": 3,
+        }
+        for game_id, tip in ((GAME_ID, TIPPED), (LATE_GAME_ID, TIPPED_LATER))
+    }
+    world.service.event_catalog = SimpleNamespace(
+        get_event=lambda season, game_id: events.get(game_id) if season == NEW else None,
+        get_freshness=lambda season, *, now: {"last_success_at": NOW.isoformat(), "fresh": True},
+    )
+    return opening_week, after_the_tip
+
+
+@pytest.mark.parametrize("order", [(GAME_ID, LATE_GAME_ID), (LATE_GAME_ID, GAME_ID)])
+def test_two_past_games_of_one_request_each_read_the_defense_cut_before_their_own_tip(world, order):
+    opening_week, after_the_tip = _two_games_either_side_of_a_composition(world)
+    matchups = request_matchups(
+        composer=season_scoped(world.service, NEW),
+        publication_reader=world.reader.for_season(NEW),
+        injuries=_StoredInjuries(),
+        settings=settings(),
+    )
+
+    read = {game_id: matchups.get_matchup(game_id=game_id) for game_id in order}
+
+    assert _served(read[GAME_ID], SEASON_STREAM) == {
+        SEASON_STREAM: ("candidate", NEW, opening_week.publication_id, THIN_CUTOFF.isoformat())
+    }
+    assert _bos_steals(read[GAME_ID]) == (7.0, 1, 0.0, 7.0)
+    assert _served(read[LATE_GAME_ID], SEASON_STREAM) == {
+        SEASON_STREAM: ("candidate", NEW, after_the_tip.publication_id, AFTER_THE_TIP.isoformat())
+    }
+    assert _bos_steals(read[LATE_GAME_ID]) == (67.0, 30, 644.444444, 9.0)
+
+
+#: When the retention tests prune: a Wednesday, so its fourteen-day horizon
+#: (2026-10-14 12:00 UTC) falls inside the week of Monday 2026-10-12.
+PRUNED_AT = datetime(2026, 10, 28, 12, tzinfo=UTC)
+EASTERN = ZoneInfo("America/New_York")
+
+
+def _daily_defense_history(world, template, *, days):
+    """A superseded 2026-27 team defense cut at 08:45 UTC each of the ``days`` days to PRUNED_AT."""
+
+    with world.engine.begin() as connection:
+        for day in range(days):
+            cutoff = PRUNED_AT.replace(hour=8, minute=45) - timedelta(days=day)
+            connection.execute(
+                text(
+                    "INSERT INTO publication_versions (publication_id, stream_key, season, cutoff, version,"
+                    " status, checksum, payload, manifest_id, event_catalog_publication_id,"
+                    " event_catalog_checksum, created_at, reason, fence)"
+                    " SELECT :id, stream_key, season, :cutoff, version + :offset, 'superseded', checksum,"
+                    " payload, manifest_id, event_catalog_publication_id, event_catalog_checksum, :cutoff,"
+                    " reason, fence FROM publication_versions WHERE publication_id = :template"
+                ),
+                {
+                    "id": f"daily-{day:02d}",
+                    "cutoff": cutoff,
+                    "offset": 100 + days - day,
+                    "template": template.publication_id,
+                },
+            )
+
+
+def _kept_defense_days(world):
+    """The Eastern dates of every 2026-27 team defense version left."""
+
+    with world.engine.connect() as connection:
+        cutoffs = connection.scalars(
+            select(PublicationVersion.cutoff).where(
+                PublicationVersion.stream_key == SEASON_STREAM, PublicationVersion.season == NEW
+            )
+        )
+        return sorted(
+            (cutoff if cutoff.tzinfo else cutoff.replace(tzinfo=UTC)).astimezone(EASTERN).date().isoformat()
+            for cutoff in cutoffs
+        )
+
+
+def test_prune_keeps_the_last_fourteen_days_then_the_newest_version_of_each_week(world):
+    withdrawn, _logs = _cut_over_and_revert_the_opening_week(world)
+    _daily_defense_history(world, withdrawn, days=40)
+    world.publications.clock = lambda: PRUNED_AT
+
+    first = world.publications.prune_history(season=NEW)
+    second = world.publications.prune_history(season=NEW)
+
+    assert _status(world, withdrawn.publication_id) is None
+    assert _kept_defense_days(world) == [
+        # Sundays, the last day of each ISO week before the horizon.
+        "2026-09-20",
+        "2026-09-27",
+        "2026-10-04",
+        "2026-10-11",
+        # 2026-10-12 to 2026-10-14 share a week with 2026-10-18, which is kept.
+        *(f"2026-10-{day}" for day in range(15, 29)),
+    ]
+    assert first.kept["as_of"] == 18
+    assert (second.deleted, second.kept) == (0, first.kept)
+
+
+def test_a_game_older_than_fourteen_days_reads_its_weeks_newest_version_once_pruned(world):
+    opening_week, ten_games = _hold_a_week_then_ten_games(world)
+    next_week = datetime(2026, 10, 27, 4, tzinfo=UTC)
+    with world.engine.begin() as connection:
+        _authority(
+            connection,
+            season=NEW,
+            manifest_id="manifest-next-week",
+            cutoff=next_week,
+            games=(),
+            catalog_games=NEW_GAMES,
+        )
+    _compose(world, SEASON_STREAM, _ten_game_defense(), cutoff=next_week)
+    world.publications.clock = lambda: datetime(2026, 11, 15, 12, tzinfo=UTC)
+
+    world.publications.prune_history(season=NEW)
+
+    assert _status(world, opening_week.publication_id) is None
+    assert _status(world, ten_games.publication_id) == "superseded"
+    _game_at(world, TIPPED)
+    matchup = _matchup(world)
+    assert _served(matchup, SEASON_STREAM) == {
+        SEASON_STREAM: ("candidate", NEW, ten_games.publication_id, NEW_CUTOFF.isoformat())
+    }
+    assert _bos_steals(matchup) == (67.0, 30, 644.444444, 9.0)
+    # A game before the week's newest version has nothing kept before it.
+    _game_at(world, AFTER_THE_OPENING_WEEK)
+    assert _served(_matchup(world), SEASON_STREAM) == {
+        SEASON_STREAM: ("prior_season", OLD, world.live(SEASON_STREAM), OLD_CUTOFF.isoformat())
+    }
+
+
+def test_a_past_slate_names_the_families_its_games_matchups_trail(world):
+    _hold_a_week_then_ten_games(world)
+    event = _game_at(world, BEFORE_ANY_COMPOSITION)
+    world.slates.event_catalog = ScheduleCatalog({NEW: [event]})
+
+    slate = season_scoped(world.slates, NEW).get_slate("2026-10-19")
+
+    assert [entry["family"] for entry in slate["trailing"]] == ["player_diets", "team_defense", "last_15"]
+    assert slate["trailing"] == _matchup(world)["trailing"]
