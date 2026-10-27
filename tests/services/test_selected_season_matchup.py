@@ -22,11 +22,22 @@ from app.services.database_first_activation import ReadSeason, TeamGames
 from app.services.matchup_snapshot import SnapshotMatchups, read_game_matchup, request_matchups
 from app.services.research_season import season_scoped
 from tests.services.test_serving_season_matchup import BOS, TRICODES, _diet_payload, _game_event
-from tests.support.season_cutover import NEW, NEW_CUTOFF, NOW, OLD, OLD_CUTOFF, PLAYER_LOGS
+from tests.support.season_cutover import (
+    NEW,
+    NEW_CUTOFF,
+    NOW,
+    OLD,
+    OLD_CUTOFF,
+    PLAYER_LOGS,
+    THIN_CUTOFF,
+    THIN_GAMES,
+    THIN_PROVENANCE,
+)
 from tests.support.selected_season import (
     GAME_ID,
     OLD_GAME_ID,
     OLD_SLATE_DATE,
+    PLAY_TYPE_DEFENSE,
     PLAYER_ID,
     PLAYER_NAME,
     SelectedWorld,
@@ -219,6 +230,32 @@ def test_a_selected_2026_27_with_no_team_defense_composition_trails_it_on_2025_2
 
     assert body["trailing"] == [DIETS, TEAM_DEFENSE, LAST_15]
     assert body["experience"]["sections"]["season_defense"]["season"] == OLD
+
+
+def test_a_selected_2026_27_matchup_reads_play_type_defense_from_its_2026_27_candidate(served, client):
+    served.publish_play_types()
+    _logs, traditional = served.hold_opening_week()
+    play_types = served.compose_new_play_types(
+        PLAY_TYPE_DEFENSE, THIN_GAMES, cutoff=THIN_CUTOFF, provenance=THIN_PROVENANCE
+    )
+
+    body = client.get(f"{ROUTES['matchup']}&season={NEW}").get_json()
+
+    assert _generation(body, PLAY_TYPE_DEFENSE) == [(play_types.publication_id, "candidate")]
+    assert _generation(body, "traditional_opponent_season") == [(traditional.publication_id, "candidate")]
+    assert body["experience"]["sections"]["season_defense"]["season"] == NEW
+    assert body["trailing"] == [DIETS, SYNERGY, LAST_15]
+
+
+def test_a_selected_2026_27_matchup_with_no_play_type_defense_composition_trails_team_defense(served, client):
+    served.publish_play_types()
+    served.hold_opening_week()
+
+    body = client.get(f"{ROUTES['matchup']}&season={NEW}").get_json()
+
+    assert _generation(body, PLAY_TYPE_DEFENSE) == [(served.live(PLAY_TYPE_DEFENSE), "prior_season")]
+    assert body["experience"]["sections"]["season_defense"]["season"] == OLD
+    assert body["trailing"] == [DIETS, TEAM_DEFENSE, SYNERGY, LAST_15]
 
 
 def test_ten_games_a_team_serve_team_defense_and_the_rest_trail_with_their_own_sample(served, client):
