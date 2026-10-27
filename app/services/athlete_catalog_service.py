@@ -9,6 +9,7 @@ transaction while leaving the last successful rows untouched.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
@@ -16,7 +17,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.engine import Engine
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
@@ -108,21 +109,23 @@ def _read_catalog_rows(
     return [{column: row[column] for column in ROSTER_COLUMNS} for row in rows]
 
 
-def _read_catalog_version(engine: Engine, season: str) -> str | None:
-    """Name one season's published catalog: its row count and newest publication.
+def _read_catalog_version(engine: Engine, season: str) -> str:
+    """Name the content of one season's catalog that Position reads depend on.
 
-    Every refresh, on either write path, republishes the season's rows, so the
-    value moves with it; ``None`` when the season has no rows.
+    A digest of every ``(player_id, position)`` pair, in player order, so it
+    changes exactly when a player's Position does, whichever writer ran and
+    whatever timestamps it stamped.
     """
 
     season = validate_canonical_season(season)
     with engine.connect() as connection:
-        count, newest = connection.execute(
-            select(func.count(), func.max(AthleteCatalog.published_at)).where(AthleteCatalog.season == season)
-        ).one()
-    if not count:
-        return None
-    return f"{count}:{_iso(newest)}"
+        rows = connection.execute(
+            select(AthleteCatalog.player_id, AthleteCatalog.position)
+            .where(AthleteCatalog.season == season, AthleteCatalog.position.is_not(None))
+            .order_by(AthleteCatalog.player_id)
+        ).all()
+    body = ",".join(f"{player_id}:{position}" for player_id, position in rows)
+    return hashlib.md5(body.encode("utf-8"), usedforsecurity=False).hexdigest()
 
 
 class AthleteCatalogReader:

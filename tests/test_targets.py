@@ -1634,3 +1634,41 @@ def test_an_oversized_or_unbounded_threshold_is_a_400_over_http(
         )
         assert response.status_code == 400, ("diet", literal, response.get_json())
     get_engine.cache_clear()
+
+
+def test_small_and_long_average_thresholds_keep_their_precision_in_the_title_over_http(
+    tmp_path, make_client, authenticate, make_db_user
+):
+    from app.utils.db import get_engine
+
+    database_url = f"sqlite:///{tmp_path / 'targets-title-precision.sqlite3'}"
+    get_engine.cache_clear()
+    engine = create_engine(database_url)
+    run_migrations(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            User.__table__.insert(),
+            {
+                "firebase_uid": OWNER,
+                "email": f"{OWNER}@example.com",
+                "display_name": OWNER,
+                "photo_url": None,
+                "created_at": datetime(2026, 8, 1, tzinfo=UTC),
+                "last_login": datetime(2026, 8, 1, tzinfo=UTC),
+                "is_active": True,
+            },
+        )
+    engine.dispose()
+    client = make_client(database_url)
+    headers = authenticate(claims={"uid": OWNER}, db_user=make_db_user(firebase_uid=OWNER))
+
+    for opponent, threshold, title in (
+        ("MEM", 1e-11, "MEM vs 3PA avg ≥ 0.00000000001"),
+        ("POR", 0.123456789012, "POR vs 3PA avg ≥ 0.123456789012"),
+        ("DEN", 2, "DEN vs 3PA avg ≥ 2"),
+    ):
+        body = {"opponent": opponent, "qualifiers": [{**THREE_PA_AVERAGE, "threshold": threshold}]}
+        created = client.post("/api/user/targets", headers=headers, json=body)
+        assert created.status_code == 201
+        assert created.get_json()["target"]["title"] == title
+    get_engine.cache_clear()

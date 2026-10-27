@@ -201,3 +201,10 @@ def test_resolve_marks_a_pool_player_with_no_position_and_never_fits_a_position(
         ("Pool Ghost", None),
     ]
     assert by_title["OKC vs Big"]["players"] == []
+
+
+def test_preview_titles_keep_a_tiny_average_threshold(journey):
+    body = _preview(journey, "OKC", [_average("3PA", 1e-11)])
+
+    assert body["target"]["title"] == "OKC vs 3PA avg ≥ 0.00000000001"
+    assert [p["name"] for p in body["players"]] == ["LeBron James"]

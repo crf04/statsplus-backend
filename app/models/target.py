@@ -14,6 +14,7 @@ average.  The ``base`` says which; the other columns are null where the kind
 does not use them.
 """
 
+from decimal import Decimal
 from types import MappingProxyType
 
 from sqlalchemy import (
@@ -80,7 +81,8 @@ def _share_as_percentage(threshold: float) -> str:
 def _average_threshold(threshold: float) -> str:
     """Render an Average threshold at its own precision, without trailing zeros."""
 
-    return f"{float(threshold):.10f}".rstrip("0").rstrip(".")
+    text = format(Decimal(repr(float(threshold))), "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
 
 
 def _qualifier_clause(qualifier) -> str:

@@ -385,7 +385,7 @@ def test_the_cron_command_fills_the_cache_after_an_idle_tick(world, cron, monkey
     assert player_shooting_refresh.main([]) == 0
 
     assert _tick_line(capsys) == '{"composed_jobs": 0, "state": "no_active_season"}'
-    service = world.backtests(redis_client=cron)
+    service = world.backtests(redis_client=cron, athlete_catalog=AthleteCatalogReader(world.engine))
     assert _statuses(service) == ["ok", "ok"]
 
 
@@ -562,3 +562,61 @@ def test_a_catalog_relabel_makes_the_precompute_and_the_batch_read_recompute(wor
     # With the relabel filed, a rerun finds it by its own key and computes nothing.
     monkeypatch.setattr(service, "_backtest_stateful", lambda *a, **k: pytest.fail("computed"))
     assert _without_duration(service.precompute(now=NOW)) == _counts(eligible=1, already_cached=1)
+
+
+def test_a_collector_relabel_stamped_before_a_later_tombstone_still_invalidates_the_cache(world):
+    """The reviewer's scenario, through the real collector writer.
+
+    The roster is published, then a later snapshot cuts an athlete, then a
+    relabel arrives stamped between the two.  The newest ``published_at`` does
+    not move, so only the content of the catalog can tell the cache.
+    """
+
+    from datetime import UTC, datetime
+
+    from app.services.collection_control import CollectionControlService
+    from tests.services.test_collection_control import (
+        _catalog_payload,
+        _roster_payload,
+        _seed_governed_catalog_evidence,
+    )
+
+    _seed_governed_catalog_evidence(world.engine)
+    with world.engine.begin() as connection:
+        connection.execute(AthleteCatalog.__table__.delete())
+    start = datetime(2026, 8, 12, tzinfo=UTC)
+    clock = {"now": start}
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(world.engine, clock=lambda: clock["now"])
+    control.activate_season(LAST, actor="operator")
+    event_request = control.create_bootstrap_request(LAST, "event", cutoff=cutoff)
+    assert control.publish_catalog(
+        event_request.request_id, _catalog_payload("event"), version="event"
+    ).complete
+
+    def publish(version, positions, *, at):
+        clock["now"] = at
+        roster = _roster_payload(list(positions))
+        for identity in roster["identities"]:
+            identity["position"] = positions[int(identity["player_id"])]
+        request = control.create_bootstrap_request(LAST, "athlete", cutoff=cutoff)
+        assert control.publish_catalog(request.request_id, roster, version=version).complete
+
+    lebron = bt.LEBRON
+    publish("first", {1: None, lebron: "Big", 11: None, 12: None}, at=start)
+    publish("cut", {1: None, lebron: "Big", 11: None}, at=start + timedelta(seconds=2))
+    target = world.users.create_target(OWNER, opponent="OKC", qualifiers=[bt.BIG])
+    service = world.backtests(
+        redis_client=CountingRedis(), athlete_catalog=AthleteCatalogReader(world.engine)
+    )
+    body, state = service.backtest(OWNER, target["id"])
+    assert (state, [p["position"] for p in body["players"]]) == ("miss", ["Big"])
+    assert service.backtest(OWNER, target["id"])[1] == "hit"
+
+    publish("relabel", {1: None, lebron: "Wing", 11: None}, at=start + timedelta(seconds=1))
+
+    with world.engine.connect() as connection:
+        newest = connection.execute(text("SELECT MAX(published_at) FROM athlete_catalog")).scalar_one()
+    assert str(newest).startswith("2026-08-12 00:00:02")
+    body, state = service.backtest(OWNER, target["id"])
+    assert (state, body["players"], body["summary"]["players_without_position"]) == ("miss", [], 0)
