@@ -36,9 +36,9 @@ concurrency:
 # installed packages, and restoring the wheel cache beside it cost about six
 # seconds per job for nothing.
 jobs:
-  # The suite runs as five parallel shards (a crc32 of the test node id picks
-  # the shard, see tests/conftest.py). Each uploads its coverage data; `checks`
-  # combines it and enforces the floor.
+  # The suite runs as five parallel shards of whole test files, balanced by the
+  # seconds recorded in tests/shard_weights.json (see tests/conftest.py). Each
+  # uploads its coverage data; `checks` combines it and enforces the floor.
   tests:
     name: tests (${{ matrix.shard }}/5)
     runs-on: ubuntu-latest
