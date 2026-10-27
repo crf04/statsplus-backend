@@ -57,9 +57,17 @@ from sqlalchemy.orm import Session
 from app.config.settings import RuntimeSettings
 from app.domain.nba_events import REGULAR_SEASON_TYPE
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
-from app.domain.target_statistics import target_stat_columns
+from app.domain.target_statistics import (
+    BOX_FIELD_ATTRIBUTES,
+    season_average_value,
+    target_stat_columns,
+)
 from app.errors import AppError, InvalidInputError, SeasonUnavailableError, isolated_error_body
-from app.models.target import TARGET_COMPARATOR_TESTS
+from app.models.target import (
+    POSITION_QUALIFIER_BASE,
+    SEASON_AVERAGE_QUALIFIER_BASE,
+    TARGET_COMPARATOR_TESTS,
+)
 from app.services.backtest_season import (
     BACKTEST_SEASONS,
     DEFAULT_BACKTEST_SEASON,
@@ -71,6 +79,7 @@ from app.services.backtest_season import (
 from app.services.matchup import (
     diet_evidence_thin,
     observed_diet_share,
+    season_sample_thin,
 )
 from app.services.player_diet import (
     PLAYER_DIET_PUBLICATION_STREAM_KEYS,
@@ -103,24 +112,7 @@ logger = getLogger(__name__)
 
 
 _WIRE_PRECISION = 6
-_BOX_FIELDS = {
-    "points": "points",
-    "rebounds": "rebounds",
-    "assists": "assists",
-    "field_goals_made": "field_goals_made",
-    "field_goals_attempted": "field_goals_attempted",
-    "threes_made": "three_pointers_made",
-    "threes_attempted": "three_pointers_attempted",
-    "free_throws_made": "free_throws_made",
-    "free_throws_attempted": "free_throws_attempted",
-    "steals": "steals",
-    "blocks": "blocks",
-    "turnovers": "turnovers",
-    "offensive_rebounds": "offensive_rebounds",
-    "defensive_rebounds": "defensive_rebounds",
-    "fouls": "personal_fouls",
-    "minutes": "minutes",
-}
+_BOX_FIELDS = BOX_FIELD_ATTRIBUTES
 
 # ``3PA`` is the Target display spelling for the governed ``FG3A`` market.
 _TARGET_MARKET_ALIASES = {"3PA": "FG3A"}
@@ -191,8 +183,10 @@ PROXY_NOTE = (
 
 #: Bump whenever the backtest's computation, its stat catalogue, or the key
 #: body changes (#279; v2 added the opponent, statsplus#123): a different schema must never be served from a cached value the
-#: older code shape wrote, and the constant is part of every key.
-TARGET_BACKTEST_CACHE_SCHEMA = 2
+#: older code shape wrote, and the constant is part of every key (v3: every
+#: player row carries its Position, and a Target may hold Position and Average
+#: Qualifiers).
+TARGET_BACKTEST_CACHE_SCHEMA = 3
 
 #: Raw threshold precision in the key: the six-decimal ``qualifier_signature``
 #: folds 0.4000001 and 0.4000004 onto one line, but those two Targets are
@@ -236,12 +230,41 @@ def aggregate_cache_state(statuses: Iterable[str], *, cache_enabled: bool = True
     return "-"
 
 
+def catalog_digest(positions: Mapping[int, str]) -> str:
+    """Name a season's Positions by their content, so a cache key follows them exactly."""
+
+    body = ",".join(f"{player_id}:{position}" for player_id, position in sorted(positions.items()))
+    return hashlib.md5(body.encode("utf-8"), usedforsecurity=False).hexdigest()
+
+
+def rule_share(base: str) -> dict[str, Any]:
+    """The `shares` entry of a Qualifier that reads no Diet slice: all nulls."""
+
+    return {"base": base, "slice_key": None, "share": None, "league_average_share": None}
+
+
+def _qualifier_key_body(qualifier: Mapping[str, Any]) -> dict[str, Any]:
+    """One Qualifier as the cache key reads it, at full threshold precision."""
+
+    if qualifier["base"] == POSITION_QUALIFIER_BASE:
+        return {"base": qualifier["base"], "groups": list(qualifier["groups"])}
+    body = {
+        "base": qualifier["base"],
+        "comparator": qualifier["comparator"],
+        "threshold": repr(float(qualifier["threshold"])),
+    }
+    if qualifier["base"] == SEASON_AVERAGE_QUALIFIER_BASE:
+        return {**body, "stat": qualifier["stat"]}
+    return {**body, "slice_key": qualifier["slice_key"]}
+
+
 def backtest_cache_key(
     target: Mapping[str, Any],
     generation: Sequence[tuple[str, str | None, int | None, int | None]],
     *,
     season: str,
     settings: RuntimeSettings,
+    catalog: str | None = None,
 ) -> str:
     """Build ``targets:backtest:v<schema>:<sha256>`` over the canonical key body.
 
@@ -260,16 +283,11 @@ def backtest_cache_key(
         "schema": TARGET_BACKTEST_CACHE_SCHEMA,
         "season": season,
         "opponent": target["opponent"],
+        # The athlete catalog's version for the season: every player row
+        # carries its Position, which no Publication names.
+        "catalog": catalog,
         "generation": [list(entry) for entry in generation],
-        "qualifiers": [
-            {
-                "base": qualifier["base"],
-                "slice_key": qualifier["slice_key"],
-                "comparator": qualifier["comparator"],
-                "threshold": repr(float(qualifier["threshold"])),
-            }
-            for qualifier in target["qualifiers"]
-        ],
+        "qualifiers": [_qualifier_key_body(qualifier) for qualifier in target["qualifiers"]],
         "conditions": target.get("conditions"),
         "thresholds": {
             "matchup": {
@@ -339,6 +357,10 @@ class PlayerDietReader(Protocol):
     ) -> PlayerDietResult: ...
 
 
+class AthleteCatalogReader(Protocol):
+    def get_positions(self, season: str) -> Mapping[int, str]: ...
+
+
 class TargetBacktestService:
     """Report one Target's season to date over the whole league."""
 
@@ -354,9 +376,13 @@ class TargetBacktestService:
         engine: Engine | None = None,
         redis_client: Any | None = None,
         cache_clock: Callable[[], float] | None = None,
+        athlete_catalog: AthleteCatalogReader | None = None,
     ) -> None:
         self.targets = targets
         self.player_logs = player_logs
+        # Names each player's Position for the season; without it no player
+        # has one, and a Position Qualifier fits nobody.
+        self.athlete_catalog = athlete_catalog
         self.player_diets = player_diets
         self.publication_reader = publication_reader
         self.settings = settings
@@ -461,6 +487,7 @@ class TargetBacktestService:
                     session=session,
                 )
                 generation = identity if self._cache_enabled else None
+                catalog = self._catalog_snapshot(choice.season)[1] if generation is not None else None
             except (InvalidInputError, SeasonUnavailableError):
                 raise
             except Exception:
@@ -484,6 +511,7 @@ class TargetBacktestService:
                     self.settings.nba.current_season,
                 )
                 generation = None
+                catalog = None
 
         items = []
         for target in listed:
@@ -492,7 +520,7 @@ class TargetBacktestService:
                 evidence = (
                     None
                     if generation is None
-                    else self._cache_read(self._cache_key(target, choice.season, generation))
+                    else self._cache_read(self._cache_key(target, choice.season, generation, catalog))
                 )
                 if evidence is None:
                     items.append({"target_id": target_id, "status": "uncached"})
@@ -579,17 +607,28 @@ class TargetBacktestService:
             except SeasonUnavailableError:
                 continue
             if generation is not None:
-                work.append((choice, generation))
+                try:
+                    work.append((choice, generation, self._catalog_snapshot(choice.season)[1]))
+                except Exception:
+                    logger.warning(
+                        "Target backtest precompute skipped season=%s: catalog version unreadable",
+                        choice.season,
+                        exc_info=True,
+                    )
         counts = {
             "already_cached": 0,
             "computed": 0,
             "bypassed": 0,
             "failed": 0,
         }
-        entries = [(choice, generation, target) for choice, generation in work for target in targets]
+        entries = [
+            (choice, generation, catalog, target)
+            for choice, generation, catalog in work
+            for target in targets
+        ]
         remaining = 0
-        for index, (choice, generation, target) in enumerate(entries):
-            cached = self._cache_exists(self._cache_key(target, choice.season, generation))
+        for index, (choice, generation, catalog, target) in enumerate(entries):
+            cached = self._cache_exists(self._cache_key(target, choice.season, generation, catalog))
             if cached is None:
                 logger.warning("Target backtest precompute stopped: result cache unavailable")
                 counts["bypassed"] += len(entries) - index
@@ -613,7 +652,7 @@ class TargetBacktestService:
                 remaining = len(entries) - index - 1
                 break
         result = {
-            "seasons": [choice.season for choice, _generation in work],
+            "seasons": [choice.season for choice, _generation, _catalog in work],
             "eligible": len(entries),
             **counts,
             "remaining": remaining,
@@ -701,10 +740,10 @@ class TargetBacktestService:
         # whatever ``note`` or ``updated_at`` has since become.  The Lab
         # hands its own snapshot in for a Draft Target the cache must never
         # see.
-        cached_choice, cache_key = (
+        cached_choice, cache_key, catalog_read = (
             self._saved_backtest_cache_key(target, choice, session)
             if publication_snapshot is _OWN and target.get("id") is not None
-            else (None, None)
+            else (None, None, None)
         )
         if cache_key is not None:
             evidence = self._cache_read(cache_key)
@@ -733,12 +772,20 @@ class TargetBacktestService:
                     None,
                     lambda season: self._publication_snapshot(season, session=session),
                     _PUBLICATION_STREAM_KEYS,
-                    choice=choice,
+                    # Pinned to the season the cache precheck resolved and read
+                    # its Positions for, so the season, its Positions and the
+                    # digest filed under come from one snapshot.
+                    choice=cached_choice if cached_choice is not None else choice,
                     projection_only_keys=_PROJECTION_ONLY_STREAM_KEYS,
                     decoded_only_keys=BACKTEST_DECODED_ONLY_STREAM_KEYS,
                     session=session,
                 )
             season = choice.season
+            if catalog_read is not None and cached_choice is not None and season != cached_choice.season:
+                # Defensive: a capture that resolved another season must not
+                # evaluate with this one's Positions or file under its key.
+                catalog_read = self._catalog_snapshot(season)
+                cache_key = None
             opponent_team_id = NBA_TEAM_TRICODE_TO_ID[target["opponent"]]
             rows = tuple(
                 record
@@ -777,7 +824,7 @@ class TargetBacktestService:
                 "played": len({row.game_id for row in rows}),
                 "kept": len({row.game_id for row in kept}),
             }
-            players = self._players(
+            players, without_position = self._players(
                 target,
                 qualifiers,
                 markets,
@@ -786,7 +833,12 @@ class TargetBacktestService:
                 kept,
                 player_minutes=player_minutes,
                 connection=connection,
+                # The Positions the cache key was derived from, when it was.
+                positions=None if catalog_read is None else catalog_read[0],
             )
+            summary = self._summary(players, markets)
+            if any(qualifier["base"] == POSITION_QUALIFIER_BASE for qualifier in qualifiers):
+                summary["players_without_position"] = without_position
             readings = getattr(snapshot, "reads", None)
             eligibility = _required_cache_streams(qualifiers)
             identity = self._cache_identity(snapshot)
@@ -808,10 +860,10 @@ class TargetBacktestService:
                     # generation, so the next request's pre-check key finds
                     # it or recomputes it -- never a torn hybrid.
                     self._cache_write(
-                        self._cache_key(target, season, identity),
+                        self._cache_key(target, season, identity, catalog_read[1]),
                         {
                             "players": players,
-                            "summary": self._summary(players, markets),
+                            "summary": summary,
                             "stat_columns": list(markets),
                             "games_considered": games_considered,
                             "season": season,
@@ -833,7 +885,7 @@ class TargetBacktestService:
             "published_season": choice.published,
             "proxy": PROXY_NOTE,
             "stat_columns": list(markets),
-            "summary": self._summary(players, markets),
+            "summary": summary,
             "players": players,
             "games_considered": games_considered,
         }, cache_state
@@ -904,8 +956,8 @@ class TargetBacktestService:
         target: Mapping[str, Any],
         choice: BacktestSeason | None,
         session: Session | None,
-    ) -> tuple[BacktestSeason | None, str | None]:
-        """Resolve the season and build its cache key, or ``(None, None)``.
+    ) -> tuple[BacktestSeason | None, str | None, tuple[dict[int, str], str | None] | None]:
+        """Resolve the season, its cache key and catalog version, or all ``None``.
 
         A ``None`` key is the cache deciding it has nothing to say: the
         feature flag off, no reader able to answer a generation, or a failed
@@ -915,7 +967,7 @@ class TargetBacktestService:
         """
 
         if not self._cache_enabled:
-            return None, None
+            return None, None, None
         try:
             if choice is None:
                 choice = self.seasons.resolve(None, session=session)
@@ -932,14 +984,15 @@ class TargetBacktestService:
                 projection_keys=_PROJECTION_ONLY_STREAM_KEYS,
                 session=session,
             )
+            catalog = self._catalog_snapshot(choice.season)
         except Exception:
             # The pre-check must not turn a Redis-or-reader outage into a
             # failed request: answer as the uncached read answers, which
             # reports an unavailable season itself.
-            return None, None
+            return None, None, None
         if generation is None:
-            return None, None
-        return choice, self._cache_key(target, choice.season, generation)
+            return None, None, None
+        return choice, self._cache_key(target, choice.season, generation, catalog[1]), catalog
 
     @staticmethod
     def _cache_identity(snapshot: Any) -> Sequence[tuple] | None:
@@ -961,8 +1014,23 @@ class TargetBacktestService:
         target: Mapping[str, Any],
         season: str,
         generation: Sequence[tuple[str, str | None, int | None, int | None]],
+        catalog: str | None,
     ) -> str:
-        return backtest_cache_key(target, generation, season=season, settings=self.settings)
+        return backtest_cache_key(target, generation, season=season, settings=self.settings, catalog=catalog)
+
+    def _catalog_snapshot(self, season: str) -> tuple[dict[int, str], str | None]:
+        """Read the season's Positions once: the map and the digest naming it.
+
+        The cache key and the evaluation both take this one read, so a result
+        is always filed under the digest of the Positions it was computed
+        from.  A failed read raises: every caller treats that as the cache
+        having nothing to say.
+        """
+
+        if self.athlete_catalog is None:
+            return {}, None
+        positions = dict(self.athlete_catalog.get_positions(season))
+        return positions, catalog_digest(positions)
 
     def _cache_read(self, key: str) -> dict[str, Any] | None:
         """Return one cached result's evidence, or ``None`` to compute.
@@ -1081,7 +1149,14 @@ class TargetBacktestService:
         *,
         player_minutes: int | None = None,
         connection: Connection | None = None,
-    ) -> list[dict[str, Any]]:
+        positions: Mapping[int, str] | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return the qualifying players and how many lacked a Position.
+
+        The count is the players a Position Qualifier alone left out: those who
+        met every other Qualifier but have no listed Position.
+        """
+
         rows_by_player: dict[int, list[PlayerGameLogRecord]] = {}
         for record in records:
             # A playoff line is not evidence against a Regular Season average,
@@ -1094,7 +1169,7 @@ class TargetBacktestService:
         if not rows_by_player:
             # Nobody has faced this opponent, so there is nobody to judge and
             # no reason to read a Diet at all.
-            return []
+            return [], 0
 
         player_ids = tuple(sorted(rows_by_player))
         # A deployment with no Diet service stores no Diet, so no player has
@@ -1102,9 +1177,13 @@ class TargetBacktestService:
         # a Target nobody meets returns, which is honest here: the demo
         # database this arises on carries no Diet schema at all, so there is
         # no evidence being withheld.
+        needs_diet = any(
+            qualifier["base"] not in (POSITION_QUALIFIER_BASE, SEASON_AVERAGE_QUALIFIER_BASE)
+            for qualifier in qualifiers
+        )
         diets = (
             PlayerDietResult(season, {}, ())
-            if self.player_diets is None
+            if self.player_diets is None or not needs_diet
             else call_with_read_scope(
                 self.player_diets.get_for_players,
                 season,
@@ -1121,7 +1200,14 @@ class TargetBacktestService:
             connection=connection,
         )
 
+        if positions is None:
+            positions = self._catalog_snapshot(season)[0]
+        wants_position = next(
+            (qualifier for qualifier in qualifiers if qualifier["base"] == POSITION_QUALIFIER_BASE),
+            None,
+        )
         players = []
+        without_position = 0
         for player_id in player_ids:
             shares = self._fit(
                 qualifiers,
@@ -1131,6 +1217,13 @@ class TargetBacktestService:
             )
             if shares is None:
                 continue
+            position = positions.get(player_id)
+            if wants_position is not None:
+                if position is None:
+                    without_position += 1
+                    continue
+                if position not in wants_position["groups"]:
+                    continue
             players.append(
                 self._player(
                     rows_by_player[player_id],
@@ -1138,6 +1231,7 @@ class TargetBacktestService:
                     summaries[player_id],
                     markets,
                     summaries[player_id].rate_rows,
+                    position,
                 )
             )
         # The Matchup's own ordering, so the two Target surfaces read the same
@@ -1149,7 +1243,7 @@ class TargetBacktestService:
                 player["canonical_id"],
             )
         )
-        return players
+        return players, without_position
 
     def _fit(
         self,
@@ -1170,6 +1264,16 @@ class TargetBacktestService:
         shares = []
         for qualifier in qualifiers:
             base = qualifier["base"]
+            if base == POSITION_QUALIFIER_BASE:
+                # Decided by the caller, which owns the Position lookup and
+                # the count of players it leaves out.
+                shares.append(rule_share(base))
+                continue
+            if base == SEASON_AVERAGE_QUALIFIER_BASE:
+                if not self._average_fits(qualifier, summary):
+                    return None
+                shares.append(rule_share(base))
+                continue
             base_facts = tuple(fact for fact in facts if fact.base == base)
             fact = next(
                 (item for item in base_facts if item.slice_key == qualifier["slice_key"]),
@@ -1204,6 +1308,24 @@ class TargetBacktestService:
             )
         return shares
 
+    def _average_fits(
+        self,
+        qualifier: Mapping[str, Any],
+        summary: PlayerSeasonLogSummary | None,
+    ) -> bool:
+        """Whether a player's Regular Season average meets an Average Qualifier.
+
+        A season too short to count is left out under the Diet thinness rule,
+        and so is a stat with nothing to divide by (no attempts, no minutes).
+        """
+
+        if season_sample_thin(summary, self.settings.matchup_scores):
+            return False
+        value = season_average_value(qualifier["stat"], summary.rate_rows)
+        return value is not None and TARGET_COMPARATOR_TESTS[qualifier["comparator"]](
+            value, qualifier["threshold"]
+        )
+
     def _player(
         self,
         rows: Sequence[PlayerGameLogRecord],
@@ -1211,6 +1333,7 @@ class TargetBacktestService:
         summary: PlayerSeasonLogSummary,
         markets: Sequence[str],
         season_rows: Sequence[PlayerGameLogRecord],
+        position: str | None,
     ) -> dict[str, Any]:
         """Shape one qualifying player against the games they have played.
 
@@ -1240,6 +1363,7 @@ class TargetBacktestService:
             "name": newest.player_name,
             "team_id": int(newest.team_id),
             "tricode": str(newest.team_tricode),
+            "position": position,
             "season_scoring": per_game_points,
             "shares": list(shares),
             "season_games": len(season_rows),

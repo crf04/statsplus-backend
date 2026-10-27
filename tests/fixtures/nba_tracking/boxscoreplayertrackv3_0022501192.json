@@ -1,0 +1,165 @@
+{
+ "boxScorePlayerTrack": {
+  "awayTeam": {
+   "players": [
+    {
+     "familyName": "Smith",
+     "personId": 1641869,
+     "statistics": {
+      "assists": 6,
+      "contestedFieldGoalPercentage": 0.333,
+      "contestedFieldGoalsAttempted": 3,
+      "contestedFieldGoalsMade": 1,
+      "defendedAtRimFieldGoalPercentage": 1.0,
+      "defendedAtRimFieldGoalsAttempted": 1,
+      "defendedAtRimFieldGoalsMade": 1,
+      "distance": 2.73,
+      "fieldGoalPercentage": 0.333,
+      "freeThrowAssists": 0,
+      "minutes": "35:31",
+      "passes": 52,
+      "reboundChancesDefensive": 6,
+      "reboundChancesOffensive": 3,
+      "reboundChancesTotal": 9,
+      "secondaryAssists": 0,
+      "speed": 4.63,
+      "touches": 58,
+      "uncontestedFieldGoalsAttempted": 6,
+      "uncontestedFieldGoalsMade": 2,
+      "uncontestedFieldGoalsPercentage": 0.333
+     }
+    },
+    {
+     "familyName": "Claxton",
+     "personId": 1629651,
+     "statistics": {
+      "assists": 0,
+      "contestedFieldGoalPercentage": 0.0,
+      "contestedFieldGoalsAttempted": 0,
+      "contestedFieldGoalsMade": 0,
+      "defendedAtRimFieldGoalPercentage": 0.0,
+      "defendedAtRimFieldGoalsAttempted": 0,
+      "defendedAtRimFieldGoalsMade": 0,
+      "distance": 0.0,
+      "fieldGoalPercentage": 0.0,
+      "freeThrowAssists": 0,
+      "minutes": "0:00",
+      "passes": 0,
+      "reboundChancesDefensive": 0,
+      "reboundChancesOffensive": 0,
+      "reboundChancesTotal": 0,
+      "secondaryAssists": 0,
+      "speed": 0.0,
+      "touches": 0,
+      "uncontestedFieldGoalsAttempted": 0,
+      "uncontestedFieldGoalsMade": 0,
+      "uncontestedFieldGoalsPercentage": 0.0
+     }
+    }
+   ],
+   "teamCity": "Brooklyn",
+   "teamId": 1610612751,
+   "teamName": "Nets",
+   "teamSlug": "nets",
+   "teamTricode": "BKN"
+  },
+  "awayTeamId": 1610612751,
+  "gameId": "0022501192",
+  "homeTeam": {
+   "players": [
+    {
+     "familyName": "Barnes",
+     "personId": 1630567,
+     "statistics": {
+      "assists": 12,
+      "contestedFieldGoalPercentage": 0.667,
+      "contestedFieldGoalsAttempted": 6,
+      "contestedFieldGoalsMade": 4,
+      "defendedAtRimFieldGoalPercentage": 0.25,
+      "defendedAtRimFieldGoalsAttempted": 4,
+      "defendedAtRimFieldGoalsMade": 1,
+      "distance": 2.26,
+      "fieldGoalPercentage": 0.727,
+      "freeThrowAssists": 3,
+      "minutes": "31:60",
+      "passes": 68,
+      "reboundChancesDefensive": 13,
+      "reboundChancesOffensive": 3,
+      "reboundChancesTotal": 16,
+      "secondaryAssists": 3,
+      "speed": 4.25,
+      "touches": 72,
+      "uncontestedFieldGoalsAttempted": 5,
+      "uncontestedFieldGoalsMade": 4,
+      "uncontestedFieldGoalsPercentage": 0.8
+     }
+    },
+    {
+     "familyName": "Walter",
+     "personId": 1642266,
+     "statistics": {
+      "assists": 1,
+      "contestedFieldGoalPercentage": 0.5,
+      "contestedFieldGoalsAttempted": 2,
+      "contestedFieldGoalsMade": 1,
+      "defendedAtRimFieldGoalPercentage": 0.8,
+      "defendedAtRimFieldGoalsAttempted": 5,
+      "defendedAtRimFieldGoalsMade": 4,
+      "distance": 1.8,
+      "fieldGoalPercentage": 0.6,
+      "freeThrowAssists": 0,
+      "minutes": "24:07",
+      "passes": 17,
+      "reboundChancesDefensive": 2,
+      "reboundChancesOffensive": 0,
+      "reboundChancesTotal": 2,
+      "secondaryAssists": 0,
+      "speed": 4.5,
+      "touches": 22,
+      "uncontestedFieldGoalsAttempted": 3,
+      "uncontestedFieldGoalsMade": 2,
+      "uncontestedFieldGoalsPercentage": 0.667
+     }
+    },
+    {
+     "familyName": "Battle",
+     "personId": 1642419,
+     "statistics": {
+      "assists": 0,
+      "contestedFieldGoalPercentage": 1.0,
+      "contestedFieldGoalsAttempted": 1,
+      "contestedFieldGoalsMade": 1,
+      "defendedAtRimFieldGoalPercentage": 0.0,
+      "defendedAtRimFieldGoalsAttempted": 0,
+      "defendedAtRimFieldGoalsMade": 0,
+      "distance": 0.41,
+      "fieldGoalPercentage": 0.5,
+      "freeThrowAssists": 0,
+      "minutes": "5:18",
+      "passes": 4,
+      "reboundChancesDefensive": 0,
+      "reboundChancesOffensive": 0,
+      "reboundChancesTotal": 0,
+      "secondaryAssists": 0,
+      "speed": 4.74,
+      "touches": 6,
+      "uncontestedFieldGoalsAttempted": 1,
+      "uncontestedFieldGoalsMade": 0,
+      "uncontestedFieldGoalsPercentage": 0.0
+     }
+    }
+   ],
+   "teamCity": "Toronto",
+   "teamId": 1610612761,
+   "teamName": "Raptors",
+   "teamSlug": "raptors",
+   "teamTricode": "TOR"
+  },
+  "homeTeamId": 1610612761
+ },
+ "meta": {
+  "request": "http://nba.cloud/games/0022501192/boxscoreplayertrack?Format=json",
+  "time": "2026-10-27T01:38:12.3812Z",
+  "version": 1
+ }
+}

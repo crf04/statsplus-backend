@@ -89,6 +89,7 @@ class ApplicationDependencies:
     rotation_service: Any | None = None
     player_season_stats_service: Any | None = None
     rotation_collection_service: Any | None = None
+    player_tracking_collection_service: Any | None = None
     injury_scenario_service: Any | None = None
 
 
@@ -150,6 +151,7 @@ def build_dependencies(
     from app.providers.nba_injury_report import NBAInjuryReportProvider
     from app.providers.nba_live_data import NBALiveDataBoxscoreAdapter
     from app.providers.nba_stats import NBAStatsAdapter
+    from app.providers.nba_tracking import NBATrackingProvider
     from app.providers.pbp_game_logs import PBPGameLogAdapter
     from app.providers.pbp_stats import PBPStatsAdapter
     from app.services.athlete_catalog_service import (
@@ -194,6 +196,8 @@ def build_dependencies(
     from app.services.player_game_log_repository import PlayerGameLogRepository
     from app.services.player_season_stats import PlayerSeasonStatsRepository, PlayerSeasonStatsService
     from app.services.player_service import PlayerProfileReader, PlayerService
+    from app.services.player_tracking_collection import PlayerTrackingCollectionService
+    from app.services.player_tracking_repository import PlayerTrackingRepository
     from app.services.projection_archive import (
         LatestProjectionPlayerPoolReader,
         ProjectionArchive,
@@ -684,8 +688,10 @@ def build_dependencies(
         StoredGameLogsSource,
     )
 
+    player_tracking_repository = PlayerTrackingRepository(engine)
     game_logs_source = StoredGameLogsSource(
         player_game_log_repository,
+        tracking=player_tracking_repository,
     )
     from app.services.event_catalog_repository import EventCatalogRepository
     from app.services.posted_lines import PostedLinesReader, StoredSchedule
@@ -816,6 +822,10 @@ def build_dependencies(
         settings=settings,
         snapshot_reuse=snapshot_reuse,
         matchup_cache=matchup_cache,
+        # A Position and a season average are read from the engine-bound
+        # catalog and the Regular Season logs, never from a provider.
+        player_logs=player_game_log_repository,
+        athlete_catalog=athlete_catalog_reader,
     )
     # The home page's slate edges compose the same two documents under the same
     # promises: one Publication snapshot, stored-only injuries, no provider.
@@ -846,6 +856,7 @@ def build_dependencies(
         publication_reader=research_publications,
         engine=engine,
         redis_client=redis_client,
+        athlete_catalog=athlete_catalog_reader,
     )
     # A preview composes the two Target reads from one Publication snapshot
     # and reads injuries stored-only: the Matchup route may refresh them from
@@ -928,6 +939,11 @@ def build_dependencies(
         rotation_collection_service=RotationCollectionService(
             nba_live_data_provider,
             rotation_repository,
+            (event_catalog_service.get_events if event_catalog_service is not None else (lambda season: [])),
+        ),
+        player_tracking_collection_service=PlayerTrackingCollectionService(
+            NBATrackingProvider(),
+            player_tracking_repository,
             (event_catalog_service.get_events if event_catalog_service is not None else (lambda season: [])),
         ),
         on_off_service=on_off_service,

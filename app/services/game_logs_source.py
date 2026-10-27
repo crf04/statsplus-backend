@@ -50,10 +50,15 @@ class GameLogsSource(Protocol):
 
 
 class StoredGameLogsSource:
-    """Build a frame from one complete durable publication, else return empty."""
+    """Build a frame from one complete durable publication, else return empty.
 
-    def __init__(self, repository: PlayerGameLogReader) -> None:
+    ``tracking`` (optional) joins NBA.com player-tracking values onto each row
+    by (game, player); a game without stored tracking serves ``null``.
+    """
+
+    def __init__(self, repository: PlayerGameLogReader, tracking: Any | None = None) -> None:
         self.repository = repository
+        self.tracking = tracking
 
     def get_player_logs(
         self,
@@ -75,7 +80,8 @@ class StoredGameLogsSource:
             if complete
             else ()
         )
-        return _player_frame(records)
+        tracking = self._tracking_for(season, (player_id,), connection) if records else {}
+        return _player_frame(records, tracking.get(player_id))
 
     def get_players_logs(
         self,
@@ -97,7 +103,24 @@ class StoredGameLogsSource:
             if complete and ids
             else {}
         )
-        return {player_id: _player_frame(found.get(player_id) or ()) for player_id in ids}
+        stored = self._tracking_for(
+            season, tuple(player_id for player_id in ids if found.get(player_id)), None
+        )
+        return {
+            player_id: _player_frame(found.get(player_id) or (), stored.get(player_id)) for player_id in ids
+        }
+
+    def _tracking_for(
+        self, season: str, player_ids: tuple[int, ...], connection: Any | None
+    ) -> dict[int, dict[str, dict[str, int | None]]]:
+        """Stored tracking by player then game; every requested player has a map."""
+
+        found = (
+            self.tracking.for_players(season, player_ids, connection=connection)
+            if self.tracking is not None
+            else {}
+        )
+        return {player_id: found.get(player_id, {}) for player_id in player_ids}
 
     def _complete(self, season: str, publication_snapshot: Any | None) -> tuple[bool, Any | None]:
         if publication_snapshot is None:
@@ -109,15 +132,49 @@ class StoredGameLogsSource:
         return self.repository.has_complete_publication(season), publication_snapshot
 
 
-def _player_frame(records: tuple[Any, ...]) -> pd.DataFrame:
+def _player_frame(
+    records: tuple[Any, ...], tracking: dict[str, dict[str, int | None]] | None = None
+) -> pd.DataFrame:
     # The request-time contract serves Regular Season games only.
     records = tuple(record for record in records if record.season_type == "Regular Season")
     return _recency_frame(
         derive_game_log_frame(
-            _records_to_primitive_frame(records),
+            _with_tracking(_records_to_primitive_frame(records), tracking or {}),
             round_minutes=True,
         )
     )
+
+
+#: Frame column to stored tracking column.  Whole counts or null, never 0 for
+#: a value that was not collected, so the columns use pandas' nullable integer.
+TRACKING_FRAME_COLUMNS = {
+    "REB_CHANCES": "reb_chances",
+    "OREB_CHANCES": "oreb_chances",
+    "DREB_CHANCES": "dreb_chances",
+    "POTENTIAL_AST": "potential_ast",
+}
+
+
+#: Per-game 0-1 conversion rates: (column, made, chances).  Null when the
+#: chances are null or 0.
+CONVERSION_FRAME_COLUMNS = (
+    ("REB_CONV_PCT", "REB", "REB_CHANCES"),
+    ("AST_CONV_PCT", "AST", "POTENTIAL_AST"),
+)
+
+
+def _with_tracking(frame: pd.DataFrame, tracking: dict[str, dict[str, int | None]]) -> pd.DataFrame:
+    game_ids = frame["GAME_ID"] if "GAME_ID" in frame else pd.Series([], dtype=object)
+    for column, stored in TRACKING_FRAME_COLUMNS.items():
+        frame[column] = pd.Series(
+            [(tracking.get(game_id) or {}).get(stored) for game_id in game_ids],
+            index=frame.index,
+            dtype="Int64",
+        )
+    for conversion, made, chances in CONVERSION_FRAME_COLUMNS:
+        denominator = frame[chances].astype("Float64")
+        frame[conversion] = frame[made].astype("Float64") / denominator.where(denominator != 0)
+    return frame
 
 
 def _recency_frame(frame: pd.DataFrame) -> pd.DataFrame:
