@@ -476,6 +476,9 @@ when a dependency is degraded.
 POST /api/nl-query
 ```
 
+`season` is the season the query names (for example `2024-25`), or `null`
+when it names none, so the reader applies its own default season.
+
 The default research season (including “this year”) follows the active,
 available player-game-log publication, so an October rollover does not select
 an unpublished season. Every read that serves published data uses the same
@@ -543,7 +546,7 @@ Response shape:
     }
   ],
   "rank_filter": ["5"],
-  "season": "2025-26",
+  "season": null,
   "confidence": 0.95,
   "intent": "game_logs",
   "time_period": null,
@@ -2594,9 +2597,10 @@ rules. Without `season` every response is byte for byte what it was.
   candidate once.
 - Caches: the slate-edges response cache keys on the selected season, and the
   per-process snapshot reuse never serves a selected request, which captures
-  its own. A Backtest reads exactly the season it names and never a held
-  candidate: 2026-27 stays `season_unavailable` until its Diets serve 2026-27
-  after the cutover.
+  its own. A Backtest reads exactly the season it names: a requested 2026-27
+  reads its held candidates once every Backtest stream's candidate serves in
+  this read, and is `season_unavailable` while any of them trails (see
+  [Backtest one Target](#backtest-one-target-over-the-season-to-date)).
 
 ### Get Ladder
 
@@ -5550,7 +5554,21 @@ that season; seasons are never mixed, and nothing about today's players is
 implied. The **published season** reads each stream's live pointer when it
 names that season, and that stream's retained Publication otherwise -- a pin
 set behind the live pointer, or one stream activating a new season before the
-others. If any Backtest stream has no readable Publication for the season in
+others.
+
+A requested season **after** the published one, before its game logs activate
+(`2026-27` while `2025-26` is published), reads as an Unpublished Season
+(crf04/statsplus-backend#625): every Backtest stream's held candidate, judged
+by the Season Cutover's own per-publication checks and Readiness Rule, with
+its ledger lineage re-judged on every read. It is served only when every
+Backtest stream's candidate serves that season; a stream that trails (still on
+`2025-26`), has no candidate, or whose candidate fails its checks is
+`503 season_unavailable` naming it, so 2026-27 logs are never read with
+2025-26 Diets. The result cache keys this read on the candidates it read, so a
+newer candidate is a new entry and a withdrawn one is refused before any
+entry is read. The default season is unchanged by held candidates.
+
+If any Backtest stream has no readable Publication for the season in
 either place -- none exists, or the one that exists cannot be read (corrupt,
 unauthorised, or missing its projection) -- the request fails with
 `503 season_unavailable` naming the stream, never an empty `players` list:
@@ -5572,8 +5590,8 @@ unauthorised, or missing its projection) -- the request fails with
 `details.season` is the season the request resolved (requested or default),
 `details.published_season` the published season it was resolved against, and
 `details.stream` the first unavailable stream. A requested `2026-27` with no
-readable Publication -- before its first activation, for example -- is this
-`503`, never an empty Backtest.
+readable Publication or serving candidate -- before its first composition, for
+example -- is this `503`, never an empty Backtest.
 
 Every successful Backtest body also carries `published_season`, the season
 `season` was resolved against, so a client can tell a read of the published

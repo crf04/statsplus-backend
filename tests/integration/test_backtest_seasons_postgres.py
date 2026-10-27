@@ -139,3 +139,29 @@ def test_a_revocation_after_the_check_never_serves_an_unchecked_entry_on_postgre
         "published_season": seasons.NEW,
         "stream": "player_game_logs",
     }
+
+
+def test_a_2026_27_backtest_reads_its_held_candidates_keyed_by_them_on_postgres(world):
+    """crf04/statsplus-backend#625: the Unpublished Season read and its cache key."""
+
+    target = world.saved_target()
+    seasons._hold_new_season(world)
+    service = world.backtests(redis_client=seasons.bt.FakeRedis())
+
+    first, first_state = service.backtest(seasons.OWNER, target["id"], season=seasons.NEW)
+    again, again_state = service.backtest(seasons.OWNER, target["id"], season=seasons.NEW)
+    world.compose(
+        "player_game_logs",
+        seasons.NEW,
+        {"rows": seasons._season_logs(seasons.NEW, okc_games=2)},
+        hold=True,
+    )
+    newer, newer_state = service.backtest(seasons.OWNER, target["id"], season=seasons.NEW)
+    world.checks.withdrawn.add("synergy_play_types")
+
+    with pytest.raises(SeasonUnavailableError, match="2026-27.*synergy_play_types"):
+        service.backtest(seasons.OWNER, target["id"], season=seasons.NEW)
+    assert (first_state, again_state, newer_state) == ("miss", "hit", "miss")
+    assert again == first
+    seasons._assert_held_2026_27(first)
+    seasons._assert_held_2026_27(newer, okc_games=2)

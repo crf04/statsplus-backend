@@ -1231,22 +1231,12 @@ class UserService:
             if self.player_logs is None:
                 raise InvalidConfigurationError("Target defender validation is unavailable.")
             choice = self.backtest_seasons.resolve(season)
-            # The game logs the Backtest itself reads: the season's retained
-            # Publication unless the live pointer names that season.
             require_defender_fielded(
                 self.player_logs,
                 conditions["defender"],
                 opponent,
                 choice.season,
-                publication_snapshot=(
-                    self.backtest_seasons.retained_snapshot(
-                        choice,
-                        ("player_game_logs",),
-                        projection_only_keys=frozenset({"player_game_logs"}),
-                    )
-                    if choice.retained
-                    else None
-                ),
+                publication_snapshot=self.backtest_seasons.defender_game_logs(choice),
             )
         return conditions
 
