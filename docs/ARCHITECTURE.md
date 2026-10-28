@@ -4844,6 +4844,8 @@ beat (every 5 min, its own Railway cron service: scripts/collect_odds.py)
     change, plus every closing snapshot) + sportsbook_prop_latest
 Matchup read (only when ODDS_API_ENABLED): MatchupService._book_lines →
   SportsbookQuoteReader (savepoint)
+Board read (only when ODDS_API_ENABLED): SlateBoardService →
+  SportsbookQuoteReader.latest_quotes (every slate game, one statement)
 ```
 
 Schedule: polling starts 13 hours before tip (an empty response costs
