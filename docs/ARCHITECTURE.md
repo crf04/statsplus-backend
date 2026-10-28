@@ -2472,10 +2472,12 @@ through the caller's stored-only reader, never the live one `get_matchup`
 would consult, so a pre-tip game with a stale stored override cannot start a
 synchronous provider refresh -- let alone a write -- inside this GET.
 `SnapshotMatchups` also owns a per-request `MatchupComposeCache`: the two
-league-wide Defense Sheet windows (keyed by `season, window_games, as_of`) and
-the league-wide Diet baseline population (keyed by the snapshot's immutable
-generation) are identical across every game the one captured snapshot composes,
-so they are read or built once per resolve rather than once per game. A
+league-wide Defense Sheet windows (keyed by the snapshot's immutable generation
+and `season, window_games, as_of`) and the league-wide Diet baseline population
+(keyed by the generation) are identical across every game that reads one
+generation, so they are read or built once per resolve rather than once per
+game. Past games of an Unpublished Season each read their own generation, as
+of their tip, so they never share one another's window. A
 deployment missing any of the three gating collaborators keeps calling
 `MatchupService.get_matchup` once per game, live injuries included, unchanged.
 
@@ -3786,7 +3788,16 @@ when a `season` argument narrows what may be deleted. The method returns a
 `PruneResult` with `deleted` and `kept` (the maintenance command prints both as
 `publications_pruned` and `publications_kept`), where `kept` counts survivors by the
 first matching reason (`active`, `previous`, `candidate`, `season_latest`,
-`cutover_restore`). Pruning takes the pointer row locks first, in stream
+`cutover_restore`, `as_of`). `as_of` keeps a superseded version of any
+stream in a season after the stream's active one, unless every activation of
+it was withdrawn (`publication_withdrawn`: a reverted cutover or same-season
+rollback revoked its history): an Unpublished Season read of a past game
+serves the newest such version cut before that game tipped
+(crf04/statsplus-backend#626). It keeps every such version cut in the last 14
+days and, before that, only the newest version of each stream and season in
+each ISO week of the US/Eastern cutoff date (a candidate counts as that week's
+newest), so a game older than 14 days reads the newest kept version cut before
+its tip. Pruning takes the pointer row locks first, in stream
 order, then touches versions, the same stream, pointer, version order as every
 other writer, so it waits for a concurrent rollback (or makes it wait) and
 cannot delete a target the rollback is reading. History rows carry no foreign

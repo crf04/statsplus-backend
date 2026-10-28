@@ -86,6 +86,7 @@ from app.services.request_reads import request_read_scope
 from app.services.research_season import (
     event_season,
     focal_game_read,
+    game_capture,
     published_capture,
     refuse_evidence_after_game,
     research_season,
@@ -286,10 +287,12 @@ _OWN = object()
 class MatchupComposeCache:
     """Per-request memo for per-game work that repeats within one generation.
 
-    A Defense Sheet window depends only on ``(season, window_games, as_of)``,
-    and a Diet baseline population depends only on the Publication generation
-    -- neither depends on which game or which players a particular Matchup
-    composition names. A caller composing many Matchups from one snapshot
+    A Defense Sheet window depends only on the Publication generation and
+    ``(season, window_games, as_of)``, and a Diet baseline population only on
+    the generation -- neither depends on which game or which players a
+    particular Matchup composition names.  Both are keyed by the generation,
+    since past games of one request may read different ones
+    (``MatchupService.game_snapshot``).  A caller composing many Matchups
     (Target resolution, #245) shares one cache instance across every
     ``get_matchup_from_snapshot`` call instead of re-reading the same
     league-wide window or rebuilding the same league-wide baselines once per
@@ -297,7 +300,9 @@ class MatchupComposeCache:
     requests, so it needs no invalidation.
     """
 
-    windows: dict[tuple[str, int | None, date | None], TeamMatchupWindow | None] = field(default_factory=dict)
+    windows: dict[tuple[Any, str, int | None, date | None], TeamMatchupWindow | None] = field(
+        default_factory=dict
+    )
     diet_baselines: dict[Any, dict[tuple[str, str], Any]] = field(default_factory=dict)
 
 
@@ -677,6 +682,13 @@ class MatchupService:
 
         return assume_utc(self._clock())
 
+    def game_snapshot(
+        self, publication_snapshot: Any, scheduled_at: str, *, session: Session | None = None
+    ) -> Any:
+        """``publication_snapshot`` as the game scheduled at ``scheduled_at`` reads it (``game_capture``)."""
+
+        return game_capture(self.publication_reader, publication_snapshot, scheduled_at, session=session)
+
     def stats_freshness_block(self, season: str) -> dict[str, Any]:
         """``freshness.stats`` as a compose reports it, without composing."""
 
@@ -1029,6 +1041,12 @@ class MatchupService:
         schedule_season = event_season(self.settings, game_id, season)
         observed_at = assume_utc(self._clock())
         event = self._event(schedule_season, game_id, connection=connection)
+        scheduled_at = parse_utc_iso(str(event["scheduled_at"]))
+        publication_snapshot = game_capture(
+            self.publication_reader, publication_snapshot, event["scheduled_at"], session=session
+        )
+        # A game read as of its tip finds its own box score only in the newest capture.
+        latest = getattr(publication_snapshot, "latest", None)
         schedule_freshness = self._schedule_freshness(
             schedule_season, observed_at=observed_at, connection=connection
         )
@@ -1063,9 +1081,11 @@ class MatchupService:
                 game_id,
                 team_ids,
                 evidence_season=season,
-                publication_snapshot=publication_snapshot,
+                publication_snapshot=latest or publication_snapshot,
                 connection=connection,
             )
+            if latest is not None and players:
+                retained_reads = (*retained_reads, latest.read("player_game_logs"))
         else:
             # A matched Out entry removes a targetable player; a game-log
             # participant already played, so injuries never remove one.
@@ -1113,7 +1133,6 @@ class MatchupService:
         )
 
         slate_date = self._event_date(event)
-        scheduled_at = parse_utc_iso(str(event["scheduled_at"]))
         team_as_of = slate_date if scheduled_at <= observed_at else None
         windows, metric_indexes = self._defense_windows(
             season,
@@ -1587,22 +1606,27 @@ class MatchupService:
         as_of: date | None,
         publication_snapshot=None,
         connection: Connection | None = None,
-        cache: dict[tuple[str, int | None, date | None], TeamMatchupWindow | None] | None = None,
+        cache: dict[tuple[Any, str, int | None, date | None], TeamMatchupWindow | None] | None = None,
     ) -> TeamMatchupWindow | None:
         """Read one Defense Sheet window.
 
         This is the shared window: `league` and `teams` display it, and #47
         made it the Matchup Score input too, in every mode. ``cache`` is an
-        optional per-request memo keyed by ``(season, window_games, as_of)``:
-        a caller composing several games from one Publication generation may
-        pass the same dict to every call, so the second game sharing a window
-        does not read it again.
+        optional per-request memo keyed by the snapshot's generation and
+        ``(season, window_games, as_of)``: a caller composing several games
+        may pass the same dict to every call, so the second game sharing a
+        window does not read it again.
         """
 
         if self.team_matchups is None:
             return None
         if cache is not None:
-            key = (season, window_games, as_of)
+            key = (
+                getattr(publication_snapshot, "generation", publication_snapshot),
+                season,
+                window_games,
+                as_of,
+            )
             if key in cache:
                 return cache[key]
         window = call_with_read_scope(

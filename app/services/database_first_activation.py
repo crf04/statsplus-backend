@@ -22,7 +22,7 @@ from math import isfinite
 from threading import Lock
 from typing import Any, NamedTuple, Protocol
 
-from sqlalchemy import case, distinct, exists, false, func, null, select
+from sqlalchemy import and_, case, distinct, exists, false, func, null, or_, select
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, aliased, defer, sessionmaker
@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session, aliased, defer, sessionmaker
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.publication_integrity import publication_payload_matches_checksum
 from app.domain.rebound_types import REBOUND_TYPE_WIRE_NAMES, REBOUND_TYPES_BASE
+from app.domain.slate_time import slate_date_for_instant
 from app.domain.team_matchup_taxonomy import (
     PLAY_TYPES,
     SHOT_TYPE_SLICES,
@@ -48,6 +49,7 @@ from app.services.collection_control import (
     ControlPlaneError,
     PublicationService,
     coupled_left_behind,
+    publication_withdrawn,
 )
 from app.services.ledger_derivations import ASSIST_DERIVED_METRICS
 from app.services.publication_authority import verify_publication_authority
@@ -969,6 +971,15 @@ class _SnapshotRow(NamedTuple):
     game_log_season: str | None = None
 
 
+class _CaptureShape(NamedTuple):
+    """How an Unpublished Season capture read each stream, to take it again as of a game."""
+
+    projection_only_keys: frozenset[str]
+    decoded_only_keys: frozenset[str]
+    label_only_keys: frozenset[str]
+    require_active: bool
+
+
 @dataclass(frozen=True, slots=True)
 class PublicationReadSnapshot:
     """One request-scoped publication generation.
@@ -994,6 +1005,13 @@ class PublicationReadSnapshot:
     #: An explicit selection only: the games per team (``TeamGames``) in each
     #: season a trailing read serves, the sample its ``trailing`` entry names.
     team_games: Mapping[str, Any] = dataclass_field(default_factory=dict)
+    #: Unpublished only: the read shape, so ``snapshot_as_of`` can capture again.
+    shape: _CaptureShape | None = None
+    #: Set by ``snapshot_as_of``: the tip time of the game this capture reads
+    #: as of, and the newest capture it was taken from, which still holds the
+    #: game's own record.
+    as_of: datetime | None = None
+    latest: PublicationReadSnapshot | None = None
 
     def read(self, stream_key: str) -> PublicationRead:
         return self.reads.get(
@@ -1154,8 +1172,9 @@ class DatabaseFirstPublicationReader:
     #: ``snapshot`` accepts ``season=ReadSeason(...)``.
     captures_published_season = True
 
-    #: Candidate judgements kept per process; each names an immutable row.
-    _CANDIDATE_CHECKS_KEPT = 64
+    #: Candidate judgements kept per process; each names an immutable row.  A
+    #: past game's read judges each stream's versions before it as well.
+    _CANDIDATE_CHECKS_KEPT = 1024
 
     #: A Diet or team-window stream's decoded facts stay valid for as long as
     #: the immutable publication row they name exists, so only the number of versions kept
@@ -1849,15 +1868,22 @@ class DatabaseFirstPublicationReader:
                 )
             if self._selected_season is None:
                 return captured
-            trailing_seasons = {
-                read.season for read in captured.reads.values() if read.status == PRIOR_SEASON_STATUS
-            }
-            return replace(
-                captured,
-                team_games={
-                    served: self._season_team_games(session, served) for served in sorted(trailing_seasons)
-                },
-            )
+            return self._with_team_games(session, captured)
+
+    def _with_team_games(
+        self, session: Session, captured: PublicationReadSnapshot
+    ) -> PublicationReadSnapshot:
+        """``captured`` with the games per team in each season its trailing reads serve."""
+
+        trailing_seasons = {
+            read.season for read in captured.reads.values() if read.status == PRIOR_SEASON_STATUS
+        }
+        return replace(
+            captured,
+            team_games={
+                served: self._season_team_games(session, served) for served in sorted(trailing_seasons)
+            },
+        )
 
     def _season_team_games(self, session: Session, season: str) -> TeamGames:
         """The games per team in ``season``'s game logs: its live Publication, else its retained one."""
@@ -1896,6 +1922,7 @@ class DatabaseFirstPublicationReader:
         decoded_only_keys: frozenset[str],
         label_only_keys: frozenset[str],
         session: Session,
+        as_of: datetime | None = None,
     ) -> PublicationReadSnapshot:
         """Read the next season as if its Season Cutover had just run.
 
@@ -1912,6 +1939,11 @@ class DatabaseFirstPublicationReader:
         also trails until its first window of ``season`` serves.  Cross-stream manifest
         equality is not required: live reads do not require it either.
         ``SeasonUnavailable`` when the game logs cannot move.
+
+        ``as_of`` reads each stream as of a game that tipped then
+        (``_unpublished_versions``); game logs with no version before it read
+        ``window_not_ready``, as any stream that does not trail does after a
+        cutover that had nothing to move.
         """
 
         requested = set(str(key) for key in stream_keys)
@@ -1919,9 +1951,116 @@ class DatabaseFirstPublicationReader:
         if _PLAYER_LOGS not in requested:
             projection_keys.add(_PLAYER_LOGS)
         keys = tuple(sorted(requested | {_PLAYER_LOGS}))
-        judged = set(keys).union(
-            *(family for family in COUPLED_PUBLICATION_STREAM_FAMILIES if set(family) & set(keys))
+        live, serving, held_back = self._unpublished_versions(session, keys, season=season, as_of=as_of)
+        if _PLAYER_LOGS not in serving and as_of is None:
+            raise SeasonUnavailable(season, published_season=published_season)
+        logs_projected = _PLAYER_LOGS in serving and bool(
+            session.scalar(
+                select(
+                    exists().where(
+                        PublicationPlayerGameLog.publication_id == serving[_PLAYER_LOGS].publication_id
+                    )
+                )
+            )
         )
+        now = _utc(self.clock())
+        reads = {
+            key: self._unpublished_read(
+                key,
+                live=live,
+                serving=serving,
+                projection_ready=key == _PLAYER_LOGS and logs_projected,
+                hydrate_payload=key not in projection_keys,
+                decoded_only=key in decoded_only_keys,
+                labels_only=key in label_only_keys,
+                season=season,
+                require_active=require_active,
+                now=now,
+                session=session,
+            )
+            for key in keys
+        }
+        return PublicationReadSnapshot(
+            season=season,
+            reads=reads,
+            generation=tuple(
+                (key, read.publication_id, read.fence, read.version) for key, read in sorted(reads.items())
+            ),
+            mode=SeasonMode.UNPUBLISHED,
+            published_season=published_season,
+            held_back=held_back,
+            shape=_CaptureShape(
+                frozenset(projection_keys),
+                frozenset(decoded_only_keys),
+                frozenset(label_only_keys),
+                require_active,
+            ),
+            as_of=as_of,
+        )
+
+    def snapshot_as_of(
+        self,
+        snapshot: PublicationReadSnapshot,
+        tip: datetime,
+        *,
+        session: Session | None = None,
+    ) -> PublicationReadSnapshot:
+        """``snapshot`` as a game that tipped at ``tip`` reads it (crf04/statsplus-backend#626).
+
+        An Unpublished Season capture serves each stream's newest candidate,
+        which may be cut after a game of an earlier slate day.  Such a game
+        reads every stream as ``_unpublished_versions`` chooses as of its tip,
+        in a capture of the same streams and shape whose ``latest`` is the
+        newest one.  A game of today or later, and any other capture, reads
+        ``snapshot`` itself.  ``session`` keeps the read on the request's own.
+        """
+
+        if snapshot.as_of == tip:
+            return snapshot
+        latest = snapshot.latest or snapshot
+        today = slate_date_for_instant(_utc(self.clock()))
+        if (
+            latest.mode is not SeasonMode.UNPUBLISHED
+            or latest.shape is None
+            or slate_date_for_instant(_utc(tip)) >= today
+        ):
+            return latest
+        with ExitStack() as stack:
+            if session is None:
+                session = self._consistent_session(stack)
+            captured = self._unpublished_snapshot(
+                latest.reads,
+                season=latest.season,
+                published_season=latest.published_season,
+                require_active=latest.shape.require_active,
+                projection_only_keys=latest.shape.projection_only_keys,
+                decoded_only_keys=latest.shape.decoded_only_keys,
+                label_only_keys=latest.shape.label_only_keys,
+                session=session,
+                as_of=_utc(tip),
+            )
+            return replace(self._with_team_games(session, captured), latest=latest)
+
+    def _unpublished_versions(
+        self, session: Session, keys: Iterable[str], *, season: str, as_of: datetime | None = None
+    ) -> tuple[dict[str, tuple[Any, Any, Any]], dict[str, PublicationVersion], dict[str, str | None]]:
+        """Which version of ``season`` each stream of an Unpublished Season read serves.
+
+        ``(live, serving, held_back)``: each judged stream's live
+        ``(stream, pointer, publication)``, the version each moving stream
+        serves, and why each other judged stream serves none.  The judged
+        streams are ``keys`` and their coupled family members.  An enabled
+        stream whose live publication is of another season moves to the
+        newest of its versions of ``season`` (by cutoff, then version) that the
+        cutover's checks pass.  With no ``as_of`` that is its held candidate
+        alone, exactly the version ``cutover_season`` would move.  As of a
+        game's tip it is any candidate, or superseded version never withdrawn
+        (``publication_withdrawn``), cut before the tip.  A coupled family
+        moves as a unit.
+        """
+
+        keys = set(keys)
+        judged = keys.union(*(family for family in COUPLED_PUBLICATION_STREAM_FAMILIES if set(family) & keys))
         live = {
             stream.stream_key: (stream, pointer, publication)
             for stream, pointer, publication in session.execute(
@@ -1935,13 +2074,22 @@ class DatabaseFirstPublicationReader:
                 .options(defer(PublicationVersion.payload))
             ).all()
         }
-        held: dict[str, PublicationVersion] = {}
-        for candidate in session.scalars(
+        servable = PublicationVersion.status == "candidate"
+        if as_of is not None:
+            servable = or_(
+                servable,
+                and_(
+                    PublicationVersion.status == "superseded",
+                    ~publication_withdrawn(PublicationVersion.publication_id),
+                ),
+            )
+        versions: dict[str, list[PublicationVersion]] = {}
+        for version in session.scalars(
             select(PublicationVersion)
             .where(
                 PublicationVersion.stream_key.in_(sorted(judged)),
                 PublicationVersion.season == season,
-                PublicationVersion.status == "candidate",
+                servable,
             )
             .order_by(
                 PublicationVersion.stream_key,
@@ -1950,79 +2098,70 @@ class DatabaseFirstPublicationReader:
             )
             .options(defer(PublicationVersion.payload))
         ):
-            held.setdefault(candidate.stream_key, candidate)
+            if as_of is None and version.stream_key in versions:
+                continue
+            if as_of is not None and _utc(version.cutoff) >= as_of:
+                continue
+            versions.setdefault(version.stream_key, []).append(version)
         moving = {
-            key: (stream, held[key])
+            key: stream
             for key, (stream, _pointer, current) in live.items()
-            if key in held and bool(stream.enabled) and current is not None and current.season != season
+            if key in versions and bool(stream.enabled) and current is not None and current.season != season
         }
-        refused = {
-            key: reason
-            for key, (stream, candidate) in sorted(moving.items())
-            if (reason := self._candidate_refusal(session, stream, candidate, season=season)) is not None
-        }
+        chosen: dict[str, PublicationVersion] = {}
+        refused: dict[str, str] = {}
+        for key, stream in sorted(moving.items()):
+            reasons = []
+            for version in versions[key]:
+                reason = self._candidate_refusal(session, stream, version, season=season)
+                if reason is None:
+                    chosen[key] = version
+                    break
+                reasons.append(reason)
+            if key not in chosen:
+                refused[key] = reasons[0]
         left_behind = coupled_left_behind(moving, refused)
-        serving = {key: candidate for key, (_stream, candidate) in moving.items() if key not in left_behind}
+        serving = {key: version for key, version in chosen.items() if key not in left_behind}
         held_back = {
             key: _held_back_reason(key, refused.get(key), held=key in moving)
             for key in judged
             if key not in serving
         }
-        if _PLAYER_LOGS not in serving:
-            raise SeasonUnavailable(season, published_season=published_season)
-        logs_projected = bool(
-            session.scalar(
-                select(
-                    exists().where(
-                        PublicationPlayerGameLog.publication_id == serving[_PLAYER_LOGS].publication_id
-                    )
-                )
+        return live, serving, held_back
+
+    def _unpublished_read(
+        self,
+        key: str,
+        *,
+        live: Mapping[str, tuple[Any, Any, Any]],
+        serving: Mapping[str, PublicationVersion],
+        projection_ready: bool = False,
+        **shape: Any,
+    ) -> PublicationRead:
+        """``key``'s read in an Unpublished Season: its serving version, else its live publication."""
+
+        stream, pointer, current = live.get(key, (None, None, None))
+        if key in serving:
+            version = serving[key]
+            return self._read_row(
+                key,
+                stream=stream,
+                pointer=_RetainedPointer(
+                    fence=int(version.fence or 0), active_publication_id=version.publication_id
+                ),
+                publication=version,
+                projection_ready=projection_ready,
+                candidate=True,
+                **shape,
             )
-        )
-        now = _utc(self.clock())
-        reads = {}
-        for key in keys:
-            stream, pointer, current = live.get(key, (None, None, None))
-            shape = {
-                "stream": stream,
-                "hydrate_payload": key not in projection_keys,
-                "decoded_only": key in decoded_only_keys,
-                "labels_only": key in label_only_keys,
-                "season": season,
-                "require_active": require_active,
-                "now": now,
-                "session": session,
-            }
-            if key in serving:
-                candidate = serving[key]
-                reads[key] = self._read_row(
-                    key,
-                    pointer=_RetainedPointer(
-                        fence=int(candidate.fence or 0), active_publication_id=candidate.publication_id
-                    ),
-                    publication=candidate,
-                    projection_ready=key == _PLAYER_LOGS and logs_projected,
-                    candidate=True,
-                    **shape,
-                )
-            else:
-                reads[key] = self._read_row(
-                    key,
-                    pointer=pointer,
-                    publication=current,
-                    prior_season_served=True,
-                    unpublished=True,
-                    **shape,
-                )
-        return PublicationReadSnapshot(
-            season=season,
-            reads=reads,
-            generation=tuple(
-                (key, read.publication_id, read.fence, read.version) for key, read in sorted(reads.items())
-            ),
-            mode=SeasonMode.UNPUBLISHED,
-            published_season=published_season,
-            held_back=held_back,
+        return self._read_row(
+            key,
+            stream=stream,
+            pointer=pointer,
+            publication=current,
+            prior_season_served=True,
+            unpublished=True,
+            **shape,
         )
 
     def _candidate_refusal(

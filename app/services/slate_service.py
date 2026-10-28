@@ -35,6 +35,7 @@ from app.errors import (
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_pool import PlayerPool, PlayerPoolReader, PoolPlayer
 from app.services.research_season import (
+    game_capture,
     refuse_evidence_after_game,
     schedule_season,
     season_context,
@@ -45,7 +46,7 @@ from app.services.response_provenance import (
     least_fresh,
     provenance_block,
 )
-from app.services.serving_season import snapshot_trailing
+from app.services.serving_season import merge_trailing, snapshot_trailing
 from app.services.slate_fallback import read_slate
 from app.services.slate_neighbors import neighbouring_game_dates
 
@@ -249,8 +250,16 @@ class SlateService:
                     "injuries": injury_freshness,
                 },
             ),
-            # The families its games' Matchups read from their previous season.
-            "trailing": snapshot_trailing(evidence) if games and evidence is not None else [],
+            # The families its games' Matchups read from their previous season,
+            # each game's as of its own tip.
+            "trailing": (
+                merge_trailing(
+                    snapshot_trailing(game_capture(self.publication_reader, evidence, tip))
+                    for tip in sorted({game["scheduled_at"] for game in games})
+                )
+                if games and evidence is not None
+                else []
+            ),
         }
 
     def game_slate_date(self, game_id: str) -> str:
