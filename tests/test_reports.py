@@ -2569,3 +2569,47 @@ def test_a_word_wider_than_the_preview_is_cut_inside_the_margin(client, signed_i
         return image.crop((image.width - MARGIN + 1, 200, image.width, 560)).tobytes()
 
     assert right_margin("W" * 120) == right_margin("W")
+
+
+def test_a_cut_word_still_fills_the_line_up_to_the_margin(client, signed_in):
+    from app.services.preview_card import MARGIN
+
+    def line_end(text_):
+        image = _preview_image(client, signed_in, [{"id": "p", "type": "paragraph", "text": text_}])
+        # The lede's first line, under a one-line title, just inside the right margin.
+        return image.crop((image.width - MARGIN - 200, 262, image.width - MARGIN, 300)).tobytes()
+
+    assert line_end("W" * 120) != line_end("W")
+
+
+def test_an_untagged_spot_row_has_no_chip_and_items_rows_draw_like_spot_rows(client, signed_in):
+    from app.services import report_preview
+
+    untagged = _preview_image(client, signed_in, [{"id": "a", "type": "spot", "title": "Hachimura rebounds"}])
+    top = report_preview._ROWS_TOP
+    chip = untagged.crop(
+        (
+            report_preview.MARGIN + 24,
+            top + 16,
+            report_preview.MARGIN + 150,
+            top + report_preview._ROW_HEIGHT - 16,
+        )
+    )
+    assert chip.getcolors() == [(chip.width * chip.height, report_preview.SURFACE)]
+
+    spot = _preview_image(
+        client, signed_in, [{"id": "a", "type": "spot", "tag": "thin", "title": "Hachimura rebounds"}]
+    )
+    items = _preview_image(
+        client,
+        signed_in,
+        [
+            {
+                "id": "a",
+                "type": "items",
+                "layout": "rows",
+                "items": [{"title": "Hachimura rebounds", "tag": "thin"}],
+            }
+        ],
+    )
+    assert _preview_row(items, 0) == _preview_row(spot, 0)
