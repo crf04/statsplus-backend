@@ -442,6 +442,22 @@ class ConflictError(AppError):
         return self._public_details
 
 
+class FlatBodyError(AppError):
+    """A refusal whose route contract is a flat body (crf04/statsplus#372).
+
+    The Research feed contract names these refusals as ``{"error": "<code>"}``
+    plus fields of their own (``{"error": "removed", "by": "author"}``), not the
+    standard ``error`` object; the central handler answers
+    ``{"error": code, "message": message, **fields}``.
+    """
+
+    def __init__(self, status_code: int, code: str, message: str, **fields: Any) -> None:
+        self.status_code = status_code  # type: ignore[misc]
+        self.code = code  # type: ignore[misc]
+        self.fields = fields
+        super().__init__(message)
+
+
 class SelectedSeasonUnavailableError(AppError):
     """An explicitly selected season is not offered (crf04/statsplus#330).
 
@@ -633,6 +649,11 @@ def register_error_handlers(app: Flask) -> None:
         if error.code != "provider_unavailable":
             record_application_failure(error.code)
 
+        if isinstance(error, FlatBodyError):
+            return (
+                jsonify({"error": error.code, "message": error.public_message, **error.fields}),
+                error.status_code,
+            )
         response = _error_response(
             error.code,
             error.public_message,

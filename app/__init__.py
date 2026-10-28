@@ -214,7 +214,7 @@ def _register_blueprints(app: Flask) -> None:
     from app.routes.nl_routes import nl_bp
     from app.routes.on_off_routes import on_off_bp
     from app.routes.player_routes import player_bp
-    from app.routes.report_routes import report_bp
+    from app.routes.report_routes import report_bp, research_bp
     from app.routes.team_routes import team_bp
     from app.routes.usage_routes import usage_bp
     from app.routes.user_routes import user_bp
@@ -237,6 +237,7 @@ def _register_blueprints(app: Flask) -> None:
     app.register_blueprint(admin_bp, url_prefix="/api/admin")
     app.register_blueprint(usage_bp, url_prefix="/api/usage")
     app.register_blueprint(report_bp, url_prefix="/api/reports")
+    app.register_blueprint(research_bp, url_prefix="/api/research")
 
 
 def _register_rate_limiting(app: Flask) -> None:
