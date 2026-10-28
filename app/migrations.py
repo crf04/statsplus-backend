@@ -2269,6 +2269,47 @@ def downgrade_research_feed(connection: Connection) -> None:
     connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 80))
 
 
+_REPORT_EDITS_COLUMNS = ("notes", "edited_at", "edits")
+
+
+def _add_report_edits(connection: Connection) -> None:
+    """Author edits of a published report (crf04/statsplus#377).
+
+    Adds the nullable ``reports.notes``, ``edited_at`` and ``edits``, so every
+    existing report reads as published, with no notes and never edited.  The
+    published ``document`` and ``calls`` are left alone.  Rerun-safe: a column
+    is added only when missing, and a fresh database already has all three
+    from the model-created table.
+    """
+    from app.models.report import Report
+
+    Report.__table__.create(connection, checkfirst=True)
+    existing = {column["name"] for column in inspect(connection).get_columns("reports")}
+    for name in _REPORT_EDITS_COLUMNS:
+        if name not in existing:
+            column = Report.__table__.c[name]
+            connection.execute(
+                text(
+                    f"ALTER TABLE reports ADD COLUMN {name} {column.type.compile(dialect=connection.dialect)}"
+                )
+            )
+
+
+def downgrade_report_edits(connection: Connection) -> None:
+    """Reverse ``081_report_edits``; also forgets its migration record.
+
+    Migrations here are forward-only at runtime.  This exists so the change is
+    provably reversible: it drops only the three columns, which loses saved
+    edits and notes but never a published report.
+    """
+    if inspect(connection).has_table("reports"):
+        existing = {column["name"] for column in inspect(connection).get_columns("reports")}
+        for name in _REPORT_EDITS_COLUMNS:
+            if name in existing:
+                connection.execute(text(f"ALTER TABLE reports DROP COLUMN {name}"))
+    connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 81))
+
+
 def _rebuild_sqlite_target_qualifiers(connection: Connection) -> None:
     """Rebuild ``target_qualifiers`` on SQLite so its Diet columns may be null.
 
@@ -3360,6 +3401,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(78, "078_player_game_tracking", _create_player_game_tracking_table),
     Migration(79, "079_position_qualifiers", _add_position_qualifiers),
     Migration(80, "080_research_feed", _add_research_feed),
+    Migration(81, "081_report_edits", _add_report_edits),
 )
 
 

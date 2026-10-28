@@ -470,6 +470,8 @@ def test_the_report_reads_anonymously_in_the_contract_shape(client, signed_in):
         "document",
         "calls",
         "cards",
+        "notes",
+        "edited_at",
     }
     assert report["id"] == report_id
     assert report["author"] is None
@@ -1195,7 +1197,14 @@ def test_covers_names_each_game_by_tricodes_and_each_player_once_in_call_order(
     ]
     body["cards"] = {"game-logs": "<html>logs</html>"}
     body["report"]["tabs"] = [
-        {"title": "Spots", "layout": "list", "items": [{"title": "Spot", "cards": ["c1"]}]}
+        {
+            "title": "Spots",
+            "layout": "list",
+            "items": [
+                {"title": "Spot", "cards": ["c1", "c2", "c3", "c4", "c5"]},
+                {"title": "More", "cards": ["c6", "c7", "c8", "c9"]},
+            ],
+        }
     ]
     _seed_listed(reports, clock, OWNER, 1, body=body)
 
@@ -1283,3 +1292,456 @@ def test_featuring_is_admin_only_and_an_unlisted_report_is_a_conflict(client, si
         headers=signed_in(ADMIN, admin=True),
     )
     assert bad_body.status_code == 400
+
+
+# --- Edits: notes, title and card overrides (crf04/statsplus#377) ----------------------------
+
+NOTES_LINKS = {"error": "notes_links", "message": "Notes can't contain links."}
+NOTES_TOO_LONG = {"error": "notes_too_long", "message": "Notes are at most 2,000 characters."}
+
+
+def _edit(client, headers, report_id, body):
+    return client.put(f"/api/user/reports/{report_id}/edits", json=body, headers=headers)
+
+
+def _edits(title="Brunson without Randle", notes=None, items=()):
+    return {"title": title, "notes": notes, "items": list(items)}
+
+
+def _read(client, report_id, headers=None):
+    response = client.get(f"/api/reports/{report_id}", headers=headers or {})
+    assert response.status_code == 200, response.get_json()
+    return response.get_json()["report"]
+
+
+def _three_spots_body():
+    """One tab of three tagged items, each with its own player's cards."""
+
+    def call(call_id, player, card="game-logs"):
+        return {**_call(call_id, card=card), "args": {"player": player}}
+
+    body = _body()
+    body["calls"] = [
+        call("brunson", "Jalen Brunson"),
+        call("hart", "Josh Hart"),
+        call("hart-matchup", "Josh Hart", card="matchup"),
+        call("tatum", "Jayson Tatum"),
+    ]
+    body["report"]["tabs"] = [
+        {
+            "title": "Spots",
+            "layout": "rows",
+            "items": [
+                {"title": "Brunson points", "tag": "strong", "cards": ["brunson"]},
+                {"title": "Hart rebounds", "tag": "lean", "cards": ["hart", "hart-matchup"]},
+                {"title": "Tatum threes", "tag": "thin", "cards": ["tatum"]},
+            ],
+        }
+    ]
+    return body
+
+
+def test_published_notes_read_back_as_given_and_an_unedited_report_has_no_edit_fields(client, signed_in):
+    notes = "My take: Brunson's usage climbs <b>without</b> Randle.\n\nSecond paragraph."
+    report_id = _published_id(client, signed_in(), {**_body(), "notes": notes})
+
+    reader = _read(client, report_id)
+
+    assert (reader["notes"], reader["edited_at"]) == (notes, None)
+    assert "original" not in reader and "edits" not in reader
+    assert _read(client, _published_id(client, signed_in()))["notes"] is None
+
+
+@pytest.mark.parametrize(
+    ("notes", "status", "answer"),
+    [
+        ("x" * 2001, 400, NOTES_TOO_LONG),
+        ("Read https://example.com first", 400, NOTES_LINKS),
+        ("plain http://example.com", 400, NOTES_LINKS),
+        ("Try WWW.example.com", 400, NOTES_LINKS),
+        (12, 400, {"error": {"code": "invalid_input", "message": "notes must be a string."}}),
+    ],
+)
+def test_notes_with_a_link_or_over_2000_characters_are_refused_on_publish_and_edit(
+    client, signed_in, report_engine, notes, status, answer
+):
+    refused = _publish(client, signed_in(), {**_body(), "notes": notes})
+
+    assert refused.status_code == status
+    body = refused.get_json()
+    if "details" in body.get("error", {}):
+        body["error"].pop("details")
+    assert body == answer
+    assert _report_count(report_engine) == 0
+
+    report_id = _published_id(client, signed_in())
+    refused_edit = _edit(client, signed_in(), report_id, _edits(notes=notes))
+    assert refused_edit.status_code == status
+    assert _read(client, report_id)["edited_at"] is None
+
+
+def test_notes_of_exactly_2000_characters_and_text_naming_www_without_the_dot_are_accepted(client, signed_in):
+    notes = "w" * 1990 + " www word"
+    report_id = _published_id(client, signed_in(), {**_body(), "notes": notes + "x"})
+    assert _read(client, report_id)["notes"] == notes + "x"
+
+    edited = _edit(client, signed_in(), report_id, _edits(notes="a" * 2000))
+    assert edited.status_code == 200, edited.get_json()
+    assert _read(client, report_id)["notes"] == "a" * 2000
+
+
+def test_readers_get_the_edited_report_without_removed_cards_hidden_items_or_their_calls(
+    client, signed_in, clock
+):
+    report_id = _published_id(client, signed_in(), _three_spots_body())
+    clock.now = datetime(2026, 10, 29, 9, 0, tzinfo=UTC)
+
+    saved = _edit(
+        client,
+        signed_in(),
+        report_id,
+        _edits(
+            notes="Hart is the spot.",
+            items=[
+                {"tab": 0, "item": 0, "hidden": True, "cards": ["brunson"]},
+                {"tab": 0, "item": 1, "hidden": False, "cards": ["hart-matchup"]},
+            ],
+        ),
+    )
+    assert saved.status_code == 200, saved.get_json()
+
+    for headers in ({}, signed_in(OTHER)):
+        reader = _read(client, report_id, headers)
+        assert reader["document"]["title"] == "Brunson without Randle"
+        assert reader["document"]["tabs"] == [
+            {
+                "title": "Spots",
+                "layout": "rows",
+                "items": [
+                    {
+                        "title": "Hart rebounds",
+                        "tag": "lean",
+                        "body": [],
+                        "bullets": [],
+                        "cards": ["hart-matchup"],
+                        "sources": [],
+                    },
+                    {
+                        "title": "Tatum threes",
+                        "tag": "thin",
+                        "body": [],
+                        "bullets": [],
+                        "cards": ["tatum"],
+                        "sources": [],
+                    },
+                ],
+            }
+        ]
+        assert [call["id"] for call in reader["calls"]] == ["hart-matchup", "tatum"]
+        assert reader["cards"] == {"game-logs": "<html>logs</html>", "matchup": "<html>matchup</html>"}
+        assert (reader["notes"], reader["edited_at"]) == ("Hart is the spot.", "2026-10-29T09:00:01+00:00")
+        assert (reader["is_author"], "original" in reader, "edits" in reader) == (False, False, False)
+        assert "brunson" not in json.dumps(reader) and "Brunson points" not in json.dumps(reader)
+
+
+def test_a_card_template_only_removed_calls_used_is_not_sent_to_readers(client, signed_in):
+    report_id = _published_id(client, signed_in(), _three_spots_body())
+
+    _edit(
+        client,
+        signed_in(),
+        report_id,
+        _edits(items=[{"tab": 0, "item": 1, "hidden": False, "cards": ["hart"]}]),
+    )
+
+    assert _read(client, report_id)["cards"] == {"game-logs": "<html>logs</html>"}
+    assert _read(client, report_id, signed_in())["cards"] == {
+        "game-logs": "<html>logs</html>",
+        "matchup": "<html>matchup</html>",
+    }
+
+
+def test_cards_are_shown_in_the_order_the_edit_gives(client, signed_in):
+    report_id = _published_id(client, signed_in(), _three_spots_body())
+
+    _edit(
+        client,
+        signed_in(),
+        report_id,
+        _edits(items=[{"tab": 0, "item": 1, "hidden": False, "cards": ["hart-matchup", "hart"]}]),
+    )
+
+    reader = _read(client, report_id)
+    assert reader["document"]["tabs"][0]["items"][1]["cards"] == ["hart-matchup", "hart"]
+    assert [call["id"] for call in reader["calls"]] == ["brunson", "hart", "hart-matchup", "tatum"]
+
+
+def test_only_the_author_gets_the_original_and_the_stored_edits_and_save_answers_the_same(
+    client, signed_in, clock
+):
+    report_id = _published_id(client, signed_in(), _three_spots_body())
+    before = _read(client, report_id, signed_in())
+    assert before["edits"] is None
+    assert before["original"]["document"]["title"] == "Injury brief: Friday, Oct 24"
+    edits = _edits(notes="Mine.", items=[{"tab": 0, "item": 2, "hidden": True, "cards": []}])
+    clock.now = datetime(2026, 10, 29, 9, 0, tzinfo=UTC)
+
+    saved = _edit(client, signed_in(), report_id, edits)
+
+    author = _read(client, report_id, signed_in())
+    assert saved.get_json() == {"report": author}
+    assert author["is_author"] is True
+    assert author["edits"] == {
+        "title": "Brunson without Randle",
+        "notes": "Mine.",
+        "items": [{"tab": 0, "item": 2, "hidden": True, "cards": []}],
+    }
+    assert author["original"] == before["original"]
+    assert author["original"]["document"]["title"] == "Injury brief: Friday, Oct 24"
+    assert [item["title"] for item in author["original"]["document"]["tabs"][0]["items"]] == [
+        "Brunson points",
+        "Hart rebounds",
+        "Tatum threes",
+    ]
+    assert [call["id"] for call in author["original"]["calls"]] == [
+        "brunson",
+        "hart",
+        "hart-matchup",
+        "tatum",
+    ]
+    assert set(author["original"]["calls"][0]) == {"id", "tool", "card", "structured", "meta"}
+    assert [item["title"] for item in author["document"]["tabs"][0]["items"]] == [
+        "Brunson points",
+        "Hart rebounds",
+    ]
+    assert [call["id"] for call in author["calls"]] == ["brunson", "hart", "hart-matchup"]
+    for headers in ({}, signed_in(OTHER)):
+        reader = _read(client, report_id, headers)
+        assert "original" not in reader and "edits" not in reader
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        pytest.param(
+            [{"tab": 0, "item": 1, "hidden": False, "cards": ["hart", "nobody"]}], id="unknown-card"
+        ),
+        pytest.param(
+            [{"tab": 0, "item": 1, "hidden": False, "cards": ["hart", "hart"]}], id="duplicate-card"
+        ),
+        pytest.param(
+            [{"tab": 0, "item": 1, "hidden": False, "cards": ["hart", "brunson"]}], id="foreign-card"
+        ),
+        pytest.param([{"tab": 0, "item": 3, "hidden": False, "cards": []}], id="no-such-item"),
+        pytest.param([{"tab": 1, "item": 0, "hidden": False, "cards": []}], id="no-such-tab"),
+        pytest.param([{"tab": -1, "item": 0, "hidden": False, "cards": []}], id="negative-tab"),
+        pytest.param(
+            [
+                {"tab": 0, "item": 1, "hidden": False, "cards": ["hart"]},
+                {"tab": 0, "item": 1, "hidden": True, "cards": ["hart"]},
+            ],
+            id="item-twice",
+        ),
+        pytest.param([{"tab": 0, "item": 1, "hidden": "no", "cards": []}], id="hidden-not-bool"),
+        pytest.param([{"tab": True, "item": 1, "hidden": False, "cards": []}], id="tab-bool"),
+        pytest.param([{"tab": 0, "item": 1, "hidden": False}], id="cards-missing"),
+        pytest.param([{"tab": 0, "item": 1, "hidden": False, "cards": "hart"}], id="cards-not-list"),
+        pytest.param([{"tab": 0, "item": 1, "hidden": False, "cards": [], "title": "x"}], id="unknown-key"),
+        pytest.param("all", id="items-not-list"),
+    ],
+)
+def test_edits_naming_cards_outside_the_item_or_twice_or_no_such_item_are_invalid(client, signed_in, items):
+    report_id = _published_id(client, signed_in(), _three_spots_body())
+
+    refused = _edit(client, signed_in(), report_id, _edits(items=items))
+
+    assert (refused.status_code, refused.get_json()) == (
+        400,
+        {"error": "invalid_edits", "message": "The edits don't match this report's items and cards."},
+    )
+    author = _read(client, report_id, signed_in())
+    assert (author["edits"], author["edited_at"], author["document"]["title"]) == (
+        None,
+        None,
+        "Injury brief: Friday, Oct 24",
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "field"),
+    [
+        ({"notes": None, "items": []}, "title"),
+        (_edits(title="x" * 121), "title"),
+        (_edits(title="   "), "title"),
+        ({**_edits(), "listed": True}, "body"),
+        ([], "body"),
+    ],
+)
+def test_an_edit_body_with_a_bad_title_or_unknown_keys_is_invalid_input(client, signed_in, body, field):
+    report_id = _published_id(client, signed_in())
+
+    refused = _edit(client, signed_in(), report_id, body)
+
+    assert refused.status_code == 400
+    assert refused.get_json()["error"]["code"] == "invalid_input"
+    assert refused.get_json()["error"]["details"] == {"field": field}
+
+
+def test_each_save_replaces_every_earlier_edit(client, signed_in):
+    report_id = _published_id(client, signed_in(), _three_spots_body())
+    first = _edits(
+        title="First title",
+        notes="First notes.",
+        items=[
+            {"tab": 0, "item": 0, "hidden": True, "cards": ["brunson"]},
+            {"tab": 0, "item": 1, "hidden": False, "cards": ["hart"]},
+        ],
+    )
+    second = _edits(title="Second title", items=[{"tab": 0, "item": 2, "hidden": False, "cards": []}])
+    assert _edit(client, signed_in(), report_id, first).status_code == 200
+
+    assert _edit(client, signed_in(), report_id, second).status_code == 200
+
+    author = _read(client, report_id, signed_in())
+    assert author["edits"] == second
+    assert (author["document"]["title"], author["notes"]) == ("Second title", None)
+    assert [(item["title"], item["cards"]) for item in author["document"]["tabs"][0]["items"]] == [
+        ("Brunson points", ["brunson"]),
+        ("Hart rebounds", ["hart", "hart-matchup"]),
+        ("Tatum threes", []),
+    ]
+    assert [call["id"] for call in author["calls"]] == ["brunson", "hart", "hart-matchup"]
+
+
+def test_editing_sets_edited_at_and_never_moves_a_report_in_the_feed(client, signed_in, reports, clock):
+    _claim(client, signed_in(OWNER), "bighat")
+    older, newer = _seed_listed(reports, clock, OWNER, 2, body=_three_spots_body())
+    listed_at = {entry["id"]: entry["listed_at"] for entry in _feed(client)["reports"]}
+    assert listed_at == {newer: "2026-10-29T00:00:04+00:00", older: "2026-10-28T18:00:02+00:00"}
+    clock.now = datetime(2026, 10, 30, 8, 0, tzinfo=UTC)
+
+    assert _edit(client, signed_in(), older, _edits()).status_code == 200
+
+    reader = _read(client, older)
+    assert (reader["edited_at"], reader["listed"]) == ("2026-10-30T08:00:01+00:00", True)
+    feed = _feed(client)["reports"]
+    assert _ids(feed) == [newer, older]
+    assert {entry["id"]: entry["listed_at"] for entry in feed} == listed_at
+    assert client.get("/api/research/authors/bighat").get_json()["reports"][1]["listed_at"] == (
+        "2026-10-28T18:00:02+00:00"
+    )
+
+
+def test_editing_a_listed_report_recomputes_its_feed_title_and_covers(client, signed_in, reports, clock):
+    _claim(client, signed_in(OWNER), "bighat")
+    [report_id] = _seed_listed(reports, clock, OWNER, 1, body=_three_spots_body())
+    assert _feed(client)["reports"][0]["covers"] == {
+        "games": [],
+        "players": ["Jalen Brunson", "Josh Hart", "Jayson Tatum"],
+    }
+
+    _edit(
+        client,
+        signed_in(),
+        report_id,
+        _edits(
+            title="Hart only",
+            items=[
+                {"tab": 0, "item": 0, "hidden": True, "cards": ["brunson"]},
+                {"tab": 0, "item": 2, "hidden": False, "cards": []},
+            ],
+        ),
+    )
+
+    [entry] = _feed(client)["reports"]
+    assert (entry["title"], entry["covers"]) == ("Hart only", {"games": [], "players": ["Josh Hart"]})
+
+    _edit(client, signed_in(), report_id, _edits(title="Back again"))
+    [entry] = _feed(client)["reports"]
+    assert (entry["title"], entry["covers"]) == (
+        "Back again",
+        {"games": [], "players": ["Jalen Brunson", "Josh Hart", "Jayson Tatum"]},
+    )
+
+
+def test_listing_a_report_edited_while_unlisted_takes_covers_from_its_visible_cards(client, signed_in):
+    _claim(client, signed_in(OWNER), "bighat")
+    report_id = _published_id(client, signed_in(), _three_spots_body())
+    _edit(
+        client,
+        signed_in(),
+        report_id,
+        _edits(
+            title="Tatum only",
+            items=[
+                {"tab": 0, "item": 0, "hidden": True, "cards": []},
+                {"tab": 0, "item": 1, "hidden": True, "cards": []},
+            ],
+        ),
+    )
+    assert _feed(client)["reports"] == []
+
+    _list(client, signed_in(), report_id)
+
+    [entry] = _feed(client)["reports"]
+    assert (entry["title"], entry["covers"]) == ("Tatum only", {"games": [], "players": ["Jayson Tatum"]})
+
+
+def test_the_meta_and_preview_follow_the_edited_report(client, signed_in):
+    report_id = _published_id(client, signed_in(), _three_spots_body())
+    published_preview = client.get(f"/api/reports/{report_id}/preview.png").data
+    _edit(
+        client,
+        signed_in(),
+        report_id,
+        _edits(title="Hart is the spot", items=[{"tab": 0, "item": 0, "hidden": True, "cards": []}]),
+    )
+    # A report published as the edit leaves it draws the same card.
+    as_edited = _three_spots_body()
+    as_edited["report"]["title"] = "Hart is the spot"
+    del as_edited["report"]["tabs"][0]["items"][0]
+    twin_id = _published_id(client, signed_in(), as_edited)
+
+    preview = client.get(f"/api/reports/{report_id}/preview.png").data
+
+    assert preview == client.get(f"/api/reports/{twin_id}/preview.png").data
+    assert preview != published_preview
+    assert client.get(f"/api/reports/{report_id}/meta").get_json() == {
+        "id": report_id,
+        "title": "Hart is the spot",
+        "date": "2026-10-24",
+        "description": "Three games carry a real absence.",
+        "tags": {"lean": 1, "thin": 1},
+    }
+
+
+def test_only_the_signed_in_author_can_edit_a_visible_report(client, signed_in):
+    report_id = _published_id(client, signed_in(OWNER))
+    deleted_id = _published_id(client, signed_in(OWNER))
+    taken_down_id = _published_id(client, signed_in(OWNER))
+    client.delete(f"/api/user/reports/{deleted_id}", headers=signed_in(OWNER))
+    client.post(f"/api/admin/reports/{taken_down_id}/takedown", headers=signed_in(ADMIN, admin=True))
+
+    # ``signed_in`` swaps the one verified identity, so each request signs in just before it.
+    for target, uid, admin in [
+        (report_id, OTHER, False),
+        (report_id, ADMIN, True),
+        (deleted_id, OWNER, False),
+        (taken_down_id, OWNER, False),
+        ("nosuchrep1", OWNER, False),
+        ("not-an-id!", OWNER, False),
+    ]:
+        refused = _edit(client, signed_in(uid, admin=admin), target, _edits())
+        assert (refused.status_code, refused.get_json()) == (404, NOT_FOUND)
+    assert _edit(client, {}, report_id, _edits()).status_code == 401
+    assert _read(client, report_id, signed_in(OWNER))["edits"] is None
+
+
+def test_a_waitlisted_author_can_edit_and_editing_lists_nothing(client, signed_in):
+    report_id = _published_id(client, signed_in(OWNER))
+
+    saved = _edit(client, signed_in(OWNER, waitlisted=True), report_id, _edits(notes="Still mine."))
+
+    assert saved.status_code == 200, saved.get_json()
+    report = saved.get_json()["report"]
+    assert (report["notes"], report["listed"], report["is_author"]) == ("Still mine.", False, True)

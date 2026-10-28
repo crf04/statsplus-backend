@@ -1,6 +1,6 @@
-"""Postgres checks for CourtAI reports (crf04/statsplus#342) and the Research feed (#372).
+"""Postgres checks for CourtAI reports (crf04/statsplus#342), the Research feed (#372) and edits (#377).
 
-Covers what SQLite cannot: migrations 076, 077 and 080 and their reversal on
+Covers what SQLite cannot: migrations 076, 077, 080 and 081 and their reversal on
 the production dialect, the ``JSONB`` columns, a publish and read round trip
 of a realistic report through the service, the feed's keyset pages over
 ``timestamptz`` and its partial index, and the listing cap under concurrency.
@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from app.config.settings import load_settings
 from app.errors import ConflictError, FlatBodyError
 from app.migrations import (
+    downgrade_report_edits,
     downgrade_reports,
     downgrade_research_feed,
     downgrade_user_public_handle,
@@ -96,6 +97,9 @@ def test_migrations_076_and_077_apply_reverse_and_reapply(engine):
         "listed_at": "TIMESTAMP",
         "featured_at": "TIMESTAMP",
         "covers": "JSONB",
+        "notes": "TEXT",
+        "edited_at": "TIMESTAMP",
+        "edits": "JSONB",
     }
     with engine.connect() as connection:
         assert (
@@ -261,7 +265,7 @@ def test_migration_080_refuses_colliding_handles_and_rolls_back(engine):
             "founder": "@bighat",
             "copycat": "BigHat",
         }
-        assert connection.execute(text("SELECT max(version) FROM schema_migrations")).scalar() == 79
+        assert 80 not in set(connection.execute(text("SELECT version FROM schema_migrations")).scalars())
     assert "listed_at" not in {c["name"] for c in inspect(engine).get_columns("reports")}
 
 
@@ -458,3 +462,71 @@ def test_a_pin_committed_between_the_feeds_two_reads_shows_the_report_once(engin
     shown = [entry["id"] for entry in page["featured"] + page["reports"]]
     assert shown == [report_id]
     assert [entry["id"] for entry in ReportService(engine).feed()["featured"]] == [report_id]
+
+
+def test_migration_081_applies_reverses_and_reapplies_keeping_published_reports(engine):
+    _user(engine, "author")
+    published = ReportService(engine).publish("author", _body())["id"]
+    with engine.begin() as connection:
+        downgrade_report_edits(connection)
+        downgrade_report_edits(connection)  # reversing twice is harmless
+    assert not {"notes", "edited_at", "edits"} & {c["name"] for c in inspect(engine).get_columns("reports")}
+
+    assert run_migrations(engine).applied == ("081_report_edits",)
+
+    with engine.connect() as connection:
+        assert dict(
+            connection.execute(
+                text(
+                    "SELECT column_name, data_type FROM information_schema.columns "
+                    "WHERE table_name = 'reports' AND column_name IN ('notes', 'edited_at', 'edits')"
+                )
+            ).all()
+        ) == {"notes": "text", "edited_at": "timestamp with time zone", "edits": "jsonb"}
+    read = ReportService(engine).read(published, viewer_uid=None)
+    assert (read["document"]["title"], read["notes"], read["edited_at"]) == ("Injury brief", None, None)
+    assert run_migrations(engine).applied == ()
+
+
+def test_edits_round_trip_as_jsonb_and_a_listed_reports_feed_entry_follows_them(engine):
+    _user(engine, "author")
+    clock = _Clock()
+    service = ReportService(engine, clock=clock)
+    service.set_public_handle("author", "author")
+    body = _body()
+    body["calls"].append({**body["calls"][0], "id": "c2", "args": {"player": "Josh Hart"}})
+    body["report"]["tabs"][0]["items"].append({"title": "Hart rebounds", "tag": "lean", "cards": ["c2"]})
+    body["notes"] = "Published notes ✓"
+    report_id = service.publish("author", body)["id"]
+    listed_at = service.set_listed("author", report_id, True)["listed_at"]
+
+    saved = service.save_edits(
+        "author",
+        report_id,
+        {
+            "title": "Hart only",
+            "notes": "Edited ✓",
+            "items": [{"tab": 0, "item": 0, "hidden": True, "cards": []}],
+        },
+    )
+
+    assert saved["edits"] == {
+        "title": "Hart only",
+        "notes": "Edited ✓",
+        "items": [{"tab": 0, "item": 0, "hidden": True, "cards": []}],
+    }
+    assert saved["edited_at"] == "2026-10-29T06:00:00.123459+00:00"
+    reader = service.read(report_id, viewer_uid=None)
+    assert [item["title"] for item in reader["document"]["tabs"][0]["items"]] == ["Hart rebounds"]
+    assert [call["id"] for call in reader["calls"]] == ["c2"]
+    assert (reader["notes"], "original" in reader) == ("Edited ✓", False)
+    [entry] = service.feed()["reports"]
+    assert (entry["title"], entry["listed_at"], entry["covers"]) == (
+        "Hart only",
+        listed_at,
+        {"games": [], "players": ["Josh Hart"]},
+    )
+    with engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT document ->> 'title', edits -> 'items' -> 0 ->> 'hidden' FROM reports")
+        ).one() == ("Injury brief", "true")

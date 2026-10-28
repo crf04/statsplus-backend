@@ -9,6 +9,12 @@ or an admin took down is ``410 removed`` on the report read and
 An author with a public handle may list a report in the public Research feed,
 on publish or later, at most :data:`LISTING_LIMIT` moves to listed per rolling
 :data:`LISTING_WINDOW`; an admin may pin listed reports as Featured.
+
+The author edits a report by saving an edit body (crf04/statsplus#377) that
+replaces any earlier one.  Every read applies it: readers never receive a
+hidden item, a removed card or a call no shown card names, and the author also
+receives the published original and the stored edits.  An edit never changes
+``listed_at``; a listed report's feed title and ``covers`` follow it.
 """
 
 from __future__ import annotations
@@ -31,7 +37,13 @@ from app.domain.nba_teams import (
     NBA_TEAM_FULL_NAME_TO_TRICODE,
     NBA_TEAM_TRICODES,
 )
-from app.domain.report_document import TAGS, PublishedReport, validate_publish_body
+from app.domain.report_document import (
+    TAGS,
+    PublishedReport,
+    apply_edits,
+    validate_edits,
+    validate_publish_body,
+)
 from app.errors import ConflictError, FlatBodyError, InvalidInputError, ResourceNotFoundError
 from app.models import get_session
 from app.models.report import REPORT_ID_LENGTH, REPORT_ID_MAX_LENGTH, Report, ReportListing
@@ -135,6 +147,18 @@ def covers(calls: Iterable[dict[str, Any]]) -> dict[str, list[str]]:
         if player:
             players[player] = None
     return {"games": list(games), "players": list(players)}
+
+
+def _shown(row: Report) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """The document and calls readers see: the stored edits over the published ones."""
+
+    return apply_edits(row.document, row.calls, row.edits)
+
+
+def _public_calls(calls: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The calls as a read returns them, without their ``args``."""
+
+    return [{key: call.get(key) for key in ("id", "tool", "card", "structured", "meta")} for call in calls]
 
 
 def _utc(value: datetime) -> datetime:
@@ -261,7 +285,7 @@ class ReportService:
         if report.listed:
             self._spend_listing(session, firebase_uid, handle, row.id, row.created_at)
             row.listed_at = row.created_at
-            row.covers = covers(row.calls)
+            row.covers = covers(_shown(row)[1])
         session.add(row)
         return row
 
@@ -302,6 +326,7 @@ class ReportService:
             calls=report.calls,
             cards=report.cards,
             show_author=report.show_author,
+            notes=report.notes,
         )
 
     def delete(self, firebase_uid: str, report_id: str) -> None:
@@ -358,7 +383,7 @@ class ReportService:
                 now = self._clock()
                 self._spend_listing(session, firebase_uid, handle, row.id, now)
                 row.listed_at = now
-                row.covers = covers(row.calls)
+                row.covers = covers(_shown(row)[1])
             elif not listed:
                 row.listed_at = None
                 row.featured_at = None
@@ -374,6 +399,42 @@ class ReportService:
             raise
         finally:
             session.close()
+
+    def save_edits(self, firebase_uid: str, report_id: str, body: Any) -> dict[str, Any]:
+        """Replace the caller's edits of their own visible report; return it as the author reads it.
+
+        Sets ``edited_at`` and leaves ``listed_at`` alone.  The account lock
+        is taken first, as listing takes it, so a listing never computes its
+        ``covers`` from edits being replaced.
+        """
+
+        if not _is_report_id(report_id):
+            raise ResourceNotFoundError(_NOT_FOUND)
+        session = get_session(self._engine)
+        try:
+            self._lock_account(session, firebase_uid)
+            row = session.get(Report, report_id)
+            if (
+                row is None
+                or row.firebase_uid != firebase_uid
+                or row.deleted_at is not None
+                or row.taken_down_at is not None
+            ):
+                raise ResourceNotFoundError(_NOT_FOUND)
+            edits = validate_edits(body, row.document)
+            row.edits = edits
+            row.notes = edits["notes"]
+            row.title = edits["title"]
+            row.edited_at = self._clock()
+            if row.listed_at is not None:
+                row.covers = covers(_shown(row)[1])
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+        return self.read(report_id, viewer_uid=firebase_uid)
 
     def set_featured(self, report_id: str, featured: bool) -> dict[str, Any]:
         """An admin pins (or unpins) a listed, visible report as Featured.
@@ -509,10 +570,13 @@ class ReportService:
             session.close()
 
     def read(self, report_id: str, *, viewer_uid: str | None) -> dict[str, Any]:
-        """The public report, with ``is_author`` for the signed-in author.
+        """The report with its edits applied, with ``is_author`` for the signed-in author.
 
         A listed report always names its author, with the handle; an unlisted
-        one only when it opted in with ``show_author``.
+        one only when it opted in with ``show_author``.  Readers get only the
+        card HTML the shown calls draw; the author gets every card's, the
+        published ``original`` and the stored ``edits``, so a removal can be
+        undone.
         """
 
         row, handle = self._visible(report_id, removed_is_gone=True)
@@ -523,31 +587,39 @@ class ReportService:
             author = {"label": f"@{handle}"}
         else:
             author = None
-        return {
+        is_author = viewer_uid is not None and viewer_uid == row.firebase_uid
+        document, calls = _shown(row)
+        drawn = {call["card"] for call in calls}
+        report = {
             "id": row.id,
             "created_at": row.created_at.isoformat(),
             "author": author,
-            "is_author": viewer_uid is not None and viewer_uid == row.firebase_uid,
+            "is_author": is_author,
             "listed": listed,
             "featured": listed and row.featured_at is not None,
-            "document": row.document,
-            "calls": [
-                {key: call.get(key) for key in ("id", "tool", "card", "structured", "meta")}
-                for call in row.calls
-            ],
-            "cards": row.cards,
+            "document": document,
+            "calls": _public_calls(calls),
+            "cards": row.cards
+            if is_author
+            else {name: html for name, html in row.cards.items() if name in drawn},
+            "notes": row.notes,
+            "edited_at": _utc(row.edited_at).isoformat() if row.edited_at else None,
         }
+        if is_author:
+            report["original"] = {"document": row.document, "calls": _public_calls(row.calls)}
+            report["edits"] = row.edits
+        return report
 
     def document(self, report_id: str) -> dict[str, Any]:
-        """The stored document of a visible report."""
+        """The document readers see of a visible report, its edits applied."""
 
-        return self._visible(report_id)[0].document
+        return _shown(self._visible(report_id)[0])[0]
 
     def meta(self, report_id: str) -> dict[str, Any]:
         """The small link-preview summary of a visible report."""
 
         row, _ = self._visible(report_id)
-        document = row.document
+        document = _shown(row)[0]
         return {
             "id": row.id,
             "title": document["title"],

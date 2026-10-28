@@ -12,9 +12,15 @@ A report its author lists (``listed_at``) appears in the public Research feed
 (``featured_at``).  ``report_listings`` records every move to listed, which is
 what the 5-per-24-hours listing cap counts: unlisting clears ``listed_at`` but
 never a listing it already spent.
+
+Its author may edit it (crf04/statsplus#377): ``edits`` holds the last saved
+edit body (title, notes, hidden items and each item's cards), applied over the
+published ``document`` and ``calls`` on every read, so neither is ever
+overwritten and every removal can be undone.  ``title`` is the title readers
+see, edited or not; ``notes`` the author's own words.
 """
 
-from sqlalchemy import JSON, Boolean, Column, DateTime, ForeignKey, Index, Integer, String, false, text
+from sqlalchemy import JSON, Boolean, Column, DateTime, ForeignKey, Index, Integer, String, Text, false, text
 from sqlalchemy.dialects.postgresql import JSONB
 
 from . import Base
@@ -40,7 +46,9 @@ class Report(Base):
         comment="Author account",
     )
     created_at = Column(DateTime(timezone=True), nullable=False, comment="When it was published")
-    title = Column(String(REPORT_TITLE_MAX_LENGTH), nullable=False, comment="The document's title")
+    title = Column(
+        String(REPORT_TITLE_MAX_LENGTH), nullable=False, comment="The title readers see, edited or not"
+    )
     document = Column(_DOCUMENT_JSON, nullable=False, comment="The validated Report document")
     calls = Column(_DOCUMENT_JSON, nullable=False, comment="The calls behind the cards, with results")
     cards = Column(_DOCUMENT_JSON, nullable=False, comment="Card name to its HTML snapshot")
@@ -52,6 +60,9 @@ class Report(Base):
     listed_at = Column(DateTime(timezone=True), comment="When its author listed it; null is unlisted")
     featured_at = Column(DateTime(timezone=True), comment="When an admin pinned it as Featured")
     covers = Column(_DOCUMENT_JSON, comment="Games and players its card calls name, set when listed")
+    notes = Column(Text, comment="The author's own words, plain text; null is none")
+    edited_at = Column(DateTime(timezone=True), comment="When its author last saved edits")
+    edits = Column(_DOCUMENT_JSON, comment="The last saved edit body; null is as published")
 
     __table_args__ = (
         Index("idx_reports_owner_created", "firebase_uid", "created_at"),
