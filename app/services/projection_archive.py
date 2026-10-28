@@ -135,12 +135,19 @@ def _projection_provider_status(
     now: datetime,
     observed_at: datetime,
     health_outcome: ProviderPollOutcome | None,
+    latest_success_at: datetime | None,
     success_is_current: bool,
     required: bool,
     live_max_age_seconds: Decimal,
     failure_fallback_max_age_seconds: Decimal,
 ) -> str | None:
-    """Classify row-bearing and Complete-empty evidence at one age boundary."""
+    """Classify row-bearing and Complete-empty evidence at one age boundary.
+
+    Evidence the provider's latest successful poll confirmed is as old as that
+    poll, so once it is past the live window the next poll is overdue and a
+    required provider falls back as it would after a failure. Evidence older
+    than that poll was omitted by it and still expires at the live window.
+    """
 
     elapsed = exact_seconds(now - assume_utc(observed_at))
     if elapsed < 0:
@@ -149,8 +156,13 @@ def _projection_provider_status(
     if health_outcome is ProviderPollOutcome.FAILED:
         maximum_age = failure_fallback_max_age_seconds if required else live_max_age_seconds
         return "stale-served" if within_max_age(age, maximum_age) else None
-    if success_is_current and within_max_age(age, live_max_age_seconds):
+    if not success_is_current:
+        return None
+    if within_max_age(age, live_max_age_seconds):
         return "fresh"
+    overdue = latest_success_at is not None and assume_utc(observed_at) >= assume_utc(latest_success_at)
+    if required and overdue and within_max_age(age, failure_fallback_max_age_seconds):
+        return "stale-served"
     return None
 
 
@@ -3872,6 +3884,7 @@ class LatestProjectionPlayerPoolReader:
                 now=now,
                 observed_at=row["confirmed_at"],
                 health_outcome=outcome,
+                latest_success_at=None if health is None else health["retrieved_at"],
                 success_is_current=outcome is not ProviderPollOutcome.FAILED,
                 required=provider in self.required_providers,
                 live_max_age_seconds=self._live_max_age_seconds_for(provider),
@@ -3891,6 +3904,7 @@ class LatestProjectionPlayerPoolReader:
                 now=now,
                 observed_at=empty_retrieved_at,
                 health_outcome=ProviderPollOutcome(str(health["outcome"])),
+                latest_success_at=health["retrieved_at"],
                 success_is_current=health["poll_id"] == empty_poll["poll_id"],
                 required=provider in self.required_providers,
                 live_max_age_seconds=self._live_max_age_seconds_for(provider),

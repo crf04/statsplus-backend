@@ -2558,6 +2558,7 @@ def test_replay_does_not_extend_a_provider_board_live_window(tmp_path):
         engine,
         ProjectionArchiveReadScope(provider="dabble", query=query),
         clock=lambda: OBSERVED_AT + timedelta(minutes=20),
+        required_providers=(),
     ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
 
     assert pool.players == ()
@@ -3580,6 +3581,73 @@ def test_stale_served_dabble_lines_never_include_one_a_complete_poll_superseded(
     (player,) = pool.players
     assert player.provenance == {"dabble": ("AST", "PTS")}
     assert player.lines == {"dabble": {"AST": 6.5, "PTS": 31.5}}
+
+
+def _dabble_reader_at(engine, query, now, *, required_providers=None):
+    return LatestProjectionPlayerPoolReader(
+        engine,
+        ProjectionArchiveReadScope(provider="dabble", query=query),
+        clock=lambda: now,
+        required_providers=required_providers,
+    )
+
+
+def test_a_required_dabble_poll_that_is_overdue_keeps_its_lines_stale_served_for_six_hours(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'dabble-overdue.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    _service, query, record = _dabble_recording(engine, catalog)
+    record((("pts-29.5", "points", "29.5"), ("reb-7.5", "rebounds", "7.5")), OBSERVED_AT, complete=True)
+
+    overdue = _dabble_reader_at(engine, query, OBSERVED_AT + timedelta(minutes=16))
+    pool = overdue.get_pool_for_game(season=SEASON, game_id=GAME_ID)
+
+    assert pool.freshness["providers"] == {
+        "dabble": {"status": "stale-served", "retrieved_at": OBSERVED_AT.isoformat()}
+    }
+    (player,) = pool.players
+    assert player.lines == {"dabble": {"PTS": 29.5, "REB": 7.5}}
+
+    at_fallback = _dabble_reader_at(engine, query, OBSERVED_AT + timedelta(hours=6))
+    assert len(at_fallback.get_pool_for_game(season=SEASON, game_id=GAME_ID).players) == 1
+    expired = _dabble_reader_at(engine, query, OBSERVED_AT + timedelta(hours=6, microseconds=1))
+    assert expired.get_pool_for_game(season=SEASON, game_id=GAME_ID).players == ()
+
+
+def test_an_overdue_dabble_poll_that_is_not_required_expires_at_the_live_window(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'dabble-overdue-optional.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    _service, query, record = _dabble_recording(engine, catalog)
+    record((("pts-29.5", "points", "29.5"),), OBSERVED_AT, complete=True)
+
+    reader = _dabble_reader_at(engine, query, OBSERVED_AT + timedelta(minutes=16), required_providers=())
+
+    assert reader.get_pool_for_game(season=SEASON, game_id=GAME_ID).players == ()
+
+
+@pytest.mark.parametrize(
+    ("minutes_after_partial", "status"),
+    ((5, "fresh"), (16, "stale-served")),
+    ids=("latest-poll-recent", "latest-poll-overdue"),
+)
+def test_a_dabble_line_a_newer_partial_poll_omitted_expires_at_the_live_window(
+    tmp_path, minutes_after_partial, status
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'dabble-omitted.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    _service, query, record = _dabble_recording(engine, catalog)
+    partial_at = OBSERVED_AT + timedelta(minutes=11)
+    record((("pts-29.5", "points", "29.5"), ("reb-7.5", "rebounds", "7.5")), OBSERVED_AT, complete=False)
+    record((("pts-29.5", "points", "29.5"),), partial_at, complete=False)
+
+    reader = _dabble_reader_at(engine, query, partial_at + timedelta(minutes=minutes_after_partial))
+    pool = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
+
+    assert pool.freshness["providers"]["dabble"]["status"] == status
+    (player,) = pool.players
+    assert player.lines == {"dabble": {"PTS": 29.5}}
 
 
 def test_the_pre_tip_freeze_never_keeps_a_dabble_line_a_complete_poll_superseded(tmp_path):

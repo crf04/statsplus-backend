@@ -761,8 +761,12 @@ Board or calling a provider registry. Each offering has a separate confirmation
 time. Complete and unchanged Complete polls confirm the whole scope; Partial
 polls confirm only included references. Confirmation is live through the
 inclusive 15-minute window. After a failed poll it may be stale-served only
-through the inclusive six-hour fallback. A disabled provider receives no new
-confirmations and expires without deleting Latest or immutable history.
+through the inclusive six-hour fallback. A required provider whose latest
+successful poll is past the live window with no newer poll is overdue and
+falls back the same way, but only for what that poll confirmed: a reference it
+omitted is older than the poll and still expires at the live window. A
+disabled provider receives no new confirmations and expires without deleting
+Latest or immutable history.
 Both the 15-minute live maximum and six-hour failure-fallback maximum enter
 through `app.domain.freshness`, including direct reader-constructor overrides.
 Populated Latest rows and successful Complete-empty evidence share one

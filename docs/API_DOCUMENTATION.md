@@ -791,8 +791,11 @@ and retains each provider's actual `retrieved_at`. This is an inclusive reuse ma
 the provider cache's exclusive fresh window. Partial coverage marks absent
 providers `missing`. On total failure, the last confirmed evidence is served
 through six hours with aggregate and contributing-provider status
-`stale-served`; beyond six hours the pool is empty and `unavailable`. No
-synthetic pool is produced.
+`stale-served`; beyond six hours the pool is empty and `unavailable`. A
+required provider whose latest successful poll is itself past its live window,
+with no newer poll recorded, is overdue and is treated as failed: what that
+poll confirmed is `stale-served` through the same six hours. No synthetic pool
+is produced.
 Aggregate `retrieved_at` is the oldest usable contributor snapshot, so its age
 never understates any provider observation included in the union, with one
 declared exception: a provider that the provider registry gives its own, longer
@@ -830,10 +833,14 @@ game whose collector has not created a set yet, or whose set has no members,
 reports `missing` and zero targetable players. Reads use only the requested
 game IDs and never create or freeze a set.
 After a failed provider poll, prior confirmed offerings may be served as
-`stale-served` only through the inclusive six-hour fallback. Partial polls
+`stale-served` only through the inclusive six-hour fallback. An overdue
+required provider gets the same fallback for the offerings, or the
+Complete-empty evidence, its latest successful poll confirmed. Partial polls
 update and confirm only included references; omissions retain their prior
-evidence and confirmation. Complete empty snapshots retire only the same
-provider/query scope and remain fresh successful provider evidence. When every
+evidence and confirmation, and an omitted offering still expires at the live
+window even when the poll that omitted it is overdue. Complete empty snapshots
+retire only the same provider/query scope and remain fresh successful provider
+evidence. When every
 required provider is current and Complete-empty, the database-first pool is
 `live`/`fresh` with zero players rather than unavailable, and each requested
 Slate game's `projection_state` is `live` with that accepted evidence time and

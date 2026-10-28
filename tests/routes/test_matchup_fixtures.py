@@ -4459,13 +4459,16 @@ def test_authenticated_projection_routes_cover_partial_failure_and_recovery(
     failed_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
     assert failed_matchup.status_code == 200
     failed_freshness = failed_matchup.get_json()["freshness"]["pool"]
-    assert "status" not in failed_freshness
+    assert failed_freshness["status"] == "stale-served"
     assert failed_freshness["providers"] == {
         "dabble": {
             "status": "stale-served",
             "retrieved_at": partial_at.isoformat(),
         },
-        "prizepicks": {"status": "missing", "retrieved_at": None},
+        "prizepicks": {
+            "status": "stale-served",
+            "retrieved_at": rematerialized_at.isoformat(),
+        },
     }
     assert [player["canonical_id"] for player in failed_matchup.get_json()["players"]] == [2544]
 
@@ -4482,7 +4485,7 @@ def test_authenticated_projection_routes_cover_partial_failure_and_recovery(
     )
     route_now[0] = late_accepted_at
     late_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
-    assert "status" not in late_matchup.get_json()["freshness"]["pool"]
+    assert late_matchup.get_json()["freshness"]["pool"]["status"] == "stale-served"
     assert [player["canonical_id"] for player in late_matchup.get_json()["players"]] == [2544]
 
     assembled.projection_recorder.record_complete_snapshot(
@@ -4505,12 +4508,13 @@ def test_authenticated_projection_routes_cover_partial_failure_and_recovery(
     late_empty_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
     late_empty_slate = client.get("/api/games/slate?date=2026-01-15")
     assert [player["canonical_id"] for player in late_empty_matchup.get_json()["players"]] == [2544]
-    assert (
-        late_empty_matchup.get_json()["freshness"]["pool"]["providers"]["dabble"]["status"] == "stale-served"
-    )
+    assert late_empty_matchup.get_json()["freshness"]["pool"]["providers"]["dabble"] == {
+        "status": "stale-served",
+        "retrieved_at": partial_at.isoformat(),
+    }
     assert late_empty_slate.get_json()["games"][0]["projection_state"] == {
         "state": "live",
-        "observed_at": partial_at.isoformat(),
+        "observed_at": rematerialized_at.isoformat(),
     }
 
     recovered_at = failed_at + timedelta(minutes=1)
