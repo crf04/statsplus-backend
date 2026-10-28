@@ -2158,6 +2158,27 @@ _NESTED = (10, "tabs", 0, "blocks")
             id="long-heading",
         ),
         pytest.param(
+            (6, "text"),
+            "x" * 1001,
+            "report.blocks[6].text",
+            "must be at most 1000 characters",
+            id="long-callout-text",
+        ),
+        pytest.param(
+            (3, "title"),
+            "x" * 121,
+            "report.blocks[3].title",
+            "must be at most 120 characters",
+            id="long-spot-title",
+        ),
+        pytest.param(
+            (7, "columns", 0),
+            "x" * 41,
+            "report.blocks[7].columns[0]",
+            "must be at most 40 characters",
+            id="long-column",
+        ),
+        pytest.param(
             (6, "title"),
             "x" * 41,
             "report.blocks[6].title",
@@ -2180,7 +2201,14 @@ _NESTED = (10, "tabs", 0, "blocks")
         ),
         pytest.param(
             (*_NESTED, 0),
-            {"id": "inner", "type": "tabs", "tabs": []},
+            {
+                "id": "inner",
+                "type": "tabs",
+                "tabs": [
+                    {"title": "A", "blocks": [{"id": "inner-a", "type": "heading", "text": "a"}]},
+                    {"title": "B", "blocks": [{"id": "inner-b", "type": "heading", "text": "b"}]},
+                ],
+            },
             "report.blocks[10].tabs[0].blocks[0].type",
             "must not be tabs inside tabs",
             id="tabs-in-tabs",
@@ -2474,3 +2502,70 @@ def test_a_listed_block_report_is_in_research_with_covers_from_its_shown_cards(
 
     [entry] = _feed(client)["reports"]
     assert entry["covers"] == {"games": ["LAL @ GSW"], "players": ["Austin Reaves"]}
+
+
+def test_card_edits_reorder_and_remove_within_a_visible_spot_a_row_and_an_items_block(client, signed_in):
+    report_id = _published_id(client, signed_in(), _reaves_body())
+
+    _edit(
+        client,
+        signed_in(),
+        report_id,
+        _block_edits(
+            blocks=[
+                {"id": "spot-pts", "hidden": False, "cards": ["reaves-matchup", "reaves-logs"]},
+                {"id": "row", "hidden": False, "cards": []},
+                {"id": "board", "hidden": False, "cards": ["reaves-matchup", "reaves-logs"]},
+            ]
+        ),
+    )
+    reader = _read(client, report_id)
+    document = {"report": reader["document"]}
+
+    assert _block(document, "spot-pts")["cards"] == ["reaves-matchup", "reaves-logs"]
+    assert _block(document, "row")["cards"] == []
+    assert [item["cards"] for item in _block(document, "board")["items"]] == [
+        [],
+        ["reaves-matchup", "reaves-logs"],
+    ]
+    assert [call["id"] for call in reader["calls"]] == ["reaves-logs", "reaves-matchup", "reaves-onoff"]
+
+
+def _preview_image(client, signed_in, blocks):
+    body = _reaves_body()
+    body["report"]["blocks"] = blocks
+    report_id = _published_id(client, signed_in(), body)
+    response = client.get(f"/api/reports/{report_id}/preview.png")
+    assert response.status_code == 200
+    return Image.open(io.BytesIO(response.data)).convert("RGB")
+
+
+def _preview_row(image, index):
+    from app.services import report_preview
+
+    top = report_preview._ROWS_TOP + index * (report_preview._ROW_HEIGHT + report_preview._ROW_GAP)
+    return image.crop((0, top, image.width, top + report_preview._ROW_HEIGHT)).tobytes()
+
+
+def test_the_block_preview_draws_spot_rows_in_document_order_untagged_ones_included(client, signed_in):
+    lean = {"id": "a", "type": "spot", "tag": "lean", "title": "Reaves over 22.5 points"}
+    untagged = {"id": "b", "type": "spot", "title": "Hachimura rebounds"}
+    renamed = {**untagged, "title": "Vincent threes"}
+
+    both = _preview_image(client, signed_in, [lean, untagged])
+    first_only = _preview_image(client, signed_in, [lean])
+    other_second = _preview_image(client, signed_in, [lean, renamed])
+
+    assert _preview_row(both, 0) == _preview_row(first_only, 0)
+    assert _preview_row(both, 1) != _preview_row(first_only, 1)
+    assert _preview_row(both, 1) != _preview_row(other_second, 1)
+
+
+def test_a_word_wider_than_the_preview_is_cut_inside_the_margin(client, signed_in):
+    from app.services.preview_card import MARGIN
+
+    def right_margin(text_):
+        image = _preview_image(client, signed_in, [{"id": "p", "type": "paragraph", "text": text_}])
+        return image.crop((image.width - MARGIN + 1, 200, image.width, 560)).tobytes()
+
+    assert right_margin("W" * 120) == right_margin("W")
