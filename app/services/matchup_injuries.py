@@ -313,21 +313,25 @@ class MatchupInjuryService:
         ):
             status = "fresh" if self._within_age(source_snapshot, now, INJURY_REFRESH_SECONDS) else "stale"
             try:
+                evidence = tuple(
+                    InjuryEntryEvidence.from_document(entry) for entry in source_snapshot.normalized_entries
+                )
                 with _optional_read(connection):
                     entries, unresolved_team_entries = self._reconcile(
-                        tuple(
-                            InjuryEntryEvidence.from_document(entry)
-                            for entry in source_snapshot.normalized_entries
-                        ),
-                        event=event,
-                        season=season,
-                        connection=connection,
+                        evidence, event=event, season=season, connection=connection
                     )
+                # Later requests serve the stored row as fresh, so it is matched
+                # against the committed catalog, never this request's snapshot.
+                stored_entries, stored_unresolved = (
+                    (entries, unresolved_team_entries)
+                    if connection is None
+                    else self._reconcile(evidence, event=event, season=season)
+                )
                 self.snapshot_repository.replace_from_source(
                     scope,
                     source_snapshot=source_snapshot,
-                    normalized_entries=entries,
-                    unresolved_team_entry_count=unresolved_team_entries,
+                    normalized_entries=stored_entries,
+                    unresolved_team_entry_count=stored_unresolved,
                 )
             except (SQLAlchemyError, TypeError, ValueError):
                 pass

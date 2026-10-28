@@ -349,3 +349,95 @@ def test_a_pool_rebound_to_the_games_season_reads_the_matchups_snapshot(
 
     assert _state(during.get_json(), TATUM) == (27.5, LATER_BOOKS, REPORT)
     assert _state(following.get_json(), TATUM)[0] == 30.5
+
+
+def test_a_league_report_reconciled_on_a_snapshot_is_stored_against_the_committed_catalog(
+    matchup, client, authenticate, monkeypatch
+):
+    """Brunson rejoins the catalog after the Matchup's snapshot began: that Matchup cannot
+    match his Out entry, but the game's stored report, which the next request serves as
+    fresh, does."""
+
+    _adopt_the_league_report(matchup)
+    with matchup.engine.begin() as connection:
+        connection.execute(
+            text("UPDATE athlete_catalog SET is_active_for_season = false WHERE player_id = :player"),
+            {"player": BRUNSON[0]},
+        )
+
+    def restore_brunson(engine):
+        with engine.begin() as connection:
+            connection.execute(
+                text("UPDATE athlete_catalog SET is_active_for_season = true WHERE player_id = :player"),
+                {"player": BRUNSON[0]},
+            )
+
+    restore = _correcting_after_the_first_read(monkeypatch, matchup, restore_brunson)
+    headers = authenticate()
+    during = client.get(f"/api/games/matchup?game_id={LATER}", headers=headers).get_json()
+    restore()
+    following = client.get(f"/api/games/matchup?game_id={LATER}", headers=headers).get_json()
+
+    def brunson(body):
+        matched = [
+            entry["canonical_player_id"]
+            for team in body["injuries"]["teams"]
+            for entry in team["entries"]
+            if entry["source_player_name"] == BRUNSON[1]
+        ]
+        return (
+            body["injuries"]["status"],
+            matched,
+            BRUNSON[0] in {row["canonical_id"] for row in body["players"]},
+        )
+
+    assert brunson(during) == ("fresh", [None], True)
+    assert brunson(following) == ("fresh", [BRUNSON[0]], False)
+
+
+def test_a_cached_matchup_without_a_caller_scope_keys_the_stats_freshness_it_composed(matchup, monkeypatch):
+    """Target resolution composes through ``SnapshotMatchups`` with no scope of its own.
+    Stats complete and Tatum's line moves in one commit, right after the cache key's stats
+    read: the Matchup stored under that key is the pre-commit one, and later requests
+    compose, store and hit the post-commit one."""
+
+    service = matchup.service
+    service.stats_freshness = StatsFreshnessRepository(matchup.engine)
+    service.stats_freshness.record_success(NOW - timedelta(hours=1))
+    read = service.stats_freshness.get
+    commits = []
+
+    def read_then_complete(*arguments, connection=None, **keywords):
+        freshness = read(*arguments, connection=connection, **keywords)
+        if not commits:
+            commits.append(NOW)
+            with matchup.engine.begin() as correction:
+                service.stats_freshness.record_success(NOW, connection=correction)
+                correction.execute(
+                    text(
+                        "UPDATE latest_player_projections SET line_value = 30.5 WHERE provider = 'dabble' "
+                        "AND canonical_player_id = :player AND market_category = 'PTS'"
+                    ),
+                    {"player": TATUM[0]},
+                )
+        return freshness
+
+    monkeypatch.setattr(service.stats_freshness, "get", read_then_complete)
+    redis = DictRedis()
+
+    def request():
+        document = SnapshotMatchups(
+            service,
+            _real_snapshot(age=0),
+            StoredMatchupInjuryReader(service.injuries),
+            season=SEASON,
+            cache=ComposedMatchupCache(redis),
+            settings=service.settings,
+        ).get_matchup(game_id=LATER, game={"game_id": LATER, "scheduled_at": LATER_TIP.isoformat()})
+        return _state(document, TATUM)[0], document["freshness"]["stats"]["retrieved_at"], len(redis.values)
+
+    assert [request(), request(), request()] == [
+        (27.5, (NOW - timedelta(hours=1)).isoformat(), 1),
+        (30.5, NOW.isoformat(), 2),
+        (30.5, NOW.isoformat(), 2),
+    ]

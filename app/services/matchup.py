@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
@@ -690,6 +690,11 @@ class MatchupService:
 
         return game_capture(self.publication_reader, publication_snapshot, scheduled_at, session=session)
 
+    def open_read_scope(self) -> AbstractContextManager[tuple[Connection | None, Session | None]]:
+        """The repeatable-read ``(connection, session)`` a compose reads on when its caller has none."""
+
+        return request_read_scope(self._engine, repeatable_read=True)
+
     def stats_freshness_block(self, season: str, *, connection: Connection | None = None) -> dict[str, Any]:
         """``freshness.stats`` as a compose reports it, without composing."""
 
@@ -735,11 +740,7 @@ class MatchupService:
         snapshot was captured on; omitted, the compose opens its own.
         """
 
-        scope = (
-            nullcontext(read_scope)
-            if read_scope is not None
-            else request_read_scope(self._engine, repeatable_read=True)
-        )
+        scope = nullcontext(read_scope) if read_scope is not None else self.open_read_scope()
         with scope as (connection, session):
             return self._compose_matchup(
                 game_id=game_id,

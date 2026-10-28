@@ -1079,8 +1079,8 @@ MATRIX = {
     "pool per-provider stamp": (_vary_pool_provider_stamp, None, False),
     "stream freshness labels": (lambda *a: None, lambda: _real_snapshot(age=60, freshness="stale"), False),
     "snapshot age": (lambda *a: None, lambda: _real_snapshot(age=60), True),
-    "stats completion": (_vary_stats_completion, None, True),
-    "another game goes final": (_vary_other_game_final, None, True),
+    "stats completion": (_vary_stats_completion, None, False),
+    "another game goes final": (_vary_other_game_final, None, False),
 }
 
 
