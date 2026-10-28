@@ -2558,6 +2558,7 @@ def test_replay_does_not_extend_a_provider_board_live_window(tmp_path):
         engine,
         ProjectionArchiveReadScope(provider="dabble", query=query),
         clock=lambda: OBSERVED_AT + timedelta(minutes=20),
+        required_providers=(),
     ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
 
     assert pool.players == ()
