@@ -476,6 +476,9 @@ when a dependency is degraded.
 POST /api/nl-query
 ```
 
+`season` is the season the query names (for example `2024-25`), or `null`
+when it names none, so the reader applies its own default season.
+
 The default research season (including “this year”) follows the active,
 available player-game-log publication, so an October rollover does not select
 an unpublished season. Every read that serves published data uses the same
@@ -543,7 +546,7 @@ Response shape:
     }
   ],
   "rank_filter": ["5"],
-  "season": "2025-26",
+  "season": null,
   "confidence": 0.95,
   "intent": "game_logs",
   "time_period": null,
@@ -2536,8 +2539,8 @@ whose `player_game_logs` can be read through a published Publication
 
 `GET /api/games/matchup`, `/api/games/matchup/selection`,
 `/api/matchups/unscheduled`, `/api/games/slate`, `/api/games/slate/edges`,
-`/api/players/profile` and `/api/diet/baselines` take an optional `season` (canonical `YYYY-YY`), the Evidence season
-(crf04/statsplus#330). Game logs keep `season_filter`, which follows the same
+`/api/players/profile`, `/api/teams/stats` and `/api/diet/baselines` take an optional `season` (canonical `YYYY-YY`), the Evidence season
+(crf04/statsplus#330, #369). Game logs keep `season_filter`, which follows the same
 rules. Without `season` every response is byte for byte what it was.
 
 - A selected season reads as game logs' `season_filter` does: the Published
@@ -2558,8 +2561,8 @@ rules. Without `season` every response is byte for byte what it was.
   version cut before its tip. A past game with no Player Pool still
   lists who played from the newest game logs, which `provenance` lists too.
 - The response adds `season_context: {selected_season, published_season}`.
-  `/api/players/profile`, whose body can be an array, instead answers
-  `{data: <today's body>, season_context, trailing}`, `trailing` naming each
+  `/api/players/profile` and `/api/teams/stats`, whose bodies can be arrays,
+  instead answer `{data: <today's body>, season_context, trailing}`, `trailing` naming each
   family the body's facts were read from that serves an earlier season (empty
   when none does). Game logs, both Matchups and the Slate also list
   `trailing`; slate edges list the trailing families of the Matchups they
@@ -2595,7 +2598,7 @@ rules. Without `season` every response is byte for byte what it was.
 - A malformed `season` is `400 invalid_input` (`details.parameters:
   ["season"]`). A season not offered is `503 season_unavailable` with
   `details: {selected_season, published_season}`.
-- The Slate, slate edges and profile also answer anonymous callers. One
+- The Slate, slate edges, profile and team stats also answer anonymous callers. One
   without a valid token may name the Published Season or an earlier one; a
   later season is `503 season_unavailable` before anything is read or cached,
   as for a [game-log preview](#get-game-log-preview-image).
@@ -2607,9 +2610,10 @@ rules. Without `season` every response is byte for byte what it was.
   candidate once.
 - Caches: the slate-edges response cache keys on the selected season, and the
   per-process snapshot reuse never serves a selected request, which captures
-  its own. A Backtest reads exactly the season it names and never a held
-  candidate: 2026-27 stays `season_unavailable` until its Diets serve 2026-27
-  after the cutover.
+  its own. A Backtest reads exactly the season it names: a requested 2026-27
+  reads its held candidates once every Backtest stream's candidate serves in
+  this read, and is `season_unavailable` while any of them trails (see
+  [Backtest one Target](#backtest-one-target-over-the-season-to-date)).
 
 ### Get Ladder
 
@@ -3649,6 +3653,11 @@ Query parameters:
 - `team`: full team name, such as `Los Angeles Lakers`.
 - `category`: `Traditional`, `Playtypes`, `Playtype Points`, `Assists`, `Zone Shooting`, or `Shooting Type`.
 - `date`: accepted and ignored.  Rankings are always whole-season.
+- `season`: optional Evidence season; see [Evidence season](#evidence-season).
+  With it the body is `{data, season_context, trailing}`, read from one
+  capture of the category's Season stream. Opponent streams are the
+  `team_defense` family, so `trailing` is empty once every team has played a
+  game. An empty `data` is `200`, not `404`.
 
 Example:
 
@@ -5558,7 +5567,21 @@ that season; seasons are never mixed, and nothing about today's players is
 implied. The **published season** reads each stream's live pointer when it
 names that season, and that stream's retained Publication otherwise -- a pin
 set behind the live pointer, or one stream activating a new season before the
-others. If any Backtest stream has no readable Publication for the season in
+others.
+
+A requested season **after** the published one, before its game logs activate
+(`2026-27` while `2025-26` is published), reads as an Unpublished Season
+(crf04/statsplus-backend#625): every Backtest stream's held candidate, judged
+by the Season Cutover's own per-publication checks and Readiness Rule, with
+its ledger lineage re-judged on every read. It is served only when every
+Backtest stream's candidate serves that season; a stream that trails (still on
+`2025-26`), has no candidate, or whose candidate fails its checks is
+`503 season_unavailable` naming it, so 2026-27 logs are never read with
+2025-26 Diets. The result cache keys this read on the candidates it read, so a
+newer candidate is a new entry and a withdrawn one is refused before any
+entry is read. The default season is unchanged by held candidates.
+
+If any Backtest stream has no readable Publication for the season in
 either place -- none exists, or the one that exists cannot be read (corrupt,
 unauthorised, or missing its projection) -- the request fails with
 `503 season_unavailable` naming the stream, never an empty `players` list:
@@ -5580,8 +5603,8 @@ unauthorised, or missing its projection) -- the request fails with
 `details.season` is the season the request resolved (requested or default),
 `details.published_season` the published season it was resolved against, and
 `details.stream` the first unavailable stream. A requested `2026-27` with no
-readable Publication -- before its first activation, for example -- is this
-`503`, never an empty Backtest.
+readable Publication or serving candidate -- before its first composition, for
+example -- is this `503`, never an empty Backtest.
 
 Every successful Backtest body also carries `published_season`, the season
 `season` was resolved against, so a client can tell a read of the published

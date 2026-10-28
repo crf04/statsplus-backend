@@ -261,6 +261,47 @@ def test_an_unavailable_season_is_skipped(world):
     assert result["seasons"] == [LAST]
 
 
+def test_held_2026_27_candidates_are_filled_under_their_own_key_until_one_is_withdrawn(world):
+    """Before its cutover, 2026-27 is keyed by the candidates it read (crf04/statsplus-backend#625)."""
+
+    first, _second = _two_targets(world)
+    seasons._hold_new_season(world)
+    redis_client = CountingRedis()
+    service = world.backtests(redis_client=redis_client)
+
+    filled = service.precompute(now=NOW)
+    selected, state = service.backtest(OWNER, first["id"], season=NEW)
+    world.checks.withdrawn.add("grouped_shot_types")
+    withdrawn = service.precompute(now=NOW)
+
+    assert _without_duration(filled) == _counts(seasons=[LAST, NEW], eligible=4, computed=4)
+    assert state == "hit"
+    seasons._assert_held_2026_27(selected)
+    # The withdrawn candidate leaves 2026-27 unavailable, so it is skipped,
+    # never answered from the entry its candidate filed.
+    assert _without_duration(withdrawn) == _counts(already_cached=2)
+
+
+def test_a_superseded_held_diet_misses_the_entry_the_precompute_filled(world):
+    first, _second = _two_targets(world)
+    seasons._hold_new_season(world)
+    service = world.backtests(redis_client=CountingRedis())
+
+    filled = service.precompute(now=NOW)
+    seasons._supersede_held_shot_zones(world)
+    selected, state = service.backtest(OWNER, first["id"], season=NEW)
+    refilled = service.precompute(now=NOW)
+
+    assert _without_duration(filled) == _counts(seasons=[LAST, NEW], eligible=4, computed=4)
+    assert state == "miss"
+    seasons._assert_superseded_shot_zones(selected)
+    # Only the second Target's 2026-27 entry is new; the first's was filed
+    # by the read above, and 2025-26's did not move.
+    assert _without_duration(refilled) == _counts(
+        seasons=[LAST, NEW], eligible=4, already_cached=3, computed=1
+    )
+
+
 def test_one_targets_failure_is_logged_and_the_run_continues(world, monkeypatch, caplog):
     first, second = _two_targets(world)
     service = world.backtests(redis_client=CountingRedis())

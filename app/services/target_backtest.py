@@ -73,6 +73,7 @@ from app.services.backtest_season import (
     DEFAULT_BACKTEST_SEASON,
     SEASON_REASON_DEFAULT,
     SEASON_REASON_PUBLISHED,
+    BacktestMode,
     BacktestSeason,
     BacktestSeasons,
 )
@@ -509,6 +510,7 @@ class TargetBacktestService:
                     DEFAULT_BACKTEST_SEASON,
                     SEASON_REASON_DEFAULT,
                     self.settings.nba.current_season,
+                    BacktestMode.PUBLISHED,
                 )
                 generation = None
                 catalog = None
@@ -729,7 +731,7 @@ class TargetBacktestService:
             # A caller's own generation without a resolved season reads in
             # the published season, as it always has.
             published = research_season(self.settings, self.publication_reader)
-            choice = BacktestSeason(published, SEASON_REASON_PUBLISHED, published)
+            choice = BacktestSeason(published, SEASON_REASON_PUBLISHED, published, BacktestMode.PUBLISHED)
         elif choice is None and requested_season is not None:
             choice = self.seasons.resolve(requested_season, session=session)
         qualifiers = list(target["qualifiers"])
