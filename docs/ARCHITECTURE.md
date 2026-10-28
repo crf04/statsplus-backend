@@ -3879,21 +3879,29 @@ database is rejected as a migration or catalog target.
 
 ### Provider athlete mappings
 
-`AthleteResolver.resolve(provider, evidence, season)` accepts one typed
-provider `AthleteEvidence` value and an explicit requested season;
-`resolve_market(market, season)` is the board-facing spelling that lifts a
-market's athlete and team evidence, and `for_board(season, identities)`
-returns the same two calls served from one read of the catalog and mapping
-state for a whole board. There is no other call shape. Resolution
-compares only the accent/case/punctuation-normalized official name among
-active `is_active_for_season` catalog rows. Normalization strips combining
-marks and folds the documented non-decomposing Latin letters (`ø`→`o`,
-`œ`→`oe`, `æ`→`ae`, `ł`→`l`, `đ`→`d`, `ð`→`d`, `þ`→`th`, `ħ`→`h`, `ŧ`→`t`,
-`ı`→`i`) to ASCII; it applies no aliases, nicknames, or fuzzy similarity.
-Exactly one candidate with non-conflicting canonical team evidence is
-automatically qualifying; missing team evidence is allowed. Duplicate names,
-inactive-only rows, aliases, fuzzy matches, and team conflicts remain typed
-non-matches. `AthleteMappingRepository` persists one current
+`AthleteResolver.resolve(provider, evidence, season, event_teams=())` accepts
+one typed provider `AthleteEvidence` value, an explicit requested season, and
+the teams of the market's game; `resolve_market(market, season)` is the
+board-facing spelling that lifts a market's athlete, team, and event-team
+evidence, and `for_board(season, identities)` returns the same two calls served
+from one read of the catalog and mapping state for a whole board. There is no
+other call shape. Resolution first compares the accent/case/punctuation-normalized
+official name among active `is_active_for_season` catalog rows. Normalization
+strips combining marks and folds the documented non-decomposing Latin letters
+(`ø`→`o`, `œ`→`oe`, `æ`→`ae`, `ł`→`l`, `đ`→`d`, `ð`→`d`, `þ`→`th`, `ħ`→`h`,
+`ŧ`→`t`, `ı`→`i`) to ASCII. A posted name with no exact row is then read
+against one roster: the athlete's team when the provider names it, otherwise
+the event's teams (Novig and Polymarket post no athlete team). A roster player
+fits when the names agree once a generational suffix is set aside and a listed
+nickname is folded (`athlete_resolver.NAME_VARIANTS`): `Robert Williams` for
+`Robert Williams III`, `Alexandre Sarr` for `Alex Sarr`. One fit is the
+candidate; two or more are ambiguous whatever their status; no team and no
+event teams leaves the name unmatched. Nothing else applies aliases or fuzzy
+similarity. Exactly one candidate with non-conflicting canonical team evidence
+is automatically qualifying; missing team evidence is allowed. Duplicate names,
+inactive-only rows, fuzzy matches, and team conflicts remain typed
+non-matches. The board resolves one identity's markets together with the
+union of their event teams, so the merged observation reads the same roster. `AthleteMappingRepository` persists one current
 `provider_athlete_mappings` row per provider identity, an append-only
 `athlete_mapping_decisions` audit log, and durable
 `athlete_mapping_rejections` suppressions. Provider names, provider team IDs,
@@ -5133,14 +5141,16 @@ scripts/backfill_closing_lines.py   (operator, from a laptop; needs ODDS_API_KEY
   normalized match resolves to the one roster player it fits: the same name once
   a generational suffix (Jr., Sr., II, III, IV) is set aside on both sides
   (`Jimmy Butler` for `Jimmy Butler III`, `Isaiah Stewart II` for
-  `Isaiah Stewart`), or once a listed nickname is folded (`odds_identity.
+  `Isaiah Stewart`), or once a listed nickname is folded (`athlete_resolver.
   NAME_VARIANTS`: `Nicolas Claxton` and `Nic Claxton`, `Herb Jones` and
   `Herbert Jones`, `Carlton Carrington` and `Bub Carrington`, ...). An exact
   match always wins; two suffixes that disagree (`Jr.` and `Sr.`) name different
   men; with two candidates (active or not) the resolver records the name as
   ambiguous, and with none it is unmatched, so neither resolves and an earlier
-  mapping of the name is not kept. The roster's spelling is only the catalog
-  lookup: the evidence, the provider identity
+  mapping of the name is not kept. This is the resolver's one spelling rule,
+  shared with the DFS and prediction-market board (see Provider athlete
+  mappings); `RosterNameResolver` passes the game's two teams as the event
+  teams. The roster's spelling is only the catalog lookup: the evidence, the provider identity
   (`name:<posted>`) and the recorded provider name stay what was posted, so a
   rejection or an approval of that identity is honoured as for any other name,
   and the live collector, which shares the resolver, resolves the same names. A

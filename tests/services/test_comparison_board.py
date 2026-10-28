@@ -129,7 +129,7 @@ class FakeAthleteResolver:
         self.canonical = canonical
         self.states = states or {}
 
-    def resolve(self, provider, evidence, season, *, observed_at=None):
+    def resolve(self, provider, evidence, season, *, observed_at=None, event_teams=()):
         provider_id = evidence.provider_id or ""
         player_id = self.canonical.get(provider_id)
         state = MappingResolutionState(self.states.get(provider_id, "auto"))
