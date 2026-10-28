@@ -5187,7 +5187,7 @@ applied: the edited title, hidden items left out and each overridden item's
 names, in published order, without their `args`; `cards` holds only the HTML
 those calls draw. `notes` and `edited_at` are `null` until set. For the
 author (`is_author: true`) the report also carries `original`, `{document,
-calls}` exactly as published, and `edits`, the stored edit body or `null`,
+calls}` exactly as published (its calls with their `args`), and `edits`, the stored edit body or `null`,
 and `cards` holds every published card's HTML. A listed report's
 `author` is `{"label": "@<handle>", "handle": "<handle>"}` whatever its
 `show_author`. An unlisted one's is `{"label": "@<handle>"}` only when it was

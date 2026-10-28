@@ -350,10 +350,10 @@ def validate_notes(value: Any) -> str | None:
         return None
     if not isinstance(value, str):
         raise _refuse("notes", "must be a string")
-    if not value.strip():
-        return None
     if len(value) > NOTES_MAX:
         raise notes_too_long()
+    if not value.strip():
+        return None
     if _NOTES_LINK.search(value):
         raise notes_links()
     if _CONTROL.search(value):

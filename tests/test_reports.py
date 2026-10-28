@@ -1315,17 +1315,17 @@ def _read(client, report_id, headers=None):
 
 
 def _three_spots_body():
-    """One tab of three tagged items, each with its own player's cards."""
+    """One tab of three tagged items, each with its own player's (and some a game's) cards."""
 
-    def call(call_id, player, card="game-logs"):
-        return {**_call(call_id, card=card), "args": {"player": player}}
+    def call(call_id, player, card="game-logs", game=None):
+        return {**_call(call_id, card=card), "args": {"player": player, **({"game": game} if game else {})}}
 
     body = _body()
     body["calls"] = [
-        call("brunson", "Jalen Brunson"),
+        call("brunson", "Jalen Brunson", game="Knicks at Celtics"),
         call("hart", "Josh Hart"),
-        call("hart-matchup", "Josh Hart", card="matchup"),
-        call("tatum", "Jayson Tatum"),
+        call("hart-matchup", "Josh Hart", card="matchup", game="NYK @ DET"),
+        call("tatum", "Jayson Tatum", game="BOS @ MIA"),
     ]
     body["report"]["tabs"] = [
         {
@@ -1356,6 +1356,7 @@ def test_published_notes_read_back_as_given_and_an_unedited_report_has_no_edit_f
     ("notes", "status", "answer"),
     [
         ("x" * 2001, 400, NOTES_TOO_LONG),
+        (" " * 2001, 400, NOTES_TOO_LONG),
         ("Read https://example.com first", 400, NOTES_LINKS),
         ("plain http://example.com", 400, NOTES_LINKS),
         ("Try WWW.example.com", 400, NOTES_LINKS),
@@ -1377,6 +1378,10 @@ def test_notes_with_a_link_or_over_2000_characters_are_refused_on_publish_and_ed
     report_id = _published_id(client, signed_in())
     refused_edit = _edit(client, signed_in(), report_id, _edits(notes=notes))
     assert refused_edit.status_code == status
+    edit_body = refused_edit.get_json()
+    if "details" in edit_body.get("error", {}):
+        edit_body["error"].pop("details")
+    assert edit_body == answer
     assert _read(client, report_id)["edited_at"] is None
 
 
@@ -1509,7 +1514,14 @@ def test_only_the_author_gets_the_original_and_the_stored_edits_and_save_answers
         "hart-matchup",
         "tatum",
     ]
-    assert set(author["original"]["calls"][0]) == {"id", "tool", "card", "structured", "meta"}
+    assert author["original"]["calls"][1] == {
+        "id": "hart",
+        "tool": "query_game_logs",
+        "args": {"player": "Josh Hart"},
+        "structured": {"rows": [{"PTS": 31}]},
+        "meta": {"data_as_of": "2026-10-24"},
+        "card": "game-logs",
+    }
     assert [item["title"] for item in author["document"]["tabs"][0]["items"]] == [
         "Brunson points",
         "Hart rebounds",
@@ -1636,7 +1648,7 @@ def test_editing_a_listed_report_recomputes_its_feed_title_and_covers(client, si
     _claim(client, signed_in(OWNER), "bighat")
     [report_id] = _seed_listed(reports, clock, OWNER, 1, body=_three_spots_body())
     assert _feed(client)["reports"][0]["covers"] == {
-        "games": [],
+        "games": ["NYK @ BOS", "NYK @ DET", "BOS @ MIA"],
         "players": ["Jalen Brunson", "Josh Hart", "Jayson Tatum"],
     }
 
@@ -1654,13 +1666,19 @@ def test_editing_a_listed_report_recomputes_its_feed_title_and_covers(client, si
     )
 
     [entry] = _feed(client)["reports"]
-    assert (entry["title"], entry["covers"]) == ("Hart only", {"games": [], "players": ["Josh Hart"]})
+    assert (entry["title"], entry["covers"]) == (
+        "Hart only",
+        {"games": ["NYK @ DET"], "players": ["Josh Hart"]},
+    )
 
     _edit(client, signed_in(), report_id, _edits(title="Back again"))
     [entry] = _feed(client)["reports"]
     assert (entry["title"], entry["covers"]) == (
         "Back again",
-        {"games": [], "players": ["Jalen Brunson", "Josh Hart", "Jayson Tatum"]},
+        {
+            "games": ["NYK @ BOS", "NYK @ DET", "BOS @ MIA"],
+            "players": ["Jalen Brunson", "Josh Hart", "Jayson Tatum"],
+        },
     )
 
 
@@ -1684,7 +1702,10 @@ def test_listing_a_report_edited_while_unlisted_takes_covers_from_its_visible_ca
     _list(client, signed_in(), report_id)
 
     [entry] = _feed(client)["reports"]
-    assert (entry["title"], entry["covers"]) == ("Tatum only", {"games": [], "players": ["Jayson Tatum"]})
+    assert (entry["title"], entry["covers"]) == (
+        "Tatum only",
+        {"games": ["BOS @ MIA"], "players": ["Jayson Tatum"]},
+    )
 
 
 def test_the_meta_and_preview_follow_the_edited_report(client, signed_in):

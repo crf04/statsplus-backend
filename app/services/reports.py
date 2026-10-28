@@ -575,8 +575,8 @@ class ReportService:
         A listed report always names its author, with the handle; an unlisted
         one only when it opted in with ``show_author``.  Readers get only the
         card HTML the shown calls draw; the author gets every card's, the
-        published ``original`` and the stored ``edits``, so a removal can be
-        undone.
+        published ``original`` (its calls with their ``args``, exactly as
+        stored) and the stored ``edits``, so a removal can be undone.
         """
 
         row, handle = self._visible(report_id, removed_is_gone=True)
@@ -606,7 +606,7 @@ class ReportService:
             "edited_at": _utc(row.edited_at).isoformat() if row.edited_at else None,
         }
         if is_author:
-            report["original"] = {"document": row.document, "calls": _public_calls(row.calls)}
+            report["original"] = {"document": row.document, "calls": row.calls}
             report["edits"] = row.edits
         return report
 
