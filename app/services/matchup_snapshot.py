@@ -27,7 +27,7 @@ from app.services.matchup import (
     build_publication_metadata,
 )
 from app.services.matchup_reuse import ComposedMatchupCache, PublicationSnapshotReuse
-from app.services.publication_snapshot_calls import accepts_keyword
+from app.services.publication_snapshot_calls import accepts_keyword, call_with_read_scope
 from app.services.research_season import event_season, published_capture
 
 
@@ -271,7 +271,12 @@ class SnapshotMatchups:
 
         if "stats" not in self._retained:
             method = getattr(self.composer, "stats_freshness_block", None)
-            self._retained["stats"] = None if not callable(method) else method(self.season)
+            connection = None if self._read_scope is None else self._read_scope[0]
+            self._retained["stats"] = (
+                None
+                if not callable(method)
+                else call_with_read_scope(method, self.season, connection=connection)
+            )
         return self._retained["stats"]
 
     def _retained_publication(self, game_id: str) -> Any:

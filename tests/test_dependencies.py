@@ -1104,3 +1104,46 @@ def test_query_defaults_to_published_season_after_calendar_rollover(monkeypatch)
     assert advanced.get_json()["player_name"] == "Published Season Rookie"
     assert advanced.get_json()["season"] is None
     engine.dispose()
+
+
+def test_the_matchup_injury_catalog_reads_on_the_callers_connection(monkeypatch, tmp_path):
+    """A Matchup reconciling the league report reads the catalog inside its own snapshot."""
+
+    from datetime import datetime
+
+    from sqlalchemy import create_engine, insert
+
+    from app.dependencies import build_dependencies
+    from app.migrations import run_migrations
+    from app.models.athlete_catalog import AthleteCatalog
+
+    settings = RuntimeSettings(
+        environment="testing",
+        auth={"firebase_admin_disabled": True},
+        database={"url": f"sqlite:///{tmp_path / 'catalog.sqlite3'}"},
+    )
+    engine = create_engine(settings.database.url)
+    run_migrations(engine)
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
+    monkeypatch.setattr("app.utils.cache_config.get_redis_client", Mock(return_value=None))
+    catalog = build_dependencies(settings).matchup_service.injuries.athlete_catalog
+
+    with engine.connect() as connection:
+        connection.execute(
+            insert(AthleteCatalog.__table__).values(
+                season="2025-26",
+                player_id=1628973,
+                display_name="Jalen Brunson",
+                roster_status="Active",
+                is_active=True,
+                is_active_for_season=True,
+                team_id=1610612752,
+                team_name="NYK",
+                team_abbreviation="NYK",
+                published_at=datetime(2026, 1, 15, tzinfo=UTC),
+            )
+        )
+        uncommitted = catalog.get_catalog("2025-26", active_only=True, connection=connection)
+
+    assert [row["display_name"] for row in uncommitted] == ["Jalen Brunson"]
+    assert catalog.get_catalog("2025-26", active_only=True) == []

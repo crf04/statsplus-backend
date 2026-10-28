@@ -580,7 +580,9 @@ def build_dependencies(
     matchup_injury_service = MatchupInjuryService(
         provider=injury_provider,
         snapshot_repository=injury_snapshot_repository,
-        athlete_catalog=athlete_catalog_service,
+        # The engine-bound reader takes the request's connection, so a report
+        # reconciled on a Matchup's read reads the catalog from its snapshot.
+        athlete_catalog=(AthleteCatalogReader(engine) if athlete_catalog_service is not None else None),
         enabled=settings.features.injury_report_enabled,
     )
     projection_archive = (

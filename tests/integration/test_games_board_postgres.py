@@ -185,3 +185,17 @@ def test_the_pools_start_fences_and_closing_sets_read_the_boards_snapshot(board,
     assert status == 200
     assert [game["status"] for game in after["games"]] == ["live", "live"]
     assert after["games"][0]["players"][0]["lines"] == {"dabble": 28.5}
+
+
+def test_a_failed_injury_read_leaves_the_rest_of_the_board(board, client):
+    """The stored report fails on the board's shared connection; the books read after it
+    still answer, and no player carries a status."""
+
+    with board.engine.begin() as connection:
+        connection.execute(text("ALTER TABLE injury_snapshots RENAME TO injury_snapshots_gone"))
+
+    status, body = _get(client, "date=2026-01-15&market=PTS")
+
+    assert status == 200
+    assert _tatum(body) == (27.5, {"draftkings": 27.5, "fanduel": 28.5}, None)
+    assert {row["injury_status"] for game in body["games"] for row in game["players"]} == {None}

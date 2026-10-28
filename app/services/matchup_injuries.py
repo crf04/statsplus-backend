@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Lock
@@ -88,6 +89,21 @@ def unavailable_injury_result(reason: str) -> MatchupInjuryResult:
         out_player_ids=frozenset(),
         badge_refs={},
     )
+
+
+@contextmanager
+def _optional_read(connection: Connection | None) -> Iterator[None]:
+    """Hold a read whose failure is served as missing evidence in a savepoint.
+
+    On the caller's shared connection a failed statement would otherwise abort
+    the transaction every later read of the response runs in.
+    """
+
+    if connection is None:
+        yield
+        return
+    with connection.begin_nested():
+        yield
 
 
 class AthleteNameIndex:
@@ -257,7 +273,8 @@ class MatchupInjuryService:
         scope = InjurySnapshotScope(season, str(event["nba_game_id"]))
         now = assume_utc(self.clock())
         try:
-            stored = call_with_read_scope(self.snapshot_repository.get, scope, connection=connection)
+            with _optional_read(connection):
+                stored = call_with_read_scope(self.snapshot_repository.get, scope, connection=connection)
         except (SQLAlchemyError, TypeError, ValueError):
             stored = None
 
@@ -284,9 +301,10 @@ class MatchupInjuryService:
             )
 
         try:
-            source_snapshot = call_with_read_scope(
-                self.snapshot_repository.get_latest_source, INJURY_SOURCE, connection=connection
-            )
+            with _optional_read(connection):
+                source_snapshot = call_with_read_scope(
+                    self.snapshot_repository.get_latest_source, INJURY_SOURCE, connection=connection
+                )
         except (SQLAlchemyError, TypeError, ValueError):
             source_snapshot = None
         use_stored = self._within_age(stored, now, INJURY_STALE_SERVE_SECONDS)
@@ -295,14 +313,16 @@ class MatchupInjuryService:
         ):
             status = "fresh" if self._within_age(source_snapshot, now, INJURY_REFRESH_SECONDS) else "stale"
             try:
-                entries, unresolved_team_entries = self._reconcile(
-                    tuple(
-                        InjuryEntryEvidence.from_document(entry)
-                        for entry in source_snapshot.normalized_entries
-                    ),
-                    event=event,
-                    season=season,
-                )
+                with _optional_read(connection):
+                    entries, unresolved_team_entries = self._reconcile(
+                        tuple(
+                            InjuryEntryEvidence.from_document(entry)
+                            for entry in source_snapshot.normalized_entries
+                        ),
+                        event=event,
+                        season=season,
+                        connection=connection,
+                    )
                 self.snapshot_repository.replace_from_source(
                     scope,
                     source_snapshot=source_snapshot,
@@ -441,11 +461,12 @@ class MatchupInjuryService:
         if self.snapshot_repository is None:
             return unavailable_injury_result("fetch_failed")
         try:
-            stored = call_with_read_scope(
-                self.snapshot_repository.get,
-                InjurySnapshotScope(season, str(event["nba_game_id"])),
-                connection=connection,
-            )
+            with _optional_read(connection):
+                stored = call_with_read_scope(
+                    self.snapshot_repository.get,
+                    InjurySnapshotScope(season, str(event["nba_game_id"])),
+                    connection=connection,
+                )
         except (SQLAlchemyError, TypeError, ValueError):
             stored = None
         return self._stored_result(
@@ -486,9 +507,10 @@ class MatchupInjuryService:
             for event in events
         }
         try:
-            stored_by_scope = call_with_read_scope(
-                self.snapshot_repository.get_many, tuple(scopes_by_game.values()), connection=connection
-            )
+            with _optional_read(connection):
+                stored_by_scope = call_with_read_scope(
+                    self.snapshot_repository.get_many, tuple(scopes_by_game.values()), connection=connection
+                )
         except (SQLAlchemyError, TypeError, ValueError):
             stored_by_scope = {}
         now = assume_utc(self.clock())
@@ -569,8 +591,11 @@ class MatchupInjuryService:
         *,
         event: Mapping[str, Any],
         season: str,
+        connection: Connection | None = None,
     ) -> tuple[tuple[dict[str, Any], ...], int]:
-        catalog = self.athlete_catalog.get_catalog(season, active_only=True)
+        catalog = call_with_read_scope(
+            self.athlete_catalog.get_catalog, season, active_only=True, connection=connection
+        )
         teams = self._event_teams(event)
         sides = {value["side"]: code for code, value in teams.items()}
         return reconcile_injury_entries(

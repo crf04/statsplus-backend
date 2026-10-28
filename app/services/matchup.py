@@ -690,10 +690,10 @@ class MatchupService:
 
         return game_capture(self.publication_reader, publication_snapshot, scheduled_at, session=session)
 
-    def stats_freshness_block(self, season: str) -> dict[str, Any]:
+    def stats_freshness_block(self, season: str, *, connection: Connection | None = None) -> dict[str, Any]:
         """``freshness.stats`` as a compose reports it, without composing."""
 
-        return self._stats_freshness(season)
+        return self._stats_freshness(season, connection=connection)
 
     def retained_publication(self, season: str) -> Any:
         """The retained Publication an earlier season's game is composed from.
