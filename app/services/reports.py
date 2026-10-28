@@ -376,13 +376,22 @@ class ReportService:
             session.close()
 
     def set_featured(self, report_id: str, featured: bool) -> dict[str, Any]:
-        """An admin pins (or unpins) a listed, visible report as Featured."""
+        """An admin pins (or unpins) a listed, visible report as Featured.
+
+        The author's account lock is taken first, as listing and unlisting
+        take it, and the report read again under it, so a pin cannot land on
+        a report its author unlisted meanwhile.
+        """
 
         if not _is_report_id(report_id):
             raise ResourceNotFoundError(_NOT_FOUND)
         session = get_session(self._engine)
         try:
-            row = session.get(Report, report_id)
+            owner = session.scalar(select(Report.firebase_uid).where(Report.id == report_id))
+            if owner is None:
+                raise ResourceNotFoundError(_NOT_FOUND)
+            self._lock_account(session, owner)
+            row = session.get(Report, report_id, populate_existing=True)
             if row is None or row.deleted_at is not None or row.taken_down_at is not None:
                 raise ResourceNotFoundError(_NOT_FOUND)
             if featured and row.listed_at is None:
@@ -439,21 +448,23 @@ class ReportService:
             if once:
                 # Conditional, so of two concurrent first claims only one sets it.
                 change = change.where(User.public_handle.is_(None))
-            if session.execute(change).rowcount == 0:
-                raise handle_already_set()
-            if handle is None:
-                # A listed report always names its author, so with no handle
-                # left nothing of theirs stays listed or Featured.
-                session.execute(
-                    update(Report)
-                    .where(Report.firebase_uid == firebase_uid, Report.listed_at.is_not(None))
-                    .values(listed_at=None, featured_at=None)
-                )
             try:
+                updated = session.execute(change).rowcount
+                if updated and handle is None:
+                    # A listed report always names its author, so with no
+                    # handle left nothing of theirs stays listed or Featured.
+                    session.execute(
+                        update(Report)
+                        .where(Report.firebase_uid == firebase_uid, Report.listed_at.is_not(None))
+                        .values(listed_at=None, featured_at=None)
+                    )
                 session.commit()
             except IntegrityError:
-                # Another account took it between the check and the commit.
+                # Another account took it after the check: the unique index
+                # refuses it on the update or the commit.
                 raise handle_taken() from None
+            if not updated:
+                raise handle_already_set()
             return handle
         except Exception:
             session.rollback()

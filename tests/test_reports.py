@@ -968,6 +968,12 @@ def test_clearing_a_handle_unlists_and_unfeatures_the_authors_reports(client, si
     assert (read["listed"], read["featured"], read["author"]) == (False, False, None)
     assert _feed(client) == {"featured": [], "reports": _feed(client)["reports"], "next_cursor": None}
     assert _ids(_feed(client)["reports"]) == [theirs]
+    # With a handle again, relisting does not bring the old pin back.
+    _admin_handle(client, signed_in, OWNER, "bighat")
+    assert _list(client, signed_in(OWNER), mine).status_code == 200
+    relisted = client.get(f"/api/reports/{mine}").get_json()["report"]
+    assert (relisted["listed"], relisted["featured"]) == (True, False)
+    assert _feed(client)["featured"] == []
 
 
 def test_listing_is_capped_at_5_moves_per_rolling_24_hours_over_both_endpoints(

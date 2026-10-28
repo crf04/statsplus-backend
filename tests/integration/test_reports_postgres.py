@@ -370,3 +370,67 @@ def test_a_first_claim_racing_another_write_cannot_overwrite_it(engine):
     assert outcome == ["handle_already_set"]
     with engine.connect() as connection:
         assert connection.execute(text("SELECT public_handle FROM users")).scalar() == "first"
+
+
+def test_two_accounts_racing_for_one_handle_leave_one_owner_and_handle_taken(engine):
+    for uid in ("first", "second"):
+        _user(engine, uid)
+    service = ReportService(engine)
+    outcome = []
+    with engine.connect() as other:
+        transaction = other.begin()
+        other.execute(text("UPDATE users SET public_handle = 'same' WHERE firebase_uid = 'first'"))
+
+        def claim():
+            try:
+                outcome.append(service.claim_public_handle("second", "same"))
+            except FlatBodyError as error:
+                outcome.append(error.code)
+
+        thread = threading.Thread(target=claim)
+        thread.start()
+        thread.join(timeout=1)
+        assert thread.is_alive()  # waiting on the unique index entry
+        transaction.commit()
+    thread.join(timeout=30)
+
+    assert outcome == ["handle_taken"]
+    with engine.connect() as connection:
+        assert dict(connection.execute(text("SELECT firebase_uid, public_handle FROM users")).all()) == {
+            "first": "same",
+            "second": None,
+        }
+
+
+def test_featuring_waits_for_an_unlisting_and_then_refuses(engine):
+    _user(engine, "author")
+    service = ReportService(engine)
+    service.set_public_handle("author", "author")
+    report_id = service.publish("author", {**_body(), "listed": True})["id"]
+    outcome = []
+    # The author's unlisting holds the account lock, uncommitted, as set_listed does.
+    with engine.connect() as other:
+        transaction = other.begin()
+        other.execute(text("SELECT 1 FROM users WHERE firebase_uid = 'author' FOR UPDATE"))
+        other.execute(
+            text("UPDATE reports SET listed_at = NULL, featured_at = NULL WHERE id = :id"), {"id": report_id}
+        )
+
+        def feature():
+            try:
+                outcome.append(service.set_featured(report_id, True)["featured"])
+            except ConflictError:
+                outcome.append("conflict")
+
+        thread = threading.Thread(target=feature)
+        thread.start()
+        thread.join(timeout=1)
+        assert thread.is_alive()  # waiting on the account lock
+        transaction.commit()
+    thread.join(timeout=30)
+
+    assert outcome == ["conflict"]
+    with engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT listed_at, featured_at FROM reports WHERE id = :id"), {"id": report_id}
+        ).one() == (None, None)
