@@ -4153,9 +4153,11 @@ fact.
 
 Provider athlete mappings are an internal, persisted read-side seam rather
 than new HTTP mutation routes. `AthleteResolver` accepts typed provider
-evidence plus an explicit season and only auto-qualifies one exact normalized
-official-name match among active season rows with non-conflicting team
-evidence. Use the offline operator CLI for list/dry-run/history and audited
+evidence plus an explicit season and only auto-qualifies one official-name
+match among active season rows with non-conflicting team evidence: an exact
+normalized match, or, when there is none, the one player on the athlete's team
+(or the event's two teams) whose name agrees once a generational suffix is set
+aside and a listed nickname is folded. Use the offline operator CLI for list/dry-run/history and audited
 approve, override, reject, and clear actions:
 
 ```bash
