@@ -10,7 +10,7 @@ from unittest.mock import Mock
 
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine, insert
+from sqlalchemy import create_engine, insert, text
 from sqlalchemy import event as sqlalchemy_event
 
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
@@ -415,9 +415,14 @@ def test_the_index_lists_each_posted_market_with_its_players_and_sources(board, 
             "games": GAMES,
             "sources": SOURCES,
             "markets": [
-                {"market": "PTS", "players": 8, "sources": ["dabble", "prizepicks", "draftkings", "fanduel"]},
-                {"market": "3PM", "players": 1, "sources": ["draftkings"]},
-                {"market": "FG3A", "players": 2, "sources": ["dabble"]},
+                {
+                    "market": "PTS",
+                    "players": 8,
+                    "book_only_unnamed": 2,
+                    "sources": ["dabble", "prizepicks", "draftkings", "fanduel"],
+                },
+                {"market": "3PM", "players": 1, "book_only_unnamed": 0, "sources": ["draftkings"]},
+                {"market": "FG3A", "players": 2, "book_only_unnamed": 0, "sources": ["dabble"]},
             ],
         },
     )
@@ -427,7 +432,9 @@ def test_the_index_counts_players_only_a_book_quotes(board, client):
     status, body = _get(client, "date=2026-01-15&sources=fanduel")
 
     assert status == 200
-    assert body["markets"] == [{"market": "PTS", "players": 2, "sources": ["fanduel"]}]
+    assert body["markets"] == [
+        {"market": "PTS", "players": 2, "book_only_unnamed": 0, "sources": ["fanduel"]}
+    ]
 
 
 CURRY_PTS = {
@@ -575,6 +582,7 @@ def test_a_sportsbook_market_carries_every_provider_and_book_per_game(board, cli
             "games": _games([CURRY_PTS, LEBRON_PTS], LATER_PTS),
             "sources": SOURCES,
             "players_total": 8,
+            "omitted": {"book_only_unnamed": 2},
         },
     )
 
@@ -585,14 +593,39 @@ def test_a_player_only_a_book_quotes_has_book_columns_and_a_catalog_name(board, 
     assert status == 200
     assert body["games"] == [{**GAMES[1], "players": LATER_PTS[:5]}]
     assert body["players_total"] == 5
+    # The two the catalog cannot name are quoted in Boston's game, so the team filter keeps them.
+    assert body["omitted"] == {"book_only_unnamed": 2}
 
 
-def test_a_book_quoted_player_the_catalog_lacks_or_lists_without_a_team_is_left_out(board, client):
-    status, body = _get(client, f"date=2026-01-15&market=PTS&game={LATER}")
+def test_a_book_quoted_player_the_catalog_lacks_or_lists_without_a_team_is_counted_not_listed(board, client):
+    assert _get(client, f"date=2026-01-15&market=PTS&game={LATER}") == (
+        200,
+        {
+            "date": "2026-01-15",
+            "season": SEASON,
+            "games": [{**GAMES[1], "players": LATER_PTS}],
+            "sources": SOURCES,
+            "players_total": 6,
+            "omitted": {"book_only_unnamed": 2},
+        },
+    )
 
-    assert status == 200
-    assert body["games"] == [{**GAMES[1], "players": LATER_PTS}]
-    assert body["players_total"] == 6
+
+@pytest.mark.parametrize(
+    ("filters", "omitted", "index"),
+    [
+        # Only DraftKings quotes the two unnamed players, and only in BOS @ NYK.
+        ("sources=draftkings", 2, [("PTS", 2), ("3PM", 0)]),
+        ("sources=fanduel", 0, [("PTS", 0)]),
+        (f"game={STARTED}", 0, [("PTS", 0), ("FG3A", 0)]),
+    ],
+)
+def test_the_uncounted_players_pass_the_same_source_and_game_filters(board, client, filters, omitted, index):
+    _status, market = _get(client, f"date=2026-01-15&market=PTS&{filters}")
+    _status, markets = _get(client, f"date=2026-01-15&{filters}")
+
+    assert market["omitted"] == {"book_only_unnamed": omitted}
+    assert [(entry["market"], entry["book_only_unnamed"]) for entry in markets["markets"]] == index
 
 
 def test_players_are_ordered_by_team_then_name_then_player_id(board, client):
@@ -636,6 +669,30 @@ def test_games_are_ordered_by_tip_then_label(board, client):
     ]
 
 
+def test_a_market_quoted_only_for_players_the_catalog_cannot_name_is_still_indexed(board, client):
+    with board.engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE sportsbook_prop_latest SET market_category = 'REB' "
+                "WHERE canonical_player_id IN (:uncatalogued, :teamless)"
+            ),
+            {"uncatalogued": UNCATALOGUED[0], "teamless": TEAMLESS[0]},
+        )
+
+    status, body = _get(client, "date=2026-01-15")
+
+    assert status == 200
+    assert [entry for entry in body["markets"] if entry["market"] in {"PTS", "REB"}] == [
+        {
+            "market": "PTS",
+            "players": 8,
+            "book_only_unnamed": 0,
+            "sources": ["dabble", "prizepicks", "draftkings", "fanduel"],
+        },
+        {"market": "REB", "players": 0, "book_only_unnamed": 2, "sources": ["draftkings"]},
+    ]
+
+
 def test_a_dfs_only_market_has_no_book_lines(board, client):
     assert _get(client, "date=2026-01-15&market=FG3A") == (
         200,
@@ -668,6 +725,7 @@ def test_a_dfs_only_market_has_no_book_lines(board, client):
             ),
             "sources": SOURCES,
             "players_total": 2,
+            "omitted": {"book_only_unnamed": 0},
         },
     )
 
@@ -720,8 +778,8 @@ def test_the_index_counts_only_the_filtered_game_and_sources(board, client):
     assert status == 200
     assert body["games"] == [GAMES[1]]
     assert body["markets"] == [
-        {"market": "PTS", "players": 2, "sources": ["draftkings"]},
-        {"market": "3PM", "players": 1, "sources": ["draftkings"]},
+        {"market": "PTS", "players": 2, "book_only_unnamed": 2, "sources": ["draftkings"]},
+        {"market": "3PM", "players": 1, "book_only_unnamed": 0, "sources": ["draftkings"]},
     ]
 
 
@@ -729,7 +787,10 @@ def test_a_date_with_no_games_is_an_empty_board(board, client):
     empty = {"date": "2026-01-14", "season": SEASON, "games": [], "sources": []}
 
     assert _get(client, "date=2026-01-14") == (200, {**empty, "markets": []})
-    assert _get(client, "date=2026-01-14&market=PTS") == (200, {**empty, "players_total": 0})
+    assert _get(client, "date=2026-01-14&market=PTS") == (
+        200,
+        {**empty, "players_total": 0, "omitted": {"book_only_unnamed": 0}},
+    )
 
 
 @pytest.mark.parametrize(

@@ -180,22 +180,27 @@ class SlateBoardService:
                 {
                     "market": name,
                     "players": len(found),
+                    "book_only_unnamed": len(unnamed),
                     "sources": sorted({provider for posting in found for provider in posting.lines})
-                    + sorted({row.book for posting in found for row in posting.book_rows}),
+                    + sorted(
+                        {row.book for posting in found for row in posting.book_rows}
+                        | {row.book for books in unnamed for row in books}
+                    ),
                 }
                 for name in self.markets
-                if (found := postings.of(name))
+                for found, unnamed in (postings.of(name),)
+                if found or unnamed
             ]
             return board
         rows_by_game: dict[str, list[dict[str, Any]]] = {game: [] for game in game_ids}
-        found = sorted(
-            postings.of(market), key=lambda posting: (posting.team, posting.name, posting.player_id)
-        )
+        found, unnamed = postings.of(market)
+        found.sort(key=lambda posting: (posting.team, posting.name, posting.player_id))
         for posting in found:
             rows_by_game[posting.game_id].append(posting.row())
         for game in board["games"]:
             game["players"] = rows_by_game[game["game_id"]]
         board["players_total"] = len(found)
+        board["omitted"] = {"book_only_unnamed": len(unnamed)}
         return board
 
     def _pool(self, season: str, game_ids: Sequence[str], connection: Any) -> PlayerPool:
@@ -290,8 +295,10 @@ class _Postings:
 
     A player a book quotes in a game whose pool has no row for him is posted
     with book columns only, named from the athlete catalog.  One the catalog
-    lacks, or holds without a team, is left out: without his team the board can
-    neither apply ``team`` nor place him in the team, name, player id order.
+    lacks, or holds without a team, is counted instead of posted: without his
+    team the board can neither apply ``team`` nor place him in the team, name,
+    player id order.  A ``team`` filter keeps him in the count, since he is
+    quoted in that team's game.
     """
 
     def __init__(
@@ -330,8 +337,11 @@ class _Postings:
             int(row["player_id"]): row for row in athletes(sorted({player for _, player in self._off_pool}))
         }
 
-    def of(self, market: str) -> list[_Posting]:
+    def of(self, market: str) -> tuple[list[_Posting], list[tuple[Any, ...]]]:
+        """The market's postings, and the book rows of each quoted player the catalog cannot name."""
+
         found = []
+        unnamed = []
         for player in self._players:
             game_id, team = self._games[player.team_id]
             lines = {
@@ -364,7 +374,12 @@ class _Postings:
             books = tuple(self._books.get((game_id, player_id, market), ()))
             athlete = self._athletes.get(player_id, {})
             team = athlete.get("team_abbreviation")
-            if not books or team is None or (self._team is not None and team != self._team):
+            if not books:
+                continue
+            if team is None:
+                unnamed.append(books)
+                continue
+            if self._team is not None and team != self._team:
                 continue
             found.append(
                 self._posting(
@@ -377,7 +392,7 @@ class _Postings:
                     books=books,
                 )
             )
-        return found
+        return found, unnamed
 
     def _posting(
         self,

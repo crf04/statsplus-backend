@@ -1280,14 +1280,15 @@ Index (no `market`):
     {"source": "draftkings", "kind": "sportsbook", "status": "fresh", "retrieved_at": "2026-01-15T23:57:00Z"}
   ],
   "markets": [
-    {"market": "PTS", "players": 4, "sources": ["dabble", "prizepicks", "draftkings"]},
-    {"market": "FG3A", "players": 2, "sources": ["dabble"]}
+    {"market": "PTS", "players": 4, "book_only_unnamed": 1, "sources": ["dabble", "prizepicks", "draftkings"]},
+    {"market": "FG3A", "players": 2, "book_only_unnamed": 0, "sources": ["dabble"]}
   ]
 }
 ```
 
 Market mode (`market=PTS`) drops `markets`, adds `players_total` (rows after
-filters), and gives each game its `players`:
+filters) and `"omitted": {"book_only_unnamed": 1}`, and gives each game its
+`players`:
 
 ```json
 {
@@ -1320,11 +1321,16 @@ filters), and gives each game its `players`:
   book quotes for the market in a game whose pool has no row for him (a late
   call-up or a rookie the DFS providers do not post). Such a row has
   `"lines": {}` and `"line_prices": {}`, and its `name` and `team` are the
-  athlete catalog's for the season. A quoted player the catalog lacks is left
-  out, since without a team the row can be neither filtered by `team` nor
-  ordered. `team`, `game` and `sources` apply to these rows as to any: a player
-  quoted only by books `sources` drops is not listed. The index's `players`
-  counts include them.
+  athlete catalog's for the season. `team`, `game` and `sources` apply to these
+  rows as to any: a player quoted only by books `sources` drops is not listed.
+  The index's `players` counts include them.
+- A quoted player outside the pool whom the athlete catalog lacks, or lists
+  without a team, is not a row, since without a team it can be neither filtered
+  by `team` nor ordered. Market mode counts these players in
+  `omitted.book_only_unnamed` and the index in each market's
+  `book_only_unnamed`, after `game` and `sources`. A `team` filter keeps them in
+  the count, because they are quoted in that team's game. A market quoted only
+  for such players is still listed in the index, with `"players": 0`.
 - `lines` and `line_prices` are the Matchup row's, for this market only.
   `line_prices` holds American prices as posted, `null` for a missing side; a
   provider with no per-pick price (PrizePicks) is absent from it.

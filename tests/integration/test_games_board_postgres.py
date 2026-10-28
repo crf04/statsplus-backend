@@ -10,10 +10,13 @@ from sqlalchemy import create_engine, text
 
 from app.migrations import run_migrations
 from tests.routes.test_games_board import (
+    CURRY,
     CURRY_PTS,
     HAUSER,
+    LATER,
     LATER_PTS,
     LEBRON_PTS,
+    NOW,
     SEASON,
     SOURCES,
     TATUM,
@@ -39,23 +42,29 @@ def board(dependencies):
     engine.dispose()
 
 
+PTS_BOARD = {
+    "date": "2026-01-15",
+    "season": SEASON,
+    "games": _games([CURRY_PTS, LEBRON_PTS], LATER_PTS),
+    "sources": SOURCES,
+    "players_total": 8,
+    "omitted": {"book_only_unnamed": 2},
+}
+
+
 def test_the_pts_board_and_its_index_on_postgres(board, client):
-    assert _get(client, "date=2026-01-15&market=PTS") == (
-        200,
-        {
-            "date": "2026-01-15",
-            "season": SEASON,
-            "games": _games([CURRY_PTS, LEBRON_PTS], LATER_PTS),
-            "sources": SOURCES,
-            "players_total": 8,
-        },
-    )
+    assert _get(client, "date=2026-01-15&market=PTS") == (200, PTS_BOARD)
     status, index = _get(client, "date=2026-01-15")
     assert status == 200
     assert index["markets"] == [
-        {"market": "PTS", "players": 8, "sources": ["dabble", "prizepicks", "draftkings", "fanduel"]},
-        {"market": "3PM", "players": 1, "sources": ["draftkings"]},
-        {"market": "FG3A", "players": 2, "sources": ["dabble"]},
+        {
+            "market": "PTS",
+            "players": 8,
+            "book_only_unnamed": 2,
+            "sources": ["dabble", "prizepicks", "draftkings", "fanduel"],
+        },
+        {"market": "3PM", "players": 1, "book_only_unnamed": 0, "sources": ["draftkings"]},
+        {"market": "FG3A", "players": 2, "book_only_unnamed": 0, "sources": ["dabble"]},
     ]
 
 
@@ -132,3 +141,47 @@ def test_a_correction_committed_mid_read_never_mixes_into_the_board(
     assert _tatum(during) == (27.5, {"draftkings": 27.5, "fanduel": 28.5}, "Questionable")
     assert _tatum(after) == (30.5, {"draftkings": 30.5, "fanduel": 28.5}, "Out")
     assert (_hauser(during), _hauser(after)) == (["Sam Hauser"], ["Samuel Hauser"])
+
+
+def _tip_later_and_correct_curry_closing(engine):
+    """BOS @ NYK tips and Curry's frozen closing PTS line is corrected to 28.5, in one commit."""
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE event_catalog SET status_code = 2, status_text = 'In Progress', "
+                "first_observed_started_at = :tipped WHERE nba_game_id = :game"
+            ),
+            {"tipped": NOW, "game": LATER},
+        )
+        connection.execute(
+            text(
+                "UPDATE projection_observations SET line_value = 28.5 "
+                "WHERE canonical_player_id = :player AND market_category = 'PTS' "
+                "AND observation_id IN (SELECT observation_id FROM projection_closing_memberships)"
+            ),
+            {"player": CURRY[0]},
+        )
+
+
+def test_the_pools_start_fences_and_closing_sets_read_the_boards_snapshot(board, client, monkeypatch):
+    """The pool decides which games have started and reads their closing sets after the
+    schedule's first read; a correction committed in between stays out of the board."""
+
+    reads = board.service.event_catalog
+    read = reads.get_events_between
+
+    def read_then_correct(*arguments, **keywords):
+        result = read(*arguments, **keywords)
+        _tip_later_and_correct_curry_closing(board.engine)
+        return result
+
+    monkeypatch.setattr(reads, "get_events_between", read_then_correct)
+    during = _get(client, "date=2026-01-15&market=PTS")
+    monkeypatch.setattr(reads, "get_events_between", read)
+    status, after = _get(client, "date=2026-01-15&market=PTS")
+
+    assert during == (200, PTS_BOARD)
+    assert status == 200
+    assert [game["status"] for game in after["games"]] == ["live", "live"]
+    assert after["games"][0]["players"][0]["lines"] == {"dabble": 28.5}
