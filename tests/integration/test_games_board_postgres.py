@@ -9,6 +9,9 @@ import pytest
 from sqlalchemy import create_engine, text
 
 from app.migrations import run_migrations
+from app.providers.dfs import NBAMarketQuery
+from app.providers.registry import dfs_provider_names
+from app.services.projection_archive import LatestProjectionPlayerPoolReader, ProjectionArchiveReadScope
 from tests.routes.test_games_board import (
     CURRY,
     CURRY_PTS,
@@ -143,6 +146,34 @@ def test_a_correction_committed_mid_read_never_mixes_into_the_board(
     assert (_hauser(during), _hauser(after)) == (["Sam Hauser"], ["Samuel Hauser"])
 
 
+def test_a_pool_rebound_to_the_slates_season_reads_the_boards_snapshot(board, client, monkeypatch):
+    """A pool reader configured for another season rebinds the whole slate to its season on
+    the board's connection, as after the October rollover."""
+
+    board.service.player_pool = LatestProjectionPlayerPoolReader(
+        board.engine,
+        tuple(
+            ProjectionArchiveReadScope(provider=provider, query=NBAMarketQuery(season="2024-25"))
+            for provider in dfs_provider_names()
+        ),
+        required_providers=("dabble", "prizepicks"),
+        clock=lambda: NOW,
+        event_reader=board.service.event_catalog,
+    )
+    reads = board.service.event_catalog
+    read = reads.get_events_between
+
+    def read_then_correct(*arguments, **keywords):
+        result = read(*arguments, **keywords)
+        _correct_tatum(board.engine)
+        return result
+
+    monkeypatch.setattr(reads, "get_events_between", read_then_correct)
+    _status, during = _get(client, "date=2026-01-15&market=PTS")
+
+    assert _tatum(during) == (27.5, {"draftkings": 27.5, "fanduel": 28.5}, "Questionable")
+
+
 def _tip_later_and_correct_curry_closing(engine):
     """BOS @ NYK tips and Curry's frozen closing PTS line is corrected to 28.5, in one commit."""
 
@@ -185,3 +216,17 @@ def test_the_pools_start_fences_and_closing_sets_read_the_boards_snapshot(board,
     assert status == 200
     assert [game["status"] for game in after["games"]] == ["live", "live"]
     assert after["games"][0]["players"][0]["lines"] == {"dabble": 28.5}
+
+
+def test_a_failed_injury_read_leaves_the_rest_of_the_board(board, client):
+    """The stored report fails on the board's shared connection; the books read after it
+    still answer, and no player carries a status."""
+
+    with board.engine.begin() as connection:
+        connection.execute(text("ALTER TABLE injury_snapshots RENAME TO injury_snapshots_gone"))
+
+    status, body = _get(client, "date=2026-01-15&market=PTS")
+
+    assert status == 200
+    assert _tatum(body) == (27.5, {"draftkings": 27.5, "fanduel": 28.5}, None)
+    assert {row["injury_status"] for game in body["games"] for row in game["players"]} == {None}

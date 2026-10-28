@@ -1210,10 +1210,12 @@ DFS provider and writes nothing.
   each provider's own status and `retrieved_at`, so one provider's new poll
   misses though the oldest stamp holds); each snapshot stream's freshness
   label (a fresh and a stale capture of one generation compose different
-  `freshness` sections); and every Matchup score, Diet baseline, schedule-age
+  `freshness` sections); the `freshness.stats` block (stats completion and its
+  stale or fresh status), read on the same repeatable-read snapshot as the
+  compose stored under it, so a hit reports its own document's stats
+  freshness; and every Matchup score, Diet baseline, schedule-age
   and pinned-season setting. A retained Publication that composition reads
-  but the key did not name (activated in between) is returned uncached. `freshness.stats` is recomputed on every read (two
-  small reads per request). Four stored inputs are not keyed and can lag a cached Matchup by
+  but the key did not name (activated in between) is returned uncached. Four stored inputs are not keyed and can lag a cached Matchup by
   `MATCHUP_CACHE_TTL_SECONDS` (accepted on crf04/statsplus#217, each being rare
   and without a cheap identity): stored injuries and Outs that do not move the
   Slate's targetable counts; durable Last-15 governance observations; projection

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
@@ -382,6 +382,7 @@ class MatchupInjuryReader(Protocol):
         event: Mapping[str, Any],
         season: str,
         pool_players: Sequence[PoolPlayer],
+        connection: Connection | None = None,
     ) -> MatchupInjuryResult: ...
 
 
@@ -689,10 +690,15 @@ class MatchupService:
 
         return game_capture(self.publication_reader, publication_snapshot, scheduled_at, session=session)
 
-    def stats_freshness_block(self, season: str) -> dict[str, Any]:
+    def open_read_scope(self) -> AbstractContextManager[tuple[Connection | None, Session | None]]:
+        """The repeatable-read ``(connection, session)`` a compose reads on when its caller has none."""
+
+        return request_read_scope(self._engine, repeatable_read=True)
+
+    def stats_freshness_block(self, season: str, *, connection: Connection | None = None) -> dict[str, Any]:
         """``freshness.stats`` as a compose reports it, without composing."""
 
-        return self._stats_freshness(season)
+        return self._stats_freshness(season, connection=connection)
 
     def retained_publication(self, season: str) -> Any:
         """The retained Publication an earlier season's game is composed from.
@@ -734,7 +740,7 @@ class MatchupService:
         snapshot was captured on; omitted, the compose opens its own.
         """
 
-        scope = nullcontext(read_scope) if read_scope is not None else request_read_scope(self._engine)
+        scope = nullcontext(read_scope) if read_scope is not None else self.open_read_scope()
         with scope as (connection, session):
             return self._compose_matchup(
                 game_id=game_id,
@@ -1070,6 +1076,7 @@ class MatchupService:
             schedule_season,
             pool_players,
             reader=self.injuries if injuries is _OWN else injuries,
+            connection=connection,
         )
         # The backend declares the mode so no client ever infers it from tip
         # dates, empty arrays, or freshness markers.
@@ -1533,16 +1540,19 @@ class MatchupService:
         pool_players: Sequence[PoolPlayer],
         *,
         reader: MatchupInjuryReader | None,
+        connection: Connection | None,
     ) -> MatchupInjuryResult:
         if reader is not None:
             # Database-first applies to governed statistical facts.  Injury
             # Injury Reports read stored evidence only; the scheduled refresh
             # is the sole provider caller. Statistical activation does not
             # change the Injury Reports contract.
-            return reader.get_injuries(
+            return call_with_read_scope(
+                reader.get_injuries,
                 event=event,
                 season=season,
                 pool_players=pool_players,
+                connection=connection,
             )
         return unavailable_injury_result("disabled")
 
