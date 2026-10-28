@@ -763,7 +763,7 @@ Each team count is the number of canonical players in the live Player Pool for
 that slate game. The pool is the union of usable PrizePicks, Underdog, Dabble,
 Kalshi, Polymarket, and Novig observations. A market qualifies only when it is available, standard,
 full-game, and explicitly mapped to PTS, REB, AST, 3PM, TOV, STL, BLK, PRA, PA,
-PR, RA, STKS, FGA, FG3A, or FG2A. Suspended, alternate, promotional,
+PR, RA, STKS, FGA, FG3A, FG2A, FTA, FTM, FGM, or FG2M. Suspended, alternate, promotional,
 period-specific, fantasy-points, DD2/TD3, unknown-stat, unjoined-player, and
 other-slate markets do not affect counts.
 When a prior Matchup read has stored a still-fresh or permitted-stale injury
@@ -1795,6 +1795,13 @@ truthfully mean that zero components were computable. Whenever at least one
 offensive component is present, `blend` is a score cell with `value` and
 `thin`; the backend never fabricates a numeric Blend merely to avoid `null`.
 
+FTA, FTM, FGM and FG2M (Dabble lines, crf04/statsplus#370) have no Matchup
+Score. A pool player who has one posted carries it in `stat_categories`,
+`posted_markets`, `lines` and `line_prices` like any other category, and its
+`scores` row has both windows as
+`{"components": {}, "blend": null, "missing_inputs": []}`. A Historical
+Matchup never lists them, because its categories are the scored ones.
+
 The stored Diet/sheet intersection supports PTS through play types, shot zones,
 and shot types; FGA through shot zones and shot types; AST through assist
 locations; and 3PM, FG2A, and FG3A through shot zones and shot types. PTS
@@ -2432,7 +2439,8 @@ rows attributable. Average-row player identity is null because it is an
 aggregate across the delivered sample.
 
 Each row's `stats` and `deltas` maps contain every Market Category posted for
-the selected player, including PRA/PA/PR/RA/STKS and FGA/FG3A/FG2A. A delta is
+the selected player, including PRA/PA/PR/RA/STKS, FGA/FG3A/FG2A and
+FTA/FTM/FGM/FG2M. A delta is
 `game stat / game minutes - sample player's Regular Season stat / Regular
 Season minutes`; it is a ±STAT/MIN difference, not a percentage. H2H and
 archetype game chronology may include stored Regular Season and Playoffs rows,
@@ -5711,8 +5719,8 @@ player's all-season totals divided by total minutes, multiplied by 36. A
 game's `/36` values use that game's minutes; zero or missing minutes yield a
 `null` game per-36 value, and zero or missing season minutes yield a `null`
 season per-36 value. `FG2A` is the governed two-point-attempt component,
-derived from `FGA - 3PA`, and `3PA` is the Target display spelling for governed
-`FG3A`:
+derived from `FGA - 3PA`, `FG2M` the two-point makes, derived from
+`FGM - 3PM`, and `3PA` is the Target display spelling for governed `FG3A`:
 
 | Qualifier base | Default columns | Example |
 | --- | --- | --- |

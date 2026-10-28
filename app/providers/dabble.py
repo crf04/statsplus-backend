@@ -109,6 +109,10 @@ _COMPONENT_ALIASES = {
     "fg-attempted": "field-goals-attempted",
     "three-attempted": "three-pointers-attempted",
     "two-attempted": "two-pointers-attempted",
+    "ft-attempted": "free-throws-attempted",
+    "ft-made": "free-throws-made",
+    "fg-made": "field-goals-made",
+    "two-made": "two-pointers-made",
 }
 _BASKETBALL_LABELS = {"basketball", "nba"}
 _NON_PLAYER_KINDS = {

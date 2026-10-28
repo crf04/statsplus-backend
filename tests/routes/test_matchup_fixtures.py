@@ -5507,6 +5507,114 @@ def test_authenticated_live_matchup_serves_dabbles_price_on_each_side(
     assert player["line_prices"] == {"dabble": {"PTS": {"over": -110, "under": None}}}
 
 
+#: Dabble's feed spelling of each stat (crf04/statsplus#370), the component the
+#: adapter aliases it to, and a line.
+_DABBLE_SHOOTING_MARKETS = (
+    ("ft-attempted", "free-throws-attempted", "6.5"),
+    ("ft-made", "free-throws-made", "4.5"),
+    ("fg-made", "field-goals-made", "8.5"),
+    ("two-made", "two-pointers-made", "5.5"),
+)
+
+
+def _dabble_snapshot(catalog, markets, *, retrieved_at):
+    """A Dabble snapshot whose markets carry the adapter's evidence, resolved as the board does."""
+
+    resolver = catalog.resolver
+    built = []
+    for label, component, threshold in markets:
+        market = PlayerProjectionMarket(
+            provider="dabble",
+            market_id=f"fixture-market-{label}",
+            athlete=AthleteEvidence(
+                provider_id="fixture-lebron",
+                canonical_id=2544,
+                name="LeBron James",
+                team=TeamEvidence(canonical_id=LAL, abbreviation="LAL"),
+            ),
+            event=EventEvidence(provider_id="fixture-event", canonical_id=GAME_ID),
+            team=TeamEvidence(canonical_id=LAL, abbreviation="LAL"),
+            statistic=StatisticEvidence(label=label, components=(component,)),
+            threshold=MarketThreshold(threshold, "count"),
+            status=MarketStatus.AVAILABLE,
+            variant=MarketVariant.STANDARD,
+            scoring_period=ScoringPeriod.FULL_GAME,
+            selections=(
+                Selection(selection_id="over", direction=SelectionDirection.HIGHER, american_price=-122),
+                Selection(selection_id="under", direction=SelectionDirection.LOWER, american_price=-104),
+            ),
+        )
+        built.append(replace(market, statistic_match=resolver.resolve_market(market)))
+    return ProviderSnapshot(
+        provider="dabble",
+        status=SnapshotStatus.COMPLETE,
+        markets=tuple(built),
+        coverage=CoverageEvidence(
+            fetched_count=len(built),
+            eligible_count=len(built),
+            normalized_count=len(built),
+            expected_total=len(built),
+        ),
+        retrieved_at=retrieved_at,
+    )
+
+
+def test_dabble_shooting_lines_are_targetable_and_served_without_a_matchup_score(
+    projection_route_context,
+):
+    context = projection_route_context
+    query = NBAMarketQuery(season=SEASON)
+    points = (("points", "points", "27.5"),)
+    context.assembled.projection_recorder.record_complete_snapshot(
+        _dabble_snapshot(context.catalog, points, retrieved_at=NOW),
+        query=query,
+        accepted_at=NOW,
+    )
+    (points_only,) = context.client.get(f"/api/games/matchup?game_id={GAME_ID}").get_json()["players"]
+
+    later = NOW + timedelta(minutes=1)
+    context.route_now[0] = later
+    context.assembled.projection_recorder.record_complete_snapshot(
+        _dabble_snapshot(context.catalog, points + _DABBLE_SHOOTING_MARKETS, retrieved_at=later),
+        query=query,
+        accepted_at=later,
+    )
+    response = context.client.get(f"/api/games/matchup?game_id={GAME_ID}")
+
+    with context.engine.connect() as connection:
+        stored = connection.execute(
+            select(
+                ProjectionObservation.statistic_provider_label,
+                ProjectionObservation.market_category,
+                ProjectionObservation.targetable,
+            )
+            .where(ProjectionObservation.statistic_provider_label != "points")
+            .distinct()
+            .order_by(ProjectionObservation.statistic_provider_label)
+        ).all()
+    assert [tuple(row) for row in stored] == [
+        ("fg-made", "FGM", True),
+        ("ft-attempted", "FTA", True),
+        ("ft-made", "FTM", True),
+        ("two-made", "FG2M", True),
+    ]
+    assert response.status_code == 200
+    (player,) = response.get_json()["players"]
+    assert player["posted_markets"] == ["FG2M", "FGM", "FTA", "FTM", "PTS"]
+    assert player["stat_categories"] == ["FG2M", "FGM", "FTA", "FTM", "PTS"]
+    assert player["provenance"] == {"dabble": ["FG2M", "FGM", "FTA", "FTM", "PTS"]}
+    assert player["lines"] == {"dabble": {"FG2M": 5.5, "FGM": 8.5, "FTA": 6.5, "FTM": 4.5, "PTS": 27.5}}
+    assert player["line_prices"] == {
+        "dabble": {market: {"over": -122, "under": -104} for market in ("FG2M", "FGM", "FTA", "FTM", "PTS")}
+    }
+    unscored = {"components": {}, "blend": None, "missing_inputs": []}
+    assert {market: player["scores"][market] for market in ("FG2M", "FGM", "FTA", "FTM")} == {
+        market: {"season": unscored, "last_15": unscored} for market in ("FG2M", "FGM", "FTA", "FTM")
+    }
+    assert player["scores"]["PTS"] == points_only["scores"]["PTS"]
+    assert player["scores"]["PTS"]["season"]["blend"] is not None
+
+
 def test_authenticated_live_matchup_declares_the_current_experience(
     projection_route_context,
 ):

@@ -10,6 +10,10 @@ component_order:
   - field_goals_attempted
   - three_pointers_attempted
   - two_pointers_attempted
+  - free_throws_attempted
+  - free_throws_made
+  - field_goals_made
+  - two_pointers_made
 statistics:
   - id: points
     market_category: PTS
@@ -188,3 +192,35 @@ statistics:
       dabble: [two-pointers-attempted, two-attempted, FG2A]
       prizepicks: [2-Pointers Attempted, Two Pointers Attempted, FG2A]
       underdog: [2-Pointers Attempted, Two Pointers Attempted, FG2A]
+  - id: free_throws_attempted
+    market_category: FTA
+    label: Free Throws Attempted
+    unit: count
+    scoring_periods: [full_game]
+    components: [free_throws_attempted]
+    provider_mappings:
+      dabble: [ft-attempted]
+  - id: free_throws_made
+    market_category: FTM
+    label: Free Throws Made
+    unit: count
+    scoring_periods: [full_game]
+    components: [free_throws_made]
+    provider_mappings:
+      dabble: [ft-made]
+  - id: field_goals_made
+    market_category: FGM
+    label: Field Goals Made
+    unit: count
+    scoring_periods: [full_game]
+    components: [field_goals_made]
+    provider_mappings:
+      dabble: [fg-made]
+  - id: two_pointers_made
+    market_category: FG2M
+    label: Two-Pointers Made
+    unit: count
+    scoring_periods: [full_game]
+    components: [two_pointers_made]
+    provider_mappings:
+      dabble: [two-made]
