@@ -1244,8 +1244,9 @@ Authorization: Bearer <firebase-id-token>
 Authenticated and read-only (crf04/statsplus#373). Every posted line on one US
 Eastern date, for the connector's `get_board`. It reads stored data only: the
 date's games, one Player Pool read covering all of them, the stored injury
-report in one statement, and every game's latest sportsbook rows in one
-statement. It composes no Matchup and calls no provider.
+report in one statement, every game's latest sportsbook rows in one statement,
+and the athlete catalog rows of players outside the pool in one statement, all
+on one repeatable-read snapshot. It composes no Matchup and calls no provider.
 
 - `date` is required, `YYYY-MM-DD`.
 - `season` (optional, canonical) names the schedule that holds the date; omitted,
@@ -1306,14 +1307,24 @@ filters), and gives each game its `players`:
 }
 ```
 
-- Games are in tip order. `status` is `final` once the game is final, `live`
-  once it has started (its tip has passed or the catalog says it is in
-  progress), else `scheduled`.
-- Players are the Player Pool's players for the date's games, ordered by team,
-  then name. A player appears only when at least one source posts the market.
-  A player ruled Out stays in, with `injury_status` `"Out"`; `injury_status` is
-  the stored report's `Out`, `Doubtful`, `Questionable` or `Probable`, else
-  `null` (not listed, `Available`, or no usable report).
+- Games are ordered by tip, then label. `status` is `final` once the game is
+  final, `live` once it has started (its tip has passed or the catalog says it
+  is in progress), else `scheduled`.
+- Players are ordered within a game by team tricode, then name, then player
+  ID. Paging relies on this order being stable. A player appears only when at
+  least one source posts the market. A player ruled Out stays in, with
+  `injury_status` `"Out"`; `injury_status` is the stored report's `Out`,
+  `Doubtful`, `Questionable` or `Probable`, else `null` (not listed,
+  `Available`, or no usable report).
+- Players come from the Player Pool for the date's games, plus every player a
+  book quotes for the market in a game whose pool has no row for him (a late
+  call-up or a rookie the DFS providers do not post). Such a row has
+  `"lines": {}` and `"line_prices": {}`, and its `name` and `team` are the
+  athlete catalog's for the season. A quoted player the catalog lacks is left
+  out, since without a team the row can be neither filtered by `team` nor
+  ordered. `team`, `game` and `sources` apply to these rows as to any: a player
+  quoted only by books `sources` drops is not listed. The index's `players`
+  counts include them.
 - `lines` and `line_prices` are the Matchup row's, for this market only.
   `line_prices` holds American prices as posted, `null` for a missing side; a
   provider with no per-pick price (PrizePicks) is absent from it.

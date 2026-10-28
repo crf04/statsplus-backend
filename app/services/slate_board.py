@@ -1,12 +1,13 @@
 """Every posted line for one market across a Slate Date (crf04/statsplus#373).
 
 The board reads the date's games, one Player Pool for all of them, their
-stored injury report in one statement and their latest sportsbook rows in one
-statement, all on one repeatable-read connection, so a correction committed
-between two of those reads never mixes into a response.  It composes no
-Matchup: a row carries the Matchup player row's ``lines``, ``line_prices`` and
-``book_lines`` for one market, and a player ruled Out stays in with his status.
-A started game's pool is its closing set, as every pool read serves it.
+stored injury report in one statement, their latest sportsbook rows in one
+statement and the catalog rows of players the books quote outside the pool in
+one statement, all on one repeatable-read connection, so a correction
+committed between two of those reads never mixes into a response.  It composes
+no Matchup: a row carries the Matchup player row's ``lines``, ``line_prices``
+and ``book_lines`` for one market, and a player ruled Out stays in with his
+status.  A started game's pool is its closing set, as every pool read serves it.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from app.errors import InvalidInputError, ProviderUnavailableError
 from app.providers.odds_api import BOOK_ALLOWLIST
 from app.providers.registry import dfs_provider_names
 from app.services.injury_listing import slate_events
-from app.services.player_pool import PlayerPool, PoolPlayer
+from app.services.player_pool import PlayerPool
 from app.services.publication_snapshot_calls import call_with_read_scope
 from app.services.request_reads import request_read_scope
 from app.services.research_season import schedule_season
@@ -39,12 +40,17 @@ def _iso_z(value: Any) -> str:
     return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _label(event: Mapping[str, Any]) -> str:
+    return f"{event['away_team_tricode']} @ {event['home_team_tricode']}"
+
+
 @dataclass(frozen=True, slots=True)
 class _Posting:
-    """One pool player's lines in one market, from every source posting it."""
+    """One player's lines in one market, from every source posting it."""
 
     game_id: str
-    player: PoolPlayer
+    player_id: int
+    name: str
     team: str
     injury_status: str | None
     lines: Mapping[str, float]
@@ -54,8 +60,8 @@ class _Posting:
     def row(self) -> dict[str, Any]:
         entry = build_market_entry(self.book_rows)
         return {
-            "player_id": int(self.player.canonical_player_id),
-            "name": self.player.name,
+            "player_id": self.player_id,
+            "name": self.name,
             "team": self.team,
             "injury_status": self.injury_status,
             "lines": dict(self.lines),
@@ -87,11 +93,14 @@ class SlateBoardService:
         sportsbook_reader: Any | None,
         statistic_catalog: Any,
         settings: Any,
+        athlete_catalog: Any | None = None,
         engine: Any | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.event_catalog = event_catalog
         self.player_pool = player_pool
+        # Names and teams for the players the books quote outside the pool.
+        self.athlete_catalog = athlete_catalog
         # Stored-only: ``get_stored_injuries_many`` never refreshes a report.
         self.injuries = injuries
         self.sportsbook_reader = sportsbook_reader
@@ -127,23 +136,38 @@ class SlateBoardService:
             raise ProviderUnavailableError("The NBA schedule is not available. Please try again later.")
         season = season or schedule_season(self.settings, self.event_catalog, slate_date)
         with request_read_scope(self._engine, repeatable_read=True) as (connection, _session):
-            events = [
-                event
-                for event in slate_events(
-                    self.event_catalog, self.settings, slate_date, season, connection=connection
-                )
-                if (game_id is None or str(event["nba_game_id"]) == game_id)
-                and (team is None or team in (event["away_team_tricode"], event["home_team_tricode"]))
-            ]
+            events = sorted(
+                (
+                    event
+                    for event in slate_events(
+                        self.event_catalog, self.settings, slate_date, season, connection=connection
+                    )
+                    if (game_id is None or str(event["nba_game_id"]) == game_id)
+                    and (team is None or team in (event["away_team_tricode"], event["home_team_tricode"]))
+                ),
+                key=lambda event: (_iso_z(event["scheduled_at"]), _label(event)),
+            )
             game_ids = [str(event["nba_game_id"]) for event in events]
             pool = self._pool(season, game_ids, connection)
             statuses = self._injury_statuses(events, season, pool, connection)
-            quotes = (
-                []
-                if self.sportsbook_reader is None or not game_ids
-                else self.sportsbook_reader.latest_quotes(game_ids, connection=connection)
+            quotes = [
+                row
+                for row in (
+                    []
+                    if self.sportsbook_reader is None or not game_ids
+                    else self.sportsbook_reader.latest_quotes(game_ids, connection=connection)
+                )
+                if sources is None or row.book in sources
+            ]
+            postings = _Postings(
+                events,
+                pool,
+                statuses,
+                quotes,
+                team=team,
+                sources=sources,
+                athletes=lambda player_ids: self._athletes(season, player_ids, connection),
             )
-        quotes = [row for row in quotes if sources is None or row.book in sources]
         now = assume_utc(self._clock())
         board: dict[str, Any] = {
             "date": slate_date.isoformat(),
@@ -151,7 +175,6 @@ class SlateBoardService:
             "games": [self._game(event, now) for event in events],
             "sources": self._sources(pool, quotes, sources),
         }
-        postings = _Postings(events, pool, statuses, quotes, team=team, sources=sources)
         if market is None:
             board["markets"] = [
                 {
@@ -165,7 +188,9 @@ class SlateBoardService:
             ]
             return board
         rows_by_game: dict[str, list[dict[str, Any]]] = {game: [] for game in game_ids}
-        found = sorted(postings.of(market), key=lambda posting: (posting.team, posting.player.name))
+        found = sorted(
+            postings.of(market), key=lambda posting: (posting.team, posting.name, posting.player_id)
+        )
         for posting in found:
             rows_by_game[posting.game_id].append(posting.row())
         for game in board["games"]:
@@ -178,6 +203,13 @@ class SlateBoardService:
             return PlayerPool((), {}, PlayerPool.unavailable_freshness())
         return call_with_read_scope(
             self.player_pool.get_pool, season=season, game_ids=game_ids, connection=connection
+        )
+
+    def _athletes(self, season: str, player_ids: Sequence[int], connection: Any) -> list[Mapping[str, Any]]:
+        if self.athlete_catalog is None or not player_ids:
+            return []
+        return call_with_read_scope(
+            self.athlete_catalog.get_catalog, season, player_ids=player_ids, connection=connection
         )
 
     def _injury_statuses(
@@ -219,7 +251,7 @@ class SlateBoardService:
             status = "scheduled"
         return {
             "game_id": str(event["nba_game_id"]),
-            "label": f"{event['away_team_tricode']} @ {event['home_team_tricode']}",
+            "label": _label(event),
             "tip": _iso_z(event["scheduled_at"]),
             "status": status,
         }
@@ -254,7 +286,13 @@ class SlateBoardService:
 
 
 class _Postings:
-    """The slate's postings, one market at a time, after the board's filters."""
+    """The slate's postings, one market at a time, after the board's filters.
+
+    A player a book quotes in a game whose pool has no row for him is posted
+    with book columns only, named from the athlete catalog.  One the catalog
+    lacks, or holds without a team, is left out: without his team the board can
+    neither apply ``team`` nor place him in the team, name, player id order.
+    """
 
     def __init__(
         self,
@@ -265,21 +303,32 @@ class _Postings:
         *,
         team: str | None,
         sources: frozenset[str] | None,
+        athletes: Callable[[Sequence[int]], Iterable[Mapping[str, Any]]],
     ) -> None:
+        self._team = team
         self._sources = sources
         self._statuses = statuses
         # A team plays once on a Slate Date, so its id names the player's game.
-        self._games = {
+        games = {
             int(event[f"{side}_team_id"]): (str(event["nba_game_id"]), str(event[f"{side}_team_tricode"]))
             for event in events
             for side in ("away", "home")
-            if team is None or event[f"{side}_team_tricode"] == team
         }
+        self._games = {team_id: game for team_id, game in games.items() if team is None or game[1] == team}
         self._players = [player for player in pool.players if player.team_id in self._games]
         self._books: dict[tuple[str, int, str], list[Any]] = {}
         for row in quotes:
             key = (str(row.canonical_game_id), int(row.canonical_player_id), str(row.market_category))
             self._books.setdefault(key, []).append(row)
+        pooled = {
+            (games[player.team_id][0], int(player.canonical_player_id))
+            for player in pool.players
+            if player.team_id in games
+        }
+        self._off_pool = sorted({(game, player) for game, player, _ in self._books} - pooled)
+        self._athletes = {
+            int(row["player_id"]): row for row in athletes(sorted({player for _, player in self._off_pool}))
+        }
 
     def of(self, market: str) -> list[_Posting]:
         found = []
@@ -293,13 +342,12 @@ class _Postings:
             books = tuple(self._books.get((game_id, int(player.canonical_player_id), market), ()))
             if not lines and not books:
                 continue
-            status = self._statuses.get(int(player.canonical_player_id))
             found.append(
-                _Posting(
-                    game_id=game_id,
-                    player=player,
-                    team=team,
-                    injury_status=status if status in BOARD_INJURY_STATUSES else None,
+                self._posting(
+                    game_id,
+                    int(player.canonical_player_id),
+                    player.name,
+                    team,
                     lines=lines,
                     line_prices={
                         provider: {
@@ -309,10 +357,50 @@ class _Postings:
                         for provider in lines
                         if market in player.line_prices.get(provider, {})
                     },
-                    book_rows=books,
+                    books=books,
+                )
+            )
+        for game_id, player_id in self._off_pool:
+            books = tuple(self._books.get((game_id, player_id, market), ()))
+            athlete = self._athletes.get(player_id, {})
+            team = athlete.get("team_abbreviation")
+            if not books or team is None or (self._team is not None and team != self._team):
+                continue
+            found.append(
+                self._posting(
+                    game_id,
+                    player_id,
+                    str(athlete["display_name"]),
+                    str(team),
+                    lines={},
+                    line_prices={},
+                    books=books,
                 )
             )
         return found
+
+    def _posting(
+        self,
+        game_id: str,
+        player_id: int,
+        name: str,
+        team: str,
+        *,
+        lines: Mapping[str, float],
+        line_prices: Mapping[str, Mapping[str, int | None]],
+        books: tuple[Any, ...],
+    ) -> _Posting:
+        status = self._statuses.get(player_id)
+        return _Posting(
+            game_id=game_id,
+            player_id=player_id,
+            name=name,
+            team=team,
+            injury_status=status if status in BOARD_INJURY_STATUSES else None,
+            lines=lines,
+            line_prices=line_prices,
+            book_rows=books,
+        )
 
 
 __all__ = ["BOARD_SOURCES", "SlateBoardService"]

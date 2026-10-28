@@ -10,15 +10,13 @@ from sqlalchemy import create_engine, text
 
 from app.migrations import run_migrations
 from tests.routes.test_games_board import (
-    BROWN_PTS,
-    BRUNSON_PTS,
     CURRY_PTS,
+    HAUSER,
+    LATER_PTS,
     LEBRON_PTS,
     SEASON,
     SOURCES,
     TATUM,
-    TATUM_PTS,
-    WHITE_PTS,
     _games,
     _get,
     seed_board,
@@ -47,15 +45,15 @@ def test_the_pts_board_and_its_index_on_postgres(board, client):
         {
             "date": "2026-01-15",
             "season": SEASON,
-            "games": _games([CURRY_PTS, LEBRON_PTS], [WHITE_PTS, BROWN_PTS, TATUM_PTS, BRUNSON_PTS]),
+            "games": _games([CURRY_PTS, LEBRON_PTS], LATER_PTS),
             "sources": SOURCES,
-            "players_total": 6,
+            "players_total": 8,
         },
     )
     status, index = _get(client, "date=2026-01-15")
     assert status == 200
     assert index["markets"] == [
-        {"market": "PTS", "players": 6, "sources": ["dabble", "prizepicks", "draftkings", "fanduel"]},
+        {"market": "PTS", "players": 8, "sources": ["dabble", "prizepicks", "draftkings", "fanduel"]},
         {"market": "3PM", "players": 1, "sources": ["draftkings"]},
         {"market": "FG3A", "players": 2, "sources": ["dabble"]},
     ]
@@ -67,8 +65,13 @@ def _tatum(body):
     return row["lines"]["dabble"], books, row["injury_status"]
 
 
+def _hauser(body):
+    return [row["name"] for game in body["games"] for row in game["players"] if row["player_id"] == HAUSER[0]]
+
+
 def _correct_tatum(engine):
-    """Dabble and DraftKings move Tatum from 27.5 to 30.5 and the report rules him Out, in one commit."""
+    """Dabble and DraftKings move Tatum from 27.5 to 30.5, the report rules him Out and the
+    catalog renames Hauser, in one commit."""
 
     with engine.begin() as connection:
         connection.execute(
@@ -90,6 +93,10 @@ def _correct_tatum(engine):
                 "UPDATE injury_snapshots "
                 "SET normalized_entries = REPLACE(normalized_entries, '\"Questionable\"', '\"Out\"')"
             )
+        )
+        connection.execute(
+            text("UPDATE athlete_catalog SET display_name = 'Samuel Hauser' WHERE player_id = :player"),
+            {"player": HAUSER[0]},
         )
 
 
@@ -124,3 +131,4 @@ def test_a_correction_committed_mid_read_never_mixes_into_the_board(
     assert status == 200
     assert _tatum(during) == (27.5, {"draftkings": 27.5, "fanduel": 28.5}, "Questionable")
     assert _tatum(after) == (30.5, {"draftkings": 30.5, "fanduel": 28.5}, "Out")
+    assert (_hauser(during), _hauser(after)) == (["Sam Hauser"], ["Samuel Hauser"])

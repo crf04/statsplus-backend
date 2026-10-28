@@ -10,11 +10,12 @@ from unittest.mock import Mock
 
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, insert
 from sqlalchemy import event as sqlalchemy_event
 
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.migrations import run_migrations
+from app.models.athlete_catalog import AthleteCatalog
 from app.providers.dfs import (
     AthleteEvidence,
     CoverageEvidence,
@@ -33,6 +34,7 @@ from app.providers.dfs import (
 )
 from app.providers.nba_injury_report import InjuryEntryEvidence, InjuryProviderSnapshot
 from app.providers.registry import dfs_provider_names
+from app.services.athlete_catalog_service import AthleteCatalogReader
 from app.services.event_catalog_service import EventCatalogService
 from app.services.injury_snapshot_repository import InjurySnapshotRepository
 from app.services.matchup_injuries import MatchupInjuryService
@@ -70,6 +72,14 @@ BRUNSON = (1628973, "Jalen Brunson", NYK, LATER)
 BROWN = (1627759, "Jaylen Brown", BOS, LATER)
 WHITE = (1628401, "Derrick White", BOS, LATER)
 BOOKER = (1626164, "Devin Booker", PHX, TOMORROW)
+#: Outside the Player Pool: only a book quotes them.  The namesake shares Brown's name and team
+#: with a lower id, so only the player id orders the two.
+HAUSER = (1630573, "Sam Hauser", BOS, LATER)
+NAMESAKE = (1626000, "Jaylen Brown", BOS, LATER)
+#: Quoted by a book, but missing from the athlete catalog or listed there without a team, so the
+#: board cannot place him.
+UNCATALOGUED = (1641999, "Unlisted Rookie", NYK, LATER)
+TEAMLESS = (1641998, "Teamless Signing", NYK, LATER)
 
 
 class _NoProvider:
@@ -167,6 +177,7 @@ def _injuries(engine, events):
                     for player, status, matchup in (
                         (BRUNSON, "Out", "BOS@NYK"),
                         (TATUM, "Questionable", "BOS@NYK"),
+                        (HAUSER, "Probable", "BOS@NYK"),
                         (LEBRON, "Available", "GSW@LAL"),
                     )
                 ),
@@ -183,7 +194,7 @@ def _injuries(engine, events):
                     "display_name": player[1],
                     "team_abbreviation": player[2].abbreviation,
                 }
-                for player in (CURRY, LEBRON, TATUM, BRUNSON)
+                for player in (CURRY, LEBRON, TATUM, BRUNSON, HAUSER)
             ]
         ),
         enabled=True,
@@ -280,6 +291,10 @@ def seed_board(engine, dependencies):
                 _quote(TATUM, "draftkings", 27.5, -128, 100),
                 _quote(TATUM, "fanduel", 28.5, -105, -115, stamp=NOW - timedelta(minutes=6)),
                 _quote(TATUM, "draftkings", 3.5, -140, 110, category="3PM"),
+                _quote(HAUSER, "draftkings", 9.5, -115, -105),
+                _quote(NAMESAKE, "fanduel", 12.5, -110, -110, stamp=NOW - timedelta(minutes=8)),
+                _quote(UNCATALOGUED, "draftkings", 6.5, -120, -110),
+                _quote(TEAMLESS, "draftkings", 4.5, -115, -105),
             ],
             False,
         ),
@@ -294,6 +309,49 @@ def seed_board(engine, dependencies):
             remaining=100,
             is_closing=closing,
             quotes=quotes,
+        )
+    with engine.begin() as connection:
+        connection.execute(
+            insert(AthleteCatalog.__table__),
+            [
+                {
+                    "season": SEASON,
+                    "player_id": player_id,
+                    "display_name": name,
+                    "roster_status": "Active",
+                    "is_active": True,
+                    "is_active_for_season": True,
+                    "team_id": team.canonical_id,
+                    "team_name": team.abbreviation,
+                    "team_abbreviation": team.abbreviation,
+                    "published_at": NOW - timedelta(days=1),
+                }
+                for player_id, name, team, _game in (
+                    CURRY,
+                    LEBRON,
+                    TATUM,
+                    BRUNSON,
+                    BROWN,
+                    WHITE,
+                    BOOKER,
+                    HAUSER,
+                    NAMESAKE,
+                )
+            ]
+            + [
+                {
+                    "season": SEASON,
+                    "player_id": TEAMLESS[0],
+                    "display_name": TEAMLESS[1],
+                    "roster_status": "Inactive",
+                    "is_active": True,
+                    "is_active_for_season": False,
+                    "team_id": None,
+                    "team_name": None,
+                    "team_abbreviation": None,
+                    "published_at": NOW - timedelta(days=1),
+                }
+            ],
         )
     events = schedule.get_events_by_ids(SEASON, (STARTED, LATER))
     pool = LatestProjectionPlayerPoolReader(
@@ -312,6 +370,7 @@ def seed_board(engine, dependencies):
         sportsbook_reader=SportsbookQuoteReader(engine),
         statistic_catalog=catalog,
         settings=settings,
+        athlete_catalog=AthleteCatalogReader(engine),
         engine=engine,
         clock=lambda: NOW,
     )
@@ -356,12 +415,19 @@ def test_the_index_lists_each_posted_market_with_its_players_and_sources(board, 
             "games": GAMES,
             "sources": SOURCES,
             "markets": [
-                {"market": "PTS", "players": 6, "sources": ["dabble", "prizepicks", "draftkings", "fanduel"]},
+                {"market": "PTS", "players": 8, "sources": ["dabble", "prizepicks", "draftkings", "fanduel"]},
                 {"market": "3PM", "players": 1, "sources": ["draftkings"]},
                 {"market": "FG3A", "players": 2, "sources": ["dabble"]},
             ],
         },
     )
+
+
+def test_the_index_counts_players_only_a_book_quotes(board, client):
+    status, body = _get(client, "date=2026-01-15&sources=fanduel")
+
+    assert status == 200
+    assert body["markets"] == [{"market": "PTS", "players": 2, "sources": ["fanduel"]}]
 
 
 CURRY_PTS = {
@@ -440,6 +506,48 @@ WHITE_PTS = {
     "line_prices": {"dabble": {"over": -110, "under": -110}},
     "book_lines": None,
 }
+HAUSER_PTS = {
+    "player_id": 1630573,
+    "name": "Sam Hauser",
+    "team": "BOS",
+    "injury_status": "Probable",
+    "lines": {},
+    "line_prices": {},
+    "book_lines": {
+        "as_of": "2026-01-15T23:57:00Z",
+        "closing": False,
+        "books": [
+            {
+                "book": "draftkings",
+                "line": 9.5,
+                "over": -115,
+                "under": -105,
+                "updated_at": "2026-01-15T23:57:00Z",
+            }
+        ],
+    },
+}
+NAMESAKE_PTS = {
+    "player_id": 1626000,
+    "name": "Jaylen Brown",
+    "team": "BOS",
+    "injury_status": None,
+    "lines": {},
+    "line_prices": {},
+    "book_lines": {
+        "as_of": "2026-01-15T23:52:00Z",
+        "closing": False,
+        "books": [
+            {
+                "book": "fanduel",
+                "line": 12.5,
+                "over": -110,
+                "under": -110,
+                "updated_at": "2026-01-15T23:52:00Z",
+            }
+        ],
+    },
+}
 BRUNSON_PTS = {
     "player_id": 1628973,
     "name": "Jalen Brunson",
@@ -455,28 +563,76 @@ def _games(*players_by_game):
     return [{**game, "players": players} for game, players in zip(GAMES, players_by_game, strict=True)]
 
 
+LATER_PTS = [WHITE_PTS, NAMESAKE_PTS, BROWN_PTS, TATUM_PTS, HAUSER_PTS, BRUNSON_PTS]
+
+
 def test_a_sportsbook_market_carries_every_provider_and_book_per_game(board, client):
     assert _get(client, "date=2026-01-15&market=PTS") == (
         200,
         {
             "date": "2026-01-15",
             "season": SEASON,
-            "games": _games([CURRY_PTS, LEBRON_PTS], [WHITE_PTS, BROWN_PTS, TATUM_PTS, BRUNSON_PTS]),
+            "games": _games([CURRY_PTS, LEBRON_PTS], LATER_PTS),
             "sources": SOURCES,
-            "players_total": 6,
+            "players_total": 8,
         },
     )
 
 
-def test_players_are_ordered_by_team_then_name(board, client):
+def test_a_player_only_a_book_quotes_has_book_columns_and_a_catalog_name(board, client):
+    status, body = _get(client, "date=2026-01-15&market=PTS&team=BOS")
+
+    assert status == 200
+    assert body["games"] == [{**GAMES[1], "players": LATER_PTS[:5]}]
+    assert body["players_total"] == 5
+
+
+def test_a_book_quoted_player_the_catalog_lacks_or_lists_without_a_team_is_left_out(board, client):
     status, body = _get(client, f"date=2026-01-15&market=PTS&game={LATER}")
 
     assert status == 200
-    assert [(row["team"], row["name"]) for row in body["games"][0]["players"]] == [
-        ("BOS", "Derrick White"),
-        ("BOS", "Jaylen Brown"),
-        ("BOS", "Jayson Tatum"),
-        ("NYK", "Jalen Brunson"),
+    assert body["games"] == [{**GAMES[1], "players": LATER_PTS}]
+    assert body["players_total"] == 6
+
+
+def test_players_are_ordered_by_team_then_name_then_player_id(board, client):
+    status, body = _get(client, f"date=2026-01-15&market=PTS&game={LATER}")
+
+    assert status == 200
+    assert [(row["team"], row["name"], row["player_id"]) for row in body["games"][0]["players"]] == [
+        ("BOS", "Derrick White", 1628401),
+        ("BOS", "Jaylen Brown", 1626000),
+        ("BOS", "Jaylen Brown", 1627759),
+        ("BOS", "Jayson Tatum", 1628369),
+        ("BOS", "Sam Hauser", 1630573),
+        ("NYK", "Jalen Brunson", 1628973),
+    ]
+
+
+def test_games_are_ordered_by_tip_then_label(board, client):
+    # Tips with BOS @ NYK and has the lower game id, so only the label puts it second.
+    board.service.event_catalog.repository.publish(
+        SEASON,
+        pd.DataFrame(
+            [
+                _event(
+                    "0022500600",
+                    TeamEvidence(canonical_id=1610612748, abbreviation="MIA"),
+                    TeamEvidence(canonical_id=1610612753, abbreviation="ORL"),
+                    LATER_TIP,
+                )
+            ]
+        ),
+        NOW - timedelta(hours=1),
+    )
+
+    status, body = _get(client, "date=2026-01-15")
+
+    assert status == 200
+    assert [(game["tip"], game["label"]) for game in body["games"]] == [
+        ("2026-01-15T23:30:00Z", "GSW @ LAL"),
+        ("2026-01-16T00:30:00Z", "BOS @ NYK"),
+        ("2026-01-16T00:30:00Z", "MIA @ ORL"),
     ]
 
 
@@ -540,6 +696,7 @@ def test_the_sources_filter_narrows_rows_lines_books_and_the_source_list(board, 
     assert body["games"] == _games(
         [],
         [
+            NAMESAKE_PTS,
             {
                 **TATUM_PTS,
                 "lines": {"prizepicks": 28.5},
@@ -553,7 +710,8 @@ def test_the_sources_filter_narrows_rows_lines_books_and_the_source_list(board, 
             {**BRUNSON_PTS, "lines": {"prizepicks": 26.5}, "line_prices": {}},
         ],
     )
-    assert body["players_total"] == 2
+    # Hauser is quoted only by DraftKings, which the filter drops.
+    assert body["players_total"] == 3
 
 
 def test_the_index_counts_only_the_filtered_game_and_sources(board, client):
@@ -562,7 +720,7 @@ def test_the_index_counts_only_the_filtered_game_and_sources(board, client):
     assert status == 200
     assert body["games"] == [GAMES[1]]
     assert body["markets"] == [
-        {"market": "PTS", "players": 1, "sources": ["draftkings"]},
+        {"market": "PTS", "players": 2, "sources": ["draftkings"]},
         {"market": "3PM", "players": 1, "sources": ["draftkings"]},
     ]
 
@@ -664,4 +822,6 @@ def test_the_slate_is_read_in_the_same_statements_whatever_its_game_count(board,
         "projection_closing_memberships": 1,
         "injury_snapshots": 1,
         "sportsbook_prop_latest": 1,
+        # Every player only a book quotes is named in one statement.
+        "athlete_catalog": 1,
     }

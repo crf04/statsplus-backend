@@ -800,8 +800,8 @@ def build_dependencies(
     )
     from app.services.slate_board import SlateBoardService
 
-    # The board reads the Slate's pool, the stored injury report and the
-    # Matchup's sportsbook reader; it composes no Matchup.
+    # The board reads the Slate's pool, the stored injury report, the
+    # Matchup's sportsbook reader and the athlete catalog; it composes no Matchup.
     slate_board_service = SlateBoardService(
         event_catalog=event_catalog_service,
         player_pool=projection_player_pool_reader,
@@ -809,6 +809,7 @@ def build_dependencies(
         sportsbook_reader=sportsbook_quote_reader,
         statistic_catalog=statistic_catalog,
         settings=settings,
+        athlete_catalog=athlete_catalog_reader,
         engine=engine,
     )
     user_service = UserService(
