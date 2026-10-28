@@ -41,6 +41,8 @@ from app.domain.report_document import (
     TAGS,
     PublishedReport,
     apply_edits,
+    lede,
+    tagged,
     validate_edits,
     validate_publish_body,
 )
@@ -195,12 +197,17 @@ def _is_report_id(value: str) -> bool:
 
 
 def describe(document: dict[str, Any]) -> str | None:
-    """The first opening paragraph, cut to 200 characters on a word boundary."""
+    """The first opening paragraph, cut to 200 characters on a word boundary.
+
+    A block document without an opening uses its lede paragraph, else its
+    first paragraph, without the light formatting.
+    """
 
     opening = document.get("opening") or []
-    if not opening:
+    source = opening[0] if opening else lede(document)
+    if source is None:
         return None
-    text = " ".join(opening[0].split())
+    text = " ".join(source.split())
     if len(text) <= DESCRIPTION_MAX:
         return text
     # One character is left for the ellipsis; a word the cut splits is dropped.
@@ -211,9 +218,9 @@ def describe(document: dict[str, Any]) -> str | None:
 
 
 def tag_counts(document: dict[str, Any]) -> dict[str, int]:
-    """How many items carry each tag, over every tab; absent tags are left out."""
+    """How many items (and spot blocks) carry each tag, over the whole document; absent tags are left out."""
 
-    counts = Counter(item["tag"] for tab in document["tabs"] for item in tab["items"] if "tag" in item)
+    counts = Counter(tag for tag, _ in tagged(document))
     return {tag: counts[tag] for tag in TAGS if counts[tag]}
 
 
