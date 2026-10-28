@@ -17,6 +17,7 @@ timeouts keep the documented 503 ``provider_unavailable`` contract.
 
 import re
 import threading
+from datetime import date
 from typing import Any
 
 import requests
@@ -26,6 +27,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.datastructures import MultiDict
 
 from ..dependencies import get_dependencies
+from ..domain.nba_teams import NBA_TEAM_TRICODES
 from ..errors import (
     InvalidInputError,
     ProviderUnavailableError,
@@ -40,6 +42,7 @@ from ..services.game_log_preview import GameLogPreviewService, parse_line, parse
 from ..services.matchup_slate_preview import MatchupSlatePreviewService
 from ..services.nba_stats_adapter import validate_canonical_season
 from ..services.research_season import refuse_after_published, season_scoped
+from ..services.slate_board import BOARD_SOURCES
 from ..utils.auth import get_current_user, require_auth
 from ._selected_season import season_argument, season_refusals, selected
 from ._service_proxy import CurrentAppService
@@ -65,6 +68,7 @@ matchup_selection_service = CurrentAppService("matchup_selection")
 injuries_service = CurrentAppService("injury_listing")
 rotation_service = CurrentAppService("rotation")
 injury_scenarios_service = CurrentAppService("injury_scenario")
+slate_board_service = CurrentAppService("slate_board")
 
 _MATCHUP_PARAMETERS = frozenset({"game_id"})
 #: The optional Evidence season on Matchup and selection (crf04/statsplus#330).
@@ -83,6 +87,7 @@ _ROTATION_DEFAULT_LAST_N = 5
 _ROTATION_MAX_LAST_N = 20
 _LAST_N = re.compile(r"[0-9]{1,2}\Z")
 _NBA_GAME_ID = re.compile(r"[0-9]{10}\Z")
+_BOARD_PARAMETERS = frozenset({"date", "season", "market", "game", "team", "sources"})
 
 
 def _is_canonical_player_id(value: str) -> bool:
@@ -139,6 +144,57 @@ def get_injury_scenarios():
             game_id=request.args.get("game_id"),
             player=request.args.get("player"),
             user_id=user.get("uid"),
+        )
+    )
+
+
+def _invalid_board(*parameters: str) -> InvalidInputError:
+    return InvalidInputError(
+        f"The board parameters are invalid: {', '.join(parameters)}.",
+        public_details={"parameters": list(parameters)},
+    )
+
+
+@game_bp.route("/board", methods=["GET"])
+@require_auth
+def get_board():
+    """Every posted line for one market across one ET date, or the date's market index."""
+
+    unknown = sorted(set(request.args) - _BOARD_PARAMETERS)
+    if unknown:
+        raise _invalid_board(*(sanitize_public_value(name) for name in unknown))
+    for name in _BOARD_PARAMETERS - {"sources"}:
+        if len(request.args.getlist(name)) > 1:
+            raise _invalid_board(name)
+    try:
+        slate_date = date.fromisoformat(request.args.get("date", ""))
+    except ValueError:
+        raise _invalid_board("date") from None
+    if slate_date.isoformat() != request.args["date"]:
+        raise _invalid_board("date")
+    game_id = request.args.get("game")
+    if game_id is not None and _NBA_GAME_ID.fullmatch(game_id) is None:
+        raise _invalid_board("game")
+    team = request.args.get("team")
+    if team is not None:
+        team = team.upper()
+        if team not in NBA_TEAM_TRICODES:
+            raise _invalid_board("team")
+    sources = None
+    if "sources" in request.args:
+        sources = frozenset(
+            name.strip().casefold() for value in request.args.getlist("sources") for name in value.split(",")
+        )
+        if not sources or not sources <= BOARD_SOURCES:
+            raise _invalid_board("sources")
+    return jsonify(
+        slate_board_service.get_board(
+            slate_date=slate_date,
+            season=season_argument(),
+            market=request.args.get("market"),
+            game_id=game_id,
+            team=team,
+            sources=sources,
         )
     )
 

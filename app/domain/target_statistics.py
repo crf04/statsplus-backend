@@ -33,7 +33,26 @@ _PLAYER_RULE_DEFAULTS = ("PTS", "PTS/36")
 #: display spelling of ``FG3A``) and their per-36 rates.  An Average Qualifier
 #: adds its own stat only where the Backtest can read it per game.
 _DISPLAYABLE_STATS = frozenset(
-    {"PTS", "REB", "AST", "3PM", "3PA", "FG2A", "FGA", "STL", "BLK", "TOV", "PA", "PR", "RA", "PRA"}
+    {
+        "PTS",
+        "REB",
+        "AST",
+        "3PM",
+        "3PA",
+        "FG2A",
+        "FG2M",
+        "FGA",
+        "FGM",
+        "FTA",
+        "FTM",
+        "STL",
+        "BLK",
+        "TOV",
+        "PA",
+        "PR",
+        "RA",
+        "PRA",
+    }
 )
 
 
@@ -133,12 +152,14 @@ def _ratio(numerator: float, denominator: float, multiplier: float = 1.0) -> flo
 
 
 def _total(stat: str, totals: Mapping[str, float]) -> float:
-    """One stat summed over a span: a box total, a combination or FG2A."""
+    """One stat summed over a span: a box total, a combination, FG2A or FG2M."""
 
     if stat in _COMBINATIONS:
         return sum(_total(part, totals) for part in _COMBINATIONS[stat])
     if stat == "FG2A":
         return totals["field_goals_attempted"] - totals["threes_attempted"]
+    if stat == "FG2M":
+        return totals["field_goals_made"] - totals["threes_made"]
     return totals[_BOX_TOTALS[stat]]
 
 

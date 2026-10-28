@@ -168,11 +168,14 @@ class EventCatalogService:
     def count_events(self, season: str, *, connection: Connection | None = None) -> int:
         return self.repository.count_events(validate_canonical_season(season), connection=connection)
 
-    def get_events_between(self, season: str, starts_at: datetime, ends_at: datetime) -> list[dict[str, Any]]:
+    def get_events_between(
+        self, season: str, starts_at: datetime, ends_at: datetime, *, connection: Connection | None = None
+    ) -> list[dict[str, Any]]:
         return self.repository.list_events_between(
             validate_canonical_season(season),
             assume_utc(starts_at),
             assume_utc(ends_at),
+            connection=connection,
         )
 
     def get_adjacent_season(self, season: str, *, below: bool, inclusive: bool = False) -> str | None:

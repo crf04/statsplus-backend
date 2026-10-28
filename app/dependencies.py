@@ -91,6 +91,7 @@ class ApplicationDependencies:
     rotation_collection_service: Any | None = None
     player_tracking_collection_service: Any | None = None
     injury_scenario_service: Any | None = None
+    slate_board_service: Any | None = None
 
 
 logger = getLogger(__name__)
@@ -797,6 +798,20 @@ def build_dependencies(
         # if quotes were stored earlier.
         sportsbook_reader=sportsbook_quote_reader,
     )
+    from app.services.slate_board import SlateBoardService
+
+    # The board reads the Slate's pool, the stored injury report, the
+    # Matchup's sportsbook reader and the athlete catalog; it composes no Matchup.
+    slate_board_service = SlateBoardService(
+        event_catalog=event_catalog_service,
+        player_pool=projection_player_pool_reader,
+        injuries=matchup_injury_service,
+        sportsbook_reader=sportsbook_quote_reader,
+        statistic_catalog=statistic_catalog,
+        settings=settings,
+        athlete_catalog=athlete_catalog_reader,
+        engine=engine,
+    )
     user_service = UserService(
         engine,
         settings=settings,
@@ -970,6 +985,7 @@ def build_dependencies(
         research_activity_service=ResearchActivityService(engine, counting=not demo_database),
         usage_event_service=UsageEventService(engine, recording=not demo_database),
         report_service=ReportService(engine),
+        slate_board_service=slate_board_service,
     )
 
 

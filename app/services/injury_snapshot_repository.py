@@ -16,6 +16,7 @@ from sqlalchemy.engine import Connection, Engine
 from app.domain.utc import assume_utc
 from app.models.injury_snapshot import InjurySnapshot, InjurySourceSnapshot
 from app.providers.nba_stats import validate_canonical_season
+from app.services.request_reads import read_connection
 from app.utils.db import is_demo_database_url
 
 
@@ -103,7 +104,7 @@ class InjurySnapshotRepository:
         )
 
     def get_many(
-        self, scopes: Sequence[InjurySnapshotScope]
+        self, scopes: Sequence[InjurySnapshotScope], *, connection: Connection | None = None
     ) -> dict[InjurySnapshotScope, StoredInjurySnapshot]:
         """Read every scope's reconciled snapshot with one statement.
 
@@ -116,7 +117,7 @@ class InjurySnapshotRepository:
         if not scopes:
             return {}
         table = InjurySnapshot.__table__
-        with self.engine.connect() as connection:
+        with read_connection(self.engine, connection) as connection:
             rows = (
                 connection.execute(
                     select(

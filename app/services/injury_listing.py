@@ -13,6 +13,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.domain.nba_events import is_all_star_kind, is_final_event, resolve_stored_event_classification
@@ -25,6 +26,7 @@ from app.providers.nba_injury_report import (
     report_time_from_name,
 )
 from app.services.injury_snapshot_repository import InjurySnapshotScope
+from app.services.publication_snapshot_calls import call_with_read_scope
 from app.services.research_season import schedule_season
 
 #: Report statuses in severity order; also the keys of a Slate game's counts.
@@ -236,21 +238,29 @@ class StoredInjuryListing:
 
 
 def slate_events(
-    event_catalog: Any, settings: Any, slate_date: date, season: str | None = None
+    event_catalog: Any,
+    settings: Any,
+    slate_date: date,
+    season: str | None = None,
+    *,
+    connection: Connection | None = None,
 ) -> list[Mapping[str, Any]]:
     """The stored non-All-Star events of one ET calendar date, in tip order.
 
-    ``season`` is the date's schedule season when the caller already has it.
+    ``season`` is the date's schedule season when the caller already has it,
+    and ``connection`` the caller's read scope.
     """
 
     if event_catalog is None:
         return []
     season = season or schedule_season(settings, event_catalog, slate_date)
     local_start = datetime.combine(slate_date, datetime.min.time(), EASTERN)
-    events = event_catalog.get_events_between(
+    events = call_with_read_scope(
+        event_catalog.get_events_between,
         season,
         local_start.astimezone(UTC),
         (local_start + timedelta(days=1)).astimezone(UTC),
+        connection=connection,
     )
     kept = [
         event

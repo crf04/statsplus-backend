@@ -295,7 +295,7 @@ def test_dabble_lines_resolve_to_players_statistics_and_periods():
     assert rows == {
         ("assists", "8.5"): (auto, cade, "full_game", "standard", "standard", "assists"),
         ("three-made", "2.5"): (auto, cade, "full_game", "standard", "standard", "three_pointers_made"),
-        ("two-made", "6.5"): (auto, cade, "full_game", "standard", "standard", None),
+        ("two-made", "6.5"): (auto, cade, "full_game", "standard", "standard", "two_pointers_made"),
         ("three-attempted", "6.5"): (
             auto,
             cade,
