@@ -2793,10 +2793,12 @@ class _RacingResolver:
         self.race()
         return resolution
 
-    def resolve(self, provider, evidence, season, *, observed_at=None):
+    def resolve(self, provider, evidence, season, *, observed_at=None, event_teams=()):
         # Resolving one identity's combined evidence is part of the same read;
         # the race is what lands between that read and the board's write.
-        return self.resolver.resolve(provider, evidence, season, observed_at=observed_at)
+        return self.resolver.resolve(
+            provider, evidence, season, observed_at=observed_at, event_teams=event_teams
+        )
 
 
 def _racing_board(repository, snapshot, race, *, rows=None):

@@ -440,6 +440,7 @@ def _merged_observation(resolutions: Iterable[Any], resolve: Any) -> Any:
         merged,
         ordered[0].season,
         observed_at=ordered[0].observed_at,
+        event_teams=tuple(dict.fromkeys(team for resolution in ordered for team in resolution.event_teams)),
     )
 
 
