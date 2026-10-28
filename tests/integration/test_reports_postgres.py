@@ -343,3 +343,30 @@ def test_two_concurrent_listings_at_4_leave_exactly_5_and_one_refusal(engine):
             connection.execute(text("SELECT count(*) FROM reports WHERE listed_at IS NOT NULL")).scalar() == 5
         )
         assert connection.execute(text("SELECT count(*) FROM report_listings")).scalar() == 5
+
+
+def test_a_first_claim_racing_another_write_cannot_overwrite_it(engine):
+    _user(engine, "author")
+    service = ReportService(engine)
+    outcome = []
+    # Another first claim holds the row, uncommitted, while this one runs.
+    with engine.connect() as other:
+        transaction = other.begin()
+        other.execute(text("UPDATE users SET public_handle = 'first' WHERE firebase_uid = 'author'"))
+
+        def claim():
+            try:
+                outcome.append(service.claim_public_handle("author", "second"))
+            except FlatBodyError as error:
+                outcome.append(error.code)
+
+        thread = threading.Thread(target=claim)
+        thread.start()
+        thread.join(timeout=1)
+        assert thread.is_alive()  # waiting on the row lock
+        transaction.commit()
+    thread.join(timeout=30)
+
+    assert outcome == ["handle_already_set"]
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT public_handle FROM users")).scalar() == "first"

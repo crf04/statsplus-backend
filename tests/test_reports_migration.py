@@ -214,6 +214,7 @@ def test_migration_080_fails_loudly_on_a_handle_it_cannot_normalise_and_changes_
     assert _handles(engine) == {"broken": bad, "founder": "@bighatprops"}
     assert 80 not in _versions(engine)
     assert "listed_at" not in {column["name"] for column in inspect(engine).get_columns("reports")}
+    assert "report_listings" not in inspect(engine).get_table_names()
 
 
 def test_migration_080_fails_loudly_on_handles_that_collide_once_normalised(engine):
@@ -224,3 +225,5 @@ def test_migration_080_fails_loudly_on_handles_that_collide_once_normalised(engi
 
     assert _handles(engine) == {"copycat": "bighatprops", "fine": "@fine", "founder": "@BigHatProps"}
     assert 80 not in _versions(engine)
+    assert "listed_at" not in {column["name"] for column in inspect(engine).get_columns("reports")}
+    assert "report_listings" not in inspect(engine).get_table_names()

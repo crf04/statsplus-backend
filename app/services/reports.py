@@ -23,7 +23,7 @@ from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.domain.nba_teams import (
@@ -73,6 +73,12 @@ def invalid_handle() -> FlatBodyError:
 
 def handle_taken() -> FlatBodyError:
     return FlatBodyError(409, "handle_taken", "That handle is taken.")
+
+
+def handle_already_set() -> FlatBodyError:
+    return FlatBodyError(
+        409, "handle_already_set", "Your handle is already set. Ask CourtAI support to change it."
+    )
 
 
 # -- covers ------------------------------------------------------------------------
@@ -406,7 +412,10 @@ class ReportService:
         return self._write_handle(firebase_uid, handle, once=True)
 
     def set_public_handle(self, firebase_uid: str, handle: Any) -> str | None:
-        """An admin sets, changes or (with ``None``) clears an account's handle."""
+        """An admin sets, changes or (with ``None``) clears an account's handle.
+
+        Clearing it also unlists and unfeatures the account's reports.
+        """
 
         return self._write_handle(firebase_uid, handle, once=False)
 
@@ -416,15 +425,8 @@ class ReportService:
             raise invalid_handle()
         session = get_session(self._engine)
         try:
-            user = session.get(User, firebase_uid)
-            if user is None:
+            if session.get(User, firebase_uid) is None:
                 raise ResourceNotFoundError("No such user.")
-            if once and user.public_handle is not None:
-                raise FlatBodyError(
-                    409,
-                    "handle_already_set",
-                    "Your handle is already set. Ask CourtAI support to change it.",
-                )
             if handle is not None:
                 owner = session.scalar(
                     select(User.firebase_uid).where(
@@ -433,7 +435,20 @@ class ReportService:
                 )
                 if owner is not None:
                     raise handle_taken()
-            user.public_handle = handle
+            change = update(User).where(User.firebase_uid == firebase_uid).values(public_handle=handle)
+            if once:
+                # Conditional, so of two concurrent first claims only one sets it.
+                change = change.where(User.public_handle.is_(None))
+            if session.execute(change).rowcount == 0:
+                raise handle_already_set()
+            if handle is None:
+                # A listed report always names its author, so with no handle
+                # left nothing of theirs stays listed or Featured.
+                session.execute(
+                    update(Report)
+                    .where(Report.firebase_uid == firebase_uid, Report.listed_at.is_not(None))
+                    .values(listed_at=None, featured_at=None)
+                )
             try:
                 session.commit()
             except IntegrityError:

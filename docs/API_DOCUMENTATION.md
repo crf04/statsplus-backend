@@ -4938,7 +4938,7 @@ report is kept until its author deletes it or an admin takes it down.
 
 ```http
 POST   /api/user/reports                       require_auth (waitlisted refused)
-PATCH  /api/user/reports/<id>                  require_auth; the author only
+PATCH  /api/user/reports/<id>                  require_auth; the author only (waitlisted may only unlist)
 DELETE /api/user/reports/<id>                  require_auth; the author only
 PUT    /api/user/public-handle                 require_auth (waitlisted refused)
 GET    /api/reports/<id>                       anonymous; a token adds is_author
@@ -5130,8 +5130,10 @@ set `409 {"error": "handle_already_set", ...}`. A waitlisted account gets
 `PUT /api/admin/users/<uid>/public-handle` with `{"public_handle": "bighatprops"}`
 sets or changes the account's handle with the same format (`400
 invalid_handle`) and uniqueness (`409 handle_taken`) and answers `{"uid":
-"<uid>", "public_handle": "bighatprops"}`; `null` clears it. It is how a
-handle changes. An unknown uid is `404`.
+"<uid>", "public_handle": "bighatprops"}`; `null` clears it and also unlists
+and unfeatures the account's reports, since a listed report always names its
+author. It is how a handle changes. An unknown uid is `404`. A first claim
+racing another is decided by one conditional update, so only one wins.
 
 #### List or unlist a report
 
@@ -5144,9 +5146,10 @@ resource_not_found`.
 Listing needs a public handle (`409 {"error": "handle_required", ...}`). An
 account may move at most 5 reports to listed per rolling 24 hours, counting
 `POST /api/user/reports` with `listed: true` and this endpoint together
-(`429 {"error": "listed_limit", ...}`). Listing a report that is already
-listed changes nothing and spends nothing. Unlisting is always allowed, clears
-`listed_at` and Featured, and does not give the listing back.
+(`429 {"error": "listed_limit", ...}`), and a waitlisted account gets `403
+waitlisted`. Listing a report that is already listed changes nothing and
+spends nothing. Unlisting is always allowed, a waitlisted author included; it
+clears `listed_at` and Featured and does not give the listing back.
 
 #### Research feed
 

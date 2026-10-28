@@ -943,6 +943,33 @@ def test_a_waitlisted_account_cannot_list(client, signed_in):
     assert _feed(client)["reports"] == []
 
 
+def test_a_waitlisted_author_can_still_unlist(client, signed_in):
+    _claim(client, signed_in(OWNER), "bighat")
+    report_id = _published_id(client, signed_in(OWNER), {**_body(), "listed": True})
+
+    unlisted = _list(client, signed_in(OWNER, waitlisted=True), report_id, listed=False)
+
+    assert unlisted.status_code == 200
+    assert unlisted.get_json()["report"]["listed"] is False
+    assert _feed(client)["reports"] == []
+
+
+def test_clearing_a_handle_unlists_and_unfeatures_the_authors_reports(client, signed_in):
+    _claim(client, signed_in(OWNER), "bighat")
+    _claim(client, signed_in(OTHER), "other")
+    mine = _published_id(client, signed_in(OWNER), {**_body(), "listed": True})
+    theirs = _published_id(client, signed_in(OTHER), {**_body(), "listed": True})
+    _feature(client, signed_in, mine)
+
+    cleared = _admin_handle(client, signed_in, OWNER, None)
+
+    assert cleared.get_json() == {"uid": OWNER, "public_handle": None}
+    read = client.get(f"/api/reports/{mine}").get_json()["report"]
+    assert (read["listed"], read["featured"], read["author"]) == (False, False, None)
+    assert _feed(client) == {"featured": [], "reports": _feed(client)["reports"], "next_cursor": None}
+    assert _ids(_feed(client)["reports"]) == [theirs]
+
+
 def test_listing_is_capped_at_5_moves_per_rolling_24_hours_over_both_endpoints(
     client, signed_in, clock, report_engine
 ):
@@ -1042,6 +1069,27 @@ def test_the_feed_pages_20_newest_first_with_featured_on_top_only_once(client, s
     assert _ids(second["reports"]) == ["rep0000001"]
 
 
+def test_a_page_boundary_inside_a_listing_time_tie_loses_and_repeats_nothing(
+    client, signed_in, reports, clock, report_engine
+):
+    _claim(client, signed_in(OWNER), "bighat")
+    _seed_listed(reports, clock, OWNER, 22)
+    with report_engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE reports SET listed_at = (SELECT listed_at FROM reports WHERE id = 'rep0000003') "
+                "WHERE id IN ('rep0000002', 'rep0000004')"
+            )
+        )
+
+    first = _feed(client)
+    second = _feed(client, first["next_cursor"])
+
+    # Ties order by id, newest first: rep4, rep3 end page one and rep2 opens page two.
+    assert _ids(first["reports"])[-3:] == ["rep0000005", "rep0000004", "rep0000003"]
+    assert (_ids(second["reports"]), second["next_cursor"]) == (["rep0000002", "rep0000001"], None)
+
+
 def test_unfeaturing_returns_a_report_to_its_place_and_unlisting_drops_featured(
     client, signed_in, reports, clock
 ):
@@ -1070,11 +1118,13 @@ def test_deleted_and_taken_down_reports_never_appear_in_the_feed_or_author_pages
     client, signed_in, reports, clock
 ):
     _claim(client, signed_in(OWNER), "bighat")
-    kept, deleted, taken_down, featured_deleted = _seed_listed(reports, clock, OWNER, 4)
-    _feature(client, signed_in, featured_deleted)
+    kept, deleted, taken_down, featured_deleted, featured_taken_down = _seed_listed(reports, clock, OWNER, 5)
+    for report_id in (featured_deleted, featured_taken_down):
+        _feature(client, signed_in, report_id)
     for report_id in (deleted, featured_deleted):
         client.delete(f"/api/user/reports/{report_id}", headers=signed_in(OWNER))
-    client.post(f"/api/admin/reports/{taken_down}/takedown", headers=signed_in(ADMIN, admin=True))
+    for report_id in (taken_down, featured_taken_down):
+        client.post(f"/api/admin/reports/{report_id}/takedown", headers=signed_in(ADMIN, admin=True))
 
     feed = _feed(client)
     author = client.get("/api/research/authors/bighat").get_json()

@@ -18,6 +18,7 @@ from app.errors import (
 from app.services import feedback_service
 from app.services.target_backtest import BACKTEST_FAILED_MESSAGE
 from app.utils.auth import (
+    _refuse_waitlisted,
     get_current_user,
     require_admin,
     require_auth,
@@ -595,7 +596,7 @@ def create_report():
 
 
 @user_bp.route("/reports/<report_id>", methods=["PATCH"])
-@require_auth
+@require_auth_allow_waitlisted
 @route_error_boundary("Failed to update the report.")
 def update_report(report_id):
     """
@@ -603,7 +604,8 @@ def update_report(report_id):
 
     Expected JSON body: ``{"listed": true | false}``.  Listing needs a public
     handle (``409 handle_required``) and counts toward the listing cap
-    (``429 listed_limit``); unlisting is always allowed.
+    (``429 listed_limit``) and an active account (``403 waitlisted``);
+    unlisting is always allowed, a waitlisted author included.
 
     Returns:
         JSON response with the report's id, ``listed`` and ``listed_at``
@@ -612,6 +614,8 @@ def update_report(report_id):
     body = request.get_json(silent=True)
     if not isinstance(body, dict) or set(body) != {"listed"} or not isinstance(body["listed"], bool):
         raise InvalidInputError('Body must be {"listed": true|false}.')
+    if body["listed"]:
+        _refuse_waitlisted(get_current_user())
     return jsonify(
         {"success": True, "report": report_service.set_listed(firebase_uid, report_id, body["listed"])}
     )
