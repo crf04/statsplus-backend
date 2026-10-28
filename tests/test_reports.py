@@ -760,6 +760,9 @@ def test_a_user_sets_a_handle_once_stored_lowercase_without_the_at(client, signe
 
     assert (first.status_code, first.get_json()) == (200, {"handle": "bighat_props"})
     assert (second.status_code, second.get_json()) == (409, HANDLE_ALREADY_SET)
+    _claim(client, signed_in(OTHER), "taken_one")
+    occupied = _claim(client, signed_in(OWNER), "taken_one")
+    assert (occupied.status_code, occupied.get_json()) == (409, HANDLE_ALREADY_SET)
     report_id = _published_id(client, signed_in(OWNER), {**_body(), "show_author": True})
     assert client.get(f"/api/reports/{report_id}").get_json()["report"]["author"] == {
         "label": "@bighat_props"
@@ -1094,6 +1097,30 @@ def test_a_page_boundary_inside_a_listing_time_tie_loses_and_repeats_nothing(
     # Ties order by id, newest first: rep4, rep3 end page one and rep2 opens page two.
     assert _ids(first["reports"])[-3:] == ["rep0000005", "rep0000004", "rep0000003"]
     assert (_ids(second["reports"]), second["next_cursor"]) == (["rep0000002", "rep0000001"], None)
+
+
+def test_a_pin_or_unpin_between_the_feeds_two_reads_never_shows_a_report_twice(
+    client, signed_in, reports, clock
+):
+    _claim(client, signed_in(OWNER), "bighat")
+    pinned, unpinned = _seed_listed(reports, clock, OWNER, 2)
+    _feature(client, signed_in, unpinned)
+    reads = reports._entries
+    calls = []
+
+    def flip_after_the_first_read(*args, **kwargs):
+        rows = reads(*args, **kwargs)
+        if not calls:
+            reports.set_featured(pinned, True)
+            reports.set_featured(unpinned, False)
+        calls.append(rows)
+        return rows
+
+    reports._entries = flip_after_the_first_read
+    page = _feed(client)
+
+    # Both lists come from before the flip or are kept apart by id: nothing twice.
+    assert (_ids(page["featured"]), _ids(page["reports"])) == ([unpinned], [])
 
 
 def test_unfeaturing_returns_a_report_to_its_place_and_unlisting_drops_featured(

@@ -434,8 +434,11 @@ class ReportService:
             raise invalid_handle()
         session = get_session(self._engine)
         try:
-            if session.get(User, firebase_uid) is None:
+            user = session.get(User, firebase_uid)
+            if user is None:
                 raise ResourceNotFoundError("No such user.")
+            if once and user.public_handle is not None:
+                raise handle_already_set()
             if handle is not None:
                 owner = session.scalar(
                     select(User.firebase_uid).where(
@@ -562,8 +565,7 @@ class ReportService:
 
         session = self._snapshot_session()
         try:
-            page = self._page(session, [Report.featured_at.is_(None)], cursor)
-            page["featured"] = (
+            featured = (
                 self._entries(
                     session,
                     [Report.featured_at.is_not(None)],
@@ -572,6 +574,11 @@ class ReportService:
                 if cursor is None
                 else []
             )
+            # Also excluded by id, so a report unpinned between the two reads
+            # cannot show twice where there is no snapshot (SQLite).
+            shown = [entry["id"] for entry in featured]
+            page = self._page(session, [Report.featured_at.is_(None), Report.id.not_in(shown)], cursor)
+            page["featured"] = featured
             return page
         finally:
             session.close()
@@ -580,8 +587,9 @@ class ReportService:
         """A session whose reads all see one snapshot.
 
         On PostgreSQL that is ``REPEATABLE READ``: under the default ``READ
-        COMMITTED`` a pin committed between the two reads would put the same
-        report in ``featured`` and ``reports``.  SQLite reads serialize anyway.
+        COMMITTED`` a pin or unpin committed between the two reads would drop
+        the report from both lists or show it in both.  SQLite gets no
+        snapshot; :meth:`feed` still never shows a report twice there.
         """
 
         session = get_session(self._engine)
