@@ -1443,6 +1443,13 @@ def test_readers_get_the_edited_report_without_removed_cards_hidden_items_or_the
             }
         ]
         assert [call["id"] for call in reader["calls"]] == ["hart-matchup", "tatum"]
+        assert reader["calls"][0] == {
+            "id": "hart-matchup",
+            "tool": "query_game_logs",
+            "card": "matchup",
+            "structured": {"rows": [{"PTS": 31}]},
+            "meta": {"data_as_of": "2026-10-24"},
+        }
         assert reader["cards"] == {"game-logs": "<html>logs</html>", "matchup": "<html>matchup</html>"}
         assert (reader["notes"], reader["edited_at"]) == ("Hart is the spot.", "2026-10-29T09:00:01+00:00")
         assert (reader["is_author"], "original" in reader, "edits" in reader) == (False, False, False)
