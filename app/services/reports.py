@@ -560,15 +560,34 @@ class ReportService:
         they are left out of ``reports`` on every page, so none shows twice.
         """
 
-        page = self._page([Report.featured_at.is_(None)], cursor)
-        page["featured"] = (
-            self._entries(
-                [Report.featured_at.is_not(None)], order=(Report.featured_at.desc(), Report.id.desc())
+        session = self._snapshot_session()
+        try:
+            page = self._page(session, [Report.featured_at.is_(None)], cursor)
+            page["featured"] = (
+                self._entries(
+                    session,
+                    [Report.featured_at.is_not(None)],
+                    order=(Report.featured_at.desc(), Report.id.desc()),
+                )
+                if cursor is None
+                else []
             )
-            if cursor is None
-            else []
-        )
-        return page
+            return page
+        finally:
+            session.close()
+
+    def _snapshot_session(self) -> Any:
+        """A session whose reads all see one snapshot.
+
+        On PostgreSQL that is ``REPEATABLE READ``: under the default ``READ
+        COMMITTED`` a pin committed between the two reads would put the same
+        report in ``featured`` and ``reports``.  SQLite reads serialize anyway.
+        """
+
+        session = get_session(self._engine)
+        if self._engine.dialect.name == "postgresql":
+            session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+        return session
 
     def author_feed(self, handle: str, cursor: str | None = None) -> dict[str, Any]:
         """One page of an author's listed reports; an unknown handle is not found."""
@@ -581,15 +600,13 @@ class ReportService:
                 if normalized
                 else None
             )
+            if firebase_uid is None:
+                raise ResourceNotFoundError("No author has that handle.")
+            return self._page(session, [Report.firebase_uid == firebase_uid], cursor)
         finally:
             session.close()
-        if firebase_uid is None:
-            raise ResourceNotFoundError("No author has that handle.")
-        page = self._page([Report.firebase_uid == firebase_uid], cursor)
-        page["featured"] = []
-        return page
 
-    def _page(self, filters: list[Any], cursor: str | None) -> dict[str, Any]:
+    def _page(self, session: Any, filters: list[Any], cursor: str | None) -> dict[str, Any]:
         if cursor is not None:
             listed_at, report_id = _decode_cursor(cursor)
             filters = [
@@ -600,7 +617,7 @@ class ReportService:
                 ),
             ]
         rows = self._entries(
-            filters, order=(Report.listed_at.desc(), Report.id.desc()), limit=FEED_PAGE_SIZE + 1
+            session, filters, order=(Report.listed_at.desc(), Report.id.desc()), limit=FEED_PAGE_SIZE + 1
         )
         more = len(rows) > FEED_PAGE_SIZE
         rows = rows[:FEED_PAGE_SIZE]
@@ -614,38 +631,34 @@ class ReportService:
         }
 
     def _entries(
-        self, filters: list[Any], *, order: tuple[Any, ...], limit: int | None = None
+        self, session: Any, filters: list[Any], *, order: tuple[Any, ...], limit: int | None = None
     ) -> list[dict[str, Any]]:
         """Listed, visible reports by authors with a handle, as feed entries.
 
         Reads only the columns an entry shows, never the calls or card HTML.
         """
 
-        session = get_session(self._engine)
-        try:
-            rows = session.execute(
-                select(
-                    Report.id,
-                    Report.title,
-                    Report.listed_at,
-                    Report.created_at,
-                    Report.document["date"].as_string(),
-                    Report.covers,
-                    User.public_handle,
-                )
-                .join(User, User.firebase_uid == Report.firebase_uid)
-                .where(
-                    Report.listed_at.is_not(None),
-                    Report.deleted_at.is_(None),
-                    Report.taken_down_at.is_(None),
-                    User.public_handle.is_not(None),
-                    *filters,
-                )
-                .order_by(*order)
-                .limit(limit)
-            ).all()
-        finally:
-            session.close()
+        rows = session.execute(
+            select(
+                Report.id,
+                Report.title,
+                Report.listed_at,
+                Report.created_at,
+                Report.document["date"].as_string(),
+                Report.covers,
+                User.public_handle,
+            )
+            .join(User, User.firebase_uid == Report.firebase_uid)
+            .where(
+                Report.listed_at.is_not(None),
+                Report.deleted_at.is_(None),
+                Report.taken_down_at.is_(None),
+                User.public_handle.is_not(None),
+                *filters,
+            )
+            .order_by(*order)
+            .limit(limit)
+        ).all()
         return [
             {
                 "id": report_id,

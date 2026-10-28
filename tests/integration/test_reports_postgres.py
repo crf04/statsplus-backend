@@ -434,3 +434,27 @@ def test_featuring_waits_for_an_unlisting_and_then_refuses(engine):
         assert connection.execute(
             text("SELECT listed_at, featured_at FROM reports WHERE id = :id"), {"id": report_id}
         ).one() == (None, None)
+
+
+def test_a_pin_committed_between_the_feeds_two_reads_shows_the_report_once(engine):
+    _user(engine, "author")
+    service = ReportService(engine)
+    service.set_public_handle("author", "author")
+    report_id = service.publish("author", {**_body(), "listed": True})["id"]
+    reads = service._entries
+
+    def first_read_then_pin(*args, **kwargs):
+        rows = reads(*args, **kwargs)
+        if not first_read_then_pin.pinned:
+            first_read_then_pin.pinned = True
+            ReportService(engine).set_featured(report_id, True)
+        return rows
+
+    first_read_then_pin.pinned = False
+    service._entries = first_read_then_pin
+
+    page = service.feed()
+
+    shown = [entry["id"] for entry in page["featured"] + page["reports"]]
+    assert shown == [report_id]
+    assert [entry["id"] for entry in ReportService(engine).feed()["featured"]] == [report_id]
