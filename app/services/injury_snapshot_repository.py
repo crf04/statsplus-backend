@@ -80,9 +80,11 @@ class InjurySnapshotRepository:
             table.c.game_id == scope.game_id,
         )
 
-    def get(self, scope: InjurySnapshotScope) -> StoredInjurySnapshot | None:
+    def get(
+        self, scope: InjurySnapshotScope, *, connection: Connection | None = None
+    ) -> StoredInjurySnapshot | None:
         table = InjurySnapshot.__table__
-        with self.engine.connect() as connection:
+        with read_connection(self.engine, connection) as connection:
             row = (
                 connection.execute(
                     select(
@@ -369,9 +371,11 @@ class InjurySnapshotRepository:
             )
             self._prune_unreferenced_sources(connection, source_snapshot.source)
 
-    def get_latest_source(self, source: str) -> StoredInjurySourceSnapshot | None:
+    def get_latest_source(
+        self, source: str, *, connection: Connection | None = None
+    ) -> StoredInjurySourceSnapshot | None:
         table = InjurySourceSnapshot.__table__
-        with self.engine.connect() as connection:
+        with read_connection(self.engine, connection) as connection:
             row = (
                 connection.execute(
                     select(table)

@@ -3161,8 +3161,14 @@ class LatestProjectionPlayerPoolReader:
         self._provider_live_max_age_seconds = provider_windows
         self.event_reader = event_reader
 
-    def get_pool_for_game(self, *, season: str, game_id: str) -> PlayerPool:
-        pool, _is_closing = self.get_pool_for_game_with_closing_state(season=season, game_id=game_id)
+    def get_pool_for_game(
+        self, *, season: str, game_id: str, connection: Connection | None = None
+    ) -> PlayerPool:
+        """The game's pool; on ``connection`` its reads share the caller's snapshot."""
+
+        pool, _is_closing = self.get_pool_for_game_with_closing_state(
+            season=season, game_id=game_id, connection=connection
+        )
         return pool
 
     def _for_season(self, season: str) -> LatestProjectionPlayerPoolReader:
@@ -3181,18 +3187,21 @@ class LatestProjectionPlayerPoolReader:
         scoped.scope = scoped.scopes[0]
         return scoped
 
-    def get_pool_for_game_with_closing_state(self, *, season: str, game_id: str) -> tuple[PlayerPool, bool]:
+    def get_pool_for_game_with_closing_state(
+        self, *, season: str, game_id: str, connection: Connection | None = None
+    ) -> tuple[PlayerPool, bool]:
         if season != self.scope.query.season:
             return self._for_season(season).get_pool_for_game_with_closing_state(
-                season=season, game_id=game_id
+                season=season, game_id=game_id, connection=connection
             )
         requested_games = (str(game_id),)
-        started_games = self._started_games(season, requested_games)
+        started_games = self._started_games(season, requested_games, connection)
         return (
             self._pool_for_requested_games(
                 season=season,
                 requested_games=requested_games,
                 started_games=started_games,
+                connection=connection,
             ),
             bool(started_games),
         )

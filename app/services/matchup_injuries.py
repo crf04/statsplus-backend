@@ -243,7 +243,10 @@ class MatchupInjuryService:
         event: Mapping[str, Any],
         season: str,
         pool_players: Sequence[Any],
+        connection: Connection | None = None,
     ) -> MatchupInjuryResult:
+        """The game's report; on ``connection`` its reads share the caller's snapshot."""
+
         if not self.enabled:
             return unavailable_injury_result("disabled")
         if not self.permission_granted:
@@ -254,7 +257,7 @@ class MatchupInjuryService:
         scope = InjurySnapshotScope(season, str(event["nba_game_id"]))
         now = assume_utc(self.clock())
         try:
-            stored = self.snapshot_repository.get(scope)
+            stored = call_with_read_scope(self.snapshot_repository.get, scope, connection=connection)
         except (SQLAlchemyError, TypeError, ValueError):
             stored = None
 
@@ -281,7 +284,9 @@ class MatchupInjuryService:
             )
 
         try:
-            source_snapshot = self.snapshot_repository.get_latest_source(INJURY_SOURCE)
+            source_snapshot = call_with_read_scope(
+                self.snapshot_repository.get_latest_source, INJURY_SOURCE, connection=connection
+            )
         except (SQLAlchemyError, TypeError, ValueError):
             source_snapshot = None
         use_stored = self._within_age(stored, now, INJURY_STALE_SERVE_SECONDS)
@@ -425,6 +430,7 @@ class MatchupInjuryService:
         event: Mapping[str, Any],
         season: str,
         pool_players: Sequence[Any],
+        connection: Connection | None = None,
     ) -> MatchupInjuryResult:
         """Read a usable override without ever starting provider collection."""
 
@@ -435,7 +441,11 @@ class MatchupInjuryService:
         if self.snapshot_repository is None:
             return unavailable_injury_result("fetch_failed")
         try:
-            stored = self.snapshot_repository.get(InjurySnapshotScope(season, str(event["nba_game_id"])))
+            stored = call_with_read_scope(
+                self.snapshot_repository.get,
+                InjurySnapshotScope(season, str(event["nba_game_id"])),
+                connection=connection,
+            )
         except (SQLAlchemyError, TypeError, ValueError):
             stored = None
         return self._stored_result(
@@ -671,8 +681,11 @@ class StoredMatchupInjuryReader:
         event: Mapping[str, Any],
         season: str,
         pool_players: Sequence[Any],
+        connection: Connection | None = None,
     ) -> MatchupInjuryResult:
-        return self.service.get_stored_injuries(event=event, season=season, pool_players=pool_players)
+        return self.service.get_stored_injuries(
+            event=event, season=season, pool_players=pool_players, connection=connection
+        )
 
 
 __all__ = [

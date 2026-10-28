@@ -382,6 +382,7 @@ class MatchupInjuryReader(Protocol):
         event: Mapping[str, Any],
         season: str,
         pool_players: Sequence[PoolPlayer],
+        connection: Connection | None = None,
     ) -> MatchupInjuryResult: ...
 
 
@@ -734,7 +735,11 @@ class MatchupService:
         snapshot was captured on; omitted, the compose opens its own.
         """
 
-        scope = nullcontext(read_scope) if read_scope is not None else request_read_scope(self._engine)
+        scope = (
+            nullcontext(read_scope)
+            if read_scope is not None
+            else request_read_scope(self._engine, repeatable_read=True)
+        )
         with scope as (connection, session):
             return self._compose_matchup(
                 game_id=game_id,
@@ -1070,6 +1075,7 @@ class MatchupService:
             schedule_season,
             pool_players,
             reader=self.injuries if injuries is _OWN else injuries,
+            connection=connection,
         )
         # The backend declares the mode so no client ever infers it from tip
         # dates, empty arrays, or freshness markers.
@@ -1533,16 +1539,19 @@ class MatchupService:
         pool_players: Sequence[PoolPlayer],
         *,
         reader: MatchupInjuryReader | None,
+        connection: Connection | None,
     ) -> MatchupInjuryResult:
         if reader is not None:
             # Database-first applies to governed statistical facts.  Injury
             # Injury Reports read stored evidence only; the scheduled refresh
             # is the sole provider caller. Statistical activation does not
             # change the Injury Reports contract.
-            return reader.get_injuries(
+            return call_with_read_scope(
+                reader.get_injuries,
                 event=event,
                 season=season,
                 pool_players=pool_players,
+                connection=connection,
             )
         return unavailable_injury_result("disabled")
 
