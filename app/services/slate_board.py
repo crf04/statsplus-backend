@@ -2,10 +2,11 @@
 
 The board reads the date's games, one Player Pool for all of them, their
 stored injury report in one statement and their latest sportsbook rows in one
-statement.  It composes no Matchup: a row carries the Matchup player row's
-``lines``, ``line_prices`` and ``book_lines`` for one market, and a player
-ruled Out stays in with his status.  A started game's pool is its closing set,
-as every pool read serves it.
+statement, all on one repeatable-read connection, so a correction committed
+between two of those reads never mixes into a response.  It composes no
+Matchup: a row carries the Matchup player row's ``lines``, ``line_prices`` and
+``book_lines`` for one market, and a player ruled Out stays in with his status.
+A started game's pool is its closing set, as every pool read serves it.
 """
 
 from __future__ import annotations
@@ -125,16 +126,18 @@ class SlateBoardService:
         if self.event_catalog is None:
             raise ProviderUnavailableError("The NBA schedule is not available. Please try again later.")
         season = season or schedule_season(self.settings, self.event_catalog, slate_date)
-        events = [
-            event
-            for event in slate_events(self.event_catalog, self.settings, slate_date, season)
-            if (game_id is None or str(event["nba_game_id"]) == game_id)
-            and (team is None or team in (event["away_team_tricode"], event["home_team_tricode"]))
-        ]
-        game_ids = [str(event["nba_game_id"]) for event in events]
         with request_read_scope(self._engine, repeatable_read=True) as (connection, _session):
+            events = [
+                event
+                for event in slate_events(
+                    self.event_catalog, self.settings, slate_date, season, connection=connection
+                )
+                if (game_id is None or str(event["nba_game_id"]) == game_id)
+                and (team is None or team in (event["away_team_tricode"], event["home_team_tricode"]))
+            ]
+            game_ids = [str(event["nba_game_id"]) for event in events]
             pool = self._pool(season, game_ids, connection)
-            statuses = self._injury_statuses(events, season, pool)
+            statuses = self._injury_statuses(events, season, pool, connection)
             quotes = (
                 []
                 if self.sportsbook_reader is None or not game_ids
@@ -178,7 +181,7 @@ class SlateBoardService:
         )
 
     def _injury_statuses(
-        self, events: Sequence[Mapping[str, Any]], season: str, pool: PlayerPool
+        self, events: Sequence[Mapping[str, Any]], season: str, pool: PlayerPool, connection: Any
     ) -> dict[int, str]:
         """Each listed player's status on the stored report, the first entry naming him."""
 
@@ -188,13 +191,15 @@ class SlateBoardService:
             str(event["nba_game_id"]): {int(event["away_team_id"]), int(event["home_team_id"])}
             for event in events
         }
-        results = self.injuries.get_stored_injuries_many(
+        results = call_with_read_scope(
+            self.injuries.get_stored_injuries_many,
             events=events,
             season=season,
             pool_players_by_game={
                 game: tuple(player for player in pool.players if player.team_id in ids)
                 for game, ids in teams.items()
             },
+            connection=connection,
         )
         statuses: dict[int, str] = {}
         for result in results.values():

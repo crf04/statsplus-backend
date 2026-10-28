@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -64,6 +66,9 @@ CURRY = (201939, "Stephen Curry", GSW, STARTED)
 LEBRON = (2544, "LeBron James", LAL, STARTED)
 TATUM = (1628369, "Jayson Tatum", BOS, LATER)
 BRUNSON = (1628973, "Jalen Brunson", NYK, LATER)
+#: Boston's other two posted players; their ids run in a different order from their names.
+BROWN = (1627759, "Jaylen Brown", BOS, LATER)
+WHITE = (1628401, "Derrick White", BOS, LATER)
 BOOKER = (1626164, "Devin Booker", PHX, TOMORROW)
 
 
@@ -240,6 +245,8 @@ def seed_board(engine, dependencies):
                 _market(catalog, "dabble", TATUM, "points", "27.5", (-122, -104)),
                 _market(catalog, "dabble", TATUM, "three_pointers_attempted", "8.5", (-125, None)),
                 _market(catalog, "dabble", BRUNSON, "points", "26.5", (-120, -106)),
+                _market(catalog, "dabble", BROWN, "points", "23.5", (-115, -105)),
+                _market(catalog, "dabble", WHITE, "points", "15.5", (-110, -110)),
                 _market(catalog, "dabble", BOOKER, "points", "25.5", (-120, -106)),
             ),
             NOW - timedelta(minutes=2),
@@ -349,7 +356,7 @@ def test_the_index_lists_each_posted_market_with_its_players_and_sources(board, 
             "games": GAMES,
             "sources": SOURCES,
             "markets": [
-                {"market": "PTS", "players": 4, "sources": ["dabble", "prizepicks", "draftkings", "fanduel"]},
+                {"market": "PTS", "players": 6, "sources": ["dabble", "prizepicks", "draftkings", "fanduel"]},
                 {"market": "3PM", "players": 1, "sources": ["draftkings"]},
                 {"market": "FG3A", "players": 2, "sources": ["dabble"]},
             ],
@@ -415,6 +422,24 @@ TATUM_PTS = {
         ],
     },
 }
+BROWN_PTS = {
+    "player_id": 1627759,
+    "name": "Jaylen Brown",
+    "team": "BOS",
+    "injury_status": None,
+    "lines": {"dabble": 23.5},
+    "line_prices": {"dabble": {"over": -115, "under": -105}},
+    "book_lines": None,
+}
+WHITE_PTS = {
+    "player_id": 1628401,
+    "name": "Derrick White",
+    "team": "BOS",
+    "injury_status": None,
+    "lines": {"dabble": 15.5},
+    "line_prices": {"dabble": {"over": -110, "under": -110}},
+    "book_lines": None,
+}
 BRUNSON_PTS = {
     "player_id": 1628973,
     "name": "Jalen Brunson",
@@ -436,11 +461,23 @@ def test_a_sportsbook_market_carries_every_provider_and_book_per_game(board, cli
         {
             "date": "2026-01-15",
             "season": SEASON,
-            "games": _games([CURRY_PTS, LEBRON_PTS], [TATUM_PTS, BRUNSON_PTS]),
+            "games": _games([CURRY_PTS, LEBRON_PTS], [WHITE_PTS, BROWN_PTS, TATUM_PTS, BRUNSON_PTS]),
             "sources": SOURCES,
-            "players_total": 4,
+            "players_total": 6,
         },
     )
+
+
+def test_players_are_ordered_by_team_then_name(board, client):
+    status, body = _get(client, f"date=2026-01-15&market=PTS&game={LATER}")
+
+    assert status == 200
+    assert [(row["team"], row["name"]) for row in body["games"][0]["players"]] == [
+        ("BOS", "Derrick White"),
+        ("BOS", "Jaylen Brown"),
+        ("BOS", "Jayson Tatum"),
+        ("NYK", "Jalen Brunson"),
+    ]
 
 
 def test_a_dfs_only_market_has_no_book_lines(board, client):
@@ -569,17 +606,62 @@ def test_the_board_requires_authentication_before_reading(client, dependencies, 
     dependencies.slate_board_service.get_board.assert_not_called()
 
 
-def test_the_slate_is_read_in_one_statement_per_store_whatever_its_game_count(board, client):
+#: Four more 2026-01-15 games, none of them posted.
+EXTRA_GAMES = [
+    _event(f"00225006{index:02d}", away, home, LATER_TIP + timedelta(minutes=30 * index))
+    for index, (away, home) in enumerate(
+        (
+            (
+                TeamEvidence(canonical_id=1610612748, abbreviation="MIA"),
+                TeamEvidence(canonical_id=1610612753, abbreviation="ORL"),
+            ),
+            (
+                TeamEvidence(canonical_id=1610612743, abbreviation="DEN"),
+                TeamEvidence(canonical_id=1610612762, abbreviation="UTA"),
+            ),
+            (
+                TeamEvidence(canonical_id=1610612742, abbreviation="DAL"),
+                TeamEvidence(canonical_id=1610612745, abbreviation="HOU"),
+            ),
+            (
+                TeamEvidence(canonical_id=1610612749, abbreviation="MIL"),
+                TeamEvidence(canonical_id=1610612741, abbreviation="CHI"),
+            ),
+        ),
+        start=4,
+    )
+]
+
+
+def test_the_slate_is_read_in_the_same_statements_whatever_its_game_count(board, client):
     statements = []
     sqlalchemy_event.listen(
         board.engine, "before_cursor_execute", lambda *arguments: statements.append(arguments[2])
     )
 
-    status, _body = _get(client, "date=2026-01-15&market=PTS")
+    def reads():
+        statements.clear()
+        status, body = _get(client, "date=2026-01-15&market=PTS")
+        assert status == 200
+        return len(body["games"]), Counter(
+            table for statement in statements for table in re.findall(r"FROM (\w+)", statement)
+        )
 
-    assert status == 200
-    reads = {
-        table: sum(f"FROM {table}" in statement for statement in statements)
-        for table in ("sportsbook_prop_latest", "injury_snapshots")
+    two_games, two_reads = reads()
+    board.service.event_catalog.repository.publish(
+        SEASON, pd.DataFrame(EXTRA_GAMES), NOW - timedelta(hours=1)
+    )
+    six_games, six_reads = reads()
+
+    assert (two_games, six_games) == (2, 6)
+    assert two_reads == six_reads
+    assert two_reads == {
+        "event_catalog": 2,
+        "latest_player_projections": 1,
+        "projection_provider_polls": 1,
+        # One closing-set lookup per DFS provider, never per game.
+        "projection_closing_sets": len(dfs_provider_names()),
+        "projection_closing_memberships": 1,
+        "injury_snapshots": 1,
+        "sportsbook_prop_latest": 1,
     }
-    assert reads == {"sportsbook_prop_latest": 1, "injury_snapshots": 1}

@@ -28,7 +28,7 @@ from sqlalchemy import (
     union_all,
     update,
 )
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
 from app.config.settings import ConfigurationError
@@ -74,6 +74,7 @@ from app.services.dfs_snapshot_cache import (
     serialize_provider_snapshot,
 )
 from app.services.player_pool import PlayerPool, PoolPlayer
+from app.services.publication_snapshot_calls import call_with_read_scope
 from app.services.statistic_catalog import StatisticCatalog
 
 PROJECTION_ARCHIVE_REQUIRED_TABLES = (
@@ -3321,6 +3322,19 @@ class LatestProjectionPlayerPoolReader:
         )
 
     @contextmanager
+    def _pool_snapshot(self, connection: Connection | None) -> Any:
+        """The caller's snapshot connection, else a ``REPEATABLE READ`` transaction of its own."""
+
+        if connection is not None:
+            yield connection
+            return
+        with self.engine.connect() as owned:
+            if self.engine.dialect.name == "postgresql":
+                owned = owned.execution_options(isolation_level="REPEATABLE READ")
+            with owned.begin():
+                yield owned
+
+    @contextmanager
     def _read_snapshot(self) -> Any:
         """One read-only transaction: PostgreSQL ``REPEATABLE READ``, an explicit SQLite read."""
 
@@ -3344,17 +3358,22 @@ class LatestProjectionPlayerPoolReader:
 
         return bool(self._started_games(season, (str(game_id),)))
 
-    def get_pool(self, *, season: str, game_ids: Iterable[str]) -> PlayerPool:
+    def get_pool(
+        self, *, season: str, game_ids: Iterable[str], connection: Connection | None = None
+    ) -> PlayerPool:
+        """The games' pool; on ``connection`` its reads share the caller's snapshot."""
+
         if season != self.scope.query.season:
-            return self._for_season(season).get_pool(season=season, game_ids=game_ids)
+            return self._for_season(season).get_pool(season=season, game_ids=game_ids, connection=connection)
         requested_games = tuple(sorted({str(game_id) for game_id in game_ids}))
         if not requested_games:
             return PlayerPool((), {}, PlayerPool.missing_projection_freshness(), {})
-        started_games = self._started_games(season, requested_games)
+        started_games = self._started_games(season, requested_games, connection)
         return self._pool_for_requested_games(
             season=season,
             requested_games=requested_games,
             started_games=started_games,
+            connection=connection,
         )
 
     def _pool_for_requested_games(
@@ -3363,22 +3382,25 @@ class LatestProjectionPlayerPoolReader:
         season: str,
         requested_games: tuple[str, ...],
         started_games: dict[str, datetime],
+        connection: Connection | None = None,
     ) -> PlayerPool:
         if started_games:
             return self._get_pool_with_closing_sets(
                 season=season,
                 requested_games=requested_games,
                 started_games=started_games,
+                connection=connection,
             )
-        return self._get_live_pool(season=season, requested_games=requested_games)
+        return self._get_live_pool(season=season, requested_games=requested_games, connection=connection)
 
     def _get_live_pool(
         self,
         *,
         season: str,
         requested_games: tuple[str, ...],
+        connection: Connection | None = None,
     ) -> PlayerPool:
-        read = self._read_pool_state(season, requested_games)
+        read = self._read_pool_state(season, requested_games, connection)
         poll_state = self._latest_provider_polls(read.polls)
         evidence = self._classify_eligible_evidence(
             read.rows,
@@ -3416,14 +3438,16 @@ class LatestProjectionPlayerPoolReader:
         )
         return PlayerPool(players, team_counts, freshness, game_states)
 
-    def _started_games(self, season: str, requested_games: tuple[str, ...]) -> dict[str, datetime]:
+    def _started_games(
+        self, season: str, requested_games: tuple[str, ...], connection: Connection | None = None
+    ) -> dict[str, datetime]:
         reader = self.event_reader
         if reader is None:
             return {}
         get_events_by_ids = getattr(reader, "get_events_by_ids", None)
         if not callable(get_events_by_ids):
             return {}
-        events = get_events_by_ids(season, requested_games)
+        events = call_with_read_scope(get_events_by_ids, season, requested_games, connection=connection)
         now = assume_utc(self.clock())
         started: dict[str, datetime] = {}
         for event in events:
@@ -3441,12 +3465,18 @@ class LatestProjectionPlayerPoolReader:
         season: str,
         requested_games: tuple[str, ...],
         started_games: dict[str, datetime],
+        connection: Connection | None = None,
     ) -> PlayerPool:
         live_games = tuple(game for game in requested_games if game not in started_games)
-        live_pool = self._get_live_pool(season=season, requested_games=live_games) if live_games else None
+        live_pool = (
+            self._get_live_pool(season=season, requested_games=live_games, connection=connection)
+            if live_games
+            else None
+        )
         closing_pool = self._read_closing_pool(
             season=season,
             requested_games=tuple(started_games),
+            connection=connection,
         )
         if live_pool is None:
             return closing_pool
@@ -3553,24 +3583,23 @@ class LatestProjectionPlayerPoolReader:
                 freshness["status"] = statuses[0]
         return PlayerPool(players, team_counts, freshness, game_states)
 
-    def _read_closing_pool(self, *, season: str, requested_games: tuple[str, ...]) -> PlayerPool:
+    def _read_closing_pool(
+        self, *, season: str, requested_games: tuple[str, ...], connection: Connection | None = None
+    ) -> PlayerPool:
         providers = tuple(scope.provider for scope in self.scopes)
-        with self.engine.connect() as connection:
-            if self.engine.dialect.name == "postgresql":
-                connection = connection.execution_options(isolation_level="REPEATABLE READ")
-            with connection.begin():
-                closing_set_ids = [
-                    closing_set_id
-                    for scope in self.scopes
-                    for closing_set_id in ProjectionArchive.closing_set_ids(
-                        connection,
-                        provider=scope.provider,
-                        season=season,
-                        query_key=scope.query_key,
-                        game_ids=requested_games,
-                    ).values()
-                ]
-                rows = _closing_member_rows(connection, closing_set_ids)
+        with self._pool_snapshot(connection) as connection:
+            closing_set_ids = [
+                closing_set_id
+                for scope in self.scopes
+                for closing_set_id in ProjectionArchive.closing_set_ids(
+                    connection,
+                    provider=scope.provider,
+                    season=season,
+                    query_key=scope.query_key,
+                    game_ids=requested_games,
+                ).values()
+            ]
+            rows = _closing_member_rows(connection, closing_set_ids)
         game_states: dict[str, dict[str, Any]] = {}
         rows_by_game: dict[str, list[Any]] = {}
         for row in rows:
@@ -3752,6 +3781,7 @@ class LatestProjectionPlayerPoolReader:
         self,
         season: str,
         requested_games: tuple[str, ...],
+        connection: Connection | None = None,
     ) -> _ProjectionPoolRead:
         """Read Latest rows and poll health inside one database snapshot."""
 
@@ -3759,83 +3789,80 @@ class LatestProjectionPlayerPoolReader:
         poll_table = ProviderPoll.__table__
         snapshot_table = ProjectionProviderSnapshot.__table__
         providers_in_scope = tuple(item.provider for item in self.scopes)
-        with self.engine.connect() as connection:
-            if self.engine.dialect.name == "postgresql":
-                connection = connection.execution_options(isolation_level="REPEATABLE READ")
-            with connection.begin():
-                rows = tuple(
-                    connection.execute(
-                        select(table)
-                        .where(
-                            table.c.season == season,
-                            table.c.provider.in_(providers_in_scope),
-                            table.c.query_key == self.scope.query_key,
-                            table.c.canonical_game_id.in_(requested_games),
-                        )
-                        .order_by(
-                            table.c.provider,
-                            table.c.canonical_player_id,
-                            table.c.market_reference,
-                        )
-                    )
-                    .mappings()
-                    .all()
-                )
-                # Provider health reads only each provider's newest promoted
-                # poll and newest failed one, so no other poll is selected.
-                ranked = (
-                    select(
-                        poll_table.c.poll_id,
-                        poll_table.c.provider,
-                        poll_table.c.outcome,
-                        poll_table.c.promoted,
-                        poll_table.c.started_at,
-                        poll_table.c.completed_at,
-                        poll_table.c.retrieved_at,
-                        poll_table.c.observation_count,
-                        snapshot_table.c.snapshot_status,
-                        func.row_number()
-                        .over(
-                            partition_by=(poll_table.c.provider, poll_table.c.promoted),
-                            order_by=newest_poll_first(poll_table),
-                        )
-                        .label("newest_rank"),
-                    )
-                    .select_from(
-                        poll_table.outerjoin(
-                            snapshot_table,
-                            poll_table.c.snapshot_id == snapshot_table.c.snapshot_id,
-                        )
-                    )
+        with self._pool_snapshot(connection) as connection:
+            rows = tuple(
+                connection.execute(
+                    select(table)
                     .where(
-                        poll_table.c.season == season,
-                        poll_table.c.provider.in_(providers_in_scope),
-                        poll_table.c.query_key == self.scope.query_key,
-                        or_(
-                            poll_table.c.promoted.is_(True),
-                            poll_table.c.outcome == ProviderPollOutcome.FAILED.value,
-                        ),
+                        table.c.season == season,
+                        table.c.provider.in_(providers_in_scope),
+                        table.c.query_key == self.scope.query_key,
+                        table.c.canonical_game_id.in_(requested_games),
                     )
-                    .subquery()
-                )
-                polls = tuple(
-                    connection.execute(
-                        select(
-                            ranked.c.poll_id,
-                            ranked.c.provider,
-                            ranked.c.outcome,
-                            ranked.c.promoted,
-                            ranked.c.completed_at,
-                            ranked.c.retrieved_at,
-                            ranked.c.observation_count,
-                            ranked.c.snapshot_status,
-                        )
-                        .where(ranked.c.newest_rank == 1)
-                        .order_by(ranked.c.provider, *newest_poll_first(ranked))
+                    .order_by(
+                        table.c.provider,
+                        table.c.canonical_player_id,
+                        table.c.market_reference,
                     )
-                    .mappings()
-                    .all()
                 )
+                .mappings()
+                .all()
+            )
+            # Provider health reads only each provider's newest promoted
+            # poll and newest failed one, so no other poll is selected.
+            ranked = (
+                select(
+                    poll_table.c.poll_id,
+                    poll_table.c.provider,
+                    poll_table.c.outcome,
+                    poll_table.c.promoted,
+                    poll_table.c.started_at,
+                    poll_table.c.completed_at,
+                    poll_table.c.retrieved_at,
+                    poll_table.c.observation_count,
+                    snapshot_table.c.snapshot_status,
+                    func.row_number()
+                    .over(
+                        partition_by=(poll_table.c.provider, poll_table.c.promoted),
+                        order_by=newest_poll_first(poll_table),
+                    )
+                    .label("newest_rank"),
+                )
+                .select_from(
+                    poll_table.outerjoin(
+                        snapshot_table,
+                        poll_table.c.snapshot_id == snapshot_table.c.snapshot_id,
+                    )
+                )
+                .where(
+                    poll_table.c.season == season,
+                    poll_table.c.provider.in_(providers_in_scope),
+                    poll_table.c.query_key == self.scope.query_key,
+                    or_(
+                        poll_table.c.promoted.is_(True),
+                        poll_table.c.outcome == ProviderPollOutcome.FAILED.value,
+                    ),
+                )
+                .subquery()
+            )
+            polls = tuple(
+                connection.execute(
+                    select(
+                        ranked.c.poll_id,
+                        ranked.c.provider,
+                        ranked.c.outcome,
+                        ranked.c.promoted,
+                        ranked.c.completed_at,
+                        ranked.c.retrieved_at,
+                        ranked.c.observation_count,
+                        ranked.c.snapshot_status,
+                    )
+                    .where(ranked.c.newest_rank == 1)
+                    .order_by(ranked.c.provider, *newest_poll_first(ranked))
+                )
+                .mappings()
+                .all()
+            )
         return _ProjectionPoolRead(rows=rows, polls=polls)
 
     @staticmethod
