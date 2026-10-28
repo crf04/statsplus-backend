@@ -21,9 +21,9 @@ the service returns `503 Service Unavailable`. Missing or invalid tokens return
 
 Authentication levels:
 
-- Anonymous (crf04/statsplus#211): `GET /api/games/slate`, `GET /api/games/slate/edges`, `GET /api/games/ladder`, `GET /api/games/game_logs/preview.png` (crf04/statsplus#285), `GET /api/games/slate/preview.png` and `GET /api/games/matchup/preview.png` (crf04/statsplus#320), and `GET /api/reports/<id>/meta` and `GET /api/reports/<id>/preview.png` (crf04/statsplus#342). They carry no auth check, so any `Authorization` header (a waitlisted user's token included) is ignored, never refused, and the [rate limiter](#rate-limits) counts the caller by client IP in the unauthenticated bucket.
+- Anonymous (crf04/statsplus#211): `GET /api/games/slate`, `GET /api/games/slate/edges`, `GET /api/games/ladder`, `GET /api/games/game_logs/preview.png` (crf04/statsplus#285), `GET /api/games/slate/preview.png` and `GET /api/games/matchup/preview.png` (crf04/statsplus#320), `GET /api/reports/<id>/meta` and `GET /api/reports/<id>/preview.png` (crf04/statsplus#342), and `GET /api/research` and `GET /api/research/authors/<handle>` (crf04/statsplus#372). They carry no auth check, so any `Authorization` header (a waitlisted user's token included) is ignored, never refused, and the [rate limiter](#rate-limits) counts the caller by client IP in the unauthenticated bucket.
 - Required: `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/rotation`, `GET /api/games/seasons`, `GET /api/players/season_stats`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `POST /api/usage/mcp-tool-calls`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
-- Admin-only: `GET`/`PUT /api/admin/signups`, `GET /api/admin/users`, `POST /api/admin/users/<uid>/admit`, `PUT /api/admin/users/<uid>/cohort`, `GET /api/admin/research-activity`, `PUT /api/admin/users/<uid>/public-handle`, `POST /api/admin/reports/<id>/takedown`, `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
+- Admin-only: `GET`/`PUT /api/admin/signups`, `GET /api/admin/users`, `POST /api/admin/users/<uid>/admit`, `PUT /api/admin/users/<uid>/cohort`, `GET /api/admin/research-activity`, `PUT /api/admin/users/<uid>/public-handle`, `POST /api/admin/reports/<id>/takedown`, `PUT /api/admin/reports/<id>/featured`, `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
 - Optional, waitlisted accepted: `GET /api/reports/<id>` (crf04/statsplus#342). A valid token only adds `is_author`; a waitlisted account's token is attached, never refused.
 - Admin claims: an authenticated token must contain `admin=true`, `role=admin`,
@@ -4932,18 +4932,29 @@ assistant published through the CourtAI connector's `publish_report` tool: a
 document of tabs and items with grades, the tool calls behind its cards with
 their results, and each card's HTML as it was when published, so an old report
 keeps rendering after a card's design changes. Anyone with the link reads it,
-signed in or not. There is no listing of reports. A report is kept until its
-author deletes it or an admin takes it down.
+signed in or not, listed or not. A report is unlisted unless its author lists
+it in the public [Research feed](#research-feed) (crf04/statsplus#372). A
+report is kept until its author deletes it or an admin takes it down.
 
 ```http
 POST   /api/user/reports                       require_auth (waitlisted refused)
+PATCH  /api/user/reports/<id>                  require_auth; the author only
 DELETE /api/user/reports/<id>                  require_auth; the author only
+PUT    /api/user/public-handle                 require_auth (waitlisted refused)
 GET    /api/reports/<id>                       anonymous; a token adds is_author
 GET    /api/reports/<id>/meta                  anonymous
 GET    /api/reports/<id>/preview.png           anonymous
+GET    /api/research                           anonymous
+GET    /api/research/authors/<handle>          anonymous
 POST   /api/admin/reports/<id>/takedown        require_admin
+PUT    /api/admin/reports/<id>/featured        require_admin
 PUT    /api/admin/users/<uid>/public-handle    require_admin
 ```
+
+The Research refusals below (`handle_required`, `listed_limit`,
+`invalid_handle`, `handle_taken`, `handle_already_set` and `410 removed`) use
+the flat body the crf04/statsplus#372 contract names, not the standard `error`
+object: `{"error": "<code>", "message": "<text>"}` plus their own fields.
 
 #### Publish a report
 
@@ -4971,7 +4982,8 @@ PUT    /api/admin/users/<uid>/public-handle    require_admin
      "structured": {}, "meta": {}, "card": "game-logs"}
   ],
   "cards": {"game-logs": "<!doctype html>..."},
-  "show_author": false
+  "show_author": false,
+  "listed": false
 }
 ```
 
@@ -4997,6 +5009,7 @@ The server checks the body against the same schema and limits as the MCP tool
 | `calls` | at most 48 of `{id, tool, args, structured, meta?, card}`; `id` matches `[a-z0-9-]{1,40}` and is unique; `tool` is `query_game_logs`, `get_on_off`, `get_matchup`, `get_rotation` or `get_injuries`; `args` and `structured` are objects, `meta` an object or absent; `card` matches `[a-z0-9_-]{1,60}` and is a key of `cards` |
 | `cards` | an object of card name to non-empty HTML string, holding only cards some call names |
 | `show_author` | optional boolean, default `false` |
+| `listed` | optional boolean, default `false`; `true` also lists the report in Research |
 
 Text is stored as given and the web app renders it escaped, so HTML in a text
 field is shown, never run. Control characters other than tab and newline are
@@ -5014,7 +5027,10 @@ is `400 invalid_input` whose `details.field` names the field, e.g.
 The id is 10 random base62 characters. An account may hold 1,000 reports that
 it has not deleted (`409 operation_conflict` beyond); the limit is 10 an hour
 and 30 a day per account (`429 rate_limited`). A waitlisted account gets
-`403 waitlisted`.
+`403 waitlisted`. With `listed: true`, an account without a public handle gets
+`409 {"error": "handle_required", ...}` and one past the [listing
+cap](#list-or-unlist-a-report) `429 {"error": "listed_limit", ...}`; either
+way nothing is stored.
 
 #### Read a report
 
@@ -5025,8 +5041,10 @@ and 30 a day per account (`429 rate_limited`). A waitlisted account gets
   "report": {
     "id": "k3x9q2mtzr",
     "created_at": "2026-10-25T18:04:11.204391+00:00",
-    "author": {"label": "@bighatprops"},
+    "author": {"label": "@bighatprops", "handle": "bighatprops"},
     "is_author": false,
+    "listed": true,
+    "featured": false,
     "document": {"title": "...", "opening": [], "tabs": []},
     "calls": [{"id": "brunson-logs", "tool": "query_game_logs", "card": "game-logs", "structured": {}, "meta": null}],
     "cards": {"game-logs": "<!doctype html>..."}
@@ -5034,12 +5052,19 @@ and 30 a day per account (`429 rate_limited`). A waitlisted account gets
 }
 ```
 
-`document` is the stored Report. `calls` omit the `args`. `author` is
-`{"label": <public handle>}` only when the report was published with
-`show_author: true` and the author's account has a public handle, else `null`
-(the web app then says "Built by a CourtAI user"); the Google display name is
-never shown. `is_author` is `true` only when the request carries the author's
-own valid token. A waitlisted token is accepted.
+`document` is the stored Report. `calls` omit the `args`. A listed report's
+`author` is `{"label": "@<handle>", "handle": "<handle>"}` whatever its
+`show_author`. An unlisted one's is `{"label": "@<handle>"}` only when it was
+published with `show_author: true` and the author's account has a public
+handle, else `null` (the web app then says "Built by a CourtAI user"); the
+Google display name is never shown. `listed` and `featured` say whether it is
+in Research and pinned there. `is_author` is `true` only when the request
+carries the author's own valid token. A waitlisted token is accepted.
+
+A report its author deleted is `410` with `{"error": "removed", "by":
+"author", "message": "This report was removed by its author."}`, and one an
+admin took down `410` with `{"error": "removed", "by": "takedown", "message":
+"This report was taken down."}` (a takedown wins when both apply).
 
 #### Report meta
 
@@ -5076,8 +5101,10 @@ one already deleted, is `404 resource_not_found`.
 `{"success": true, "report": {"id": "k3x9q2mtzr", "taken_down_at": "..."}}`.
 It is idempotent and keeps the first time.
 
-A report that does not exist, was deleted or was taken down is the same
-`404` on all three reads, to everyone, the author included:
+A report that does not exist is `404` on all three reads, to everyone, the
+author included. One that was deleted or taken down is `410 removed` on
+`GET /api/reports/<id>` (see [Read a report](#read-a-report)) and the same
+`404` on the meta and preview image:
 
 ```json
 {"error": {"code": "resource_not_found", "message": "This report isn't available."}}
@@ -5086,17 +5113,108 @@ A report that does not exist, was deleted or was taken down is the same
 Both are soft: the row stays, with `deleted_at` or `taken_down_at` set.
 Deleting the account deletes its reports.
 
-`PUT /api/admin/users/<uid>/public-handle` with `{"public_handle": "@bighatprops"}`
-sets the account's author label (trimmed, 1-40 printable characters) and
-answers `{"uid": "<uid>", "public_handle": "@bighatprops"}`; `null` clears it.
-An unknown uid is `404`.
+#### Public handles
+
+A public handle is 3-20 characters of `a-z`, `0-9` and `_`, stored lowercase
+without the `@` it is shown with, and unique case-insensitively. Surrounding
+space, one leading `@` and capitals are accepted and dropped, so `@BigHat` is
+stored as `bighat`.
+
+`PUT /api/user/public-handle` with `{"handle": "bighatprops"}` sets the
+caller's handle once and answers `{"handle": "bighatprops"}`. Anything that is
+not a handle is `400 {"error": "invalid_handle", ...}`, another account's
+handle `409 {"error": "handle_taken", ...}`, and a second call once a handle is
+set `409 {"error": "handle_already_set", ...}`. A waitlisted account gets
+`403 waitlisted`.
+
+`PUT /api/admin/users/<uid>/public-handle` with `{"public_handle": "bighatprops"}`
+sets or changes the account's handle with the same format (`400
+invalid_handle`) and uniqueness (`409 handle_taken`) and answers `{"uid":
+"<uid>", "public_handle": "bighatprops"}`; `null` clears it. It is how a
+handle changes. An unknown uid is `404`.
+
+#### List or unlist a report
+
+`PATCH /api/user/reports/<id>` with `{"listed": true}` or `{"listed": false}`
+answers `{"success": true, "report": {"id": "k3x9q2mtzr", "listed": true,
+"listed_at": "2026-10-28T12:00:02+00:00"}}`. Any other body is `400
+invalid_input`; someone else's report, or a deleted or taken-down one, is `404
+resource_not_found`.
+
+Listing needs a public handle (`409 {"error": "handle_required", ...}`). An
+account may move at most 5 reports to listed per rolling 24 hours, counting
+`POST /api/user/reports` with `listed: true` and this endpoint together
+(`429 {"error": "listed_limit", ...}`). Listing a report that is already
+listed changes nothing and spends nothing. Unlisting is always allowed, clears
+`listed_at` and Featured, and does not give the listing back.
+
+#### Research feed
+
+`GET /api/research?cursor=<opaque>` (anonymous: 60/min per IP) is the public
+feed of listed reports:
+
+```json
+{
+  "featured": [Entry],
+  "reports": [Entry],
+  "next_cursor": "MjAyNi0xMC0yOFQxMjowMDowMiswMDowMHxrM3g5cTJtdHpy"
+}
+```
+
+`reports` holds 20 entries per page, newest `listed_at` first; pass
+`next_cursor` back as `cursor` for the next page, and it is `null` on the last.
+The first page's `featured` holds every Featured report, newest pin first;
+later pages' is `[]`, and a Featured report is never repeated in `reports`. A
+cursor the server did not issue is `400 invalid_input`.
+
+```json
+{
+  "id": "k3x9q2mtzr",
+  "title": "Injury brief: Friday, Oct 24",
+  "listed_at": "2026-10-28T12:00:02+00:00",
+  "created_at": "2026-10-28T11:58:40+00:00",
+  "date": "2026-10-24",
+  "author": {"handle": "bighatprops"},
+  "covers": {"games": ["DET @ CHA"], "players": ["Cade Cunningham"]},
+  "preview_url": "/api/reports/k3x9q2mtzr/preview.png"
+}
+```
+
+`date` is the report's own date or `null`. `covers` comes from the stored card
+calls' `game` and `player` arguments, in call order and once each: a game as
+its teams' tricodes (`DET @ CHA`, from a tricode, full name or nickname written
+with `@` or `at`), a player without a `(TEAM)` suffix. A call with neither, or
+a game naming no two known teams, adds nothing. `preview_url` is the report's
+[preview image](#report-preview-image), relative to the site.
+
+`GET /api/research/authors/<handle>` is one author's listed reports in the
+same shape and order, Featured ones included in `reports`, with `featured`
+always `[]`. The handle is matched like a stored one (`@BigHat` finds
+`bighat`). An unknown handle is `404 resource_not_found`; an author with no
+listed reports is `200` with an empty `reports`.
+
+Deleted and taken-down reports never appear in the feed or on author pages.
+The feed and author pages also serve the crawler meta for `/research` and
+`/research/@handle`: its image is the newest listed entry's `preview_url`.
+
+`PUT /api/admin/reports/<id>/featured` with `{"featured": true}` pins a listed
+report as Featured and answers `{"success": true, "report": {"id": "...",
+"featured": true, "featured_at": "..."}}`; pinning again keeps the first time.
+`{"featured": false}` unpins it. An unlisted report is `409
+operation_conflict`; a missing, deleted or taken-down one `404`.
 
 Storage: the `reports` table (migration 076): `id` (`VARCHAR(12)`), `firebase_uid`
 (foreign key to `users`, `ON DELETE CASCADE`), `created_at`, `title`
 (`VARCHAR(120)`), `document`, `calls` and `cards` (`JSONB` on PostgreSQL),
 `show_author`, `deleted_at` and `taken_down_at`, indexed on
 `(firebase_uid, created_at)`. Migration 077 adds the nullable
-`users.public_handle` (`VARCHAR(40)`).
+`users.public_handle` (`VARCHAR(40)`). Migration 080 adds the nullable
+`reports.listed_at`, `featured_at` and `covers` (set when listed), a partial
+index on `(listed_at, id)` over listed, visible reports, the
+`report_listings` table the listing cap counts (one row per move to listed),
+and a unique index on `lower(users.public_handle)`. It first normalises
+existing handles (`@bighatprops` becomes `bighatprops`) and stops, changing
+nothing, on a handle it cannot normalise or two that collide.
 
 ### Targets
 

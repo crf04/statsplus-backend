@@ -92,6 +92,7 @@ class PublishedReport:
     calls: list[dict[str, Any]]
     cards: dict[str, str]
     show_author: bool
+    listed: bool = False
 
 
 def _refuse(field: str, problem: str) -> InvalidInputError:
@@ -302,11 +303,13 @@ def _cards(value: Any, calls: list[dict[str, Any]]) -> dict[str, str]:
 def validate_publish_body(body: Any) -> PublishedReport:
     """The validated ``POST /api/user/reports`` body, or ``invalid_input`` naming the field."""
 
-    source = _object(body, "body", ("report", "calls", "cards", "show_author"))
+    source = _object(body, "body", ("report", "calls", "cards", "show_author", "listed"))
     calls = _calls(source.get("calls"))
     document = _document(source.get("report"), {call["id"] for call in calls})
     cards = _cards(source.get("cards"), calls)
-    show_author = source.get("show_author", False)
-    if not isinstance(show_author, bool):
-        raise _refuse("show_author", "must be true or false")
-    return PublishedReport(document=document, calls=calls, cards=cards, show_author=show_author)
+    flags = {}
+    for name in ("show_author", "listed"):
+        flags[name] = source.get(name, False)
+        if not isinstance(flags[name], bool):
+            raise _refuse(name, "must be true or false")
+    return PublishedReport(document=document, calls=calls, cards=cards, **flags)

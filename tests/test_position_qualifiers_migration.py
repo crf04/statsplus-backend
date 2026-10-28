@@ -123,7 +123,7 @@ def exercise_upgrade(engine, settings):
 
 
 def test_migration_078_upgrades_a_database_with_the_old_target_and_catalog_shapes(tmp_path, runtime_settings):
-    assert MIGRATIONS[-1].name == "079_position_qualifiers"
+    assert "079_position_qualifiers" in {migration.name for migration in MIGRATIONS}
     engine = create_engine(f"sqlite:///{tmp_path / 'at-077.sqlite3'}")
     try:
         exercise_upgrade(engine, runtime_settings)

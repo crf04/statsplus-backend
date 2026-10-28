@@ -5,6 +5,7 @@ This model stores basic user account data synchronized from Firebase
 authentication to enable local user management and future features.
 """
 
+import re
 from datetime import UTC, datetime
 
 from sqlalchemy import Boolean, Column, DateTime, Index, String
@@ -15,8 +16,27 @@ from . import Base
 ACCESS_ACTIVE = "active"
 ACCESS_WAITLISTED = "waitlisted"
 
-#: The public author label on a report (crf04/statsplus#342), set by an admin.
+#: The column width of a public handle (crf04/statsplus#342); the format below is narrower.
 PUBLIC_HANDLE_MAX_LENGTH = 40
+
+#: A public handle (crf04/statsplus#372): stored lowercase without the ``@`` it
+#: is displayed with, and unique case-insensitively.
+PUBLIC_HANDLE_PATTERN = re.compile(r"[a-z0-9_]{3,20}")
+
+
+def normalize_public_handle(value: object) -> str | None:
+    """``value`` as a stored handle, or ``None`` when it is not one.
+
+    Surrounding space and one leading ``@`` are dropped and letters lowercased,
+    so ``" @BigHat_Props"`` is ``"bighat_props"``; what is left must be 3-20 of
+    ``a-z0-9_``.
+    """
+
+    if not isinstance(value, str):
+        return None
+    handle = value.strip()
+    handle = (handle[1:] if handle.startswith("@") else handle).lower()
+    return handle if PUBLIC_HANDLE_PATTERN.fullmatch(handle) else None
 
 
 class User(Base):
@@ -65,12 +85,13 @@ class User(Base):
         comment="Beta access: active or waitlisted",
     )
 
-    # Shown as a report's author only when the report opts in, so the Google
-    # display name is never published.  Set by an admin in v1.
+    # Shown as a report's author when the report opts in or is listed, so the
+    # Google display name is never published.  Set once by its user, changed
+    # by an admin.
     public_handle = Column(
         String(PUBLIC_HANDLE_MAX_LENGTH),
         nullable=True,
-        comment="Public author label on reports, set by an admin",
+        comment="Public author handle on reports, lowercase without the @",
     )
 
     # Add indexes for performance
@@ -78,6 +99,7 @@ class User(Base):
         Index("idx_users_email", "email"),
         Index("idx_users_last_login", "last_login"),
         Index("idx_users_created_at", "created_at"),
+        Index("uq_users_public_handle", func.lower(public_handle), unique=True),
     )
 
     def __repr__(self):

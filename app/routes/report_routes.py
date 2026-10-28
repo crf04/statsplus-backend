@@ -1,8 +1,9 @@
-"""Public reads of CourtAI reports (crf04/statsplus#342).
+"""Public reads of CourtAI reports (crf04/statsplus#342) and the Research feed (#372).
 
 Anyone with a report's link can read it, signed in or not, waitlisted
-included; a token only adds ``is_author``.  Publishing and deleting live under
-``/api/user/reports``, the takedown under ``/api/admin``.
+included; a token only adds ``is_author``.  The Research feed and author pages
+are public too.  Publishing, listing and deleting live under
+``/api/user/reports``, the takedown and Featured pins under ``/api/admin``.
 """
 
 from flask import Blueprint, Response, jsonify, request
@@ -14,6 +15,7 @@ from app.utils.auth import get_current_user, require_auth_optional_allow_waitlis
 from ._service_proxy import CurrentAppService
 
 report_bp = Blueprint("reports", __name__)
+research_bp = Blueprint("research", __name__)
 
 report_service = CurrentAppService("report")
 
@@ -45,3 +47,15 @@ def _refusals_of_the_preview_are_not_cached(response):
     if request.endpoint == "reports.get_report_preview" and response.status_code != 200:
         response.headers["Cache-Control"] = "no-store"
     return response
+
+
+@research_bp.route("", methods=["GET"])
+@route_error_boundary("Failed to read Research.")
+def get_research():
+    return jsonify(report_service.feed(request.args.get("cursor")))
+
+
+@research_bp.route("/authors/<handle>", methods=["GET"])
+@route_error_boundary("Failed to read the author's reports.")
+def get_research_author(handle):
+    return jsonify(report_service.author_feed(handle, request.args.get("cursor")))

@@ -2169,8 +2169,104 @@ def downgrade_user_public_handle(connection: Connection) -> None:
 
     existing = {column["name"] for column in inspect(connection).get_columns("users")}
     if "public_handle" in existing:
+        # SQLite cannot drop an indexed column; 080's unique index goes first.
+        connection.execute(text("DROP INDEX IF EXISTS uq_users_public_handle"))
         connection.execute(text("ALTER TABLE users DROP COLUMN public_handle"))
     connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 77))
+
+
+_RESEARCH_FEED_COLUMNS = ("listed_at", "featured_at", "covers")
+
+
+def _add_research_feed(connection: Connection) -> None:
+    """Listing, Featured and unique handles for the Research feed (crf04/statsplus#372).
+
+    Adds the nullable ``reports.listed_at``, ``featured_at`` and ``covers``,
+    so every existing report stays unlisted and unfeatured; the feed index; the
+    ``report_listings`` table the listing cap counts; and a case-insensitive
+    unique index on ``users.public_handle``.
+
+    Existing handles are normalised first, as the app now stores them:
+    surrounding space and one leading ``@`` dropped and lowercased, so
+    ``@bighatprops`` becomes ``bighatprops``.  A handle that is then not 3-20
+    of ``a-z0-9_``, or two that become the same, stop the migration with an
+    error naming the accounts, and nothing is changed: an admin must fix the
+    rows first.  Rerun-safe: each step looks at the current schema first, and
+    already normalised handles are left alone.
+    """
+
+    from app.models.report import Report, ReportListing
+    from app.models.user import User, normalize_public_handle
+
+    # Checked before any DDL: SQLite commits DDL as it goes, so a refusal
+    # after it would leave the schema half changed.
+    User.__table__.create(connection, checkfirst=True)
+    handles = connection.execute(
+        text("SELECT firebase_uid, public_handle FROM users WHERE public_handle IS NOT NULL")
+    ).all()
+    invalid = sorted(uid for uid, handle in handles if normalize_public_handle(handle) is None)
+    if invalid:
+        raise ValueError(
+            "080_research_feed: users.public_handle cannot be normalised to 3-20 of a-z0-9_ for "
+            f"firebase_uid {', '.join(invalid)}; fix or clear them, then rerun."
+        )
+    owners: dict[str, list[str]] = {}
+    for uid, handle in handles:
+        owners.setdefault(normalize_public_handle(handle), []).append(uid)
+    collisions = sorted(
+        f"{handle} ({', '.join(sorted(uids))})" for handle, uids in owners.items() if len(uids) > 1
+    )
+    if collisions:
+        raise ValueError(
+            "080_research_feed: users.public_handle values collide once normalised: "
+            f"{'; '.join(collisions)}; change all but one, then rerun."
+        )
+    Report.__table__.create(connection, checkfirst=True)
+    ReportListing.__table__.create(connection, checkfirst=True)
+
+    existing = {column["name"] for column in inspect(connection).get_columns("reports")}
+    for name in _RESEARCH_FEED_COLUMNS:
+        if name not in existing:
+            column = Report.__table__.c[name]
+            connection.execute(
+                text(
+                    f"ALTER TABLE reports ADD COLUMN {name} {column.type.compile(dialect=connection.dialect)}"
+                )
+            )
+    for index in Report.__table__.indexes:
+        # ``IF NOT EXISTS`` on a rerun: SQLite cannot reflect the users expression index.
+        connection.execute(CreateIndex(index, if_not_exists=True))
+
+    for uid, handle in handles:
+        normalized = normalize_public_handle(handle)
+        if normalized != handle:
+            connection.execute(
+                text("UPDATE users SET public_handle = :handle WHERE firebase_uid = :uid"),
+                {"handle": normalized, "uid": uid},
+            )
+    for index in User.__table__.indexes:
+        if index.name == "uq_users_public_handle":
+            connection.execute(CreateIndex(index, if_not_exists=True))
+
+
+def downgrade_research_feed(connection: Connection) -> None:
+    """Reverse ``080_research_feed``; also forgets its migration record.
+
+    Migrations here are forward-only at runtime.  This exists so the change is
+    provably reversible: it drops the two indexes, ``report_listings`` and the
+    three report columns.  Normalised handles stay normalised.
+    """
+    from app.models.report import ReportListing
+
+    connection.execute(text("DROP INDEX IF EXISTS uq_users_public_handle"))
+    connection.execute(text("DROP INDEX IF EXISTS idx_reports_feed"))
+    ReportListing.__table__.drop(connection, checkfirst=True)
+    if inspect(connection).has_table("reports"):
+        existing = {column["name"] for column in inspect(connection).get_columns("reports")}
+        for name in _RESEARCH_FEED_COLUMNS:
+            if name in existing:
+                connection.execute(text(f"ALTER TABLE reports DROP COLUMN {name}"))
+    connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 80))
 
 
 def _rebuild_sqlite_target_qualifiers(connection: Connection) -> None:
@@ -3263,6 +3359,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(77, "077_user_public_handle", _add_user_public_handle),
     Migration(78, "078_player_game_tracking", _create_player_game_tracking_table),
     Migration(79, "079_position_qualifiers", _add_position_qualifiers),
+    Migration(80, "080_research_feed", _add_research_feed),
 )
 
 

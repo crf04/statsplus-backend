@@ -577,8 +577,13 @@ def create_report():
             "report": {...},
             "calls": [{"id", "tool", "args", "structured", "meta", "card"}],
             "cards": {"<card>": "<html>"},
-            "show_author": false
+            "show_author": false,
+            "listed": false
         }
+
+    ``listed: true`` also lists it in Research (crf04/statsplus#372): without a
+    handle that is ``409 handle_required`` and past the listing cap ``429
+    listed_limit``, and nothing is stored.
 
     Returns:
         201 with the report's id, public URL and creation time
@@ -587,6 +592,49 @@ def create_report():
     request.max_content_length = REPORT_MAX_REQUEST_BYTES
     published = report_service.publish(firebase_uid, request.get_json(silent=True))
     return jsonify({"success": True, "report": published}), 201
+
+
+@user_bp.route("/reports/<report_id>", methods=["PATCH"])
+@require_auth
+@route_error_boundary("Failed to update the report.")
+def update_report(report_id):
+    """
+    List or unlist one of the caller's reports in Research (crf04/statsplus#372).
+
+    Expected JSON body: ``{"listed": true | false}``.  Listing needs a public
+    handle (``409 handle_required``) and counts toward the listing cap
+    (``429 listed_limit``); unlisting is always allowed.
+
+    Returns:
+        JSON response with the report's id, ``listed`` and ``listed_at``
+    """
+    firebase_uid = _authenticated_uid()
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or set(body) != {"listed"} or not isinstance(body["listed"], bool):
+        raise InvalidInputError('Body must be {"listed": true|false}.')
+    return jsonify(
+        {"success": True, "report": report_service.set_listed(firebase_uid, report_id, body["listed"])}
+    )
+
+
+@user_bp.route("/public-handle", methods=["PUT"])
+@require_auth
+@route_error_boundary("Failed to set the public handle.")
+def put_public_handle():
+    """
+    Choose the caller's public handle, once (crf04/statsplus#372).
+
+    Expected JSON body: ``{"handle": "bighatprops"}`` (a leading ``@`` and
+    capitals are accepted and dropped).  ``400 invalid_handle``, ``409
+    handle_taken``, or ``409 handle_already_set`` once one is set.
+
+    Returns:
+        JSON response with the stored handle
+    """
+    firebase_uid = _authenticated_uid()
+    body = request.get_json(silent=True)
+    handle = body.get("handle") if isinstance(body, dict) else None
+    return jsonify({"handle": report_service.claim_public_handle(firebase_uid, handle)})
 
 
 @user_bp.route("/reports/<report_id>", methods=["DELETE"])

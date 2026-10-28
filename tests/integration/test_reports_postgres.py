@@ -1,8 +1,9 @@
-"""Postgres checks for CourtAI reports (crf04/statsplus#342).
+"""Postgres checks for CourtAI reports (crf04/statsplus#342) and the Research feed (#372).
 
-Covers what SQLite cannot: migrations 076 and 077 and their reversal on the
-production dialect, the ``JSONB`` columns, and a publish and read round trip
-of a realistic report through the service.
+Covers what SQLite cannot: migrations 076, 077 and 080 and their reversal on
+the production dialect, the ``JSONB`` columns, a publish and read round trip
+of a realistic report through the service, the feed's keyset pages over
+``timestamptz`` and its partial index, and the listing cap under concurrency.
 """
 
 from __future__ import annotations
@@ -10,14 +11,20 @@ from __future__ import annotations
 import contextlib
 import os
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import IntegrityError
 
 from app.config.settings import load_settings
-from app.errors import ConflictError
-from app.migrations import downgrade_reports, downgrade_user_public_handle, run_migrations
+from app.errors import ConflictError, FlatBodyError
+from app.migrations import (
+    downgrade_reports,
+    downgrade_research_feed,
+    downgrade_user_public_handle,
+    run_migrations,
+)
 from app.services.reports import ReportService
 from app.services.user_service import UserService
 
@@ -86,6 +93,9 @@ def test_migrations_076_and_077_apply_reverse_and_reapply(engine):
         "show_author": "BOOLEAN",
         "deleted_at": "TIMESTAMP",
         "taken_down_at": "TIMESTAMP",
+        "listed_at": "TIMESTAMP",
+        "featured_at": "TIMESTAMP",
+        "covers": "JSONB",
     }
     with engine.connect() as connection:
         assert (
@@ -127,6 +137,7 @@ def test_a_report_round_trips_and_goes_with_its_account(engine):
     read = service.read(published["id"], viewer_uid="author")
 
     assert read["author"] == {"label": "@bighatprops"}
+    assert (read["listed"], read["featured"]) == (False, False)
     assert read["is_author"] is True
     assert read["created_at"].endswith("+00:00")
     assert read["calls"] == [
@@ -194,3 +205,141 @@ def test_two_concurrent_publishes_at_999_leave_exactly_1000_and_one_conflict(eng
     assert sorted(outcomes) == ["conflict", "published"]
     with engine.connect() as connection:
         assert connection.execute(text("SELECT count(*) FROM reports")).scalar() == 1000
+
+
+def _index_definition(engine, name):
+    with engine.connect() as connection:
+        return connection.execute(
+            text("SELECT indexdef FROM pg_indexes WHERE indexname = :name"), {"name": name}
+        ).scalar()
+
+
+def test_migration_080_normalises_handles_applies_reverses_and_reapplies(engine):
+    for uid in ("founder", "other"):
+        _user(engine, uid)
+    with engine.begin() as connection:
+        downgrade_research_feed(connection)
+        connection.execute(
+            text("UPDATE users SET public_handle = '@BigHatProps' WHERE firebase_uid = 'founder'")
+        )
+    assert _index_definition(engine, "idx_reports_feed") is None
+
+    assert run_migrations(engine).applied == ("080_research_feed",)
+
+    with engine.connect() as connection:
+        assert dict(connection.execute(text("SELECT firebase_uid, public_handle FROM users")).all()) == {
+            "founder": "bighatprops",
+            "other": None,
+        }
+    assert _index_definition(engine, "idx_reports_feed") == (
+        "CREATE INDEX idx_reports_feed ON public.reports USING btree (listed_at, id) WHERE "
+        "((listed_at IS NOT NULL) AND (deleted_at IS NULL) AND (taken_down_at IS NULL))"
+    )
+    assert _index_definition(engine, "uq_users_public_handle") == (
+        "CREATE UNIQUE INDEX uq_users_public_handle ON public.users USING btree (lower((public_handle)::text))"
+    )
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(
+            text("UPDATE users SET public_handle = 'BIGHATPROPS' WHERE firebase_uid = 'other'")
+        )
+    assert run_migrations(engine).applied == ()
+
+
+def test_migration_080_refuses_colliding_handles_and_rolls_back(engine):
+    for uid in ("founder", "copycat"):
+        _user(engine, uid)
+    with engine.begin() as connection:
+        downgrade_research_feed(connection)
+        connection.execute(text("UPDATE users SET public_handle = '@bighat' WHERE firebase_uid = 'founder'"))
+        connection.execute(text("UPDATE users SET public_handle = 'BigHat' WHERE firebase_uid = 'copycat'"))
+
+    with pytest.raises(ValueError, match=r"collide once normalised: bighat \(copycat, founder\)"):
+        run_migrations(engine)
+
+    with engine.connect() as connection:
+        assert dict(connection.execute(text("SELECT firebase_uid, public_handle FROM users")).all()) == {
+            "founder": "@bighat",
+            "copycat": "BigHat",
+        }
+        assert connection.execute(text("SELECT max(version) FROM schema_migrations")).scalar() == 79
+    assert "listed_at" not in {c["name"] for c in inspect(engine).get_columns("reports")}
+
+
+class _Clock:
+    def __init__(self):
+        self.now = datetime(2026, 10, 28, 12, 0, 0, 123456, tzinfo=UTC)
+
+    def __call__(self):
+        self.now += timedelta(hours=6, microseconds=1)
+        return self.now
+
+
+def test_the_feed_pages_by_listing_time_with_featured_on_top(engine):
+    for uid in ("author", "second"):
+        _user(engine, uid)
+    ids = (f"pg{number:08d}" for number in range(1, 100))
+    service = ReportService(engine, clock=_Clock(), new_id=lambda: next(ids))
+    service.set_public_handle("author", "author")
+    service.set_public_handle("second", "second")
+    listed = []
+    for index in range(23):
+        uid = "author" if index % 2 else "second"
+        report_id = service.publish(uid, _body())["id"]
+        service.set_listed(uid, report_id, True)
+        listed.append(report_id)
+    service.set_featured(listed[3], True)
+    deleted = listed[20]
+    service.delete("author" if 20 % 2 else "second", deleted)
+
+    first = service.feed()
+    second = service.feed(first["next_cursor"])
+
+    expected = [report_id for report_id in reversed(listed) if report_id not in (listed[3], deleted)]
+    assert [entry["id"] for entry in first["featured"]] == [listed[3]]
+    assert [entry["id"] for entry in first["reports"]] == expected[:20]
+    assert [entry["id"] for entry in second["reports"]] == expected[20:] == [listed[0]]
+    assert (second["featured"], second["next_cursor"]) == ([], None)
+    assert first["reports"][0]["covers"] == {"games": [], "players": ["Jalen Brunson"]}
+    assert first["reports"][0]["listed_at"].endswith("+00:00")
+    author = service.author_feed("AUTHOR")
+    assert [entry["id"] for entry in author["reports"]] == [
+        report_id for report_id in reversed(listed[1::2]) if report_id != deleted
+    ]
+
+
+def test_two_concurrent_listings_at_4_leave_exactly_5_and_one_refusal(engine):
+    _user(engine, "author")
+    service = ReportService(engine)
+    service.set_public_handle("author", "author")
+    drafts = [service.publish("author", _body())["id"] for _ in range(6)]
+    for report_id in drafts[:4]:
+        service.set_listed("author", report_id, True)
+    barrier = threading.Barrier(2, timeout=2)
+
+    def clock():
+        with contextlib.suppress(threading.BrokenBarrierError):
+            barrier.wait()
+        return datetime.now(UTC)
+
+    racing = ReportService(engine, clock=clock)
+    outcomes = []
+
+    def list_one(report_id):
+        try:
+            racing.set_listed("author", report_id, True)
+            outcomes.append("listed")
+        except FlatBodyError as error:
+            outcomes.append(error.code)
+
+    threads = [threading.Thread(target=list_one, args=(report_id,)) for report_id in drafts[4:]]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert sorted(outcomes) == ["listed", "listed_limit"]
+    with engine.connect() as connection:
+        assert (
+            connection.execute(text("SELECT count(*) FROM reports WHERE listed_at IS NOT NULL")).scalar() == 5
+        )
+        assert connection.execute(text("SELECT count(*) FROM report_listings")).scalar() == 5
