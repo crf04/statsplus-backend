@@ -5062,6 +5062,7 @@ report is kept until its author deletes it or an admin takes it down.
 ```http
 POST   /api/user/reports                       require_auth (waitlisted refused)
 PATCH  /api/user/reports/<id>                  require_auth; the author only (waitlisted may only unlist)
+PUT    /api/user/reports/<id>/edits            require_auth; the author only (waitlisted accepted)
 DELETE /api/user/reports/<id>                  require_auth; the author only
 PUT    /api/user/public-handle                 require_auth (waitlisted refused)
 GET    /api/reports/<id>                       anonymous; a token adds is_author
@@ -5074,8 +5075,9 @@ PUT    /api/admin/reports/<id>/featured        require_admin
 PUT    /api/admin/users/<uid>/public-handle    require_admin
 ```
 
-The Research refusals below (`handle_required`, `listed_limit`,
-`invalid_handle`, `handle_taken`, `handle_already_set` and `410 removed`) use
+The Research and edit refusals below (`handle_required`, `listed_limit`,
+`invalid_handle`, `handle_taken`, `handle_already_set`, `410 removed`,
+`notes_links`, `notes_too_long` and `invalid_edits`) use
 the flat body the crf04/statsplus#372 contract names, not the standard `error`
 object: `{"error": "<code>", "message": "<text>"}` plus their own fields.
 
@@ -5106,7 +5108,8 @@ object: `{"error": "<code>", "message": "<text>"}` plus their own fields.
   ],
   "cards": {"game-logs": "<!doctype html>..."},
   "show_author": false,
-  "listed": false
+  "listed": false,
+  "notes": "My own take, in my words."
 }
 ```
 
@@ -5133,6 +5136,7 @@ The server checks the body against the same schema and limits as the MCP tool
 | `cards` | an object of card name to non-empty HTML string, holding only cards some call names |
 | `show_author` | optional boolean, default `false` |
 | `listed` | optional boolean, default `false`; `true` also lists the report in Research |
+| `notes` | optional, top-level (not in `report`): the author's own words as plain text, at most 2,000 characters, with no link (`http://`, `https://` or `www.`, any case); missing, `null` or blank is no notes. Over-length is `400 {"error": "notes_too_long", ...}`, a link `400 {"error": "notes_links", ...}` (crf04/statsplus#377) |
 
 Text is stored as given and the web app renders it escaped, so HTML in a text
 field is shown, never run. Control characters other than tab and newline are
@@ -5170,12 +5174,21 @@ way nothing is stored.
     "featured": false,
     "document": {"title": "...", "opening": [], "tabs": []},
     "calls": [{"id": "brunson-logs", "tool": "query_game_logs", "card": "game-logs", "structured": {}, "meta": null}],
-    "cards": {"game-logs": "<!doctype html>..."}
+    "cards": {"game-logs": "<!doctype html>..."},
+    "notes": "My own take, in my words.",
+    "edited_at": "2026-10-29T09:00:01+00:00"
   }
 }
 ```
 
-`document` is the stored Report. `calls` omit the `args`. A listed report's
+`document` is the stored Report with the author's [edits](#edit-a-report)
+applied: the edited title, hidden items left out and each overridden item's
+`cards` filtered and ordered. `calls` holds only the calls some shown card
+names, in published order, without their `args`; `cards` holds only the HTML
+those calls draw. `notes` and `edited_at` are `null` until set. For the
+author (`is_author: true`) the report also carries `original`, `{document,
+calls}` exactly as published (its calls with their `args`), and `edits`, the stored edit body or `null`,
+and `cards` holds every published card's HTML. A listed report's
 `author` is `{"label": "@<handle>", "handle": "<handle>"}` whatever its
 `show_author`. An unlisted one's is `{"label": "@<handle>"}` only when it was
 published with `show_author: true` and the author's account has a public
@@ -5274,6 +5287,35 @@ waitlisted`. Listing a report that is already listed changes nothing and
 spends nothing. Unlisting is always allowed, a waitlisted author included; it
 clears `listed_at` and Featured and does not give the listing back.
 
+#### Edit a report
+
+`PUT /api/user/reports/<id>/edits` (crf04/statsplus#377) saves the author's
+edits, replacing every earlier edit (it is not a patch):
+
+```json
+{"title": "Brunson without Randle", "notes": "My own take.",
+ "items": [{"tab": 0, "item": 2, "hidden": false, "cards": ["call-id-b", "call-id-a"]}]}
+```
+
+`title` is required, 1-120 characters (`400 invalid_input` with
+`details.field: "title"`); `notes` is checked as on publish. `items` (omitted
+is `[]`) overrides only the items it names, by tab and item index: `hidden`
+hides the whole item and `cards` lists the cards it shows, in display order,
+a subset of the cards it was published with and without duplicates. An item
+named twice, an index out of range, or a card the item was not published with
+is `400 {"error": "invalid_edits", ...}`. An item left out shows as
+published. The published document and calls are never changed, so a removed
+card or hidden item is restored by saving again without it; cards are never
+added, moved between items or rerun.
+
+The answer is `{"report": ...}` exactly as `GET /api/reports/<id>` returns
+it to the author. Saving sets `edited_at`; it never changes `listed` or
+`listed_at`, so an edit does not move a report in Research, but a listed
+report's feed `title` and `covers` follow the edited report, as do the meta
+and the preview image. Someone else's report, or a deleted or taken-down one,
+is `404 resource_not_found`. A waitlisted author may edit; editing lists
+nothing.
+
 #### Research feed
 
 `GET /api/research?cursor=<opaque>` (anonymous: 60/min per IP) is the public
@@ -5306,8 +5348,9 @@ cursor the server did not issue is `400 invalid_input`.
 }
 ```
 
-`date` is the report's own date or `null`. `covers` comes from the stored card
-calls' `game` and `player` arguments, in call order and once each: a game as
+`date` is the report's own date or `null`. `title` is the report's title as
+edited. `covers` comes from the `game` and `player` arguments of the calls its
+shown cards name, after any edits, in call order and once each: a game as
 its teams' tricodes (`DET @ CHA`, from a tricode, full name or nickname written
 with `@` or `at`), a player without a `(TEAM)` suffix. A call with neither, or
 a game naming no two known teams, adds nothing. `preview_url` is the report's

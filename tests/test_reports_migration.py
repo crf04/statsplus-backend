@@ -1,5 +1,6 @@
 """Migrations 076 and 077: the reports table and ``users.public_handle`` (crf04/statsplus#342),
-and 080: listing, Featured and unique normalised handles (crf04/statsplus#372)."""
+080: listing, Featured and unique normalised handles (crf04/statsplus#372), and 081: author
+edits (crf04/statsplus#377)."""
 
 from __future__ import annotations
 
@@ -8,6 +9,7 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
 from app.migrations import (
+    downgrade_report_edits,
     downgrade_reports,
     downgrade_research_feed,
     downgrade_user_public_handle,
@@ -61,6 +63,9 @@ def test_migration_076_creates_the_table_and_reruns_as_a_noop(tmp_path):
         "listed_at",
         "featured_at",
         "covers",
+        "notes",
+        "edited_at",
+        "edits",
     ]
     assert str(columns["id"]["type"]) == "VARCHAR(12)"
     assert str(columns["title"]["type"]) == "VARCHAR(120)"
@@ -70,6 +75,9 @@ def test_migration_076_creates_the_table_and_reruns_as_a_noop(tmp_path):
         "listed_at",
         "featured_at",
         "covers",
+        "notes",
+        "edited_at",
+        "edits",
     }
     assert inspector.get_pk_constraint("reports")["constrained_columns"] == ["id"]
     [foreign_key] = inspector.get_foreign_keys("reports")
@@ -227,3 +235,44 @@ def test_migration_080_fails_loudly_on_handles_that_collide_once_normalised(engi
     assert 80 not in _versions(engine)
     assert "listed_at" not in {column["name"] for column in inspect(engine).get_columns("reports")}
     assert "report_listings" not in inspect(engine).get_table_names()
+
+
+# --- 081_report_edits ----------------------------------------------------------------------
+
+
+def test_migration_081_adds_the_edit_columns_and_existing_reports_read_as_published(engine):
+    with engine.begin() as connection:
+        connection.execute(text(_REPORT), {"id": "old0000001", "uid": "u"})
+        downgrade_report_edits(connection)
+    with engine.begin() as connection:
+        downgrade_report_edits(connection)  # reversing twice is harmless
+    columns = {column["name"] for column in inspect(engine).get_columns("reports")}
+    assert not {"notes", "edited_at", "edits"} & columns
+    assert 81 not in _versions(engine)
+
+    assert run_migrations(engine).applied == ("081_report_edits",)
+
+    columns = {column["name"]: column for column in inspect(engine).get_columns("reports")}
+    assert [str(columns[name]["type"]) for name in ("notes", "edited_at", "edits")] == [
+        "TEXT",
+        "DATETIME",
+        "JSON",
+    ]
+    assert all(columns[name]["nullable"] for name in ("notes", "edited_at", "edits"))
+    with engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT id, title, document, calls, notes, edited_at, edits FROM reports")
+        ).all() == [("old0000001", "Brief", "{}", "[]", None, None, None)]
+    assert run_migrations(engine).applied == ()
+
+
+def test_migration_081_reruns_after_a_partial_run_left_some_columns(engine):
+    with engine.begin() as connection:
+        downgrade_report_edits(connection)
+        connection.execute(text("ALTER TABLE reports ADD COLUMN notes TEXT"))
+
+    assert run_migrations(engine).applied == ("081_report_edits",)
+
+    assert {"notes", "edited_at", "edits"} <= {
+        column["name"] for column in inspect(engine).get_columns("reports")
+    }

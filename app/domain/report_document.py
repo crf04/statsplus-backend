@@ -28,6 +28,15 @@ skill that misspells a field hears about it.
 
 A valid body is returned normalised: an omitted list is ``[]`` and an omitted
 or ``null`` optional value is left out.
+
+The author's ``notes`` and edits (crf04/statsplus#377) are checked here too.
+Notes are plain text of at most :data:`NOTES_MAX` characters with no link
+(``http://``, ``https://`` or ``www.``); those two refusals are the flat
+``notes_too_long`` and ``notes_links``.  An edit body names items by tab and
+item index and lists each one's cards as a subset of the cards it was
+published with; anything else about its items is the flat ``invalid_edits``.
+:func:`apply_edits` lays a stored edit body over the published document and
+calls, which are never changed.
 """
 
 from __future__ import annotations
@@ -38,7 +47,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from app.errors import InvalidInputError
+from app.errors import FlatBodyError, InvalidInputError
 
 TOOLS = (
     "query_game_logs",
@@ -72,6 +81,7 @@ BULLET_LABEL_MAX = 80
 BULLET_TEXT_MAX = 300
 WATCH_MAX = 500
 SOURCE_FACT_MAX = 200
+NOTES_MAX = 2000
 
 SKILL_URL_PREFIX = "https://courtai.app/"
 
@@ -82,6 +92,7 @@ _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _HTTP_URL = re.compile(r"https?://[^\s/?#]+[^\s]*", re.IGNORECASE)
 #: C0 controls except tab and newline (carriage return included), DEL and C1.
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+_NOTES_LINK = re.compile(r"https?://|www\.", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -93,6 +104,7 @@ class PublishedReport:
     cards: dict[str, str]
     show_author: bool
     listed: bool = False
+    notes: str | None = None
 
 
 def _refuse(field: str, problem: str) -> InvalidInputError:
@@ -303,7 +315,8 @@ def _cards(value: Any, calls: list[dict[str, Any]]) -> dict[str, str]:
 def validate_publish_body(body: Any) -> PublishedReport:
     """The validated ``POST /api/user/reports`` body, or ``invalid_input`` naming the field."""
 
-    source = _object(body, "body", ("report", "calls", "cards", "show_author", "listed"))
+    source = _object(body, "body", ("report", "calls", "cards", "show_author", "listed", "notes"))
+    notes = validate_notes(source.get("notes"))
     calls = _calls(source.get("calls"))
     document = _document(source.get("report"), {call["id"] for call in calls})
     cards = _cards(source.get("cards"), calls)
@@ -312,4 +325,110 @@ def validate_publish_body(body: Any) -> PublishedReport:
         flags[name] = source.get(name, False)
         if not isinstance(flags[name], bool):
             raise _refuse(name, "must be true or false")
-    return PublishedReport(document=document, calls=calls, cards=cards, **flags)
+    return PublishedReport(document=document, calls=calls, cards=cards, notes=notes, **flags)
+
+
+# -- the author's notes and edits (crf04/statsplus#377) -------------------------------
+
+
+def notes_too_long() -> FlatBodyError:
+    return FlatBodyError(400, "notes_too_long", f"Notes are at most {NOTES_MAX:,} characters.")
+
+
+def notes_links() -> FlatBodyError:
+    return FlatBodyError(400, "notes_links", "Notes can't contain links.")
+
+
+def invalid_edits() -> FlatBodyError:
+    return FlatBodyError(400, "invalid_edits", "The edits don't match this report's items and cards.")
+
+
+def validate_notes(value: Any) -> str | None:
+    """The author's notes as given, ``None`` for none or blank, or a refusal."""
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise _refuse("notes", "must be a string")
+    if len(value) > NOTES_MAX:
+        raise notes_too_long()
+    if not value.strip():
+        return None
+    if _NOTES_LINK.search(value):
+        raise notes_links()
+    if _CONTROL.search(value):
+        raise _refuse("notes", "must not contain control characters")
+    return value
+
+
+def _index(value: Any, size: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < size:
+        raise invalid_edits()
+    return value
+
+
+def validate_edits(body: Any, document: dict[str, Any]) -> dict[str, Any]:
+    """The normalised ``PUT /api/user/reports/<id>/edits`` body for ``document``.
+
+    The title is checked as on publish (``invalid_input``), the notes by
+    :func:`validate_notes`; ``items`` (omitted is ``[]``) names each item at
+    most once, and each item's ``cards`` are distinct cards it was published
+    with, in display order, or the body is ``invalid_edits``.
+    """
+
+    source = _object(body, "body", ("title", "notes", "items"))
+    title = _text(source.get("title"), "title", TITLE_MAX)
+    notes = validate_notes(source.get("notes"))
+    entries = source.get("items")
+    if entries is None:
+        entries = []
+    if not isinstance(entries, list):
+        raise invalid_edits()
+    tabs = document["tabs"]
+    items: list[dict[str, Any]] = []
+    seen: set[tuple[int, int]] = set()
+    for entry in entries:
+        if not isinstance(entry, Mapping) or set(entry) != {"tab", "item", "hidden", "cards"}:
+            raise invalid_edits()
+        tab = _index(entry["tab"], len(tabs))
+        item = _index(entry["item"], len(tabs[tab]["items"]))
+        if (tab, item) in seen or not isinstance(entry["hidden"], bool):
+            raise invalid_edits()
+        seen.add((tab, item))
+        cards = entry["cards"]
+        published = tabs[tab]["items"][item]["cards"]
+        if (
+            not isinstance(cards, list)
+            or not all(isinstance(card, str) and card in published for card in cards)
+            or len(set(cards)) != len(cards)
+        ):
+            raise invalid_edits()
+        items.append({"tab": tab, "item": item, "hidden": entry["hidden"], "cards": list(cards)})
+    return {"title": title, "notes": notes, "items": items}
+
+
+def apply_edits(
+    document: dict[str, Any], calls: list[dict[str, Any]], edits: dict[str, Any] | None
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """The document and calls a reader sees: ``edits`` (or none) over the published ones.
+
+    Hidden items are dropped, each overridden item shows only its listed cards
+    in their order, and only the calls some shown card names are kept, in
+    published order.  The inputs are not changed.
+    """
+
+    if edits is not None:
+        overrides = {(entry["tab"], entry["item"]): entry for entry in edits["items"]}
+        tabs = []
+        for tab_index, tab in enumerate(document["tabs"]):
+            items = []
+            for item_index, item in enumerate(tab["items"]):
+                override = overrides.get((tab_index, item_index))
+                if override is None:
+                    items.append(item)
+                elif not override["hidden"]:
+                    items.append({**item, "cards": list(override["cards"])})
+            tabs.append({**tab, "items": items})
+        document = {**document, "title": edits["title"], "tabs": tabs}
+    shown = {card for tab in document["tabs"] for item in tab["items"] for card in item["cards"]}
+    return document, [call for call in calls if call["id"] in shown]

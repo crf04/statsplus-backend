@@ -621,6 +621,34 @@ def update_report(report_id):
     )
 
 
+@user_bp.route("/reports/<report_id>/edits", methods=["PUT"])
+@require_auth_allow_waitlisted
+@route_error_boundary("Failed to save the report's edits.")
+def put_report_edits(report_id):
+    """
+    Save the caller's edits of one of their reports (crf04/statsplus#377).
+
+    Expected JSON body, replacing every earlier edit:
+        {
+            "title": "...",
+            "notes": "..." | null,
+            "items": [{"tab": 0, "item": 2, "hidden": false, "cards": ["call-id"]}]
+        }
+
+    Someone else's report, or a deleted or taken-down one, is ``404``; bad
+    notes are ``400 notes_links`` or ``400 notes_too_long`` and items or cards
+    the report was not published with ``400 invalid_edits``.  A waitlisted
+    author may edit; editing lists nothing.
+
+    Returns:
+        The report exactly as ``GET /api/reports/<id>`` returns it to its author
+    """
+    firebase_uid = _authenticated_uid()
+    return jsonify(
+        {"report": report_service.save_edits(firebase_uid, report_id, request.get_json(silent=True))}
+    )
+
+
 @user_bp.route("/public-handle", methods=["PUT"])
 @require_auth
 @route_error_boundary("Failed to set the public handle.")
