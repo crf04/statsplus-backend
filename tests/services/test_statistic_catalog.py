@@ -51,6 +51,10 @@ def test_default_catalog_is_immutable_and_contains_initial_full_game_statistics(
         "field_goals_attempted",
         "three_pointers_attempted",
         "two_pointers_attempted",
+        "free_throws_attempted",
+        "free_throws_made",
+        "field_goals_made",
+        "two_pointers_made",
     )
     assert all(statistic.scoring_periods == (ScoringPeriod.FULL_GAME,) for statistic in catalog.statistics)
     assert catalog.by_id["pra"].components == ("points", "rebounds", "assists")
@@ -74,6 +78,10 @@ def test_default_catalog_is_immutable_and_contains_initial_full_game_statistics(
         "FGA",
         "FG3A",
         "FG2A",
+        "FTA",
+        "FTM",
+        "FGM",
+        "FG2M",
     }
 
     with pytest.raises(TypeError):

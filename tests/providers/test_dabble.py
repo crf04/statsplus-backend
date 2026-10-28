@@ -981,6 +981,39 @@ def test_recorded_lines_carry_dabbles_own_price_on_each_side():
     }
 
 
+@pytest.mark.parametrize(
+    ("token", "component", "market_category"),
+    [
+        ("ft-attempted", "free-throws-attempted", "FTA"),
+        ("ft-made", "free-throws-made", "FTM"),
+        ("fg-made", "field-goals-made", "FGM"),
+        ("two-made", "two-pointers-made", "FG2M"),
+    ],
+)
+def test_a_recorded_shooting_line_is_served_as_its_full_game_category(token, component, market_category):
+    """Dabble posts these as the 2026-10-27 feed spells them (crf04/statsplus#370)."""
+
+    detail = _payload("recorded_2026-10-23.chi-mil.fixture_details.json")
+    fixture = detail["sportFixtureDetail"]
+    market_id = "01a165f5-0c91-73e8-b406-978d423655d5"
+    for market in fixture["markets"]:
+        if market["id"] == market_id:
+            market["resultingType"] = token
+    for prop in fixture["playerProps"]:
+        if prop["marketId"] == market_id:
+            prop["stats"] = [token]
+    turner = next(m for m in _recorded_snapshot(detail).markets if m.statistic.label == token)
+
+    match = StatisticCatalog.load_default().resolver.resolve_market(turner)
+
+    assert (
+        turner.scoring_period.value,
+        turner.statistic.components,
+        match.state,
+        match.canonical.market_category,
+    ) == ("full_game", (component,), MatchState.CANONICAL, market_category)
+
+
 def test_recorded_three_made_line_is_served_as_full_game_3pm():
     snapshot = _recorded_snapshot()
     turner = next(

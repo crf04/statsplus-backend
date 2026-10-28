@@ -1639,7 +1639,7 @@ remain publishable. Every rejected refresh records
 bounded scalar rejection and accumulated coverage counts without identities.
 Only raw box-score inputs are stored: minutes, PTS/REB/AST, FGM/FGA, FG3M/FG3A,
 TOV/STL/BLK, and canonical game/team/opponent identity. PRA, PA, PR, RA, STKS,
-FG2A, season rates, and rolling selections are derived at read time rather
+FG2A, FG2M, season rates, and rolling selections are derived at read time rather
 than persisted in redundant tables.
 
 `PlayerGameLogRepository` is the internal query seam used by later matchup
@@ -2231,7 +2231,8 @@ the selected player from the archetype peer query, and asks the durable log
 repository for H2H/archetype rows. Rows without positive minutes or a usable
 stored Regular Season rate are omitted rather than assigned a synthetic
 baseline. Posted Market Categories are derived from the reviewed Statistic
-Catalog components, including combinations and FG2A (`FGA - FG3A`). Each game
+Catalog components, including combinations, FG2A (`FGA - FG3A`) and FG2M
+(`FGM - FG3M`). Each game
 delta is `stat / minutes - own Regular Season rate`. An AVG row reports
 per-game mean stats/minutes and a minutes-weighted rate delta; this preserves
 each archetype sample player's own baseline instead of inventing one aggregate
