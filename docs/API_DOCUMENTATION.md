@@ -5145,6 +5145,30 @@ omitted or `null` optional field is left out of the stored document. A refusal
 is `400 invalid_input` whose `details.field` names the field, e.g.
 `{"field": "report.tabs[1].items[0].sources[0][1]"}`.
 
+**Block documents** (crf04/statsplus#380). `report` has exactly one of
+`tabs` (above) or `blocks`; both or neither is `400 invalid_input` with
+`details.field: "report"`. `blocks` is 1-120 blocks, counting those inside a
+`tabs` group. Every block has an `id` matching `[a-z0-9-]{1,40}`, unique
+across the whole document, and a `type`:
+
+| `type` | Fields |
+| --- | --- |
+| `heading` | `text` 1-120 |
+| `paragraph` | `text` 1-1500, `lede?` boolean |
+| `list` | `items`: 1-12 strings of 1-300, `ordered?` boolean |
+| `callout` | `title?` 1-40, `text` 1-1000, `tone?` `warn` or `plain` |
+| `card` | `card`: a call id |
+| `cards` | `cards`: 2-3 call ids (a row of cards) |
+| `spot` | `tag?`, `title` 1-120, `subtitle?` and `key?` 1-240, `cards`: at most 8 call ids |
+| `table` | `columns`: 1-6 strings of 1-40; `rows`: 1-20 rows of exactly one 1-200 cell per column |
+| `items` | `layout` `tiles`, `rows` or `list`; `items`: at most 60 items as in a tab |
+| `sources` | `sources`: 1-12 `[fact, url]` pairs as in an item |
+| `tabs` | `tabs`: 2-5 of `{title: 1-30, blocks: 1-60 blocks}`; top level only, so a `tabs` block inside a tab is refused |
+
+An unknown type or key is refused, and every call id must name a call in
+`calls`. Paragraph and callout text may use `**bold**`, `*italic*` and lines
+starting `- `; the web app renders that light formatting and nothing else.
+
 `201`:
 
 ```json
@@ -5213,17 +5237,21 @@ admin took down `410` with `{"error": "removed", "by": "takedown", "message":
 
 `date` is `null` when the report has none. `description` is the first
 `opening` paragraph with whitespace collapsed, cut on a word boundary to at most
-200 characters ending in `…`, or `null` without one. `tags` counts the items
-carrying each tag over every tab; a tag no item carries is left out.
+200 characters ending in `…`, or `null` without one; a block document without
+an opening uses its first `lede` paragraph, else its first paragraph, with the
+light formatting removed. `tags` counts the items carrying each tag over every
+tab (in a block document, the `spot` blocks and the items of `items` blocks);
+a tag nothing carries is left out.
 
 #### Report preview image
 
 `GET /api/reports/<id>/preview.png` is a 1200×630 `image/png` on the same
 canvas as the other [preview images](#get-slate-and-matchup-preview-images):
 the CourtAI brand row with the report's date (or `Report`), its title (one
-line, or two cut short), and the first three tagged items in document order,
-each a grade chip and the item's title, above the footer "A spot is a place to
-look, not a pick." It is served with `Cache-Control: no-cache`, so a cached copy
+line, or two cut short), and the first three tagged items (or `spot` blocks)
+in document order, each a grade chip and the item's title, above the footer "A spot is a place to
+look, not a pick." A block document with nothing tagged draws its
+`description` under the title instead. It is served with `Cache-Control: no-cache`, so a cached copy
 is revalidated on every use and a deleted or taken-down report stops showing at
 once; a refusal carries `no-store`.
 
@@ -5307,6 +5335,21 @@ is `400 {"error": "invalid_edits", ...}`. An item left out shows as
 published. The published document and calls are never changed, so a removed
 card or hidden item is restored by saving again without it; cards are never
 added, moved between items or rerun.
+
+A block document's edit body has `blocks` instead of `items` (the other key
+is refused as unknown):
+
+```json
+{"title": "Reaves only", "notes": null,
+ "blocks": [{"id": "spot-pts", "hidden": true}, {"id": "row", "hidden": false, "cards": ["c2", "c1"]}]}
+```
+
+Each entry names a published block by `id` (inside a `tabs` group too) at most
+once. `hidden` hides the block; a hidden `tabs` block hides its whole group.
+`cards`, optional and only on a `cards`, `spot` or `items` block, lists the
+cards the block shows, in display order, a subset of its published cards
+without duplicates; in an `items` block each item keeps only its own listed
+cards, in that order. Anything else is `400 {"error": "invalid_edits", ...}`.
 
 The answer is `{"report": ...}` exactly as `GET /api/reports/<id>` returns
 it to the author. Saving sets `edited_at`; it never changes `listed` or

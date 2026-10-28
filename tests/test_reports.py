@@ -1773,3 +1773,704 @@ def test_a_waitlisted_author_can_edit_and_editing_lists_nothing(client, signed_i
     assert saved.status_code == 200, saved.get_json()
     report = saved.get_json()["report"]
     assert (report["notes"], report["listed"], report["is_author"]) == ("Still mine.", False, True)
+
+
+# --- block documents (crf04/statsplus#380) ---------------------------------------------
+
+
+def _block_call(call_id, card, tool, args):
+    return {**_call(call_id, card=card, tool=tool), "args": args}
+
+
+def _reaves_body():
+    """The Reaves prototype as a block document: every block type, a tabs group holding an items block."""
+
+    return {
+        "report": {
+            "title": "Austin Reaves points vs Golden State",
+            "date": "2026-10-28",
+            "blocks": [
+                {"id": "h1", "type": "heading", "text": "The case for Reaves"},
+                {
+                    "id": "lede",
+                    "type": "paragraph",
+                    "lede": True,
+                    "text": "**Reaves** has cleared 22.5 in *seven* of nine games without Doncic.",
+                },
+                {"id": "why", "type": "paragraph", "text": "- Usage climbs to 31%\n- Minutes hold at 36"},
+                {
+                    "id": "spot-pts",
+                    "type": "spot",
+                    "tag": "lean",
+                    "title": "Reaves over 22.5 points",
+                    "subtitle": "Doncic out",
+                    "key": "beat 7 of 9",
+                    "cards": ["reaves-logs", "reaves-matchup"],
+                },
+                {"id": "onoff", "type": "card", "card": "reaves-onoff"},
+                {"id": "row", "type": "cards", "cards": ["hachimura", "injuries"]},
+                {
+                    "id": "watch",
+                    "type": "callout",
+                    "title": "Watch",
+                    "text": "Doncic is *questionable*; a late return ends the case.",
+                    "tone": "warn",
+                },
+                {
+                    "id": "splits",
+                    "type": "table",
+                    "columns": ["Split", "PTS", "MIN"],
+                    "rows": [["Without Doncic", "26.1", "36.2"], ["With Doncic", "19.4", "33.0"]],
+                },
+                {
+                    "id": "steps",
+                    "type": "list",
+                    "ordered": True,
+                    "items": ["Check the 5 pm report", "Check minutes"],
+                },
+                {
+                    "id": "src",
+                    "type": "sources",
+                    "sources": [["Official injury report", "https://official.nba.com/injury-report"]],
+                },
+                {
+                    "id": "more",
+                    "type": "tabs",
+                    "tabs": [
+                        {
+                            "title": "Other spots",
+                            "blocks": [
+                                {
+                                    "id": "board",
+                                    "type": "items",
+                                    "layout": "rows",
+                                    "items": [
+                                        {
+                                            "title": "Hachimura rebounds",
+                                            "tag": "thin",
+                                            "cards": ["hachimura"],
+                                        },
+                                        {
+                                            "title": "Reaves assists",
+                                            "tag": "strong",
+                                            "cards": ["reaves-logs", "reaves-matchup"],
+                                        },
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "title": "Notes",
+                            "blocks": [{"id": "notes-p", "type": "paragraph", "text": "Tab two."}],
+                        },
+                    ],
+                },
+            ],
+        },
+        "calls": [
+            _block_call(
+                "reaves-logs",
+                "game-logs",
+                "query_game_logs",
+                {"player": "Austin Reaves", "game": "LAL @ GSW"},
+            ),
+            _block_call(
+                "reaves-matchup", "matchup", "get_matchup", {"player": "Austin Reaves", "game": "LAL @ GSW"}
+            ),
+            _block_call("reaves-onoff", "on-off", "get_on_off", {"player": "Austin Reaves"}),
+            _block_call("hachimura", "rotation", "get_rotation", {"player": "Rui Hachimura"}),
+            _block_call("injuries", "injuries", "get_injuries", {"date": "2026-10-28"}),
+        ],
+        "cards": {
+            "game-logs": "<html>logs</html>",
+            "matchup": "<html>matchup</html>",
+            "on-off": "<html>on-off</html>",
+            "rotation": "<html>rotation</html>",
+            "injuries": "<html>injuries</html>",
+        },
+        "show_author": False,
+    }
+
+
+def _block(body, block_id):
+    """The block ``block_id`` of a body's report, searched inside tabs groups too."""
+
+    def find(blocks):
+        for block in blocks:
+            if block["id"] == block_id:
+                return block
+            for tab in block.get("tabs", []):
+                found = find(tab["blocks"])
+                if found:
+                    return found
+        return None
+
+    return find(body["report"]["blocks"])
+
+
+def test_a_block_document_publishes_and_reads_back_normalised_with_every_card(client, signed_in):
+    body = _reaves_body()
+    body["report"]["opening"] = None
+    _block(body, "board")["items"][0]["tag"] = None
+    _block(body, "watch")["tone"] = None
+
+    report_id = _published_id(client, signed_in(), body)
+    report = _read(client, report_id)
+
+    assert report["document"] == {
+        "title": "Austin Reaves points vs Golden State",
+        "date": "2026-10-28",
+        "opening": [],
+        "blocks": [
+            {"id": "h1", "type": "heading", "text": "The case for Reaves"},
+            {
+                "id": "lede",
+                "type": "paragraph",
+                "text": "**Reaves** has cleared 22.5 in *seven* of nine games without Doncic.",
+                "lede": True,
+            },
+            {"id": "why", "type": "paragraph", "text": "- Usage climbs to 31%\n- Minutes hold at 36"},
+            {
+                "id": "spot-pts",
+                "type": "spot",
+                "tag": "lean",
+                "title": "Reaves over 22.5 points",
+                "subtitle": "Doncic out",
+                "key": "beat 7 of 9",
+                "cards": ["reaves-logs", "reaves-matchup"],
+            },
+            {"id": "onoff", "type": "card", "card": "reaves-onoff"},
+            {"id": "row", "type": "cards", "cards": ["hachimura", "injuries"]},
+            {
+                "id": "watch",
+                "type": "callout",
+                "title": "Watch",
+                "text": "Doncic is *questionable*; a late return ends the case.",
+            },
+            {
+                "id": "splits",
+                "type": "table",
+                "columns": ["Split", "PTS", "MIN"],
+                "rows": [["Without Doncic", "26.1", "36.2"], ["With Doncic", "19.4", "33.0"]],
+            },
+            {
+                "id": "steps",
+                "type": "list",
+                "items": ["Check the 5 pm report", "Check minutes"],
+                "ordered": True,
+            },
+            {
+                "id": "src",
+                "type": "sources",
+                "sources": [["Official injury report", "https://official.nba.com/injury-report"]],
+            },
+            {
+                "id": "more",
+                "type": "tabs",
+                "tabs": [
+                    {
+                        "title": "Other spots",
+                        "blocks": [
+                            {
+                                "id": "board",
+                                "type": "items",
+                                "layout": "rows",
+                                "items": [
+                                    {
+                                        "title": "Hachimura rebounds",
+                                        "body": [],
+                                        "bullets": [],
+                                        "cards": ["hachimura"],
+                                        "sources": [],
+                                    },
+                                    {
+                                        "title": "Reaves assists",
+                                        "tag": "strong",
+                                        "body": [],
+                                        "bullets": [],
+                                        "cards": ["reaves-logs", "reaves-matchup"],
+                                        "sources": [],
+                                    },
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "title": "Notes",
+                        "blocks": [{"id": "notes-p", "type": "paragraph", "text": "Tab two."}],
+                    },
+                ],
+            },
+        ],
+    }
+    assert [call["id"] for call in report["calls"]] == [
+        "reaves-logs",
+        "reaves-matchup",
+        "reaves-onoff",
+        "hachimura",
+        "injuries",
+    ]
+    assert sorted(report["cards"]) == ["game-logs", "injuries", "matchup", "on-off", "rotation"]
+
+
+def test_a_block_documents_meta_takes_tags_from_spots_and_items_and_the_lede_as_description(
+    client, signed_in
+):
+    report_id = _published_id(client, signed_in(), _reaves_body())
+
+    assert client.get(f"/api/reports/{report_id}/meta").get_json() == {
+        "id": report_id,
+        "title": "Austin Reaves points vs Golden State",
+        "date": "2026-10-28",
+        "description": "Reaves has cleared 22.5 in seven of nine games without Doncic.",
+        "tags": {"strong": 1, "lean": 1, "thin": 1},
+    }
+
+
+def test_a_block_documents_description_prefers_the_opening_then_the_lede_then_the_first_paragraph():
+    blocks = [
+        {"id": "a", "type": "heading", "text": "Heading"},
+        {"id": "b", "type": "paragraph", "text": "First *plain* paragraph."},
+        {"id": "c", "type": "paragraph", "text": "The **lede**.", "lede": True},
+    ]
+
+    assert describe({"opening": ["Opening."], "blocks": blocks}) == "Opening."
+    assert describe({"opening": [], "blocks": blocks}) == "The lede."
+    assert describe({"opening": [], "blocks": blocks[:2]}) == "First plain paragraph."
+    assert describe({"opening": [], "blocks": blocks[:1]}) is None
+
+
+def test_a_block_documents_preview_lists_its_spots_and_items_in_document_order(client, signed_in):
+    from app.services.report_preview import tagged_items
+
+    report_id = _published_id(client, signed_in(), _reaves_body())
+    document = client.get(f"/api/reports/{report_id}").get_json()["report"]["document"]
+    response = client.get(f"/api/reports/{report_id}/preview.png")
+
+    assert tagged_items(document) == [
+        ("lean", "Reaves over 22.5 points"),
+        ("thin", "Hachimura rebounds"),
+        ("strong", "Reaves assists"),
+    ]
+    assert response.status_code == 200
+    assert Image.open(io.BytesIO(response.data)).size == (1200, 630)
+
+
+def test_a_block_report_without_spots_draws_its_lede_under_the_title(client, signed_in):
+    def spotless(lede):
+        body = _reaves_body()
+        body["report"]["blocks"] = [
+            {"id": "lede", "type": "paragraph", "lede": True, "text": lede},
+            {"id": "row", "type": "cards", "cards": ["hachimura", "injuries"]},
+        ]
+        report_id = _published_id(client, signed_in(), body)
+        response = client.get(f"/api/reports/{report_id}/preview.png")
+        assert response.status_code == 200
+        return response.data
+
+    long_lede = "Reaves has cleared 22.5 points in seven of nine games without Doncic this season " * 6
+
+    first, second, long = (
+        spotless("Reaves has cleared 22.5."),
+        spotless("Hachimura rebounds more."),
+        spotless(long_lede),
+    )
+
+    assert first != second
+    assert Image.open(io.BytesIO(long)).size == (1200, 630)
+
+
+def _blocks_set(path):
+    """A mutator setting ``path`` (keys and indexes) under ``report.blocks`` to a value."""
+
+    def mutate(body, value):
+        target = body["report"]["blocks"]
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = value
+
+    return mutate
+
+
+_NESTED = (10, "tabs", 0, "blocks")
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "field", "message"),
+    [
+        pytest.param(
+            (0, "type"),
+            "video",
+            "report.blocks[0].type",
+            "must be one of heading, paragraph, list, callout, card, cards, spot, table, items, sources, tabs",
+            id="unknown-type",
+        ),
+        pytest.param((0, "colour"), "red", "report.blocks[0]", "has unknown keys (1)", id="unknown-key"),
+        pytest.param(
+            (3, "id"), "h1", "report.blocks[3].id", "must be unique across the report", id="duplicate-id"
+        ),
+        pytest.param(
+            (*_NESTED, 0, "id"),
+            "h1",
+            "report.blocks[10].tabs[0].blocks[0].id",
+            "must be unique across the report",
+            id="duplicate-id-inside-tabs",
+        ),
+        pytest.param(
+            (0, "id"), "H1", "report.blocks[0].id", "must be 1-40 characters of a-z, 0-9 and -", id="bad-id"
+        ),
+        pytest.param(
+            (4, "card"), "nope", "report.blocks[4].card", "must name a call in calls", id="card-no-call"
+        ),
+        pytest.param(
+            (5, "cards", 1),
+            "nope",
+            "report.blocks[5].cards[1]",
+            "must name a call in calls",
+            id="row-no-call",
+        ),
+        pytest.param(
+            (3, "cards", 0),
+            "nope",
+            "report.blocks[3].cards[0]",
+            "must name a call in calls",
+            id="spot-no-call",
+        ),
+        pytest.param(
+            (*_NESTED, 0, "items", 1, "cards", 0),
+            "nope",
+            "report.blocks[10].tabs[0].blocks[0].items[1].cards[0]",
+            "must name a call in calls",
+            id="item-no-call",
+        ),
+        pytest.param(
+            (1, "text"),
+            "x" * 1501,
+            "report.blocks[1].text",
+            "must be at most 1500 characters",
+            id="long-text",
+        ),
+        pytest.param(
+            (0, "text"),
+            "x" * 121,
+            "report.blocks[0].text",
+            "must be at most 120 characters",
+            id="long-heading",
+        ),
+        pytest.param(
+            (6, "title"),
+            "x" * 41,
+            "report.blocks[6].title",
+            "must be at most 40 characters",
+            id="long-callout",
+        ),
+        pytest.param(
+            (7, "rows", 0, 0),
+            "x" * 201,
+            "report.blocks[7].rows[0][0]",
+            "must be at most 200 characters",
+            id="long-cell",
+        ),
+        pytest.param(
+            (8, "items", 0),
+            "x" * 301,
+            "report.blocks[8].items[0]",
+            "must be at most 300 characters",
+            id="long-list-item",
+        ),
+        pytest.param(
+            (*_NESTED, 0),
+            {"id": "inner", "type": "tabs", "tabs": []},
+            "report.blocks[10].tabs[0].blocks[0].type",
+            "must not be tabs inside tabs",
+            id="tabs-in-tabs",
+        ),
+        pytest.param(
+            (7, "rows", 1),
+            ["With Doncic", "19.4"],
+            "report.blocks[7].rows[1]",
+            "must have 3 cells, one per column",
+            id="row-width",
+        ),
+        pytest.param(
+            (7, "columns"),
+            ["a"] * 7,
+            "report.blocks[7].columns",
+            "must have at most 6 entries",
+            id="seven-columns",
+        ),
+        pytest.param(
+            (5, "cards"),
+            ["hachimura"],
+            "report.blocks[5].cards",
+            "must have at least 2 entries",
+            id="row-of-one",
+        ),
+        pytest.param(
+            (5, "cards"),
+            ["hachimura"] * 4,
+            "report.blocks[5].cards",
+            "must have at most 3 entries",
+            id="row-of-four",
+        ),
+        pytest.param(
+            (6, "tone"), "loud", "report.blocks[6].tone", "must be one of warn, plain", id="bad-tone"
+        ),
+        pytest.param(
+            (1, "lede"), "yes", "report.blocks[1].lede", "must be true or false", id="lede-not-bool"
+        ),
+        pytest.param(
+            (3, "tag"),
+            "lock",
+            "report.blocks[3].tag",
+            "must be one of strong, lean, thin, pass, tipped",
+            id="bad-tag",
+        ),
+        pytest.param(
+            (8, "items"), [], "report.blocks[8].items", "must have at least 1 entry", id="empty-list"
+        ),
+        pytest.param(
+            (9, "sources", 0, 1),
+            "ftp://x",
+            "report.blocks[9].sources[0][1]",
+            "must be an http or https URL",
+            id="bad-url",
+        ),
+        pytest.param(
+            (10, "tabs"),
+            [{"title": "One", "blocks": [{"id": "x", "type": "heading", "text": "x"}]}],
+            "report.blocks[10].tabs",
+            "must have at least 2 entries",
+            id="one-tab-group",
+        ),
+        pytest.param(
+            (*_NESTED[:3], "blocks"),
+            [],
+            "report.blocks[10].tabs[0].blocks",
+            "must have at least 1 entry",
+            id="empty-tab",
+        ),
+    ],
+)
+def test_a_malformed_block_document_is_refused_naming_the_field_and_stores_nothing(
+    client, signed_in, reports, path, value, field, message
+):
+    body = _reaves_body()
+    _blocks_set(path)(body, value)
+
+    response = _publish(client, signed_in(), body)
+
+    assert response.status_code == 400
+    error = response.get_json()["error"]
+    assert (error["code"], error["details"], error["message"]) == (
+        "invalid_input",
+        {"field": field},
+        f"{field} {message}.",
+    )
+    with reports._engine.connect() as connection:
+        assert connection.execute(text("SELECT count(*) FROM reports")).scalar() == 0
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        pytest.param("both", id="both"),
+        pytest.param("neither", id="neither"),
+    ],
+)
+def test_a_report_with_both_or_neither_of_tabs_and_blocks_is_refused(client, signed_in, reports, shape):
+    body = _reaves_body()
+    if shape == "both":
+        body["report"]["tabs"] = _body()["report"]["tabs"]
+    else:
+        del body["report"]["blocks"]
+
+    response = _publish(client, signed_in(), body)
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == {
+        "code": "invalid_input",
+        "message": "report must have exactly one of tabs or blocks.",
+        "details": {"field": "report"},
+    }
+
+
+def test_the_120_block_limit_counts_blocks_inside_tabs(client, signed_in):
+    def body_of(headings):
+        body = _reaves_body()
+        body["report"]["blocks"] = [
+            {"id": f"h{n}", "type": "heading", "text": "x"} for n in range(headings)
+        ] + [
+            {
+                "id": "group",
+                "type": "tabs",
+                "tabs": [
+                    {"title": "A", "blocks": [{"id": "a", "type": "heading", "text": "a"}]},
+                    {"title": "B", "blocks": [{"id": "b", "type": "heading", "text": "b"}]},
+                ],
+            }
+        ]
+        return body
+
+    assert _publish(client, signed_in(), body_of(117)).status_code == 201
+
+    refused = _publish(client, signed_in(), body_of(118))
+
+    assert refused.status_code == 400
+    assert refused.get_json()["error"]["message"] == (
+        "report.blocks must hold at most 120 blocks, counting those inside tabs."
+    )
+
+
+def _block_edits(title="Reaves only", notes=None, blocks=()):
+    return {"title": title, "notes": notes, "blocks": list(blocks)}
+
+
+def test_readers_get_a_block_report_with_hidden_blocks_and_removed_cards_left_out(client, signed_in):
+    report_id = _published_id(client, signed_in(), _reaves_body())
+
+    saved = _edit(
+        client,
+        signed_in(),
+        report_id,
+        _block_edits(
+            blocks=[
+                {"id": "spot-pts", "hidden": True},
+                {"id": "row", "hidden": False, "cards": ["injuries", "hachimura"]},
+                {"id": "board", "hidden": False, "cards": ["reaves-matchup"]},
+                {"id": "notes-p", "hidden": True},
+            ]
+        ),
+    )
+    reader = _read(client, report_id)
+
+    assert saved.status_code == 200, saved.get_json()
+    assert saved.get_json()["report"]["edits"] == {
+        "title": "Reaves only",
+        "notes": None,
+        "blocks": [
+            {"id": "spot-pts", "hidden": True},
+            {"id": "row", "hidden": False, "cards": ["injuries", "hachimura"]},
+            {"id": "board", "hidden": False, "cards": ["reaves-matchup"]},
+            {"id": "notes-p", "hidden": True},
+        ],
+    }
+    document = reader["document"]
+    assert document["title"] == "Reaves only"
+    assert [block["id"] for block in document["blocks"]] == [
+        "h1",
+        "lede",
+        "why",
+        "onoff",
+        "row",
+        "watch",
+        "splits",
+        "steps",
+        "src",
+        "more",
+    ]
+    assert _block({"report": document}, "row")["cards"] == ["injuries", "hachimura"]
+    assert [item["cards"] for item in _block({"report": document}, "board")["items"]] == [
+        [],
+        ["reaves-matchup"],
+    ]
+    assert _block({"report": document}, "more")["tabs"][1] == {"title": "Notes", "blocks": []}
+    # reaves-logs was shown only by the hidden spot and the board's removed cards.
+    assert [call["id"] for call in reader["calls"]] == [
+        "reaves-matchup",
+        "reaves-onoff",
+        "hachimura",
+        "injuries",
+    ]
+    assert sorted(reader["cards"]) == ["injuries", "matchup", "on-off", "rotation"]
+    assert client.get(f"/api/reports/{report_id}/meta").get_json()["tags"] == {"strong": 1, "thin": 1}
+
+
+def test_hiding_a_tabs_block_hides_the_whole_group(client, signed_in):
+    report_id = _published_id(client, signed_in(), _reaves_body())
+
+    _edit(client, signed_in(), report_id, _block_edits(blocks=[{"id": "more", "hidden": True}]))
+    reader = _read(client, report_id)
+
+    assert [block["id"] for block in reader["document"]["blocks"]] == [
+        "h1",
+        "lede",
+        "why",
+        "spot-pts",
+        "onoff",
+        "row",
+        "watch",
+        "splits",
+        "steps",
+        "src",
+    ]
+    assert client.get(f"/api/reports/{report_id}/meta").get_json()["tags"] == {"lean": 1}
+
+
+@pytest.mark.parametrize(
+    "blocks",
+    [
+        pytest.param([{"id": "nope", "hidden": True}], id="no-such-block"),
+        pytest.param([{"id": "row", "hidden": True}, {"id": "row", "hidden": False}], id="block-twice"),
+        pytest.param([{"id": "row", "hidden": "no"}], id="hidden-not-bool"),
+        pytest.param([{"id": "row"}], id="hidden-missing"),
+        pytest.param([{"id": "row", "hidden": False, "title": "x"}], id="unknown-key"),
+        pytest.param([{"id": ["row"], "hidden": False}], id="id-not-string"),
+        pytest.param([{"id": "row", "hidden": False, "cards": ["reaves-logs"]}], id="card-not-in-block"),
+        pytest.param([{"id": "row", "hidden": False, "cards": ["injuries", "injuries"]}], id="card-twice"),
+        pytest.param([{"id": "row", "hidden": False, "cards": "injuries"}], id="cards-not-list"),
+        pytest.param(
+            [{"id": "onoff", "hidden": False, "cards": ["reaves-onoff"]}], id="cards-on-a-card-block"
+        ),
+        pytest.param([{"id": "h1", "hidden": False, "cards": []}], id="cards-on-a-heading"),
+        pytest.param([{"id": "board", "hidden": False, "cards": ["injuries"]}], id="card-not-in-items-block"),
+        pytest.param("all", id="blocks-not-list"),
+    ],
+)
+def test_block_edits_naming_no_such_block_or_cards_outside_it_are_invalid(client, signed_in, blocks):
+    report_id = _published_id(client, signed_in(), _reaves_body())
+
+    refused = _edit(client, signed_in(), report_id, _block_edits(blocks=blocks))
+
+    assert (refused.status_code, refused.get_json()) == (
+        400,
+        {"error": "invalid_edits", "message": "The edits don't match this report's items and cards."},
+    )
+    assert _read(client, report_id, signed_in())["edits"] is None
+
+
+def test_each_document_shape_takes_only_its_own_edit_key(client, signed_in):
+    block_id = _published_id(client, signed_in(), _reaves_body())
+    tab_id = _published_id(client, signed_in())
+
+    item_edit = _edit(client, signed_in(), block_id, _edits(items=[]))
+    block_edit = _edit(client, signed_in(), tab_id, _block_edits())
+
+    for refused in (item_edit, block_edit):
+        assert refused.status_code == 400
+        assert refused.get_json()["error"]["details"] == {"field": "body"}
+
+
+def test_a_listed_block_report_is_in_research_with_covers_from_its_shown_cards(
+    client, signed_in, reports, clock
+):
+    _claim(client, signed_in(OWNER), "bighat")
+    [report_id] = _seed_listed(reports, clock, OWNER, 1, body=_reaves_body())
+
+    [entry] = _feed(client)["reports"]
+    assert (entry["id"], entry["title"], entry["date"], entry["covers"]) == (
+        report_id,
+        "Austin Reaves points vs Golden State",
+        "2026-10-28",
+        {"games": ["LAL @ GSW"], "players": ["Austin Reaves", "Rui Hachimura"]},
+    )
+
+    _edit(
+        client,
+        signed_in(),
+        report_id,
+        _block_edits(blocks=[{"id": "row", "hidden": True}, {"id": "more", "hidden": True}]),
+    )
+
+    [entry] = _feed(client)["reports"]
+    assert entry["covers"] == {"games": ["LAL @ GSW"], "players": ["Austin Reaves"]}

@@ -530,3 +530,66 @@ def test_edits_round_trip_as_jsonb_and_a_listed_reports_feed_entry_follows_them(
         assert connection.execute(
             text("SELECT document ->> 'title', edits -> 'items' -> 0 ->> 'hidden' FROM reports")
         ).one() == ("Injury brief", "true")
+
+
+def test_a_block_report_and_its_edits_round_trip_as_jsonb_and_its_feed_entry_follows_them(engine):
+    _user(engine, "author")
+    service = ReportService(engine, clock=_Clock())
+    service.set_public_handle("author", "author")
+    body = _body()
+    body["calls"].append({**body["calls"][0], "id": "c2", "args": {"player": "Josh Hart"}})
+    body["report"] = {
+        "title": "Block brief",
+        "date": "2026-10-28",
+        "blocks": [
+            {"id": "lede", "type": "paragraph", "lede": True, "text": "**Hart** rebounds ✓"},
+            {"id": "spot", "type": "spot", "tag": "lean", "title": "Brunson points", "cards": ["c1"]},
+            {
+                "id": "group",
+                "type": "tabs",
+                "tabs": [
+                    {"title": "A", "blocks": [{"id": "row", "type": "cards", "cards": ["c1", "c2"]}]},
+                    {
+                        "title": "B",
+                        "blocks": [{"id": "t", "type": "table", "columns": ["x"], "rows": [["1"]]}],
+                    },
+                ],
+            },
+        ],
+    }
+    report_id = service.publish("author", body)["id"]
+    service.set_listed("author", report_id, True)
+
+    service.save_edits(
+        "author",
+        report_id,
+        {
+            "title": "Hart only",
+            "blocks": [{"id": "spot", "hidden": True}, {"id": "row", "hidden": False, "cards": ["c2"]}],
+        },
+    )
+
+    reader = service.read(report_id, viewer_uid=None)
+    assert [block["id"] for block in reader["document"]["blocks"]] == ["lede", "group"]
+    assert reader["document"]["blocks"][1]["tabs"][0]["blocks"][0]["cards"] == ["c2"]
+    assert [call["id"] for call in reader["calls"]] == ["c2"]
+    assert service.meta(report_id) == {
+        "id": report_id,
+        "title": "Hart only",
+        "date": "2026-10-28",
+        "description": "Hart rebounds ✓",
+        "tags": {},
+    }
+    [entry] = service.feed()["reports"]
+    assert (entry["title"], entry["date"], entry["covers"]) == (
+        "Hart only",
+        "2026-10-28",
+        {"games": [], "players": ["Josh Hart"]},
+    )
+    with engine.connect() as connection:
+        assert connection.execute(
+            text(
+                "SELECT document -> 'blocks' -> 2 -> 'tabs' -> 1 -> 'blocks' -> 0 ->> 'type',"
+                " edits -> 'blocks' -> 1 -> 'cards' ->> 0 FROM reports"
+            )
+        ).one() == ("table", "c2")

@@ -16,6 +16,27 @@ Item   = {title ≤120, tag?: strong|lean|thin|pass|tipped, subtitle ≤240?, ke
           cards: [call id] ≤8, sources: [[fact ≤200, http(s) url ≤500]] ≤12}
 ```
 
+A report may instead be a block document (crf04/statsplus#380): exactly one of
+``tabs`` or ``blocks``, with no version key.
+
+```text
+Report = {title ≤120, date?, skill?, footnote ≤300?, opening? [≤600] ≤3, blocks: [Block] 1..120}
+Block  = {id [a-z0-9-]{1,40} unique across the whole document, type, ...}
+  heading   {text ≤120}
+  paragraph {text ≤1500, lede?: bool}
+  list      {items [≤300] 1..12, ordered?: bool}
+  callout   {title? ≤40, text ≤1000, tone?: "warn"|"plain"}
+  card      {card: call id}
+  cards     {cards: [call id] 2..3}
+  spot      {tag?, title ≤120, subtitle? ≤240, key? ≤240, cards? [call id] ≤8}
+  table     {columns [≤40] 1..6, rows [[cell ≤200]] 1..20}   each row has len(columns) cells
+  items     {layout tiles|rows|list, items [Item] ≤60}
+  sources   {sources [[fact ≤200, http(s) url ≤500]] 1..12}
+  tabs      {tabs [{title ≤30, blocks [Block] 1..60}] 2..5}  top level only
+```
+
+The 120-block limit counts every block, those inside a ``tabs`` group included.
+
 The stored call also carries the rerun's ``structured`` content, its optional
 ``meta`` and the ``card`` it draws; ``cards`` maps each card name to its HTML.
 
@@ -35,7 +56,9 @@ Notes are plain text of at most :data:`NOTES_MAX` characters with no link
 ``notes_too_long`` and ``notes_links``.  An edit body names items by tab and
 item index and lists each one's cards as a subset of the cards it was
 published with; anything else about its items is the flat ``invalid_edits``.
-:func:`apply_edits` lays a stored edit body over the published document and
+A block document's edit body names blocks by ``id`` instead, each hidden or
+with its ``cards`` (only on a ``cards``, ``spot`` or ``items`` block) a subset
+of the block's published cards.  :func:`apply_edits` lays a stored edit body over the published document and
 calls, which are never changed.
 """
 
@@ -58,6 +81,22 @@ TOOLS = (
 )
 TAGS = ("strong", "lean", "thin", "pass", "tipped")
 LAYOUTS = ("tiles", "rows", "list")
+BLOCK_TYPES = (
+    "heading",
+    "paragraph",
+    "list",
+    "callout",
+    "card",
+    "cards",
+    "spot",
+    "table",
+    "items",
+    "sources",
+    "tabs",
+)
+TONES = ("warn", "plain")
+#: The block types whose cards an edit may reorder or remove.
+CARD_BLOCKS = ("cards", "spot", "items")
 
 MAX_CALLS = 48
 MAX_TABS = 5
@@ -67,6 +106,14 @@ MAX_BODY = 6
 MAX_BULLETS = 10
 MAX_ITEM_CARDS = 8
 MAX_SOURCES = 12
+MAX_BLOCKS = 120
+MAX_TAB_BLOCKS = 60
+MIN_GROUP_TABS = 2
+MAX_LIST_ITEMS = 12
+MIN_ROW_CARDS = 2
+MAX_ROW_CARDS = 3
+MAX_TABLE_COLUMNS = 6
+MAX_TABLE_ROWS = 20
 
 TITLE_MAX = 120
 OPENING_MAX = 600
@@ -82,6 +129,11 @@ BULLET_TEXT_MAX = 300
 WATCH_MAX = 500
 SOURCE_FACT_MAX = 200
 NOTES_MAX = 2000
+LIST_ITEM_MAX = 300
+CALLOUT_TITLE_MAX = 40
+CALLOUT_TEXT_MAX = 1000
+TABLE_COLUMN_MAX = 40
+TABLE_CELL_MAX = 200
 
 SKILL_URL_PREFIX = "https://courtai.app/"
 
@@ -93,6 +145,10 @@ _HTTP_URL = re.compile(r"https?://[^\s/?#]+[^\s]*", re.IGNORECASE)
 #: C0 controls except tab and newline (carriage return included), DEL and C1.
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 _NOTES_LINK = re.compile(r"https?://|www\.", re.IGNORECASE)
+#: Light formatting (crf04/statsplus#380): ``**bold**``, ``*italic*`` and ``- `` bullet lines.
+_BOLD = re.compile(r"\*\*(.+?)\*\*")
+_ITALIC = re.compile(r"\*(.+?)\*")
+_BULLET = re.compile(r"^- ", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -173,6 +229,39 @@ def _date(value: Any, field: str) -> str:
     return value
 
 
+def _flag(source: Mapping[str, Any], key: str, field: str, out: dict) -> None:
+    if source.get(key) is not None:
+        if not isinstance(source[key], bool):
+            raise _refuse(field, "must be true or false")
+        out[key] = source[key]
+
+
+def _tag(source: Mapping[str, Any], field: str, out: dict) -> None:
+    if source.get("tag") is not None:
+        if source["tag"] not in TAGS:
+            raise _refuse(field, f"must be one of {', '.join(TAGS)}")
+        out["tag"] = source["tag"]
+
+
+def _card_list(value: Any, field: str, call_ids: set[str], maximum: int, *, minimum: int = 0) -> list[str]:
+    cards = []
+    for index, card in enumerate(_list(value, field, maximum, minimum=minimum)):
+        if not isinstance(card, str) or card not in call_ids:
+            raise _refuse(f"{field}[{index}]", "must name a call in calls")
+        cards.append(card)
+    return cards
+
+
+def _sources(value: Any, field: str, *, minimum: int = 0) -> list[list[str]]:
+    sources = []
+    for index, entry in enumerate(_list(value, field, MAX_SOURCES, minimum=minimum)):
+        fact, url = _pair(entry, f"{field}[{index}]")
+        sources.append(
+            [_text(fact, f"{field}[{index}][0]", SOURCE_FACT_MAX), _url(url, f"{field}[{index}][1]")]
+        )
+    return sources
+
+
 def _item(value: Any, field: str, call_ids: set[str]) -> dict[str, Any]:
     source = _object(
         value,
@@ -180,10 +269,7 @@ def _item(value: Any, field: str, call_ids: set[str]) -> dict[str, Any]:
         ("title", "tag", "subtitle", "key", "body", "bullets", "watch", "cards", "sources"),
     )
     item: dict[str, Any] = {"title": _text(source.get("title"), f"{field}.title", TITLE_MAX)}
-    if source.get("tag") is not None:
-        if source["tag"] not in TAGS:
-            raise _refuse(f"{field}.tag", f"must be one of {', '.join(TAGS)}")
-        item["tag"] = source["tag"]
+    _tag(source, f"{field}.tag", item)
     _optional_text(source, "subtitle", f"{field}.subtitle", SUBTITLE_MAX, item)
     _optional_text(source, "key", f"{field}.key", KEY_MAX, item)
     item["body"] = [
@@ -201,22 +287,8 @@ def _item(value: Any, field: str, call_ids: set[str]) -> dict[str, Any]:
         )
     item["bullets"] = bullets
     _optional_text(source, "watch", f"{field}.watch", WATCH_MAX, item)
-    cards = []
-    for index, card in enumerate(_list(source.get("cards"), f"{field}.cards", MAX_ITEM_CARDS)):
-        if not isinstance(card, str) or card not in call_ids:
-            raise _refuse(f"{field}.cards[{index}]", "must name a call in calls")
-        cards.append(card)
-    item["cards"] = cards
-    sources = []
-    for index, entry in enumerate(_list(source.get("sources"), f"{field}.sources", MAX_SOURCES)):
-        fact, url = _pair(entry, f"{field}.sources[{index}]")
-        sources.append(
-            [
-                _text(fact, f"{field}.sources[{index}][0]", SOURCE_FACT_MAX),
-                _url(url, f"{field}.sources[{index}][1]"),
-            ]
-        )
-    item["sources"] = sources
+    item["cards"] = _card_list(source.get("cards"), f"{field}.cards", call_ids, MAX_ITEM_CARDS)
+    item["sources"] = _sources(source.get("sources"), f"{field}.sources")
     return item
 
 
@@ -232,8 +304,129 @@ def _tab(value: Any, field: str, call_ids: set[str]) -> dict[str, Any]:
     return {"title": title, "layout": source["layout"], "items": items}
 
 
+_BLOCK_KEYS: dict[str, tuple[str, ...]] = {
+    "heading": ("text",),
+    "paragraph": ("text", "lede"),
+    "list": ("items", "ordered"),
+    "callout": ("title", "text", "tone"),
+    "card": ("card",),
+    "cards": ("cards",),
+    "spot": ("tag", "title", "subtitle", "key", "cards"),
+    "table": ("columns", "rows"),
+    "items": ("layout", "items"),
+    "sources": ("sources",),
+    "tabs": ("tabs",),
+}
+
+
+def _block(value: Any, field: str, call_ids: set[str], ids: set[str], *, nested: bool) -> dict[str, Any]:
+    """One validated block; ``ids`` collects every block id so far, across the whole document."""
+
+    if not isinstance(value, Mapping):
+        raise _refuse(field, "must be an object")
+    kind = value.get("type")
+    if kind not in BLOCK_TYPES:
+        raise _refuse(f"{field}.type", f"must be one of {', '.join(BLOCK_TYPES)}")
+    if kind == "tabs" and nested:
+        raise _refuse(f"{field}.type", "must not be tabs inside tabs")
+    source = _object(value, field, ("id", "type", *_BLOCK_KEYS[kind]))
+    block_id = source.get("id")
+    if not isinstance(block_id, str) or _CALL_ID.fullmatch(block_id) is None:
+        raise _refuse(f"{field}.id", "must be 1-40 characters of a-z, 0-9 and -")
+    if block_id in ids:
+        raise _refuse(f"{field}.id", "must be unique across the report")
+    ids.add(block_id)
+    if len(ids) > MAX_BLOCKS:
+        raise _refuse("report.blocks", f"must hold at most {MAX_BLOCKS} blocks, counting those inside tabs")
+    block: dict[str, Any] = {"id": block_id, "type": kind}
+    if kind == "heading":
+        block["text"] = _text(source.get("text"), f"{field}.text", TITLE_MAX)
+    elif kind == "paragraph":
+        block["text"] = _text(source.get("text"), f"{field}.text", BODY_MAX)
+        _flag(source, "lede", f"{field}.lede", block)
+    elif kind == "list":
+        block["items"] = [
+            _text(entry, f"{field}.items[{index}]", LIST_ITEM_MAX)
+            for index, entry in enumerate(
+                _list(source.get("items"), f"{field}.items", MAX_LIST_ITEMS, minimum=1)
+            )
+        ]
+        _flag(source, "ordered", f"{field}.ordered", block)
+    elif kind == "callout":
+        _optional_text(source, "title", f"{field}.title", CALLOUT_TITLE_MAX, block)
+        block["text"] = _text(source.get("text"), f"{field}.text", CALLOUT_TEXT_MAX)
+        if source.get("tone") is not None:
+            if source["tone"] not in TONES:
+                raise _refuse(f"{field}.tone", f"must be one of {', '.join(TONES)}")
+            block["tone"] = source["tone"]
+    elif kind == "card":
+        card = source.get("card")
+        if not isinstance(card, str) or card not in call_ids:
+            raise _refuse(f"{field}.card", "must name a call in calls")
+        block["card"] = card
+    elif kind == "cards":
+        block["cards"] = _card_list(
+            source.get("cards"), f"{field}.cards", call_ids, MAX_ROW_CARDS, minimum=MIN_ROW_CARDS
+        )
+    elif kind == "spot":
+        _tag(source, f"{field}.tag", block)
+        block["title"] = _text(source.get("title"), f"{field}.title", TITLE_MAX)
+        _optional_text(source, "subtitle", f"{field}.subtitle", SUBTITLE_MAX, block)
+        _optional_text(source, "key", f"{field}.key", KEY_MAX, block)
+        block["cards"] = _card_list(source.get("cards"), f"{field}.cards", call_ids, MAX_ITEM_CARDS)
+    elif kind == "table":
+        columns = [
+            _text(column, f"{field}.columns[{index}]", TABLE_COLUMN_MAX)
+            for index, column in enumerate(
+                _list(source.get("columns"), f"{field}.columns", MAX_TABLE_COLUMNS, minimum=1)
+            )
+        ]
+        rows = []
+        for row_index, row in enumerate(
+            _list(source.get("rows"), f"{field}.rows", MAX_TABLE_ROWS, minimum=1)
+        ):
+            row_field = f"{field}.rows[{row_index}]"
+            if not isinstance(row, list):
+                raise _refuse(row_field, "must be a list")
+            if len(row) != len(columns):
+                raise _refuse(row_field, f"must have {len(columns)} cells, one per column")
+            rows.append(
+                [_text(cell, f"{row_field}[{index}]", TABLE_CELL_MAX) for index, cell in enumerate(row)]
+            )
+        block["columns"], block["rows"] = columns, rows
+    elif kind == "items":
+        if source.get("layout") not in LAYOUTS:
+            raise _refuse(f"{field}.layout", f"must be one of {', '.join(LAYOUTS)}")
+        block["layout"] = source["layout"]
+        block["items"] = [
+            _item(item, f"{field}.items[{index}]", call_ids)
+            for index, item in enumerate(_list(source.get("items"), f"{field}.items", MAX_ITEMS))
+        ]
+    elif kind == "sources":
+        block["sources"] = _sources(source.get("sources"), f"{field}.sources", minimum=1)
+    else:  # tabs
+        tabs = []
+        for index, tab in enumerate(
+            _list(source.get("tabs"), f"{field}.tabs", MAX_TABS, minimum=MIN_GROUP_TABS)
+        ):
+            tab_field = f"{field}.tabs[{index}]"
+            tab_source = _object(tab, tab_field, ("title", "blocks"))
+            title = _text(tab_source.get("title"), f"{tab_field}.title", TAB_TITLE_MAX)
+            blocks = [
+                _block(child, f"{tab_field}.blocks[{child_index}]", call_ids, ids, nested=True)
+                for child_index, child in enumerate(
+                    _list(tab_source.get("blocks"), f"{tab_field}.blocks", MAX_TAB_BLOCKS, minimum=1)
+                )
+            ]
+            tabs.append({"title": title, "blocks": blocks})
+        block["tabs"] = tabs
+    return block
+
+
 def _document(value: Any, call_ids: set[str]) -> dict[str, Any]:
-    source = _object(value, "report", ("title", "date", "opening", "skill", "footnote", "tabs"))
+    source = _object(value, "report", ("title", "date", "opening", "skill", "footnote", "tabs", "blocks"))
+    if (source.get("tabs") is None) == (source.get("blocks") is None):
+        raise _refuse("report", "must have exactly one of tabs or blocks")
     document: dict[str, Any] = {"title": _text(source.get("title"), "report.title", TITLE_MAX)}
     if source.get("date") is not None:
         document["date"] = _date(source["date"], "report.date")
@@ -251,6 +444,13 @@ def _document(value: Any, call_ids: set[str]) -> dict[str, Any]:
             skill["url"] = url
         document["skill"] = skill
     _optional_text(source, "footnote", "report.footnote", FOOTNOTE_MAX, document)
+    if source.get("blocks") is not None:
+        ids: set[str] = set()
+        document["blocks"] = [
+            _block(block, f"report.blocks[{index}]", call_ids, ids, nested=False)
+            for index, block in enumerate(_list(source["blocks"], "report.blocks", MAX_BLOCKS, minimum=1))
+        ]
+        return document
     document["tabs"] = [
         _tab(tab, f"report.tabs[{index}]", call_ids)
         for index, tab in enumerate(_list(source.get("tabs"), "report.tabs", MAX_TABS, minimum=1))
@@ -373,9 +573,15 @@ def validate_edits(body: Any, document: dict[str, Any]) -> dict[str, Any]:
     The title is checked as on publish (``invalid_input``), the notes by
     :func:`validate_notes`; ``items`` (omitted is ``[]``) names each item at
     most once, and each item's ``cards`` are distinct cards it was published
-    with, in display order, or the body is ``invalid_edits``.
+    with, in display order, or the body is ``invalid_edits``.  A block
+    document's body has ``blocks`` instead of ``items``; see :func:`_block_edits`.
     """
 
+    if "blocks" in document:
+        source = _object(body, "body", ("title", "notes", "blocks"))
+        title = _text(source.get("title"), "title", TITLE_MAX)
+        notes = validate_notes(source.get("notes"))
+        return {"title": title, "notes": notes, "blocks": _block_edits(source.get("blocks"), document)}
     source = _object(body, "body", ("title", "notes", "items"))
     title = _text(source.get("title"), "title", TITLE_MAX)
     notes = validate_notes(source.get("notes"))
@@ -414,9 +620,17 @@ def apply_edits(
 
     Hidden items are dropped, each overridden item shows only its listed cards
     in their order, and only the calls some shown card names are kept, in
-    published order.  The inputs are not changed.
+    published order.  In a block document a hidden block is dropped (a hidden
+    ``tabs`` block with its whole group) and an overridden block shows only its
+    listed cards.  The inputs are not changed.
     """
 
+    if "blocks" in document:
+        if edits is not None:
+            overrides = {entry["id"]: entry for entry in edits["blocks"]}
+            document = {**document, "title": edits["title"], "blocks": _edited(document["blocks"], overrides)}
+        shown = set(shown_cards(document))
+        return document, [call for call in calls if call["id"] in shown]
     if edits is not None:
         overrides = {(entry["tab"], entry["item"]): entry for entry in edits["items"]}
         tabs = []
@@ -432,3 +646,141 @@ def apply_edits(
         document = {**document, "title": edits["title"], "tabs": tabs}
     shown = {card for tab in document["tabs"] for item in tab["items"] for card in item["cards"]}
     return document, [call for call in calls if call["id"] in shown]
+
+
+def _block_edits(value: Any, document: dict[str, Any]) -> list[dict[str, Any]]:
+    """A block document's edit entries: ``[{id, hidden, cards?}]``, omitted is ``[]``.
+
+    ``id`` names a published block at most once; ``cards``, only on a
+    ``cards``, ``spot`` or ``items`` block, lists distinct cards that block
+    was published with, in display order.  Anything else is ``invalid_edits``.
+    """
+
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise invalid_edits()
+    published = {block["id"]: block for block in walk_blocks(document)}
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in value:
+        if not isinstance(entry, Mapping) or not {"id", "hidden"} <= set(entry) <= {"id", "hidden", "cards"}:
+            raise invalid_edits()
+        block_id = entry["id"]
+        if not isinstance(block_id, str) or block_id not in published or block_id in seen:
+            raise invalid_edits()
+        if not isinstance(entry["hidden"], bool):
+            raise invalid_edits()
+        seen.add(block_id)
+        edit: dict[str, Any] = {"id": block_id, "hidden": entry["hidden"]}
+        cards = entry.get("cards")
+        if cards is not None:
+            block = published[block_id]
+            own = block_cards(block)
+            if (
+                block["type"] not in CARD_BLOCKS
+                or not isinstance(cards, list)
+                or not all(isinstance(card, str) and card in own for card in cards)
+                or len(set(cards)) != len(cards)
+            ):
+                raise invalid_edits()
+            edit["cards"] = list(cards)
+        entries.append(edit)
+    return entries
+
+
+def _edited(blocks: list[dict[str, Any]], overrides: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    shown = []
+    for block in blocks:
+        override = overrides.get(block["id"])
+        if override is not None and override["hidden"]:
+            continue
+        if block["type"] == "tabs":
+            block = {
+                **block,
+                "tabs": [{**tab, "blocks": _edited(tab["blocks"], overrides)} for tab in block["tabs"]],
+            }
+        if override is not None and "cards" in override:
+            kept = override["cards"]
+            if block["type"] == "items":
+                block = {
+                    **block,
+                    "items": [
+                        {**item, "cards": [card for card in kept if card in item["cards"]]}
+                        for item in block["items"]
+                    ],
+                }
+            else:
+                block = {**block, "cards": list(kept)}
+        shown.append(block)
+    return shown
+
+
+# -- reading either document shape ----------------------------------------------------
+
+
+def walk_blocks(document: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every block in document order, a ``tabs`` group before the blocks it holds; ``[]`` for tabs."""
+
+    def walk(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out = []
+        for block in blocks:
+            out.append(block)
+            if block["type"] == "tabs":
+                for tab in block["tabs"]:
+                    out.extend(walk(tab["blocks"]))
+        return out
+
+    return walk(document.get("blocks") or [])
+
+
+def block_cards(block: dict[str, Any]) -> list[str]:
+    """The call ids one block shows, in display order, once each."""
+
+    if block["type"] == "card":
+        return [block["card"]]
+    if block["type"] in ("cards", "spot"):
+        return list(dict.fromkeys(block["cards"]))
+    if block["type"] == "items":
+        return list(dict.fromkeys(card for item in block["items"] for card in item["cards"]))
+    return []
+
+
+def shown_cards(document: dict[str, Any]) -> list[str]:
+    """Every call id a card in the document names, in document order, once each."""
+
+    if "blocks" in document:
+        cards = (card for block in walk_blocks(document) for card in block_cards(block))
+    else:
+        cards = (card for tab in document["tabs"] for item in tab["items"] for card in item["cards"])
+    return list(dict.fromkeys(cards))
+
+
+def tagged(document: dict[str, Any]) -> list[tuple[str, str]]:
+    """The ``(tag, title)`` of every tagged item and spot block, in document order."""
+
+    if "blocks" not in document:
+        return [
+            (item["tag"], item["title"]) for tab in document["tabs"] for item in tab["items"] if "tag" in item
+        ]
+    entries = []
+    for block in walk_blocks(document):
+        if block["type"] == "spot" and "tag" in block:
+            entries.append((block["tag"], block["title"]))
+        elif block["type"] == "items":
+            entries.extend((item["tag"], item["title"]) for item in block["items"] if "tag" in item)
+    return entries
+
+
+def lede(document: dict[str, Any]) -> str | None:
+    """A block document's first ``lede`` paragraph, else its first paragraph, as plain text.
+
+    The light formatting is dropped: ``**`` and ``*`` around text and a
+    leading ``- `` on a line.  ``None`` for a tab document or one with no paragraph.
+    """
+
+    paragraphs = [block for block in walk_blocks(document) if block["type"] == "paragraph"]
+    chosen = next((block for block in paragraphs if block.get("lede")), paragraphs[0] if paragraphs else None)
+    if chosen is None:
+        return None
+    return _ITALIC.sub(r"\1", _BOLD.sub(r"\1", _BULLET.sub("", chosen["text"])))
