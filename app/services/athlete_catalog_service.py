@@ -17,7 +17,7 @@ from typing import Any
 
 import pandas as pd
 from sqlalchemy import delete, insert, select, update
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.domain.freshness import (
@@ -29,6 +29,7 @@ from app.domain.market_content import NumericDomainError
 from app.errors import InvalidConfigurationError
 from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
 from app.providers.nba_stats import ROSTER_COLUMNS, NBAStatsAdapter, validate_canonical_season
+from app.services.request_reads import read_connection
 from app.utils.db import is_demo_database_url
 from app.utils.telemetry import ProviderResponseError
 
@@ -92,19 +93,25 @@ def _read_catalog_rows(
     season: str,
     *,
     active_only: bool = False,
+    player_ids: Iterable[int] | None = None,
+    connection: Connection | None = None,
 ) -> list[dict[str, Any]]:
     """Read persisted canonical athletes for one explicit season."""
 
     season = validate_canonical_season(season)
-    with engine.connect() as connection:
-        statement = (
-            select(AthleteCatalog.__table__)
-            .where(AthleteCatalog.season == season)
-            .order_by(AthleteCatalog.player_id)
+    statement = (
+        select(AthleteCatalog.__table__)
+        .where(AthleteCatalog.season == season)
+        .order_by(AthleteCatalog.player_id)
+    )
+    if active_only:
+        statement = statement.where(AthleteCatalog.is_active_for_season.is_(True))
+    if player_ids is not None:
+        statement = statement.where(
+            AthleteCatalog.player_id.in_(sorted({int(player_id) for player_id in player_ids}))
         )
-        if active_only:
-            statement = statement.where(AthleteCatalog.is_active_for_season.is_(True))
-        rows = connection.execute(statement).mappings().all()
+    with read_connection(engine, connection) as active:
+        rows = active.execute(statement).mappings().all()
     return [{column: row[column] for column in ROSTER_COLUMNS} for row in rows]
 
 
@@ -141,8 +148,12 @@ class AthleteCatalogReader:
         season: str,
         *,
         active_only: bool = False,
+        player_ids: Iterable[int] | None = None,
+        connection: Connection | None = None,
     ) -> list[dict[str, Any]]:
-        return _read_catalog_rows(self._engine, season, active_only=active_only)
+        return _read_catalog_rows(
+            self._engine, season, active_only=active_only, player_ids=player_ids, connection=connection
+        )
 
     def get_positions(self, season: str) -> dict[int, str]:
         return _read_catalog_positions(self._engine, season)

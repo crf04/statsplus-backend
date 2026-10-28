@@ -217,12 +217,12 @@ class EventCatalogRepository:
             )
 
     def list_events_between(
-        self, season: str, starts_at: datetime, ends_at: datetime
+        self, season: str, starts_at: datetime, ends_at: datetime, *, connection: Connection | None = None
     ) -> list[dict[str, Any]]:
         """Read events in one half-open UTC window without decoding a season."""
 
         table = EventCatalogEntry.__table__
-        with self.engine.connect() as connection:
+        with read_connection(self.engine, connection) as connection:
             rows = connection.execute(
                 select(table)
                 .where(

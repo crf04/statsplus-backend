@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from threading import Lock
 from typing import Any
 
+from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.domain.nba_events import is_final_event
@@ -19,6 +20,7 @@ from app.domain.utc import assume_utc, parse_utc_iso
 from app.providers.nba_injury_report import EASTERN, SOURCE_URL, InjuryEntryEvidence
 from app.services.athlete_resolver import normalize_athlete_name
 from app.services.injury_snapshot_repository import InjurySnapshotScope
+from app.services.publication_snapshot_calls import call_with_read_scope
 from app.utils.telemetry import (
     BoundedInjuryTelemetryRecorder,
     InjuryTelemetryEvent,
@@ -449,6 +451,7 @@ class MatchupInjuryService:
         events: Sequence[Mapping[str, Any]],
         season: str,
         pool_players_by_game: Mapping[str, Sequence[Any]],
+        connection: Connection | None = None,
     ) -> dict[str, MatchupInjuryResult]:
         """Read every event's stored override with one batched statement.
 
@@ -473,7 +476,9 @@ class MatchupInjuryService:
             for event in events
         }
         try:
-            stored_by_scope = self.snapshot_repository.get_many(tuple(scopes_by_game.values()))
+            stored_by_scope = call_with_read_scope(
+                self.snapshot_repository.get_many, tuple(scopes_by_game.values()), connection=connection
+            )
         except (SQLAlchemyError, TypeError, ValueError):
             stored_by_scope = {}
         now = assume_utc(self.clock())

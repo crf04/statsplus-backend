@@ -101,7 +101,7 @@ reads.
 | Link previews | `GET /api/games/game_logs/preview.png`, `GET /api/games/slate/preview.png`, `GET /api/games/matchup/preview.png` | Chat apps fetch them signed out to unfurl a shared link; there is no account to count. |
 | Target resolve | `GET /api/user/targets/resolve` | The Slate page reads it on every load to show live Targets, so counting it would count Slate loads. This also means the connector's `get_targets` call is not counted. |
 | Reference lists | `GET /api/players`, `GET /api/teams`, `GET /api/games/seasons`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, `GET /api/players/next-opponent` | Pickers and reference data. |
-| Other research reads | `GET /api/games/rotation`, `GET /api/players/season_stats`, `GET /api/on_off`, `GET /api/injuries`, `GET /api/injury_scenarios` | Not among the surfaces #213 names, so not counted. To count one, add its endpoint to `RESEARCH_ENDPOINTS`. |
+| Other research reads | `GET /api/games/board`, `GET /api/games/rotation`, `GET /api/players/season_stats`, `GET /api/on_off`, `GET /api/injuries`, `GET /api/injury_scenarios` | Not among the surfaces #213 names, so not counted. To count one, add its endpoint to `RESEARCH_ENDPOINTS`. |
 | Account | every other `/api/user/*` route, `POST /api/user/attribution` | Account management, not research. |
 
 `RESEARCH_ENDPOINTS` in `app/services/research_activity.py` is the single list
@@ -1233,6 +1233,119 @@ DFS provider and writes nothing.
   generation (one payload-free statement) is unchanged, for at most
   `SNAPSHOT_REUSE_MAX_AGE_SECONDS` (default 60; `0` captures every request),
   because a capture stamps each stream's `age_seconds`.
+
+### Get Board
+
+```http
+GET /api/games/board?date=YYYY-MM-DD[&season=YYYY-YY][&market=CODE][&game=<nba_game_id>][&team=ABBR][&sources=a,b,...]
+Authorization: Bearer <firebase-id-token>
+```
+
+Authenticated and read-only (crf04/statsplus#373). Every posted line on one US
+Eastern date, for the connector's `get_board`. It reads stored data only: the
+date's games, one Player Pool read covering all of them, the stored injury
+report in one statement, every game's latest sportsbook rows in one statement,
+and the athlete catalog rows of players outside the pool in one statement, all
+on one repeatable-read snapshot. It composes no Matchup and calls no provider.
+
+- `date` is required, `YYYY-MM-DD`.
+- `season` (optional, canonical) names the schedule that holds the date; omitted,
+  it is the date's own season, as on the Slate.
+- `market` is one Statistic Catalog market category (`PTS`, `FG3A`, `FTA`, ...),
+  exact case. Without it the response is the market index.
+- `game` (a 10-digit NBA game ID) and `team` (an NBA tricode, any case) keep only
+  that game, or that team's game and its players.
+- `sources` is a comma-separated list of providers (`dabble`, `prizepicks`,
+  `underdog`, `novig`, `kalshi`, `polymarket`) and books (`draftkings`,
+  `fanduel`, `betmgm`, `williamhill_us`, `betrivers`, `fanatics`). It narrows the
+  rows, each row's `lines`, `line_prices` and `book_lines.books`, the index's
+  counts, and the top-level `sources` list.
+- An unknown market, a malformed value, a repeated parameter (other than
+  `sources`) or any other parameter is `400 invalid_input` with
+  `details.parameters` naming it. A date with no games is `200` with
+  `"games": []`.
+
+Index (no `market`):
+
+```json
+{
+  "date": "2026-01-15",
+  "season": "2025-26",
+  "games": [
+    {"game_id": "0022500601", "label": "GSW @ LAL", "tip": "2026-01-15T23:30:00Z", "status": "live"}
+  ],
+  "sources": [
+    {"source": "dabble", "kind": "provider", "status": "fresh", "retrieved_at": "2026-01-15T23:58:00Z"},
+    {"source": "prizepicks", "kind": "provider", "status": "stale-served", "retrieved_at": "2026-01-15T23:40:00Z"},
+    {"source": "draftkings", "kind": "sportsbook", "status": "fresh", "retrieved_at": "2026-01-15T23:57:00Z"}
+  ],
+  "markets": [
+    {"market": "PTS", "players": 4, "book_only_unnamed": 1, "sources": ["dabble", "prizepicks", "draftkings"]},
+    {"market": "FG3A", "players": 2, "book_only_unnamed": 0, "sources": ["dabble"]}
+  ]
+}
+```
+
+Market mode (`market=PTS`) drops `markets`, adds `players_total` (rows after
+filters) and `"omitted": {"book_only_unnamed": 1}`, and gives each game its
+`players`:
+
+```json
+{
+  "player_id": 1628369,
+  "name": "Jayson Tatum",
+  "team": "BOS",
+  "injury_status": "Questionable",
+  "lines": {"dabble": 27.5, "prizepicks": 28.5},
+  "line_prices": {"dabble": {"over": -122, "under": -104}},
+  "book_lines": {
+    "as_of": "2026-01-15T23:57:00Z",
+    "closing": false,
+    "books": [
+      {"book": "draftkings", "line": 27.5, "over": -128, "under": 100, "updated_at": "2026-01-15T23:57:00Z"}
+    ]
+  }
+}
+```
+
+- Games are ordered by tip, then label. `status` is `final` once the game is
+  final, `live` once it has started (its tip has passed or the catalog says it
+  is in progress), else `scheduled`.
+- Players are ordered within a game by team tricode, then name, then player
+  ID. Paging relies on this order being stable. A player appears only when at
+  least one source posts the market. A player ruled Out stays in, with
+  `injury_status` `"Out"`; `injury_status` is the stored report's `Out`,
+  `Doubtful`, `Questionable` or `Probable`, else `null` (not listed,
+  `Available`, or no usable report).
+- Players come from the Player Pool for the date's games, plus every player a
+  book quotes for the market in a game whose pool has no row for him (a late
+  call-up or a rookie the DFS providers do not post). Such a row has
+  `"lines": {}` and `"line_prices": {}`, and its `name` and `team` are the
+  athlete catalog's for the season. `team`, `game` and `sources` apply to these
+  rows as to any: a player quoted only by books `sources` drops is not listed.
+  The index's `players` counts include them.
+- A quoted player outside the pool whom the athlete catalog lacks, or lists
+  without a team, is not a row, since without a team it can be neither filtered
+  by `team` nor ordered. Market mode counts these players in
+  `omitted.book_only_unnamed` and the index in each market's
+  `book_only_unnamed`, after `game` and `sources`. A `team` filter keeps them in
+  the count, because they are quoted in that team's game. A market quoted only
+  for such players is still listed in the index, with `"players": 0`.
+- `lines` and `line_prices` are the Matchup row's, for this market only.
+  `line_prices` holds American prices as posted, `null` for a missing side; a
+  provider with no per-pick price (PrizePicks) is absent from it.
+- `book_lines` is the Matchup's `book_lines` entry for this market without the
+  best-price flags, or `null` when no book quotes it. `as_of` is the newest
+  book's update and `closing` is `true` when every listed book's quote is a
+  closing quote.
+- A started game reads its closing set, as every pool read does, so a line
+  posted after the tip is not shown.
+- `sources` lists each provider the pool reports (the
+  `freshness.pool.providers` vocabulary: `fresh`, `stale-served`, `missing`,
+  and `closing` when every game read has started), then each book quoting a
+  game read, `fresh` with its newest update. Times are UTC with a `Z` suffix.
+
+The board is not a research action and records no usage event.
 
 ### Get Matchup
 
