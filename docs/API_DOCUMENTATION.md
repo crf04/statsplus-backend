@@ -2764,8 +2764,10 @@ rules. Without `season` every response is byte for byte what it was.
 - A malformed `season` is `400 invalid_input` (`details.parameters:
   ["season"]`). A season not offered is `503 season_unavailable` with
   `details: {selected_season, published_season}`.
-- The Slate, slate edges, profile and team stats also answer anonymous callers. One
-  without a valid token may name the Published Season or an earlier one; a
+- The Slate and slate edges select any offered season (see
+  [`/seasons`](#get-seasons)) for every caller, anonymous included, so the home page shows the
+  Matchup's numbers. Profile and team stats also answer anonymous callers; one
+  without a valid token may name the Published Season or an earlier one, and a
   later season is `503 season_unavailable` before anything is read or cached,
   as for a [game-log preview](#get-game-log-preview-image).
 - Matchup, Unscheduled Matchup, selection, selected profile and selected

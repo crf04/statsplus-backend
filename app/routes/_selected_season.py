@@ -4,9 +4,10 @@
 selects which season's evidence the response reads.  Omitted, the route reads
 exactly as before.  A selected season reads through ``season_scoped``; one
 that is not offered is ``503 season_unavailable``, never another season's
-answer.  An anonymous caller never reads an Unpublished Season: one after the
-Published Season is refused before anything is read or cached, as a game-log
-preview is.
+answer.  An anonymous profile or team-stats caller never reads an
+Unpublished Season: one after the Published Season is refused before anything
+is read or cached, as a game-log preview is.  The Slate and slate edges serve
+every offered season to anyone, so the home page reads the Matchup's season.
 """
 
 from collections.abc import Iterator

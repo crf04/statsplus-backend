@@ -93,6 +93,8 @@ ROUTES = {
 }
 #: Slate, edges, profile and team stats also answer anonymous callers.
 ANONYMOUS = ("slate", "slate_edges", "profile", "team_stats")
+#: The home page's reads: an anonymous caller selects any offered season.
+HOME = ("slate", "slate_edges")
 
 
 def _with_season(path):
@@ -139,10 +141,28 @@ def test_every_route_names_an_explicit_published_season_in_its_context(served, c
     assert body["season_context"] == {"selected_season": OLD, "published_season": OLD}
 
 
-@pytest.mark.parametrize("route", ANONYMOUS)
+@pytest.mark.parametrize("route", sorted(set(ANONYMOUS) - set(HOME)))
 def test_an_anonymous_caller_cannot_select_a_held_season(served, client, route):
     served.hold_opening_week()
 
+    response = client.get(f"{_with_season(ROUTES[route])}{NEW}")
+
+    assert _refusal(response) == (503, "season_unavailable", CONTEXT)
+
+
+@pytest.mark.parametrize("route", HOME)
+def test_an_anonymous_home_read_selects_the_offered_2026_27(served, client, route):
+    served.hold_opening_week()
+
+    response = client.get(f"{_with_season(ROUTES[route])}{NEW}")
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert (body["season_context"], body["trailing"]) == (CONTEXT, [DIETS, LAST_15])
+
+
+@pytest.mark.parametrize("route", HOME)
+def test_an_anonymous_home_read_of_an_unoffered_season_is_refused(served, client, route):
     response = client.get(f"{_with_season(ROUTES[route])}{NEW}")
 
     assert _refusal(response) == (503, "season_unavailable", CONTEXT)
