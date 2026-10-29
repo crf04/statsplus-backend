@@ -212,8 +212,8 @@ def _sync_firebase_user(
     return current_user
 
 
-def _refuse_waitlisted(current_user: dict[str, Any], *, tolerate_lookup_errors: bool = False) -> None:
-    """Refuse a waitlisted account, except an administrator.
+def is_waitlisted(current_user: dict[str, Any], *, tolerate_lookup_errors: bool = False) -> bool:
+    """Whether ``current_user`` is a waitlisted account; an administrator never is.
 
     Administrators are exempt so the switch and the waitlist stay reachable
     even if an admin's own first sign-in landed while sign-ups were paused.
@@ -228,23 +228,27 @@ def _refuse_waitlisted(current_user: dict[str, Any], *, tolerate_lookup_errors: 
     """
 
     if _user_is_admin(current_user):
-        return
+        return False
     db_user = current_user.get("db_user")
     if db_user is not None:
-        status = getattr(db_user, "access_status", None)
-    elif isinstance(user_service := get_dependencies().user_service, UserService):
+        return getattr(db_user, "access_status", None) == ACCESS_WAITLISTED
+    if not isinstance(user_service := get_dependencies().user_service, UserService):
         # Only the real service can answer; the offline suite's stand-ins have
         # no access policy to apply.
-        try:
-            status = user_service.resolve_access_status(current_user.get("uid"))
-        except Exception as error:
-            if not tolerate_lookup_errors:
-                raise
-            logger.warning("Could not resolve access status: %s", error)
-            return
-    else:
-        return
-    if status == ACCESS_WAITLISTED:
+        return False
+    try:
+        return user_service.resolve_access_status(current_user.get("uid")) == ACCESS_WAITLISTED
+    except Exception as error:
+        if not tolerate_lookup_errors:
+            raise
+        logger.warning("Could not resolve access status: %s", error)
+        return False
+
+
+def _refuse_waitlisted(current_user: dict[str, Any], *, tolerate_lookup_errors: bool = False) -> None:
+    """Refuse a waitlisted account (see :func:`is_waitlisted`)."""
+
+    if is_waitlisted(current_user, tolerate_lookup_errors=tolerate_lookup_errors):
         raise WaitlistedError(detail=f"Waitlisted user {current_user.get('uid')} refused")
 
 

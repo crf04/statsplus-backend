@@ -92,12 +92,6 @@ def test_a_token_is_ignored_even_when_it_would_be_refused(
     assert response.status_code == 200
 
 
-def test_game_logs_stays_authenticated(client, firebase_enforced, real_service):
-    response = client.get("/api/games/game_logs?player_name=Jalen+Johnson")
-
-    assert response.status_code == 401
-
-
 def test_other_game_routes_stay_authenticated(client, firebase_enforced):
     statuses = {
         path: client.get(path).status_code

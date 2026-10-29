@@ -341,9 +341,18 @@ def test_a_batch_backtest_that_served_any_backtest_counts_once(client, engine, d
 def test_a_waitlisted_account_is_refused_and_not_counted(client, engine):
     UserService(engine).set_signups_open(False)
 
-    response = _call(client, "get", "/api/games/game_logs?player_name=A", "queued")
+    response = _call(client, "get", "/api/games/matchup?game_id=0022600001", "queued")
 
     assert response.status_code == 403
+    assert _tally(engine) == []
+
+
+def test_a_waitlisted_accounts_shared_link_read_is_served_but_not_counted(client, engine):
+    UserService(engine).set_signups_open(False)
+
+    response = _call(client, "get", "/api/games/game_logs?player_name=A", "queued")
+
+    assert response.status_code == 200
     assert _tally(engine) == []
 
 
