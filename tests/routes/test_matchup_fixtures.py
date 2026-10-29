@@ -2772,6 +2772,7 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
         settings=settings,
         injuries=_injuries(engine),
         clock=lambda: NOW,
+        statistic_catalog=catalog,
     )
     dependencies = SimpleNamespace(
         settings=settings,
@@ -2809,6 +2810,34 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
     assert payload["players"][0]["canonical_id"] == 2544
     assert payload["players"][0]["season_scoring"] == 25.0
     assert payload["players"][0]["last_10_minutes"] == [35.0]
+    # One game, so the season averages are that game's line.
+    one_game = {
+        "3PM": 3.0,
+        "AST": 7.0,
+        "BLK": 1.0,
+        "FG2A": 11.0,
+        "FG3A": 7.0,
+        "FGA": 18.0,
+        "PA": 32.0,
+        "PR": 33.0,
+        "PRA": 40.0,
+        "PTS": 25.0,
+        "RA": 15.0,
+        "REB": 8.0,
+        "STKS": 2.0,
+        "STL": 1.0,
+        "TOV": 3.0,
+    }
+    assert payload["players"][0]["season_averages"] == one_game
+    assert payload["players"][0]["last_five_games"] == [
+        {
+            "game_id": "0022500500",
+            "game_date": "2026-01-10",
+            "matchup": "LAL vs. BOS",
+            "minutes": 35.0,
+            "stats": one_game,
+        }
+    ]
     play_diet = payload["players"][0]["diet_shares"]["play_types"]
     assert {row["key"] for row in play_diet} == {
         "Transition",
