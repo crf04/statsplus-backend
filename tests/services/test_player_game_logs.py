@@ -1141,6 +1141,9 @@ def test_batch_summaries_use_one_rows_query_and_keep_phase_semantics(tmp_path):
     assert summaries[101].season_rate is not None
     assert summaries[101].season_rate.game_count == 12
     assert summaries[101].season_rate.per_game["PTS"] == 13
+    # The rate's own rows, which the Matchup's last five games read: Regular
+    # Season only, oldest first, never the two later playoff games.
+    assert [row.game_id for row in summaries[101].rate_rows] == [f"002250{i:04d}" for i in range(1, 13)]
     assert summaries[101].last_ten_minutes == (
         5.0,
         6.0,

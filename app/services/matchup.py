@@ -653,6 +653,17 @@ class MatchupService:
             }
         )
         self._historical_categories = tuple(sorted(self._statistics))
+        # A recent game's stat line covers every posted market, scoreable or
+        # not (FTA, FGM...), so the rail can chart whichever tab is open.
+        self._line_statistics = (
+            {}
+            if statistic_catalog is None
+            else {
+                statistic.market_category: statistic
+                for statistic in statistic_catalog.statistics
+                if statistic.market_category is not None
+            }
+        )
         self.database_only = bool(database_only)
         self.publication_reader = publication_reader
         # One request checks out one connection for every read it composes;
@@ -1932,7 +1943,7 @@ class MatchupService:
                 availability,
             )
             season_rate = None if historical or summary is None else summary.season_rate
-            line_markets = [market for market in player.market_categories if market in self._statistics]
+            line_markets = [market for market in player.market_categories if market in self._line_statistics]
             rows.append(
                 {
                     "canonical_id": int(player.canonical_player_id),
@@ -1958,7 +1969,7 @@ class MatchupService:
                         []
                         if season_rate is None
                         else [
-                            player_game_log_focal_line(record, line_markets, self._statistics)
+                            player_game_log_focal_line(record, line_markets, self._line_statistics)
                             for record in sorted(
                                 summary.rate_rows,
                                 key=lambda record: (record.game_date, record.game_id),

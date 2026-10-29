@@ -3211,6 +3211,8 @@ class _UnorderedRateRowLogs(RecordedLogs):
                 ("0022500004", "2026-01-08", 24),
                 ("0022500003", "2026-01-08", 23),
                 ("0022500005", "2026-01-09", 25),
+                # Rescheduled: the lowest id, played last.
+                ("0022500000", "2026-01-12", 27),
             )
         )
         return {2544: replace(summary, rate_rows=rows)}
@@ -3222,11 +3224,34 @@ def test_last_five_games_are_ordered_by_date_then_game_id_whatever_order_the_row
     (player,) = service.get_matchup(game_id=GAME_ID)["players"]
 
     assert [(game["game_id"], game["game_date"], game["stats"]) for game in player["last_five_games"]] == [
-        ("0022500002", "2026-01-04", {"PTS": 22.0, "FGA": 18.0}),
         ("0022500003", "2026-01-08", {"PTS": 23.0, "FGA": 18.0}),
         ("0022500004", "2026-01-08", {"PTS": 24.0, "FGA": 18.0}),
         ("0022500005", "2026-01-09", {"PTS": 25.0, "FGA": 18.0}),
         ("0022500006", "2026-01-11", {"PTS": 26.0, "FGA": 18.0}),
+        ("0022500000", "2026-01-12", {"PTS": 27.0, "FGA": 18.0}),
+    ]
+
+
+def test_last_five_games_carry_every_posted_market_not_only_scoreable_ones():
+    """FTA, FTM, FGM and FG2M have no Matchup Score but are rail tabs."""
+
+    markets = ("PTS", "FTA", "FTM", "FGM", "FG2M")
+    pool = PlayerPool(
+        players=(PoolPlayer(2544, "LeBron James", LAL, markets, {"prizepicks": markets}),),
+        team_counts={LAL: 1},
+        freshness={"status": "fresh", "retrieved_at": RETRIEVED_AT.isoformat(), "providers": {}},
+    )
+    service = _service(
+        pool=pool, player_logs=_UnorderedRateRowLogs(), statistic_catalog=StatisticCatalog.load_default()
+    )
+
+    (player,) = service.get_matchup(game_id=GAME_ID)["players"]
+
+    assert player["stat_categories"] == list(markets)
+    # 9 of 18 field goals with 3 threes, 3 of 4 free throws, in every game.
+    assert [game["stats"] for game in player["last_five_games"]] == [
+        {"PTS": float(points), "FTA": 4.0, "FTM": 3.0, "FGM": 9.0, "FG2M": 6.0}
+        for points in (23, 24, 25, 26, 27)
     ]
 
 
