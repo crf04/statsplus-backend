@@ -54,7 +54,7 @@ import redis
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
-from app.config.settings import RuntimeSettings
+from app.config.settings import MatchupScoreSettings, RuntimeSettings
 from app.domain.nba_events import REGULAR_SEASON_TYPE
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.domain.target_statistics import (
@@ -835,6 +835,7 @@ class TargetBacktestService:
                 kept,
                 player_minutes=player_minutes,
                 connection=connection,
+                thinness=choice.thinness(self.settings.matchup_scores),
                 # The Positions the cache key was derived from, when it was.
                 positions=None if catalog_read is None else catalog_read[0],
             )
@@ -1151,6 +1152,7 @@ class TargetBacktestService:
         *,
         player_minutes: int | None = None,
         connection: Connection | None = None,
+        thinness: MatchupScoreSettings,
         positions: Mapping[int, str] | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """Return the qualifying players and how many lacked a Position.
@@ -1216,6 +1218,7 @@ class TargetBacktestService:
                 diets.players.get(player_id, ()),
                 summaries.get(player_id),
                 diets,
+                thinness,
             )
             if shares is None:
                 continue
@@ -1253,6 +1256,7 @@ class TargetBacktestService:
         facts: Sequence[Any],
         summary: PlayerSeasonLogSummary | None,
         diets: PlayerDietResult,
+        thinness: MatchupScoreSettings,
     ) -> list[dict[str, Any]] | None:
         """Return one player's per-Qualifier shares, or ``None`` if unfit.
 
@@ -1272,7 +1276,7 @@ class TargetBacktestService:
                 shares.append(rule_share(base))
                 continue
             if base == SEASON_AVERAGE_QUALIFIER_BASE:
-                if not self._average_fits(qualifier, summary):
+                if not self._average_fits(qualifier, summary, thinness):
                     return None
                 shares.append(rule_share(base))
                 continue
@@ -1292,7 +1296,7 @@ class TargetBacktestService:
                 observed_share=observed_diet_share(base, base_facts),
                 selected_facts=base_facts,
                 summary=summary,
-                settings=self.settings.matchup_scores,
+                settings=thinness,
             ):
                 return None
             baseline = diets.baselines.get((base, qualifier["slice_key"]))
@@ -1314,6 +1318,7 @@ class TargetBacktestService:
         self,
         qualifier: Mapping[str, Any],
         summary: PlayerSeasonLogSummary | None,
+        thinness: MatchupScoreSettings,
     ) -> bool:
         """Whether a player's Regular Season average meets an Average Qualifier.
 
@@ -1321,7 +1326,7 @@ class TargetBacktestService:
         and so is a stat with nothing to divide by (no attempts, no minutes).
         """
 
-        if season_sample_thin(summary, self.settings.matchup_scores):
+        if season_sample_thin(summary, thinness):
             return False
         value = season_average_value(qualifier["stat"], summary.rate_rows)
         return value is not None and TARGET_COMPARATOR_TESTS[qualifier["comparator"]](

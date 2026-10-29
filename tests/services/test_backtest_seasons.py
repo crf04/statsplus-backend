@@ -16,7 +16,7 @@ from dataclasses import asdict
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from app.config.settings import (
@@ -28,6 +28,7 @@ from app.domain.publication_integrity import canonical_publication_json
 from app.domain.team_matchup_taxonomy import PLAY_TYPES, SHOT_TYPE_SLICES
 from app.errors import InvalidInputError, SeasonUnavailableError
 from app.migrations import run_migrations
+from app.models.collection_control import PublicationVersion
 from app.models.user import User
 from app.services.collection_control import PublicationService
 from app.services.database_first_activation import DatabaseFirstPublicationReader
@@ -103,8 +104,8 @@ def _log(player_id, name, season, game_id, game_date, opponent_id, opponent):
     return row
 
 
-def _season_logs(season, *, okc_games):
-    """LeBron's five-game season, ``okc_games`` of them against OKC.
+def _season_logs(season, *, okc_games, games=5):
+    """LeBron's ``games``-game season, ``okc_games`` of them against OKC.
 
     In 2025-26 Embiid plays for OKC in those games, so he is a defender the
     opponent fielded last season and never this one.
@@ -113,7 +114,7 @@ def _season_logs(season, *, okc_games):
     prefix = "00225" if season == LAST else "00226"
     start = date(2026, 1, 1) if season == LAST else date(2026, 10, 22)
     rows = []
-    for index in range(5):
+    for index in range(games):
         game_id, game_date = f"{prefix}{index:05d}", start + timedelta(days=index)
         against_okc = index < okc_games
         rows.append(
@@ -143,7 +144,7 @@ def _season_logs(season, *, okc_games):
 OTHER_BASE_SHARE = {LAST: 0.5, NEW: 0.005}
 
 
-def _diet_rows(base, season, corner_three):
+def _diet_rows(base, season, corner_three, *, games=10):
     stream, unit, provider, slices = DIET_STREAMS[base]
 
     def shares(player_id):
@@ -163,7 +164,7 @@ def _diet_rows(base, season, corner_three):
                 "slice_key": slice_key,
                 "share": share,
                 "volume": 100.0,
-                "games_played": 10,
+                "games_played": games,
                 "volume_unit": unit,
                 "provider": provider,
             }
@@ -347,15 +348,16 @@ def _open_new_season(world):
     world.compose("player_game_logs", NEW, {"rows": _season_logs(NEW, okc_games=1)})
 
 
-def _hold_new_season(world, *, okc_games=1, without=()):
+def _hold_new_season(world, *, okc_games=1, without=(), games=5):
     """Hold a 2026-27 candidate of every Backtest stream but ``without``, as before its cutover.
 
     LeBron's 2026-27 Corner 3 share is 0.5, so he fits ``CORNER_THREE`` in
     both seasons and the shares say which season served.  Tatum plays for
     OKC in 2026-27's first game, so he is a defender only 2026-27 fielded.
+    ``games`` is the season's length in game logs and Diets alike.
     """
 
-    rows = _season_logs(NEW, okc_games=okc_games)
+    rows = _season_logs(NEW, okc_games=okc_games, games=games)
     first = rows[0]
     rows.append(
         {
@@ -368,7 +370,7 @@ def _hold_new_season(world, *, okc_games=1, without=()):
     world.compose("player_game_logs", NEW, {"rows": rows}, hold=True)
     for base, (stream, *_rest) in DIET_STREAMS.items():
         if stream not in without:
-            world.compose(stream, NEW, _diet_rows(base, NEW, 0.5), hold=True)
+            world.compose(stream, NEW, _diet_rows(base, NEW, 0.5, games=games), hold=True)
 
 
 def _pin(world, season):
@@ -563,6 +565,67 @@ def test_a_position_only_2026_27_backtest_reads_held_diets_before_their_readines
     assert (*_season(body), body["published_season"]) == (NEW, "requested", LAST)
     assert _fitting(body) == [bt.LEBRON]
     assert body["games_considered"] == {"played": 1, "kept": 1}
+
+
+#: Opening week: every team three games in, under the five-game floor a
+#: Matchup Score cell is thin at.
+OPENING_WEEK_GAMES = 3
+SCORES_TEN = {"base": "season_average", "stat": "PTS", "comparator": "at_or_above", "threshold": 10}
+
+
+def _cut_over_held(world):
+    with Session(world.engine) as session:
+        held = session.scalars(
+            select(PublicationVersion).where(PublicationVersion.status == "candidate")
+        ).all()
+        session.expunge_all()
+    for version in held:
+        cut_over_if_held(world.publications, version)
+
+
+@pytest.mark.parametrize("redis_client", [None, bt.FakeRedis], ids=("no-cache", "cache"))
+@pytest.mark.parametrize("qualifier", [CORNER_THREE, SCORES_TEN], ids=("diet", "average"))
+def test_a_2026_27_backtest_fits_players_on_their_opening_week_sample(world, redis_client, qualifier):
+    # A reader who asks for 2026-27 judges a three-game sample from its
+    # season_games, rather than finding nobody fits.
+    world.checks.not_ready.update(DIET_STREAM_KEYS)
+    _hold_new_season(world, games=OPENING_WEEK_GAMES)
+    target = world.users.create_target(OWNER, opponent="OKC", qualifiers=[qualifier])
+
+    body, _ = world.backtests(redis_client=redis_client and redis_client()).backtest(
+        OWNER, target["id"], season=NEW
+    )
+
+    assert (*_season(body), _fitting(body)) == (NEW, "requested", [bt.LEBRON])
+    lebron = body["players"][0]
+    assert (lebron["season_games"], lebron["season_averages"]["PTS"]) == (3, 12.0)
+
+
+@pytest.mark.parametrize("qualifier", [CORNER_THREE, SCORES_TEN], ids=("diet", "average"))
+def test_the_published_season_still_leaves_out_players_under_five_games(world, qualifier):
+    world.compose(
+        "player_game_logs", LAST, {"rows": _season_logs(LAST, okc_games=2, games=OPENING_WEEK_GAMES)}
+    )
+    for base, (stream, *_rest) in DIET_STREAMS.items():
+        world.compose(stream, LAST, _diet_rows(base, LAST, 0.42, games=OPENING_WEEK_GAMES))
+    target = world.users.create_target(OWNER, opponent="OKC", qualifiers=[qualifier])
+
+    body, _ = world.backtests().backtest(OWNER, target["id"])
+
+    assert (*_season(body), _fitting(body)) == (LAST, "default", [])
+
+
+def test_the_five_game_floor_returns_once_2026_27_is_published(world):
+    _hold_new_season(world, games=OPENING_WEEK_GAMES)
+    target = world.saved_target()
+    service = world.backtests(redis_client=bt.FakeRedis())
+    selected, selected_state = service.backtest(OWNER, target["id"], season=NEW)
+    _cut_over_held(world)
+
+    published, published_state = service.backtest(OWNER, target["id"], season=NEW)
+
+    assert (selected_state, _fitting(selected)) == ("miss", [bt.LEBRON])
+    assert (published["published_season"], published_state, _fitting(published)) == (NEW, "miss", [])
 
 
 @pytest.mark.parametrize("stream", sorted(DIET_STREAM_KEYS))

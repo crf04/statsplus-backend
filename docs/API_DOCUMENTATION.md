@@ -5937,7 +5937,8 @@ A requested season **after** the published one, before its game logs activate
 (crf04/statsplus-backend#625): every Backtest stream's held candidate, judged
 by the Season Cutover's own per-publication checks, with its ledger lineage
 re-judged on every read. No Readiness Rule applies, so a Backtest reads the
-Diets however few games each team has played (crf04/statsplus#386). It is
+Diets however few games each team has played, and a player with one game can
+fit a Diet or Average Qualifier (crf04/statsplus#386). It is
 served only when every
 Backtest stream's candidate serves that season; a stream that trails (still on
 `2025-26`), has no candidate, or whose candidate fails its checks is
@@ -6114,7 +6115,11 @@ scoring descending, canonical id breaking ties.
   list agrees with the Matchup about who is in tonight's game, while the
   backtest drops them, because a season-long production claim resting on an
   unusable Diet is worse than no claim. See `diet_thin` under
-  [Get Matchup](#get-matchup) for what makes a Base thin.
+  [Get Matchup](#get-matchup) for what makes a Base thin. An Unpublished
+  Season read (below) applies the rule with a one-game minimum instead of
+  `MATCHUP_SCORE_MIN_GAMES`: a reader who chose that season judges each
+  player's sample from `season_games` (crf04/statsplus#386). The volume
+  floors still apply.
 - A Position Qualifier lists only players whose Position is one of its
   groups. A player with no Position never fits, and `summary.players_without_position`
   (present only when the Target holds a Position Qualifier) counts the players
@@ -6123,7 +6128,7 @@ scoring descending, canonical id breaking ties.
 - An Average Qualifier is judged on the player's whole Regular Season (not only
   the games against this opponent), and a player whose season is under the
   Matchup's minimum number of games is left out under the same thin rule as a
-  Diet share. A Target with no Diet Qualifier reads no Diet at all.
+  Diet share, one game on an Unpublished Season read. A Target with no Diet Qualifier reads no Diet at all.
 - `shares` is one entry per Qualifier of every kind, in Qualifier order, with
   the player's Season `share` and `league_average_share` for a Diet slice and
   nulls for a Position or Average entry.
