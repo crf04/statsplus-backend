@@ -54,8 +54,9 @@ class Catalog:
 
 
 class Pools:
-    def __init__(self, by_game, *, player_id=LEBRON, team_id=LAL):
+    def __init__(self, by_game, *, player_id=LEBRON, team_id=LAL, prices=None):
         self.by_game = by_game
+        self.prices = prices or {}
         self.player_id = player_id
         self.team_id = team_id
         self.reads = []
@@ -69,7 +70,17 @@ class Pools:
         if lines is None:
             return None
         return PlayerPool(
-            players=(PoolPlayer(self.player_id, "Someone", self.team_id, ("PTS",), {}, lines),),
+            players=(
+                PoolPlayer(
+                    self.player_id,
+                    "Someone",
+                    self.team_id,
+                    ("PTS",),
+                    {},
+                    lines,
+                    line_prices=self.prices.get(game_id, {}),
+                ),
+            ),
             team_counts={self.team_id: 1},
             freshness={},
         )
@@ -78,6 +89,12 @@ class Pools:
 #: Tonight: LAL hosts GSW. Past: LAL at DEN-less stub, GSW hosting LAL.
 TONIGHT = _event("0022600012", "2026-10-22T02:00:00+00:00", "LAL", "GSW")
 PAST = _event("0022500101", "2025-11-05T02:00:00+00:00", "GSW", "LAL")
+
+
+@pytest.fixture(autouse=True)
+def signed_in(client, authenticate):
+    """The web app and the MCP both call with the user's token; anonymous callers see no prices (#381)."""
+    client.environ_base["HTTP_AUTHORIZATION"] = authenticate()["Authorization"]
 
 
 @pytest.fixture
@@ -116,6 +133,7 @@ def _serve(
     team_now=LAL,
     team_reads=None,
     now=NOW,
+    sportsbook=None,
 ):
     class Logs:
         def get_player_logs(self, player_id, season, **kwargs):
@@ -146,6 +164,7 @@ def _serve(
             closing_lines=closing,
             athlete_catalog=Players(),
             clock=lambda: now,
+            sportsbook_reader=sportsbook,
         )
         if with_reader
         else None

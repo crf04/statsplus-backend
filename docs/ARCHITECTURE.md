@@ -1152,12 +1152,17 @@ Game logs:
 
 ```text
 GET /api/games/game_logs
-  → Firebase auth (or explicit local-only bypass)
+  → optional Firebase auth, waitlisted caller attached (crf04/statsplus#381)
   → GameService.get_filtered_logs
   → durable player-game-log publication
   → local/database and request filters
-  → serialized logs and averages
+  → serialized logs and averages; posted-line prices stripped unless admitted
 ```
+
+The read answers anyone, so a shared Log Workspace link loads signed out. The
+route derives one decision from the caller, admitted (signed in and not
+waitlisted). Anyone else gets `posted_lines.without_prices`, no season after the
+Published Season, and no research action counted.
 
 `GameService.get_player_id` resolves the `player_name` query parameter against
 the injected Athlete Catalog (`AthleteCatalogReader.get_catalog`, an

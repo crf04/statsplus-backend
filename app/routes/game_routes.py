@@ -4,8 +4,10 @@ The slate, slate-edges and ladder reads (crf04/statsplus#211) and the
 game-log, Slate and Matchup preview images (crf04/statsplus#285, #320) are
 anonymous:
 they carry no auth decorator, so an ``Authorization`` header is ignored and
-the rate limiter counts the caller by IP. Every other route here requires
-authentication.
+the rate limiter counts the caller by IP. The game-log read (crf04/statsplus#381)
+answers anyone too, but attaches a valid token, waitlisted included, so a
+signed-in caller keeps the uid bucket and only an admitted one sees prices.
+Every other route here requires authentication.
 
 The slate route delegates one optional ET date to the persisted-schedule
 service. The game-log route parses query parameters into one typed
@@ -21,7 +23,7 @@ from datetime import date
 from typing import Any
 
 import requests
-from flask import Blueprint, Response, current_app, jsonify, request
+from flask import Blueprint, Response, current_app, g, jsonify, request
 from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.datastructures import MultiDict
@@ -41,9 +43,10 @@ from ..services.database_first_activation import SeasonUnavailable
 from ..services.game_log_preview import GameLogPreviewService, parse_line, parse_line_type
 from ..services.matchup_slate_preview import MatchupSlatePreviewService
 from ..services.nba_stats_adapter import validate_canonical_season
+from ..services.posted_lines import without_prices
 from ..services.research_season import refuse_after_published, season_scoped
 from ..services.slate_board import BOARD_SOURCES
-from ..utils.auth import get_current_user, require_auth
+from ..utils.auth import get_current_user, is_waitlisted, require_auth, require_auth_optional_allow_waitlisted
 from ._selected_season import season_argument, season_refusals, selected
 from ._service_proxy import CurrentAppService
 
@@ -564,10 +567,26 @@ def _filtered_logs(player_name: str, query: GameLogQuery, *, selected: bool = Fa
 
 
 @game_bp.route("/game_logs", methods=["GET"])
-@require_auth
+@require_auth_optional_allow_waitlisted
 def get_game_logs():
+    """Game logs for anyone with a Log Workspace link (crf04/statsplus#381).
+
+    Only an admitted caller (signed in, not waitlisted) gets the full answer.
+    Anyone else gets the shared-link view: each posted line without prices,
+    no season after the Published Season, and no research action counted.
+    """
+    viewer = get_current_user()
+    admitted = viewer is not None and not is_waitlisted(viewer, tolerate_lookup_errors=True)
     player_name, query = _parse_game_log_filters()
-    return jsonify(_filtered_logs(player_name, query, selected=request.args.get("season_filter") is not None))
+    selected_season = request.args.get("season_filter") is not None
+    if not admitted:
+        g.research_action = False
+        if selected_season:
+            refuse_after_published(getattr(game_service, "publication_reader", None), query.season_filter)
+    logs = _filtered_logs(player_name, query, selected=selected_season)
+    if not admitted and logs.get("posted_line") is not None:
+        logs = {**logs, "posted_line": without_prices(logs["posted_line"])}
+    return jsonify(logs)
 
 
 def _preview_query_from(args: Any) -> tuple[str, GameLogQuery]:

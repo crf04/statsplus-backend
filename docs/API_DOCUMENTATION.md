@@ -22,10 +22,11 @@ the service returns `503 Service Unavailable`. Missing or invalid tokens return
 Authentication levels:
 
 - Anonymous (crf04/statsplus#211): `GET /api/games/slate`, `GET /api/games/slate/edges`, `GET /api/games/ladder`, `GET /api/games/game_logs/preview.png` (crf04/statsplus#285), `GET /api/games/slate/preview.png` and `GET /api/games/matchup/preview.png` (crf04/statsplus#320), `GET /api/reports/<id>/meta` and `GET /api/reports/<id>/preview.png` (crf04/statsplus#342), and `GET /api/research` and `GET /api/research/authors/<handle>` (crf04/statsplus#372). They carry no auth check, so any `Authorization` header (a waitlisted user's token included) is ignored, never refused, and the [rate limiter](#rate-limits) counts the caller by client IP in the unauthenticated bucket.
-- Required: `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/rotation`, `GET /api/games/seasons`, `GET /api/players/season_stats`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `POST /api/usage/mcp-tool-calls`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
+- Required: `GET /api/games/matchup`, `GET /api/games/rotation`, `GET /api/games/seasons`, `GET /api/players/season_stats`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `POST /api/usage/mcp-tool-calls`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
 - Admin-only: `GET`/`PUT /api/admin/signups`, `GET /api/admin/users`, `POST /api/admin/users/<uid>/admit`, `PUT /api/admin/users/<uid>/cohort`, `GET /api/admin/research-activity`, `PUT /api/admin/users/<uid>/public-handle`, `POST /api/admin/reports/<id>/takedown`, `PUT /api/admin/reports/<id>/featured`, `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
 - Optional, waitlisted accepted: `GET /api/reports/<id>` (crf04/statsplus#342). A valid token only adds `is_author`; a waitlisted account's token is attached, never refused.
+- Optional, waitlisted accepted: `GET /api/games/game_logs` (crf04/statsplus#381), so a shared Log Workspace link loads for anyone. Only a signed-in, non-waitlisted caller gets prices in `posted_line` (see [Get Game Logs](#get-game-logs)). An invalid token reads as anonymous, and without Firebase Admin (the local bypass) every call is anonymous.
 - Admin claims: an authenticated token must contain `admin=true`, `role=admin`,
   or `roles` containing `admin` for admin-only routes. Missing claims return
   `403 Forbidden`.
@@ -83,7 +84,8 @@ actions and serves a report from it.
 **Research action.** A successful (`2xx`) authenticated read on one of the routes
 below. Anonymous reads (the optional-auth routes accept them), local-bypass
 requests, and every request that fails or is refused (including `403
-waitlisted` and `429`) are not counted. Connector (MCP) tool calls arrive on
+waitlisted` and `429`) are not counted, nor is a waitlisted account's game-log
+read (crf04/statsplus#381). Connector (MCP) tool calls arrive on
 the same routes with the user's own token, so they count like the web app's
 reads.
 
@@ -2973,6 +2975,12 @@ changes no average.
   store is off, has no quotes, or fails to read (logged; the logs and
   `posted_line` are unaffected). On the closing-line fallback `provider_lines`
   and `line_prices` are `{}` and `book_lines` is still read for that game.
+* Anonymous and waitlisted callers (crf04/statsplus#381) get `posted_line`
+  without prices: `line_prices` is absent, and each `book_lines[<market>].books`
+  entry keeps `book`, `line` and `updated_at` but has no `over`, `under`,
+  `best_over` or `best_under`. `lines`, `provider_lines`, `as_of` and `closing`
+  are unchanged. Such a caller also cannot select a season after the Published
+  Season (`503 season_unavailable`, as on the other anonymous routes).
 * `matchup` reads from the player's side: `LAL vs GSW` at home, `LAL @ GSW` away.
 * `lines` has one entry per market the stored player pool holds for that game
   (`PTS`, `REB`, `AST`, `PRA`, `3PM`, ...), one value each: the majority line

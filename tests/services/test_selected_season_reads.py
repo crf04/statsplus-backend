@@ -397,19 +397,32 @@ def served(world, dependencies):
     return world
 
 
-def _get_logs(client, season):
-    return client.get(f"/api/games/game_logs?player_name=Player+0&season_filter={season}")
+def _get_logs(client, season, headers=None):
+    return client.get(f"/api/games/game_logs?player_name=Player+0&season_filter={season}", headers=headers)
 
 
-def test_the_route_serves_a_selected_2026_27_with_its_context(served, client):
+def test_the_route_serves_a_selected_2026_27_with_its_context(served, client, authenticate):
     served.hold_opening_week()
 
-    response = _get_logs(client, NEW)
+    response = _get_logs(client, NEW, authenticate())
 
     assert response.status_code == 200
     body = response.get_json()
     assert [row["PTS"] for row in body["game_logs"]] == [12]
     assert body["season_context"] == {"selected_season": NEW, "published_season": OLD}
+
+
+def test_an_anonymous_caller_is_refused_the_offered_unpublished_season(served, client):
+    served.hold_opening_week()
+
+    response = _get_logs(client, NEW)
+
+    assert response.status_code == 503
+    error = response.get_json()["error"]
+    assert (error["code"], error["details"]) == (
+        "season_unavailable",
+        {"selected_season": NEW, "published_season": OLD},
+    )
 
 
 def test_the_route_refuses_an_unoffered_season_naming_the_published_one(served, client):
