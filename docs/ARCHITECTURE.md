@@ -2750,12 +2750,15 @@ are US Eastern dates, stored in `day` so the report can index them.
 | --- | --- | --- |
 | `active` | noted where a verified token is synced to its user row (`_sync_firebase_user`, so required and optional auth alike), written after the response | once per uid, day, source |
 | `matchup_viewed`, `game_logs_queried`, `query_prompt_parsed`, `backtest_viewed` | `after_request`, on a 2xx `web`-source response for a verified non-bypass account (`WEB_ACTION_ENDPOINTS`) | once per uid, day, source, name |
+| `report_published` | `after_request`, on a 2xx publish of a `builder` report (the route sets `g.usage_web_action`), source `web` whichever client posted it (migration 083) | once per uid, day, source, name |
 | `mcp_tool_call` | `POST /api/usage/mcp-tool-calls` | never deduplicated |
 
 The source is the request header `X-CourtAI-Client`: the exact value `mcp` is
 `mcp`, anything else (or none) is `web`. The header grants nothing and changes no
 response. A web action is recorded only for `web` requests, so the backend calls
-an MCP tool makes do not count as web feature use.
+an MCP tool makes do not count as web feature use. `report_published` is the
+exception: a Report Builder report with Cards reaches the backend through the
+MCP server, and the builder is still a web surface.
 
 A daily event is `INSERT ... ON CONFLICT DO NOTHING` against the partial unique
 index `uq_usage_events_daily` (`name <> 'mcp_tool_call'`), behind a process-local
@@ -2793,7 +2796,10 @@ columns (`JSONB` on PostgreSQL). `ReportService` (`app/services/reports.py`) is
 its only reader and writer, and `app/domain/report_document.py` holds the
 schema and limits, mirroring the MCP tool's, so a caller other than the MCP
 cannot store anything bigger. The route lifts the app-wide 1 MB body cap to
-2 MB for this one request, as the feedback route does.
+2 MB for this one request, as the feedback route does. `reports.origin`
+(migration 082, crf04/statsplus#382) records who wrote a report, `assistant`
+or `builder` (the Report Builder), parsed into `ReportOrigin` at the body
+boundary and returned on every read so the report footer can say so.
 
 The public reads (`app/routes/report_routes.py`, `/api/reports/<id>`, `/meta`,
 `/preview.png`) are anonymous. The report read uses

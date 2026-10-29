@@ -1,6 +1,6 @@
 """Migrations 076 and 077: the reports table and ``users.public_handle`` (crf04/statsplus#342),
 080: listing, Featured and unique normalised handles (crf04/statsplus#372), and 081: author
-edits (crf04/statsplus#377)."""
+edits (crf04/statsplus#377), and 082: each report's origin (crf04/statsplus#382)."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.migrations import (
     downgrade_report_edits,
+    downgrade_report_origin,
     downgrade_reports,
     downgrade_research_feed,
     downgrade_user_public_handle,
@@ -66,6 +67,7 @@ def test_migration_076_creates_the_table_and_reruns_as_a_noop(tmp_path):
         "notes",
         "edited_at",
         "edits",
+        "origin",
     ]
     assert str(columns["id"]["type"]) == "VARCHAR(12)"
     assert str(columns["title"]["type"]) == "VARCHAR(120)"
@@ -276,3 +278,50 @@ def test_migration_081_reruns_after_a_partial_run_left_some_columns(engine):
     assert {"notes", "edited_at", "edits"} <= {
         column["name"] for column in inspect(engine).get_columns("reports")
     }
+
+
+# --- 082_report_origin ---------------------------------------------------------------------
+
+
+def _origins(engine):
+    with engine.connect() as connection:
+        return connection.execute(text("SELECT id, origin FROM reports ORDER BY id")).all()
+
+
+def test_migration_082_makes_every_existing_report_an_assistant_report(engine):
+    with engine.begin() as connection:
+        connection.execute(text(_REPORT), {"id": "old0000001", "uid": "u"})
+        downgrade_report_origin(connection)
+    with engine.begin() as connection:
+        downgrade_report_origin(connection)  # reversing twice is harmless
+    assert "origin" not in {column["name"] for column in inspect(engine).get_columns("reports")}
+    assert 82 not in _versions(engine)
+
+    assert run_migrations(engine).applied == ("082_report_origin",)
+
+    assert _origins(engine) == [("old0000001", "assistant")]
+    with engine.begin() as connection:
+        connection.execute(text(_REPORT), {"id": "new0000001", "uid": "u"})
+        connection.execute(
+            text(
+                "INSERT INTO reports (id, firebase_uid, created_at, title, document, calls, cards, origin) "
+                "VALUES ('bld0000001', 'u', CURRENT_TIMESTAMP, 'Mine', '{}', '[]', '{}', 'builder')"
+            )
+        )
+    assert _origins(engine) == [
+        ("bld0000001", "builder"),
+        ("new0000001", "assistant"),
+        ("old0000001", "assistant"),
+    ]
+    assert run_migrations(engine).applied == ()
+
+
+@pytest.mark.parametrize("origin", ["'ai'", "'Builder'", "NULL"])
+def test_after_082_the_database_refuses_any_other_origin(engine, origin):
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO reports (id, firebase_uid, created_at, title, document, calls, cards, origin) "
+                f"VALUES ('bad0000001', 'u', CURRENT_TIMESTAMP, 'Mine', '{{}}', '[]', '{{}}', {origin})"
+            )
+        )

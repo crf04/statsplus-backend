@@ -241,7 +241,7 @@ class ReportService:
     # -- writes ------------------------------------------------------------------
 
     def publish(self, firebase_uid: str, body: Any) -> dict[str, Any]:
-        """Validate and store a report; return its id, URL and creation time."""
+        """Validate and store a report; return its id, URL, creation time and origin."""
 
         report = validate_publish_body(body)
         session = get_session(self._engine)
@@ -264,6 +264,7 @@ class ReportService:
                 "id": report_id,
                 "url": f"{REPORT_URL_PREFIX}{report_id}",
                 "created_at": created_at.isoformat(),
+                "origin": report.origin,
             }
         except Exception:
             session.rollback()
@@ -334,6 +335,7 @@ class ReportService:
             cards=report.cards,
             show_author=report.show_author,
             notes=report.notes,
+            origin=report.origin,
         )
 
     def delete(self, firebase_uid: str, report_id: str) -> None:
@@ -611,6 +613,7 @@ class ReportService:
             else {name: html for name, html in row.cards.items() if name in drawn},
             "notes": row.notes,
             "edited_at": _utc(row.edited_at).isoformat() if row.edited_at else None,
+            "origin": row.origin,
         }
         if is_author:
             report["original"] = {"document": row.document, "calls": row.calls}
@@ -633,6 +636,7 @@ class ReportService:
             "date": document.get("date"),
             "description": describe(document),
             "tags": tag_counts(document),
+            "origin": row.origin,
         }
 
     def feed(self, cursor: str | None = None) -> dict[str, Any]:
@@ -733,6 +737,7 @@ class ReportService:
                 Report.created_at,
                 Report.document["date"].as_string(),
                 Report.covers,
+                Report.origin,
                 User.public_handle,
             )
             .join(User, User.firebase_uid == Report.firebase_uid)
@@ -756,6 +761,7 @@ class ReportService:
                 "author": {"handle": handle},
                 "covers": entry_covers or {"games": [], "players": []},
                 "preview_url": f"/api/reports/{report_id}/preview.png",
+                "origin": origin,
             }
-            for report_id, title, listed_at, created_at, date, entry_covers, handle in rows
+            for report_id, title, listed_at, created_at, date, entry_covers, origin, handle in rows
         ]

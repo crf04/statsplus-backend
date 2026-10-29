@@ -238,9 +238,9 @@ cohort      users   wk0   wk1
 2026-10-12      1  100%     -
 
 Weekly users per web action
-week        matchup_viewed  game_logs_queried  query_prompt_parsed  backtest_viewed
-2026-10-05               0                  0                    0                0
-2026-10-12               0                  0                    0                0
+week        matchup_viewed  game_logs_queried  query_prompt_parsed  backtest_viewed  report_published
+2026-10-05               0                  0                    0                0                 0
+2026-10-12               0                  0                    0                0                 0
 
 MCP tool calls, 2026-10-05 to today
 tool         calls  users  error  limit  needs_choice  p50_ms  p95_ms
@@ -257,3 +257,30 @@ get_matchup      2      2    50%     0%            0%     100     300
             connection.execute(text("DELETE FROM usage_events"))
     finally:
         read_only.dispose()
+
+
+def test_migration_083_widens_an_older_name_check_to_report_published(engine):
+    _user(engine, "u1")
+    narrower = "name IN ('active', 'matchup_viewed', 'game_logs_queried', 'query_prompt_parsed', "
+    narrower += "'backtest_viewed', 'mcp_tool_call')"
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE usage_events DROP CONSTRAINT ck_usage_events_name"))
+        connection.execute(
+            text(f"ALTER TABLE usage_events ADD CONSTRAINT ck_usage_events_name CHECK ({narrower})")
+        )
+        connection.execute(text("DELETE FROM schema_migrations WHERE version = 83"))
+    insert = (
+        "INSERT INTO usage_events (firebase_uid, occurred_at, day, source, name) "
+        "VALUES ('u1', now(), '2026-10-14', 'web', :name)"
+    )
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(text(insert), {"name": "report_published"})
+
+    assert run_migrations(engine).applied == ("083_usage_report_published",)
+
+    with engine.begin() as connection:
+        connection.execute(text(insert), {"name": "report_published"})
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(text(insert), {"name": "page_viewed"})
+    assert [row[3] for row in _rows(engine)] == ["report_published"]
+    assert run_migrations(engine).applied == ()

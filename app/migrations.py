@@ -2310,6 +2310,102 @@ def downgrade_report_edits(connection: Connection) -> None:
     connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 81))
 
 
+def _add_report_origin(connection: Connection) -> None:
+    """Record who wrote each report (crf04/statsplus#382).
+
+    Adds ``reports.origin``, NOT NULL with default ``assistant`` and a CHECK
+    admitting only ``assistant`` and ``builder``, so every existing report,
+    all published by an assistant, becomes ``assistant``.  Rerun-safe: the
+    column is added only when missing, and a fresh database already has it
+    from the model-created table.
+    """
+    from app.models.report import REPORT_ORIGIN_CHECK, REPORT_ORIGIN_MAX_LENGTH, Report
+    from app.models.user import User
+
+    User.__table__.create(connection, checkfirst=True)
+    Report.__table__.create(connection, checkfirst=True)
+    existing = {column["name"] for column in inspect(connection).get_columns("reports")}
+    if "origin" not in existing:
+        connection.execute(
+            text(
+                f"ALTER TABLE reports ADD COLUMN origin VARCHAR({REPORT_ORIGIN_MAX_LENGTH}) "
+                f"NOT NULL DEFAULT 'assistant' CONSTRAINT ck_reports_origin CHECK ({REPORT_ORIGIN_CHECK})"
+            )
+        )
+
+
+def downgrade_report_origin(connection: Connection) -> None:
+    """Reverse ``082_report_origin``; also forgets its migration record.
+
+    Migrations here are forward-only at runtime.  This exists so the change is
+    provably reversible: it drops only the column, which forgets which reports
+    the Report Builder wrote.
+    """
+    if inspect(connection).has_table("reports"):
+        existing = {column["name"] for column in inspect(connection).get_columns("reports")}
+        if "origin" in existing:
+            connection.execute(text("ALTER TABLE reports DROP COLUMN origin"))
+    connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 82))
+
+
+def _admit_report_published_usage_event(connection: Connection) -> None:
+    """Let ``usage_events`` record the ``report_published`` web action (crf04/statsplus#382).
+
+    ``ck_usage_events_name`` enumerates the event names, so a table created
+    before this one rejects its rows.  PostgreSQL swaps the constraint in
+    place; SQLite cannot alter a CHECK, so it rebuilds the table from the
+    current model.  Rerun-safe: the PostgreSQL swap is a drop-if-exists plus
+    add, and a SQLite table whose definition already names the event is left
+    alone.
+    """
+    from sqlalchemy import CheckConstraint
+
+    from app.models.usage_event import EVENT_REPORT_PUBLISHED, UsageEvent
+    from app.models.user import User
+
+    table = UsageEvent.__table__
+    User.__table__.create(connection, checkfirst=True)
+    if not inspect(connection).has_table(table.name):
+        table.create(connection)
+        return
+    if connection.dialect.name == "sqlite":
+        current_sql = _sqlite_table_sql(connection, table.name)
+        if EVENT_REPORT_PUBLISHED not in current_sql:
+            _rebuild_sqlite_usage_events(connection, table)
+        return
+    [constraint] = [
+        constraint
+        for constraint in table.constraints
+        if isinstance(constraint, CheckConstraint) and constraint.name == "ck_usage_events_name"
+    ]
+    connection.execute(text("ALTER TABLE usage_events DROP CONSTRAINT IF EXISTS ck_usage_events_name"))
+    # NOT VALID skips the scan: every stored row passed the narrower CHECK.
+    connection.execute(
+        text(
+            "ALTER TABLE usage_events ADD CONSTRAINT ck_usage_events_name "
+            f"CHECK ({constraint.sqltext}) NOT VALID"
+        )
+    )
+
+
+def _rebuild_sqlite_usage_events(connection: Connection, table) -> None:
+    """Rebuild ``usage_events`` from the model in one transaction, keeping every row and id.
+
+    The renamed table keeps its indexes' names, so they are dropped before the
+    model's are created.
+    """
+    driver = connection.connection.driver_connection
+    if not getattr(driver, "in_transaction", True):
+        connection.exec_driver_sql("BEGIN")
+    connection.execute(text("ALTER TABLE usage_events RENAME TO usage_events__083"))
+    for index in table.indexes:
+        connection.execute(text(f"DROP INDEX IF EXISTS {index.name}"))
+    table.create(connection)
+    columns = ", ".join(column.name for column in table.columns)
+    connection.execute(text(f"INSERT INTO usage_events ({columns}) SELECT {columns} FROM usage_events__083"))
+    connection.execute(text("DROP TABLE usage_events__083"))
+
+
 def _rebuild_sqlite_target_qualifiers(connection: Connection) -> None:
     """Rebuild ``target_qualifiers`` on SQLite so its Diet columns may be null.
 
@@ -3402,6 +3498,8 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(79, "079_position_qualifiers", _add_position_qualifiers),
     Migration(80, "080_research_feed", _add_research_feed),
     Migration(81, "081_report_edits", _add_report_edits),
+    Migration(82, "082_report_origin", _add_report_origin),
+    Migration(83, "083_usage_report_published", _admit_report_published_usage_event),
 )
 
 

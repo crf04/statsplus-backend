@@ -68,6 +68,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
+from enum import StrEnum
 from typing import Any
 
 from app.errors import FlatBodyError, InvalidInputError
@@ -151,6 +152,13 @@ _ITALIC = re.compile(r"\*(.+?)\*")
 _BULLET = re.compile(r"^- ", re.MULTILINE)
 
 
+class ReportOrigin(StrEnum):
+    """Who wrote a report (crf04/statsplus#382): an AI assistant, or its author in the Report Builder."""
+
+    ASSISTANT = "assistant"
+    BUILDER = "builder"
+
+
 @dataclass(frozen=True)
 class PublishedReport:
     """A validated publish body, ready to store."""
@@ -161,6 +169,7 @@ class PublishedReport:
     show_author: bool
     listed: bool = False
     notes: str | None = None
+    origin: ReportOrigin = ReportOrigin.ASSISTANT
 
 
 def _refuse(field: str, problem: str) -> InvalidInputError:
@@ -515,7 +524,7 @@ def _cards(value: Any, calls: list[dict[str, Any]]) -> dict[str, str]:
 def validate_publish_body(body: Any) -> PublishedReport:
     """The validated ``POST /api/user/reports`` body, or ``invalid_input`` naming the field."""
 
-    source = _object(body, "body", ("report", "calls", "cards", "show_author", "listed", "notes"))
+    source = _object(body, "body", ("report", "calls", "cards", "show_author", "listed", "notes", "origin"))
     notes = validate_notes(source.get("notes"))
     calls = _calls(source.get("calls"))
     document = _document(source.get("report"), {call["id"] for call in calls})
@@ -525,7 +534,21 @@ def validate_publish_body(body: Any) -> PublishedReport:
         flags[name] = source.get(name, False)
         if not isinstance(flags[name], bool):
             raise _refuse(name, "must be true or false")
-    return PublishedReport(document=document, calls=calls, cards=cards, notes=notes, **flags)
+    return PublishedReport(
+        document=document,
+        calls=calls,
+        cards=cards,
+        notes=notes,
+        origin=_origin(source.get("origin", ReportOrigin.ASSISTANT)),
+        **flags,
+    )
+
+
+def _origin(value: Any) -> ReportOrigin:
+    try:
+        return ReportOrigin(value)
+    except ValueError:
+        raise _refuse("origin", "must be assistant or builder") from None
 
 
 # -- the author's notes and edits (crf04/statsplus#377) -------------------------------

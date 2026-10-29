@@ -132,3 +132,53 @@ def test_duplicate_tool_calls_are_accepted(engine, outcome):
 
     with engine.connect() as connection:
         assert connection.execute(text("SELECT count(*) FROM usage_events")).scalar() == 2
+
+
+# --- 083_usage_report_published (crf04/statsplus#382) ---------------------------------------
+
+
+def _as_before_083(engine):
+    """Rebuild ``usage_events`` with the CHECK it had before ``report_published``, keeping one row."""
+
+    with engine.begin() as connection:
+        objects = connection.execute(
+            text(
+                "SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'usage_events' AND sql IS NOT NULL"
+            )
+        ).all()
+        connection.execute(text("DROP TABLE usage_events"))
+        for kind, _, sql in sorted(objects, key=lambda row: row[0] != "table"):
+            if kind == "table":
+                assert "'backtest_viewed', 'report_published'" in sql
+                sql = sql.replace("'backtest_viewed', 'report_published'", "'backtest_viewed'")
+            connection.execute(text(sql))
+        connection.execute(text("DELETE FROM schema_migrations WHERE version = 83"))
+        _insert(connection, name="'matchup_viewed'")
+
+
+def _rows(engine):
+    with engine.connect() as connection:
+        return connection.execute(
+            text("SELECT id, firebase_uid, source, name FROM usage_events ORDER BY id")
+        ).all()
+
+
+def test_migration_083_lets_an_older_table_record_report_published_and_keeps_its_rows(engine):
+    _as_before_083(engine)
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        _insert(connection, name="'report_published'")
+
+    assert run_migrations(engine).applied == ("083_usage_report_published",)
+
+    with engine.begin() as connection:
+        _insert(connection, name="'report_published'")
+    assert _rows(engine) == [(1, "u", "web", "matchup_viewed"), (2, "u", "web", "report_published")]
+    assert {index["name"] for index in inspect(engine).get_indexes("usage_events")} == {
+        "uq_usage_events_daily",
+        "idx_usage_events_day_name",
+    }
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        _insert(connection, name="'report_published'")
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        _insert(connection, name="'page_viewed'")
+    assert run_migrations(engine).applied == ()
