@@ -579,15 +579,17 @@ def create_report():
             "calls": [{"id", "tool", "args", "structured", "meta", "card"}],
             "cards": {"<card>": "<html>"},
             "show_author": false,
-            "listed": false
+            "listed": false,
+            "origin": "assistant"
         }
 
-    ``listed: true`` also lists it in Research (crf04/statsplus#372): without a
+    ``origin`` (crf04/statsplus#382) is ``assistant`` (the default) or
+    ``builder``.  ``listed: true`` also lists it in Research (crf04/statsplus#372): without a
     handle that is ``409 handle_required`` and past the listing cap ``429
     listed_limit``, and nothing is stored.
 
     Returns:
-        201 with the report's id, public URL and creation time
+        201 with the report's id, public URL, creation time and origin
     """
     firebase_uid = _authenticated_uid()
     request.max_content_length = REPORT_MAX_REQUEST_BYTES

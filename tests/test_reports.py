@@ -166,7 +166,8 @@ def test_publish_returns_the_id_url_and_creation_time(client, signed_in):
     assert set(body) == {"success", "report"}
     assert body["success"] is True
     report = body["report"]
-    assert set(report) == {"id", "url", "created_at"}
+    assert set(report) == {"id", "url", "created_at", "origin"}
+    assert report["origin"] == "assistant"
     assert len(report["id"]) == 10 and report["id"].isalnum() and report["id"].isascii()
     assert report["url"] == f"https://courtai.app/reports/{report['id']}"
     datetime.fromisoformat(report["created_at"])
@@ -472,6 +473,7 @@ def test_the_report_reads_anonymously_in_the_contract_shape(client, signed_in):
         "cards",
         "notes",
         "edited_at",
+        "origin",
     }
     assert report["id"] == report_id
     assert report["author"] is None
@@ -570,6 +572,7 @@ def test_meta_has_the_title_date_description_and_tag_counts(client, signed_in):
         "date": "2026-10-24",
         "description": "Three games carry a real absence.",
         "tags": {"strong": 1, "lean": 2, "pass": 1},
+        "origin": "assistant",
     }
 
 
@@ -1054,6 +1057,7 @@ def test_an_entry_has_the_contract_shape(client, signed_in, reports, clock):
                 "author": {"handle": "bighat"},
                 "covers": {"games": [], "players": ["Jalen Brunson"]},
                 "preview_url": f"/api/reports/{report_id}/preview.png",
+                "origin": "assistant",
             }
         ],
         "next_cursor": None,
@@ -1740,6 +1744,7 @@ def test_the_meta_and_preview_follow_the_edited_report(client, signed_in):
         "date": "2026-10-24",
         "description": "Three games carry a real absence.",
         "tags": {"lean": 1, "thin": 1},
+        "origin": "assistant",
     }
 
 
@@ -2024,6 +2029,7 @@ def test_a_block_documents_meta_takes_tags_from_spots_and_items_and_the_lede_as_
         "date": "2026-10-28",
         "description": "Reaves has cleared 22.5 in seven of nine games without Doncic.",
         "tags": {"strong": 1, "lean": 1, "thin": 1},
+        "origin": "assistant",
     }
 
 
@@ -2613,3 +2619,74 @@ def test_an_untagged_spot_row_has_no_chip_and_items_rows_draw_like_spot_rows(cli
         ],
     )
     assert _preview_row(items, 0) == _preview_row(spot, 0)
+
+
+# --- origin (crf04/statsplus#382) ---------------------------------------------------------
+
+
+def _text_only_body(**extra):
+    """A Report Builder report with no Cards: a block document and no calls."""
+
+    return {
+        "report": {
+            "title": "Brunson without Randle",
+            "date": "2026-10-28",
+            "blocks": [{"id": "p", "type": "paragraph", "text": "He scored more.", "lede": True}],
+        },
+        "calls": [],
+        "cards": {},
+        **extra,
+    }
+
+
+def test_a_publish_that_omits_origin_is_an_assistant_report_on_every_read(client, signed_in):
+    _claim(client, signed_in(OWNER), "bighat")
+    published = _publish(client, signed_in(), {**_body(), "listed": True})
+    report_id = published.get_json()["report"]["id"]
+
+    assert published.get_json()["report"]["origin"] == "assistant"
+    assert client.get(f"/api/reports/{report_id}").get_json()["report"]["origin"] == "assistant"
+    assert client.get(f"/api/reports/{report_id}/meta").get_json()["origin"] == "assistant"
+    assert [entry["origin"] for entry in _feed(client)["reports"]] == ["assistant"]
+    author_page = client.get("/api/research/authors/bighat").get_json()
+    assert [entry["origin"] for entry in author_page["reports"]] == ["assistant"]
+
+
+def test_a_builder_report_reads_back_as_builder_on_every_read(client, signed_in):
+    _claim(client, signed_in(OWNER), "bighat")
+    assistant_id = _published_id(client, signed_in(), {**_body(), "origin": "assistant", "listed": True})
+    published = _publish(client, signed_in(), _text_only_body(origin="builder", listed=True))
+    builder_id = published.get_json()["report"]["id"]
+
+    assert published.status_code == 201
+    assert published.get_json()["report"]["origin"] == "builder"
+    for headers in ({}, signed_in(OWNER)):
+        read = client.get(f"/api/reports/{builder_id}", headers=headers).get_json()["report"]
+        assert read["origin"] == "builder"
+    assert client.get(f"/api/reports/{builder_id}/meta").get_json() == {
+        "id": builder_id,
+        "title": "Brunson without Randle",
+        "date": "2026-10-28",
+        "description": "He scored more.",
+        "tags": {},
+        "origin": "builder",
+    }
+    expected = [(builder_id, "builder"), (assistant_id, "assistant")]
+    assert [(entry["id"], entry["origin"]) for entry in _feed(client)["reports"]] == expected
+    author_page = client.get("/api/research/authors/bighat").get_json()
+    assert [(entry["id"], entry["origin"]) for entry in author_page["reports"]] == expected
+
+
+@pytest.mark.parametrize("origin", ["Builder", "ai", "", None, 1, True, ["builder"], {"kind": "builder"}])
+def test_an_origin_other_than_assistant_or_builder_is_refused_and_stores_nothing(
+    client, signed_in, report_engine, origin
+):
+    response = _publish(client, signed_in(), _text_only_body(origin=origin))
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == {
+        "code": "invalid_input",
+        "message": "origin must be assistant or builder.",
+        "details": {"field": "origin"},
+    }
+    assert _report_count(report_engine) == 0

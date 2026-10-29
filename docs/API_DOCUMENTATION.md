@@ -5109,7 +5109,8 @@ object: `{"error": "<code>", "message": "<text>"}` plus their own fields.
   "cards": {"game-logs": "<!doctype html>..."},
   "show_author": false,
   "listed": false,
-  "notes": "My own take, in my words."
+  "notes": "My own take, in my words.",
+  "origin": "assistant"
 }
 ```
 
@@ -5136,6 +5137,7 @@ The server checks the body against the same schema and limits as the MCP tool
 | `cards` | an object of card name to non-empty HTML string, holding only cards some call names |
 | `show_author` | optional boolean, default `false` |
 | `listed` | optional boolean, default `false`; `true` also lists the report in Research |
+| `origin` | optional, `assistant` (the default: an AI assistant wrote it) or `builder` (its author wrote it in the Report Builder); any other value, `null` included, is `400 invalid_input` with `details.field: "origin"` (crf04/statsplus#382) |
 | `notes` | optional, top-level (not in `report`): the author's own words as plain text, at most 2,000 characters, with no link (`http://`, `https://` or `www.`, any case); missing, `null` or blank is no notes. Over-length is `400 {"error": "notes_too_long", ...}`, a link `400 {"error": "notes_links", ...}` (crf04/statsplus#377) |
 
 Text is stored as given and the web app renders it escaped, so HTML in a text
@@ -5172,7 +5174,7 @@ starting `- `; the web app renders that light formatting and nothing else.
 `201`:
 
 ```json
-{"success": true, "report": {"id": "k3x9q2mtzr", "url": "https://courtai.app/reports/k3x9q2mtzr", "created_at": "2026-10-25T18:04:11.204391+00:00"}}
+{"success": true, "report": {"id": "k3x9q2mtzr", "url": "https://courtai.app/reports/k3x9q2mtzr", "created_at": "2026-10-25T18:04:11.204391+00:00", "origin": "assistant"}}
 ```
 
 The id is 10 random base62 characters. An account may hold 1,000 reports that
@@ -5200,7 +5202,8 @@ way nothing is stored.
     "calls": [{"id": "brunson-logs", "tool": "query_game_logs", "card": "game-logs", "structured": {}, "meta": null}],
     "cards": {"game-logs": "<!doctype html>..."},
     "notes": "My own take, in my words.",
-    "edited_at": "2026-10-29T09:00:01+00:00"
+    "edited_at": "2026-10-29T09:00:01+00:00",
+    "origin": "assistant"
   }
 }
 ```
@@ -5218,7 +5221,8 @@ and `cards` holds every published card's HTML. A listed report's
 published with `show_author: true` and the author's account has a public
 handle, else `null` (the web app then says "Built by a CourtAI user"); the
 Google display name is never shown. `listed` and `featured` say whether it is
-in Research and pinned there. `is_author` is `true` only when the request
+in Research and pinned there. `origin` is who wrote it: `assistant` or
+`builder` (crf04/statsplus#382). `is_author` is `true` only when the request
 carries the author's own valid token. A waitlisted token is accepted.
 
 A report its author deleted is `410` with `{"error": "removed", "by":
@@ -5232,7 +5236,8 @@ admin took down `410` with `{"error": "removed", "by": "takedown", "message":
 
 ```json
 {"id": "k3x9q2mtzr", "title": "Injury brief: Friday, Oct 24", "date": "2026-10-24",
- "description": "Three games carry a real absence.", "tags": {"lean": 2, "pass": 1, "strong": 1}}
+ "description": "Three games carry a real absence.", "tags": {"lean": 2, "pass": 1, "strong": 1},
+ "origin": "assistant"}
 ```
 
 `date` is `null` when the report has none. `description` is the first
@@ -5387,7 +5392,8 @@ cursor the server did not issue is `400 invalid_input`.
   "date": "2026-10-24",
   "author": {"handle": "bighatprops"},
   "covers": {"games": ["DET @ CHA"], "players": ["Cade Cunningham"]},
-  "preview_url": "/api/reports/k3x9q2mtzr/preview.png"
+  "preview_url": "/api/reports/k3x9q2mtzr/preview.png",
+  "origin": "assistant"
 }
 ```
 
@@ -5397,7 +5403,8 @@ shown cards name, after any edits, in call order and once each: a game as
 its teams' tricodes (`DET @ CHA`, from a tricode, full name or nickname written
 with `@` or `at`), a player without a `(TEAM)` suffix. A call with neither, or
 a game naming no two known teams, adds nothing. `preview_url` is the report's
-[preview image](#report-preview-image), relative to the site.
+[preview image](#report-preview-image), relative to the site. `origin` is
+`assistant` or `builder`, as on the report read.
 
 `GET /api/research/authors/<handle>` is one author's listed reports in the
 same shape and order, Featured ones included in `reports`, with `featured`
@@ -5426,7 +5433,9 @@ index on `(listed_at, id)` over listed, visible reports, the
 `report_listings` table the listing cap counts (one row per move to listed),
 and a unique index on `lower(users.public_handle)`. It first normalises
 existing handles (`@bighatprops` becomes `bighatprops`) and stops, changing
-nothing, on a handle it cannot normalise or two that collide.
+nothing, on a handle it cannot normalise or two that collide. Migration 082
+adds `reports.origin` (`VARCHAR(16)`, `NOT NULL DEFAULT 'assistant'`, checked
+to `assistant` or `builder`), so every earlier report is `assistant`.
 
 ### Targets
 

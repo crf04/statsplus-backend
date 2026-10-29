@@ -1,6 +1,7 @@
-"""Postgres checks for CourtAI reports (crf04/statsplus#342), the Research feed (#372) and edits (#377).
+"""Postgres checks for CourtAI reports (crf04/statsplus#342), the Research feed (#372), edits (#377)
+and origin (#382).
 
-Covers what SQLite cannot: migrations 076, 077, 080 and 081 and their reversal on
+Covers what SQLite cannot: migrations 076, 077, 080, 081 and 082 and their reversal on
 the production dialect, the ``JSONB`` columns, a publish and read round trip
 of a realistic report through the service, the feed's keyset pages over
 ``timestamptz`` and its partial index, and the listing cap under concurrency.
@@ -21,6 +22,7 @@ from app.config.settings import load_settings
 from app.errors import ConflictError, FlatBodyError
 from app.migrations import (
     downgrade_report_edits,
+    downgrade_report_origin,
     downgrade_reports,
     downgrade_research_feed,
     downgrade_user_public_handle,
@@ -100,6 +102,7 @@ def test_migrations_076_and_077_apply_reverse_and_reapply(engine):
         "notes": "TEXT",
         "edited_at": "TIMESTAMP",
         "edits": "JSONB",
+        "origin": "VARCHAR(16)",
     }
     with engine.connect() as connection:
         assert (
@@ -579,6 +582,7 @@ def test_a_block_report_and_its_edits_round_trip_as_jsonb_and_its_feed_entry_fol
         "date": "2026-10-28",
         "description": "Hart rebounds ✓",
         "tags": {},
+        "origin": "assistant",
     }
     [entry] = service.feed()["reports"]
     assert (entry["title"], entry["date"], entry["covers"]) == (
@@ -593,3 +597,38 @@ def test_a_block_report_and_its_edits_round_trip_as_jsonb_and_its_feed_entry_fol
                 " edits -> 'blocks' -> 1 -> 'cards' ->> 0 FROM reports"
             )
         ).one() == ("table", "c2")
+
+
+def test_migration_082_makes_existing_reports_assistant_reports_reverses_and_reapplies(engine):
+    _user(engine, "author")
+    published = ReportService(engine).publish("author", _body())["id"]
+    with engine.begin() as connection:
+        downgrade_report_origin(connection)
+        downgrade_report_origin(connection)  # reversing twice is harmless
+    assert "origin" not in {c["name"] for c in inspect(engine).get_columns("reports")}
+
+    assert run_migrations(engine).applied == ("082_report_origin",)
+
+    with engine.connect() as connection:
+        assert connection.execute(
+            text(
+                "SELECT is_nullable, column_default FROM information_schema.columns "
+                "WHERE table_name = 'reports' AND column_name = 'origin'"
+            )
+        ).one() == ("NO", "'assistant'::character varying")
+    assert ReportService(engine).read(published, viewer_uid=None)["origin"] == "assistant"
+    for origin in ("ai", None):
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            connection.execute(text("UPDATE reports SET origin = :origin"), {"origin": origin})
+    assert run_migrations(engine).applied == ()
+
+
+def test_a_builder_report_round_trips_on_the_read_and_the_feed(engine):
+    _user(engine, "author")
+    service = ReportService(engine)
+    service.set_public_handle("author", "bighat")
+    report_id = service.publish("author", {**_body(), "origin": "builder", "listed": True})["id"]
+
+    assert service.read(report_id, viewer_uid=None)["origin"] == "builder"
+    assert [(entry["id"], entry["origin"]) for entry in service.feed()["reports"]] == [(report_id, "builder")]
+    assert [entry["origin"] for entry in service.author_feed("bighat")["reports"]] == ["builder"]

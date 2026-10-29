@@ -2787,7 +2787,10 @@ columns (`JSONB` on PostgreSQL). `ReportService` (`app/services/reports.py`) is
 its only reader and writer, and `app/domain/report_document.py` holds the
 schema and limits, mirroring the MCP tool's, so a caller other than the MCP
 cannot store anything bigger. The route lifts the app-wide 1 MB body cap to
-2 MB for this one request, as the feedback route does.
+2 MB for this one request, as the feedback route does. `reports.origin`
+(migration 082, crf04/statsplus#382) records who wrote a report, `assistant`
+or `builder` (the Report Builder), parsed into `ReportOrigin` at the body
+boundary and returned on every read so the report footer can say so.
 
 The public reads (`app/routes/report_routes.py`, `/api/reports/<id>`, `/meta`,
 `/preview.png`) are anonymous. The report read uses
