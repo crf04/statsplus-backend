@@ -1214,6 +1214,7 @@ class MatchupService:
                 book_lines=(
                     {} if historical or not with_book_lines else self._book_lines(game_id, connection)
                 ),
+                historical=historical,
             ),
             "injuries": dict(injury_result.block),
             "freshness": {
@@ -1844,6 +1845,8 @@ class MatchupService:
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
         injury_badges: Mapping[int, str],
         book_lines: Mapping[int, Mapping[str, Any]] | None = None,
+        *,
+        historical: bool = False,
     ) -> list[dict[str, Any]]:
         """Compose every player row, scored against ``opponent_of(player)``.
 
@@ -1851,7 +1854,9 @@ class MatchupService:
         each player's opponent from its two teams, an Unscheduled Matchup
         names the one requested opponent, and everything else -- Diet
         shares, thin verdicts, and every score window -- is computed here
-        the same way for both.
+        the same way for both.  A Historical Matchup's summary holds the
+        focal game and the games after it, so ``historical`` withholds the
+        rows' recent games and season averages.
         """
 
         rows = []
@@ -1926,6 +1931,8 @@ class MatchupService:
                 metric_indexes,
                 availability,
             )
+            season_rate = None if historical or summary is None else summary.season_rate
+            line_markets = [market for market in player.market_categories if market in self._statistics]
             rows.append(
                 {
                     "canonical_id": int(player.canonical_player_id),
@@ -1945,6 +1952,28 @@ class MatchupService:
                     "lines": serialize_lines(player.lines),
                     "line_prices": serialize_line_prices(player.line_prices),
                     "season_scoring": (None if scoring is None else self._number(scoring)),
+                    # The rate's own Evidence-season rows, so the last five
+                    # and the averages describe the games season_scoring does.
+                    "last_five_games": (
+                        []
+                        if season_rate is None
+                        else [
+                            player_game_log_focal_line(record, line_markets, self._statistics)
+                            for record in sorted(
+                                summary.rate_rows,
+                                key=lambda record: (record.game_date, record.game_id),
+                            )[-5:]
+                        ]
+                    ),
+                    "season_averages": (
+                        {}
+                        if season_rate is None
+                        else {
+                            market: self._number(season_rate.per_game[market])
+                            for market in player.market_categories
+                            if market in season_rate.per_game
+                        }
+                    ),
                     "last_10_minutes": (
                         [] if summary is None else [self._number(value) for value in summary.last_ten_minutes]
                     ),

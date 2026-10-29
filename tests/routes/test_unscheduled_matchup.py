@@ -387,8 +387,18 @@ def test_unscheduled_scores_equal_the_game_matchup_scores(tmp_path):
     # The windows really carry scores, so the comparison is not vacuous.
     assert game_scores["PTS"]["season"]["blend"] is not None
     assert game_scores["PTS"]["last_15"]["blend"] is not None
-    for key in ("diet_shares", "diet_thin", "season_scoring", "last_10_minutes"):
+    for key in (
+        "diet_shares",
+        "diet_thin",
+        "season_scoring",
+        "last_10_minutes",
+        "last_five_games",
+        "season_averages",
+    ):
         assert unscheduled_player[key] == game_player[key], key
+    # The recent games and averages really are served, so that is not vacuous.
+    assert [game["game_id"] for game in unscheduled_player["last_five_games"]] == ["0022500500"]
+    assert unscheduled_player["season_averages"]["PTS"] == 25.0
     # The opponent's Defense Sheet is the same sheet the game shows for BOS.
     game_bos = next(team for team in game.get_json()["teams"] if team["team_id"] == BOS)
     (unscheduled_bos,) = unscheduled.get_json()["teams"]

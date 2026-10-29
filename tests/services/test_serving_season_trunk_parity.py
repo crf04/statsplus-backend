@@ -4,6 +4,8 @@ crf04/statsplus-backend#547 adds Serving Season fields to a Matchup and the
 Slate edges, and #552 adds ``trailing`` to the Slate and ``as_of`` to a game
 Matchup.  Before a cutover nothing trails, so each response must equal
 trunk's apart from those additive keys, which carry their resting values.
+#654 later adds ``last_five_games`` and ``season_averages`` to each Matchup
+player row; they are stripped too and pinned on their own.
 The golden file is trunk's (622a98b4) output of ``_responses``, captured by
 running this module's ``__main__`` against a ``git archive`` of that commit;
 regenerate it only from trunk.  Publication ids are random, so they are
@@ -127,6 +129,9 @@ def _without_serving_season_keys(responses: dict) -> dict:
     for body in (stripped["matchup"], stripped["slate"], stripped["edges"]):
         body.pop("trailing", None)
     stripped["matchup"].pop("as_of", None)
+    for player in stripped["matchup"]["players"]:
+        player.pop("last_five_games", None)
+        player.pop("season_averages", None)
     window_states = [
         stripped["matchup"]["experience"]["sections"][section]
         for section in ("season_defense", "last_15_defense")
@@ -165,6 +170,18 @@ def test_before_a_cutover_matchup_slate_and_edges_equal_trunk_but_for_the_servin
         "last_15_defense": "2026-01-15",
         "player_diets": "2026-01-15",
     }
+    (player,) = responses["matchup"]["players"]
+    # This service has no Statistic Catalog, so the game line names no stats.
+    assert player["last_five_games"] == [
+        {
+            "game_id": "0022500584",
+            "game_date": "2026-01-14",
+            "matchup": "LAL @ BOS",
+            "minutes": 34.0,
+            "stats": {},
+        }
+    ]
+    assert player["season_averages"] == {"PTS": 31.0, "FGA": 18.0}
     assert responses["matchup"]["trailing"] == []
     assert responses["slate"]["trailing"] == []
     assert responses["edges"]["trailing"] == []

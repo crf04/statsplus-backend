@@ -371,6 +371,7 @@ def _service(
     injuries=None,
     diets=None,
     player_logs=None,
+    statistic_catalog=None,
 ):
     if pool is None:
         pool = PlayerPool(
@@ -413,6 +414,7 @@ def _service(
             nba=NBASeasonSettings(current_season=SEASON),
         ),
         clock=lambda: NOW,
+        statistic_catalog=statistic_catalog,
     )
 
 
@@ -570,6 +572,9 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
         },
         "line_prices": {"underdog": {"PTS": {"over": -112, "under": None}}},
         "season_scoring": 25.4,
+        # The fake summary has a points rate but no rows behind it.
+        "last_five_games": [],
+        "season_averages": {"PTS": 25.4},
         "last_10_minutes": [31.0, 32.0, 33.0],
         "diet_shares": {
             "play_types": [
@@ -1425,7 +1430,7 @@ def _log_row(*, game_id: str, game_date: str, points: int, minutes: float):
     }
 
 
-def _published_matchup_service(tmp_path, rows):
+def _published_matchup_service(tmp_path, rows, *, statistic_catalog=None):
     """Build a matchup service over one real activated player-log publication."""
 
     engine = create_engine(f"sqlite:///{tmp_path / 'matchup-logs.sqlite3'}")
@@ -1487,6 +1492,7 @@ def _published_matchup_service(tmp_path, rows):
         ),
         clock=lambda: NOW,
         publication_reader=reader,
+        statistic_catalog=statistic_catalog,
     )
     return engine, service, publication
 
@@ -1916,6 +1922,8 @@ class RecordedGameLogs:
                     else None
                 ),
                 last_ten_minutes=(31.0 + focal, 32.0),
+                # The completed season's rows, focal game included.
+                rate_rows=tuple(row for row in self.rows if row.player_id == player_id),
             )
             for player_id in player_ids
         }
@@ -3068,3 +3076,182 @@ def test_a_base_not_yet_stored_is_listed_but_never_changes_an_existing_freshness
         == with_base["experience"]["sections"]["season_defense"]
     )
     assert without_base["players"][0]["scores"] == with_base["players"][0]["scores"]
+
+
+def _last_five_row(**overrides):
+    return {**_log_row(game_id="0022500001", game_date="2026-01-01", points=0, minutes=30.0), **overrides}
+
+
+def _last_five_player(tmp_path, rows):
+    engine, service, _ = _published_matchup_service(
+        tmp_path, rows, statistic_catalog=StatisticCatalog.load_default()
+    )
+    (player,) = service.get_matchup(game_id=GAME_ID)["players"]
+    engine.dispose()
+    return player
+
+
+def test_a_current_row_serves_its_last_five_rate_games_oldest_first_and_its_season_averages(tmp_path):
+    """crf04/statsplus-backend#654: the rows behind season_scoring, newest five."""
+
+    rows = [
+        # Stored out of date order: the newest five are chosen by date, then id.
+        _last_five_row(game_id="0022500007", game_date="2026-01-12", points=27, minutes=36.0),
+        _last_five_row(game_id="0022500001", game_date="2026-01-02", points=20, minutes=30.0),
+        _last_five_row(game_id="0022500005", game_date="2026-01-09", points=24, minutes=33.5),
+        _last_five_row(game_id="0022500002", game_date="2026-01-04", points=21, minutes=31.0),
+        _last_five_row(game_id="0022500004", game_date="2026-01-08", points=23, minutes=33.0),
+        _last_five_row(game_id="0022500006", game_date="2026-01-11", points=25, minutes=35.0),
+        _last_five_row(game_id="0022500003", game_date="2026-01-06", points=22, minutes=32.0),
+    ]
+
+    player = _last_five_player(tmp_path, rows)
+
+    assert player["last_five_games"] == [
+        {
+            "game_id": "0022500003",
+            "game_date": "2026-01-06",
+            "matchup": "LAL @ BOS",
+            "minutes": 32.0,
+            "stats": {"PTS": 22.0, "FGA": 18.0},
+        },
+        {
+            "game_id": "0022500004",
+            "game_date": "2026-01-08",
+            "matchup": "LAL @ BOS",
+            "minutes": 33.0,
+            "stats": {"PTS": 23.0, "FGA": 18.0},
+        },
+        {
+            "game_id": "0022500005",
+            "game_date": "2026-01-09",
+            "matchup": "LAL @ BOS",
+            "minutes": 33.5,
+            "stats": {"PTS": 24.0, "FGA": 18.0},
+        },
+        {
+            "game_id": "0022500006",
+            "game_date": "2026-01-11",
+            "matchup": "LAL @ BOS",
+            "minutes": 35.0,
+            "stats": {"PTS": 25.0, "FGA": 18.0},
+        },
+        {
+            "game_id": "0022500007",
+            "game_date": "2026-01-12",
+            "matchup": "LAL @ BOS",
+            "minutes": 36.0,
+            "stats": {"PTS": 27.0, "FGA": 18.0},
+        },
+    ]
+    # 162 points over seven Regular Season games, rounded as season_scoring is.
+    assert player["season_averages"] == {"PTS": 23.142857, "FGA": 18.0}
+    assert player["season_scoring"] == 23.142857
+
+
+def test_a_current_row_with_fewer_than_five_games_serves_only_those(tmp_path):
+    rows = [
+        _last_five_row(game_id="0022500002", game_date="2026-01-05", points=31, minutes=37.0),
+        _last_five_row(game_id="0022500001", game_date="2026-01-02", points=25, minutes=35.0),
+    ]
+
+    player = _last_five_player(tmp_path, rows)
+
+    assert player["last_five_games"] == [
+        {
+            "game_id": "0022500001",
+            "game_date": "2026-01-02",
+            "matchup": "LAL @ BOS",
+            "minutes": 35.0,
+            "stats": {"PTS": 25.0, "FGA": 18.0},
+        },
+        {
+            "game_id": "0022500002",
+            "game_date": "2026-01-05",
+            "matchup": "LAL @ BOS",
+            "minutes": 37.0,
+            "stats": {"PTS": 31.0, "FGA": 18.0},
+        },
+    ]
+    assert player["season_averages"] == {"PTS": 28.0, "FGA": 18.0}
+
+
+def test_a_row_without_a_season_rate_serves_no_games_and_no_averages(tmp_path):
+    # A summary whose one game has no minutes, so it has no season rate.
+    rows = [_last_five_row(game_id="0022500001", game_date="2026-01-02", points=0, minutes=0.0)]
+
+    player = _last_five_player(tmp_path, rows)
+
+    assert player["season_scoring"] is None
+    assert player["last_five_games"] == []
+    assert player["season_averages"] == {}
+
+
+class _UnorderedRateRowLogs(RecordedLogs):
+    """A summary whose rows arrive in payload order, as a payload read's may."""
+
+    def get_player_summaries(self, season, player_ids):
+        (summary,) = super().get_player_summaries(season, player_ids).values()
+        rows = tuple(
+            _game_log_record(
+                player_id=2544,
+                player_name="LeBron James",
+                team_id=LAL,
+                team_tricode="LAL",
+                opponent_team_id=BOS,
+                opponent_team_tricode="BOS",
+                game_id=game_id,
+                game_date=date.fromisoformat(game_date),
+                points=points,
+            )
+            for game_id, game_date, points in (
+                ("0022500006", "2026-01-11", 26),
+                ("0022500002", "2026-01-04", 22),
+                ("0022500001", "2026-01-02", 21),
+                ("0022500004", "2026-01-08", 24),
+                ("0022500003", "2026-01-08", 23),
+                ("0022500005", "2026-01-09", 25),
+            )
+        )
+        return {2544: replace(summary, rate_rows=rows)}
+
+
+def test_last_five_games_are_ordered_by_date_then_game_id_whatever_order_the_rows_arrive_in():
+    service = _service(player_logs=_UnorderedRateRowLogs(), statistic_catalog=StatisticCatalog.load_default())
+
+    (player,) = service.get_matchup(game_id=GAME_ID)["players"]
+
+    assert [(game["game_id"], game["game_date"], game["stats"]) for game in player["last_five_games"]] == [
+        ("0022500002", "2026-01-04", {"PTS": 22.0, "FGA": 18.0}),
+        ("0022500003", "2026-01-08", {"PTS": 23.0, "FGA": 18.0}),
+        ("0022500004", "2026-01-08", {"PTS": 24.0, "FGA": 18.0}),
+        ("0022500005", "2026-01-09", {"PTS": 25.0, "FGA": 18.0}),
+        ("0022500006", "2026-01-11", {"PTS": 26.0, "FGA": 18.0}),
+    ]
+
+
+class _NoSummaryLogs(RecordedLogs):
+    def get_player_summaries(self, season, player_ids):
+        return {}
+
+
+def test_a_row_without_a_summary_serves_no_games_and_no_averages():
+    (player,) = _service(player_logs=_NoSummaryLogs()).get_matchup(game_id=GAME_ID)["players"]
+
+    assert player["last_five_games"] == []
+    assert player["season_averages"] == {}
+
+
+def test_a_historical_row_serves_no_games_and_no_averages():
+    """Its summary holds the focal game and later ones, so neither is served."""
+
+    logs = RecordedGameLogs()
+    payload = _historical_service(player_logs=logs).get_matchup(game_id=GAME_ID)
+
+    assert payload["experience"]["mode"] == "historical"
+    assert {row["canonical_id"] for row in payload["players"]} == {AWAY_PARTICIPANT, HOME_PARTICIPANT}
+    for player in payload["players"]:
+        # The summary has a rate and rows; historical mode withholds both.
+        assert player["season_scoring"] == 21.0
+        assert player["last_five_games"] == []
+        assert player["season_averages"] == {}

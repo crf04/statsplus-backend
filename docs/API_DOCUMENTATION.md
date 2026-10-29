@@ -1652,6 +1652,16 @@ Each stored pool player has this shape:
     "underdog": { "PTS": { "over": -112, "under": -112 } }
   },
   "season_scoring": 25.4,
+  "last_five_games": [
+    {
+      "game_id": "0022500570",
+      "game_date": "2026-01-12",
+      "matchup": "LAL vs. MIA",
+      "minutes": 36.0,
+      "stats": { "FGA": 19.0, "PTS": 28.0 }
+    }
+  ],
+  "season_averages": { "FGA": 18.6, "PTS": 25.4 },
   "last_10_minutes": [35.0, 36.0],
   "diet_shares": {
     "play_types": [
@@ -1766,6 +1776,21 @@ exactly the key set of `scores`; in current mode it equals `posted_markets`,
 and in historical mode it is the governed Statistic Catalog crossed with the
 score-input contract rather than any DFS archive. `focal_game_line` is `null`
 in current mode.
+
+`last_five_games` and `season_averages` (crf04/statsplus#395) are additive and
+always present. Both read the rows behind `season_scoring`: the player's
+Evidence-season Regular Season game logs (preseason is never stored).
+`last_five_games` is the last five of those rows by `game_date`, then
+`game_id`, oldest first, so it holds fewer than five entries when the season
+has fewer games. Each entry has the `focal_game_line` shape
+`{ game_id, game_date, matchup, minutes, stats }`, with one `stats` key per
+`stat_categories` entry the governed Statistic Catalog defines.
+`season_averages` is the season per-game rate for each `stat_categories`
+entry, rounded as `season_scoring` is, so `season_averages.PTS` equals
+`season_scoring` whenever `PTS` is a category. With no season rate (no logs,
+or no minutes) they are `[]` and `{}`. A Historical Matchup serves `[]` and
+`{}`: its evidence includes the focal game and the games after it. Older
+backends omit both fields.
 
 `book_lines` (#377, crf04/statsplus#185) is additive and always present: sportsbook
 player-prop lines from The Odds API, keyed by category (a subset of `PTS`,
@@ -2183,6 +2208,8 @@ the same shape as a stored pool player, with these differences:
   Display and score inputs now read the participant's completed-season
   summary once, together: `season_scoring`, `last_10_minutes`, and Matchup
   Score inputs all come from the same read and all include the focal game.
+  `last_five_games` is `[]` and `season_averages` is `{}`: recent games read
+  from that summary would include the focal game and later games.
   Hindsight is disclosed by the `completed_season` label, not by excluding the
   focal game from an input. The selection route's comparison samples and delta
   baseline are unaffected by #47 and keep dropping the focal row, so a
@@ -2427,8 +2454,9 @@ current-season Athlete Catalog team (`null` when the catalog names none).
 Catalog, as in a Historical Matchup, because there is no Player Pool to name
 posted markets.
 
-`scores`, `diet_shares`, `diet_thin`, `season_scoring`, and `last_10_minutes`
-are computed by the same code the game Matchup uses, with the opponent named
+`scores`, `diet_shares`, `diet_thin`, `season_scoring`, `last_10_minutes`,
+`last_five_games`, and `season_averages` are computed by the same code the
+game Matchup uses (the last two over every `stat_categories` entry), with the opponent named
 by the request rather than by a game. For a game whose Defense Sheet as-of is
 the latest window, a player's Unscheduled `scores` equal that game's `scores`
 for the player, market by market and window by window. The Blend follows the
