@@ -1163,8 +1163,8 @@ The read answers anyone, so a shared Log Workspace link loads signed out. The
 route derives one decision from the caller, admitted (signed in and not
 waitlisted; a failed waitlist lookup is not admitted). Anyone else gets `posted_lines.without_prices` and no research action
 counted. An offered season after the Published Season reads for anyone, so a
-link its sender copied from that season loads the same logs; a season not
-offered is refused for everyone. Anonymous callers are also
+link its sender copied from that season loads the same logs. Every caller
+reads the same seasons, so a next season not yet offered is refused for all. Anonymous callers are also
 limited per IP by `ANONYMOUS_ROUTE_LIMITS` in `app/utils/rate_limit.py`.
 
 `GameService.get_player_id` resolves the `player_name` query parameter against
