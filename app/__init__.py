@@ -335,10 +335,14 @@ def _register_usage_recording(app: Flask) -> None:
     @app.after_request
     def record_web_action(response):  # type: ignore[no-untyped-def]
         try:
-            name = WEB_ACTION_ENDPOINTS.get((request.method, request.endpoint))
-            if name is None or not 200 <= response.status_code < 300:
-                return response
-            if request_source() != SOURCE_WEB:
+            # A route that names its action itself (a Report Builder publish)
+            # names web use whichever client posted it, the MCP server included.
+            name = g.get("usage_web_action")
+            if name is None:
+                name = WEB_ACTION_ENDPOINTS.get((request.method, request.endpoint))
+                if name is None or request_source() != SOURCE_WEB:
+                    return response
+            if not 200 <= response.status_code < 300:
                 return response
             user = get_current_user()
             if not user or not user.get("uid") or user.get("is_dev_bypass"):

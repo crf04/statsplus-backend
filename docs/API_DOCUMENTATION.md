@@ -5137,7 +5137,7 @@ The server checks the body against the same schema and limits as the MCP tool
 | `cards` | an object of card name to non-empty HTML string, holding only cards some call names |
 | `show_author` | optional boolean, default `false` |
 | `listed` | optional boolean, default `false`; `true` also lists the report in Research |
-| `origin` | optional, `assistant` (the default: an AI assistant wrote it) or `builder` (its author wrote it in the Report Builder); any other value, `null` included, is `400 invalid_input` with `details.field: "origin"` (crf04/statsplus#382) |
+| `origin` | optional, `assistant` (the default: an AI assistant wrote it) or `builder` (its author wrote it in the Report Builder); any other value, `null` included, is `400 invalid_input` with `details.field: "origin"` (crf04/statsplus#382). Publishing a `builder` report records the `report_published` web action |
 | `notes` | optional, top-level (not in `report`): the author's own words as plain text, at most 2,000 characters, with no link (`http://`, `https://` or `www.`, any case); missing, `null` or blank is no notes. Over-length is `400 {"error": "notes_too_long", ...}`, a link `400 {"error": "notes_links", ...}` (crf04/statsplus#377) |
 
 Text is stored as given and the web app renders it escaped, so HTML in a text

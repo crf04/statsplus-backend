@@ -2348,6 +2348,64 @@ def downgrade_report_origin(connection: Connection) -> None:
     connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 82))
 
 
+def _admit_report_published_usage_event(connection: Connection) -> None:
+    """Let ``usage_events`` record the ``report_published`` web action (crf04/statsplus#382).
+
+    ``ck_usage_events_name`` enumerates the event names, so a table created
+    before this one rejects its rows.  PostgreSQL swaps the constraint in
+    place; SQLite cannot alter a CHECK, so it rebuilds the table from the
+    current model.  Rerun-safe: the PostgreSQL swap is a drop-if-exists plus
+    add, and a SQLite table whose definition already names the event is left
+    alone.
+    """
+    from sqlalchemy import CheckConstraint
+
+    from app.models.usage_event import EVENT_REPORT_PUBLISHED, UsageEvent
+    from app.models.user import User
+
+    table = UsageEvent.__table__
+    User.__table__.create(connection, checkfirst=True)
+    if not inspect(connection).has_table(table.name):
+        table.create(connection)
+        return
+    if connection.dialect.name == "sqlite":
+        current_sql = _sqlite_table_sql(connection, table.name)
+        if EVENT_REPORT_PUBLISHED not in current_sql:
+            _rebuild_sqlite_usage_events(connection, table)
+        return
+    [constraint] = [
+        constraint
+        for constraint in table.constraints
+        if isinstance(constraint, CheckConstraint) and constraint.name == "ck_usage_events_name"
+    ]
+    connection.execute(text("ALTER TABLE usage_events DROP CONSTRAINT IF EXISTS ck_usage_events_name"))
+    # NOT VALID skips the scan: every stored row passed the narrower CHECK.
+    connection.execute(
+        text(
+            "ALTER TABLE usage_events ADD CONSTRAINT ck_usage_events_name "
+            f"CHECK ({constraint.sqltext}) NOT VALID"
+        )
+    )
+
+
+def _rebuild_sqlite_usage_events(connection: Connection, table) -> None:
+    """Rebuild ``usage_events`` from the model in one transaction, keeping every row and id.
+
+    The renamed table keeps its indexes' names, so they are dropped before the
+    model's are created.
+    """
+    driver = connection.connection.driver_connection
+    if not getattr(driver, "in_transaction", True):
+        connection.exec_driver_sql("BEGIN")
+    connection.execute(text("ALTER TABLE usage_events RENAME TO usage_events__083"))
+    for index in table.indexes:
+        connection.execute(text(f"DROP INDEX IF EXISTS {index.name}"))
+    table.create(connection)
+    columns = ", ".join(column.name for column in table.columns)
+    connection.execute(text(f"INSERT INTO usage_events ({columns}) SELECT {columns} FROM usage_events__083"))
+    connection.execute(text("DROP TABLE usage_events__083"))
+
+
 def _rebuild_sqlite_target_qualifiers(connection: Connection) -> None:
     """Rebuild ``target_qualifiers`` on SQLite so its Diet columns may be null.
 
@@ -3441,6 +3499,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(80, "080_research_feed", _add_research_feed),
     Migration(81, "081_report_edits", _add_report_edits),
     Migration(82, "082_report_origin", _add_report_origin),
+    Migration(83, "083_usage_report_published", _admit_report_published_usage_event),
 )
 
 

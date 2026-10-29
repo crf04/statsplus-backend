@@ -20,6 +20,7 @@ from sqlalchemy import create_engine, event, text
 
 from app.errors import ResourceNotFoundError
 from app.migrations import run_migrations
+from app.services.reports import ReportService
 from app.services.usage_events import WEB_ACTION_ENDPOINTS, UsageEventService
 from app.services.user_service import UserService
 
@@ -72,6 +73,7 @@ def client(app, dependencies, engine, runtime_settings, usage, monkeypatch):
 
     dependencies.user_service = UserService(engine, settings=runtime_settings)
     dependencies.usage_event_service = usage
+    dependencies.report_service = ReportService(engine)
     dependencies.matchup_service = Mock(name="matchup_service")
     dependencies.matchup_service.get_matchup.return_value = {"game_id": "0022600001"}
     dependencies.game_service.get_filtered_logs.return_value = {"game_logs": []}
@@ -698,3 +700,46 @@ def test_a_delayed_write_for_an_earlier_day_does_not_forget_todays_keys(usage, e
 
 
 DAY_BEFORE = date(2026, 10, 13)
+
+
+# --- report_published (crf04/statsplus#382) ----------------------------------------------
+
+
+def _report(**extra):
+    return {
+        "report": {"title": "Mine", "blocks": [{"id": "p", "type": "paragraph", "text": "Words."}]},
+        "calls": [],
+        "cards": {},
+        **extra,
+    }
+
+
+def test_publishing_a_builder_report_records_report_published_once_a_day(client, engine):
+    for _ in range(2):
+        assert _call(client, "post", "/api/user/reports", json=_report(origin="builder")).status_code == 201
+
+    assert _events(engine) == [_active("u1", "web"), _action("u1", "report_published")]
+
+
+def test_a_builder_report_the_mcp_server_posts_still_records_a_web_report_published(client, engine):
+    response = _call(client, "post", "/api/user/reports", headers=MCP, json=_report(origin="builder"))
+
+    assert response.status_code == 201
+    assert _events(engine) == [_active("u1", "mcp"), _action("u1", "report_published")]
+
+
+@pytest.mark.parametrize("headers", [None, MCP])
+@pytest.mark.parametrize("extra", [{}, {"origin": "assistant"}])
+def test_an_assistant_report_records_no_report_published(client, engine, headers, extra):
+    response = _call(client, "post", "/api/user/reports", headers=headers, json=_report(**extra))
+
+    assert response.status_code == 201
+    assert _events(engine) == [_active("u1", "mcp" if headers else "web")]
+
+
+def test_a_refused_builder_publish_records_no_report_published(client, engine):
+    body = _report(origin="builder")
+    body["report"]["title"] = " "
+
+    assert _call(client, "post", "/api/user/reports", json=body).status_code == 400
+    assert _events(engine) == [_active("u1", "web")]
