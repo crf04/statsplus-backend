@@ -1,9 +1,11 @@
 """With no season chosen, every response is byte for byte what it was (statsplus#330 AC1).
 
-The goldens were recorded from master before Selected Season reads existed,
-over a world that publishes 2025-26 and holds 2026-27 candidates of the game
-logs and team defense, so a default read that touched a held candidate would
-change them.  Publication IDs are random per run and are replaced, in order of
+The goldens were recorded from master before a selection served candidates
+whose Readiness Rule does not hold (statsplus#386), over a world that
+publishes 2025-26 and holds opening-week 2026-27 candidates of the game logs,
+team defense, play-type defense and player Synergy, and whose reader has
+already served them to a selection, so a default read that touched a held
+candidate or a selection's cached verdict would change them.  Publication IDs are random per run and are replaced, in order of
 first appearance, before comparing.  ``GOLDEN_RECORD=1`` rewrites the files.
 """
 
@@ -15,16 +17,39 @@ from pathlib import Path
 
 import pytest
 
-from tests.support.selected_season import GAME_ID, PLAYER_ID, PLAYER_NAME, SelectedWorld
+from app.services.database_first_activation import ReadSeason
+from tests.support.season_cutover import (
+    L15_STREAM,
+    NEW,
+    OLD,
+    PLAYER_LOGS,
+    SEASON_STREAM,
+    THIN_CUTOFF,
+    THIN_GAMES,
+    THIN_PROVENANCE,
+)
+from tests.support.selected_season import (
+    GAME_ID,
+    PLAY_TYPE_DEFENSE,
+    PLAYER_ID,
+    PLAYER_NAME,
+    PLAYER_SYNERGY,
+    SelectedWorld,
+)
 
 GOLDEN = Path(__file__).parent / "fixtures" / "omitted_season"
+SELECTED_KEYS = (PLAYER_LOGS, SEASON_STREAM, L15_STREAM, PLAY_TYPE_DEFENSE, PLAYER_SYNERGY)
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 @pytest.fixture
 def world(tmp_path, dependencies):
     built = SelectedWorld(tmp_path)
+    built.publish_play_types()
     built.hold_opening_week()
+    for stream_key in (PLAY_TYPE_DEFENSE, PLAYER_SYNERGY):
+        built.compose_new_play_types(stream_key, THIN_GAMES, cutoff=THIN_CUTOFF, provenance=THIN_PROVENANCE)
+    built.reader.for_season(NEW).snapshot(SELECTED_KEYS, season=ReadSeason(OLD))
     dependencies.game_service = built.games
     dependencies.matchup_service = built.service
     dependencies.slate_service = built.slates

@@ -266,6 +266,8 @@ class ResidentialScopeExecutor:
             # only through its games played.  The box-score games of every
             # player and team over the same date bound travel with it, so
             # composition can prove the tracking covers every governed game.
+            # Tracking's Overall range lists every player it has reached,
+            # including one whose shots are none of the three types.
             date_to = parameters.get("date_to")
             window_reads = {
                 "date_to": date_to,
@@ -274,6 +276,7 @@ class ResidentialScopeExecutor:
             }
             games = _call(self.provider, "fetch_player_season_totals", None, **window_reads)
             team_games = _call(self.provider, "fetch_team_season_totals", None, **window_reads)
+            tracked = _call(self.provider, "fetch_player_shot_type", "Overall", **window_reads)
             for category in categories:
                 raw = _call(self.provider, "fetch_player_shot_type", category, **window_reads)
                 yield normalize_grouped_shot_response(
@@ -289,6 +292,7 @@ class ResidentialScopeExecutor:
                     },
                     games_response=games,
                     team_games_response=team_games,
+                    tracking_response=tracked,
                 )
             return
         if scope in {"exact_shot_zones", "shot_zones", "player_shot_zones", "shot_zones_opponent"}:

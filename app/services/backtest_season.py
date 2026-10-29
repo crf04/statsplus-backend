@@ -31,6 +31,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any
 
+from app.config.settings import MatchupScoreSettings
 from app.errors import InvalidInputError, SeasonUnavailableError
 from app.services.database_first_activation import ReadSeason, SeasonUnavailable
 from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS
@@ -78,6 +79,19 @@ class BacktestSeason:
         """Whether this season is not the published one, so says nothing of tonight."""
 
         return self.season != self.published
+
+    def thinness(self, settings: MatchupScoreSettings) -> MatchupScoreSettings:
+        """The Diet thinness floors this season's players are judged under.
+
+        An Unpublished Season is a reader's explicit choice of the next season
+        before its cutover, while most players have fewer games than the Diet
+        thinness floor.  That reader judges the sample from each player's
+        ``season_games`` (crf04/statsplus#386), so one game clears it there.
+        """
+
+        if self.mode is not BacktestMode.UNPUBLISHED:
+            return settings
+        return settings.model_copy(update={"min_games": 1})
 
 
 class BacktestSeasons:

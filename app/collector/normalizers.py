@@ -792,6 +792,7 @@ def normalize_grouped_shot_response(
     scope: Mapping[str, Any] | None = None,
     games_response: Any = None,
     team_games_response: Any = None,
+    tracking_response: Any = None,
 ) -> NormalizedObservation:
     """Normalize player tracking shot types beside their box-score games.
 
@@ -800,9 +801,14 @@ def normalize_grouped_shot_response(
     player's box-score games as ``box_games_played`` and the payload keeps
     every team's as ``team_games_played``, so composition can refuse
     tracking that has not yet caught up with the games the cutoff governs.
-    Every player's box-score attempts travel as ``box_field_goal_attempts``,
-    because tracking that has not reached a player at all leaves no record
-    whose games could fall short.
+    Every player's box-score attempts and games travel as
+    ``box_field_goal_attempts`` and ``box_games_played``, because tracking
+    that has not reached a player at all leaves no record whose games could
+    fall short.  ``tracking_response`` is tracking's Overall range over the
+    same bound; its games travel as ``tracking_games_played``.  The three
+    types do not cover every shot (a floater from 12 feet is none of them),
+    so only Overall tells a player tracking has not reached from one whose
+    shots fall outside the three (crf04/statsplus#386).
     """
 
     scope = dict(scope or {"window": "season", "subject": "player", "phase": "Regular Season"})
@@ -837,6 +843,11 @@ def normalize_grouped_shot_response(
         )
         for row in _records(games_response)
     }
+    observation.payload["box_games_played"] = {str(player_id): played for player_id, played in games.items()}
+    if tracking_response is not None:
+        observation.payload["tracking_games_played"] = {
+            str(player_id): played for player_id, played in _player_games_played(tracking_response).items()
+        }
     return observation
 
 

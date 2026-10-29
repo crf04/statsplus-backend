@@ -2,9 +2,10 @@
 
 2025-26 is the Published Season; 2026-27 candidates are held.  Only a read
 scoped to an explicit selection may serve them, and only a candidate that
-passes the cutover's own per-publication checks.  Families that are not ready
-keep their 2025-26 Publication labelled ``prior_season``; game logs that cannot
-serve make the season unavailable.  Every test reads through the real reader,
+passes the cutover's own per-publication checks; a family's Readiness Rule is
+not one of them (statsplus#386).  Families with no candidate keep their 2025-26
+Publication labelled ``prior_season``; game logs that cannot serve make the
+season unavailable.  Every test reads through the real reader,
 repositories and services of ``tests/support/selected_season``.
 """
 
@@ -101,19 +102,29 @@ def test_an_opening_week_selection_with_no_team_defense_composition_keeps_2025_2
     }
 
 
-def test_a_family_whose_rule_does_not_hold_keeps_2025_26_until_it_does(world, monkeypatch):
+def test_a_selection_serves_a_family_before_its_readiness_rule_holds(world, monkeypatch):
+    # A reader who chose 2026-27 judges its one game a team themselves
+    # (crf04/statsplus#386); the rule still decides what the default serves.
     team_defense_waits_for_ten_games(monkeypatch)
-    world.hold_opening_week()
+    _logs, defense = world.hold_opening_week()
 
-    reads = _reads(world.reader.for_season(NEW).snapshot(KEYS, season=ReadSeason(OLD)))
-    families = world.games.list_seasons()["choices"][0]["families"]
+    selected = world.reader.for_season(NEW).snapshot(KEYS, season=ReadSeason(OLD))
+    choice = world.games.list_seasons()["choices"][0]
 
-    assert reads[SEASON_STREAM] == ("prior_season", OLD, None, _live(world, SEASON_STREAM))
-    assert families["team_defense"] == {
-        "served_season": OLD,
-        "state": "trailing",
-        "reason": "readiness_not_met",
-    }
+    assert _reads(selected)[SEASON_STREAM] == ("candidate", NEW, None, defense.publication_id)
+    assert trailing(selected.reads.values()) == [
+        {"family": "last_15", "serving_season": OLD, "rule": "its first window of the season is composed"},
+    ]
+    assert (choice["families"]["team_defense"], choice["team_games"]) == (
+        {"served_season": NEW, "state": "serving"},
+        {"min": 1, "max": 1},
+    )
+    assert _reads(world.reader.snapshot(KEYS, season=ReadSeason(OLD)))[SEASON_STREAM] == (
+        "active",
+        OLD,
+        None,
+        _live(world, SEASON_STREAM),
+    )
 
 
 # --- play-type defense follows team defense (crf04/statsplus-backend#610) ---
@@ -171,24 +182,17 @@ def test_an_opening_week_selection_with_no_play_type_defense_composition_trails_
     }
 
 
-def test_player_synergy_still_waits_for_ten_games_a_team(world):
+def test_a_selection_serves_player_synergy_before_ten_games_a_team(world):
     world.publish_play_types()
     world.hold_opening_week()
-    world.compose_new_play_types(PLAYER_SYNERGY, THIN_GAMES, cutoff=THIN_CUTOFF, provenance=THIN_PROVENANCE)
-
-    reads, _trailing, families = _play_type_selection(world)
-
-    assert reads[PLAYER_SYNERGY] == ("prior_season", OLD, None, _live(world, PLAYER_SYNERGY))
-    assert families["synergy"] == {"served_season": OLD, "state": "trailing", "reason": "readiness_not_met"}
-
-    world.hold_ten_games()
-    ready = world.compose_new_play_types(
-        PLAYER_SYNERGY, NEW_GAMES, cutoff=NEW_CUTOFF, provenance=NEW_PROVENANCE
+    synergy = world.compose_new_play_types(
+        PLAYER_SYNERGY, THIN_GAMES, cutoff=THIN_CUTOFF, provenance=THIN_PROVENANCE
     )
 
-    reads, _trailing, families = _play_type_selection(world)
+    reads, trailing_families, families = _play_type_selection(world)
 
-    assert reads[PLAYER_SYNERGY] == ("candidate", NEW, None, ready.publication_id)
+    assert reads[PLAYER_SYNERGY] == ("candidate", NEW, None, synergy.publication_id)
+    assert [entry["family"] for entry in trailing_families] == ["team_defense", "last_15"]
     assert families["synergy"] == {"served_season": NEW, "state": "serving"}
 
 

@@ -54,7 +54,7 @@ import redis
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
-from app.config.settings import RuntimeSettings
+from app.config.settings import MatchupScoreSettings, RuntimeSettings
 from app.domain.nba_events import REGULAR_SEASON_TYPE
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.domain.target_statistics import (
@@ -62,6 +62,7 @@ from app.domain.target_statistics import (
     season_average_value,
     target_stat_columns,
 )
+from app.domain.utc import parse_utc_iso
 from app.errors import AppError, InvalidInputError, SeasonUnavailableError, isolated_error_body
 from app.models.target import (
     POSITION_QUALIFIER_BASE,
@@ -266,6 +267,7 @@ def backtest_cache_key(
     season: str,
     settings: RuntimeSettings,
     catalog: str | None = None,
+    thinness: MatchupScoreSettings | None = None,
 ) -> str:
     """Build ``targets:backtest:v<schema>:<sha256>`` over the canonical key body.
 
@@ -277,9 +279,12 @@ def backtest_cache_key(
     ownership is enforced by the Target load before any lookup.  The
     ``opponent`` is in the body because the Backtest reads only that
     opponent's games: two Targets differing only in opponent are different
-    questions (statsplus#123).
+    questions (statsplus#123).  ``thinness`` is the Matchup floors the
+    season's players were judged under (``BacktestSeason.thinness``), the
+    configured ones when omitted.
     """
 
+    matchup = settings.matchup_scores if thinness is None else thinness
     body = {
         "schema": TARGET_BACKTEST_CACHE_SCHEMA,
         "season": season,
@@ -292,10 +297,9 @@ def backtest_cache_key(
         "conditions": target.get("conditions"),
         "thresholds": {
             "matchup": {
-                "min_games": settings.matchup_scores.min_games,
+                "min_games": matchup.min_games,
                 "volume_per_game": {
-                    base: settings.matchup_scores.minimum_volume_per_game(base)
-                    for base in QUALIFIER_DIET_BASES
+                    base: matchup.minimum_volume_per_game(base) for base in QUALIFIER_DIET_BASES
                 },
             },
             "diet_baseline": {
@@ -311,6 +315,22 @@ def backtest_cache_key(
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     prefix = _CACHE_KEY_PREFIX_TEMPLATE.format(schema=TARGET_BACKTEST_CACHE_SCHEMA)
     return f"{prefix}{digest}"
+
+
+def _lagging_inputs(snapshot: Any) -> list[dict[str, str]]:
+    """Each Diet whose cutoff trails the game logs' cutoff, with both cutoffs.
+
+    An Unpublished Season serves each held candidate at its own cutoff, so a
+    Diet uploaded before last night's games is read beside game logs that
+    include them; the response names that lag (crf04/statsplus#386 AC4).
+    """
+
+    game_log_cutoff = snapshot.read("player_game_logs").cutoff
+    return [
+        {"stream_key": key, "coverage_cutoff": read.cutoff, "game_log_cutoff": game_log_cutoff}
+        for key in sorted(PLAYER_DIET_PUBLICATION_STREAM_KEYS)
+        if parse_utc_iso((read := snapshot.read(key)).cutoff) < parse_utc_iso(game_log_cutoff)
+    ]
 
 
 class TargetReader(Protocol):
@@ -522,7 +542,7 @@ class TargetBacktestService:
                 evidence = (
                     None
                     if generation is None
-                    else self._cache_read(self._cache_key(target, choice.season, generation, catalog))
+                    else self._cache_read(self._cache_key(target, choice, generation, catalog))
                 )
                 if evidence is None:
                     items.append({"target_id": target_id, "status": "uncached"})
@@ -630,7 +650,7 @@ class TargetBacktestService:
         ]
         remaining = 0
         for index, (choice, generation, catalog, target) in enumerate(entries):
-            cached = self._cache_exists(self._cache_key(target, choice.season, generation, catalog))
+            cached = self._cache_exists(self._cache_key(target, choice, generation, catalog))
             if cached is None:
                 logger.warning("Target backtest precompute stopped: result cache unavailable")
                 counts["bypassed"] += len(entries) - index
@@ -835,12 +855,18 @@ class TargetBacktestService:
                 kept,
                 player_minutes=player_minutes,
                 connection=connection,
+                thinness=choice.thinness(self.settings.matchup_scores),
                 # The Positions the cache key was derived from, when it was.
                 positions=None if catalog_read is None else catalog_read[0],
             )
             summary = self._summary(players, markets)
             if any(qualifier["base"] == POSITION_QUALIFIER_BASE for qualifier in qualifiers):
                 summary["players_without_position"] = without_position
+            lagging = (
+                {"lagging_inputs": _lagging_inputs(snapshot)}
+                if choice.mode is BacktestMode.UNPUBLISHED
+                else {}
+            )
             readings = getattr(snapshot, "reads", None)
             eligibility = _required_cache_streams(qualifiers)
             identity = self._cache_identity(snapshot)
@@ -862,13 +888,14 @@ class TargetBacktestService:
                     # generation, so the next request's pre-check key finds
                     # it or recomputes it -- never a torn hybrid.
                     self._cache_write(
-                        self._cache_key(target, season, identity, catalog_read[1]),
+                        self._cache_key(target, choice, identity, catalog_read[1]),
                         {
                             "players": players,
                             "summary": summary,
                             "stat_columns": list(markets),
                             "games_considered": games_considered,
                             "season": season,
+                            **lagging,
                         },
                     )
                     cache_state = "miss"
@@ -890,6 +917,7 @@ class TargetBacktestService:
             "summary": summary,
             "players": players,
             "games_considered": games_considered,
+            **lagging,
         }, cache_state
 
     @staticmethod
@@ -913,6 +941,7 @@ class TargetBacktestService:
             "summary": evidence["summary"],
             "players": evidence["players"],
             "games_considered": evidence["games_considered"],
+            **({"lagging_inputs": evidence["lagging_inputs"]} if "lagging_inputs" in evidence else {}),
         }
 
     @classmethod
@@ -994,7 +1023,7 @@ class TargetBacktestService:
             return None, None, None
         if generation is None:
             return None, None, None
-        return choice, self._cache_key(target, choice.season, generation, catalog[1]), catalog
+        return choice, self._cache_key(target, choice, generation, catalog[1]), catalog
 
     @staticmethod
     def _cache_identity(snapshot: Any) -> Sequence[tuple] | None:
@@ -1014,11 +1043,18 @@ class TargetBacktestService:
     def _cache_key(
         self,
         target: Mapping[str, Any],
-        season: str,
+        choice: BacktestSeason,
         generation: Sequence[tuple[str, str | None, int | None, int | None]],
         catalog: str | None,
     ) -> str:
-        return backtest_cache_key(target, generation, season=season, settings=self.settings, catalog=catalog)
+        return backtest_cache_key(
+            target,
+            generation,
+            season=choice.season,
+            settings=self.settings,
+            catalog=catalog,
+            thinness=choice.thinness(self.settings.matchup_scores),
+        )
 
     def _catalog_snapshot(self, season: str) -> tuple[dict[int, str], str | None]:
         """Read the season's Positions once: the map and the digest naming it.
@@ -1151,6 +1187,7 @@ class TargetBacktestService:
         *,
         player_minutes: int | None = None,
         connection: Connection | None = None,
+        thinness: MatchupScoreSettings,
         positions: Mapping[int, str] | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """Return the qualifying players and how many lacked a Position.
@@ -1216,6 +1253,7 @@ class TargetBacktestService:
                 diets.players.get(player_id, ()),
                 summaries.get(player_id),
                 diets,
+                thinness,
             )
             if shares is None:
                 continue
@@ -1253,6 +1291,7 @@ class TargetBacktestService:
         facts: Sequence[Any],
         summary: PlayerSeasonLogSummary | None,
         diets: PlayerDietResult,
+        thinness: MatchupScoreSettings,
     ) -> list[dict[str, Any]] | None:
         """Return one player's per-Qualifier shares, or ``None`` if unfit.
 
@@ -1272,7 +1311,7 @@ class TargetBacktestService:
                 shares.append(rule_share(base))
                 continue
             if base == SEASON_AVERAGE_QUALIFIER_BASE:
-                if not self._average_fits(qualifier, summary):
+                if not self._average_fits(qualifier, summary, thinness):
                     return None
                 shares.append(rule_share(base))
                 continue
@@ -1292,7 +1331,7 @@ class TargetBacktestService:
                 observed_share=observed_diet_share(base, base_facts),
                 selected_facts=base_facts,
                 summary=summary,
-                settings=self.settings.matchup_scores,
+                settings=thinness,
             ):
                 return None
             baseline = diets.baselines.get((base, qualifier["slice_key"]))
@@ -1314,6 +1353,7 @@ class TargetBacktestService:
         self,
         qualifier: Mapping[str, Any],
         summary: PlayerSeasonLogSummary | None,
+        thinness: MatchupScoreSettings,
     ) -> bool:
         """Whether a player's Regular Season average meets an Average Qualifier.
 
@@ -1321,7 +1361,7 @@ class TargetBacktestService:
         and so is a stat with nothing to divide by (no attempts, no minutes).
         """
 
-        if season_sample_thin(summary, self.settings.matchup_scores):
+        if season_sample_thin(summary, thinness):
             return False
         value = season_average_value(qualifier["stat"], summary.rate_rows)
         return value is not None and TARGET_COMPARATOR_TESTS[qualifier["comparator"]](

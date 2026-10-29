@@ -1268,19 +1268,19 @@ def _assert_player_shot_types_cover_governed_games(
     *,
     cutoff: datetime,
     expected_game_ids_by_team: Mapping[int, frozenset[str]] | None,
-) -> frozenset[int]:
+) -> None:
     """Refuse player tracking that does not yet cover every governed game.
 
     NBA player tracking can trail the box score by game-days while still
     answering, and its only tell is a smaller games played.  The observation
-    proves its window twice over: every team's box-score games equal the
-    games the cutoff governs, and every player's tracking games equal his
-    box-score games over the same date bound.
-
-    Returns the players with box-score field-goal attempts.  A player tracking
-    has not reached has no record here at all, so the caller requires each of
-    them in at least one category.  A player with no attempts has no shot
-    type and is legitimately absent from every category.
+    proves its window three times over: every team's box-score games equal
+    the games the cutoff governs, every player's tracking games in each
+    category equal his box-score games over the same date bound, and every
+    player with box-score field-goal attempts has as many games in tracking's
+    Overall range as in the box score.  A player tracking has not reached has
+    no Overall record at all.  A player whose shots are none of the three
+    types has an Overall record and no category record, and is legitimately
+    absent from the Diet (crf04/statsplus#386).
     """
 
     if not expected_game_ids_by_team:
@@ -1288,25 +1288,33 @@ def _assert_player_shot_types_cover_governed_games(
     endpoint_window = scope.get("endpoint_window")
     team_games = document.get("team_games_played")
     box_attempts = document.get("box_field_goal_attempts")
+    box_games = document.get("box_games_played")
+    tracking_games = document.get("tracking_games_played")
     if (
         not isinstance(endpoint_window, Mapping)
         or endpoint_window.get("date_to") != slate_date_for_instant(cutoff).strftime("%m/%d/%Y")
         or not isinstance(team_games, Mapping)
         or not isinstance(box_attempts, Mapping)
+        or not isinstance(box_games, Mapping)
+        or not isinstance(tracking_games, Mapping)
     ):
         raise _ProviderWindowUnavailable("provider_window_unverified")
-    if any(
-        team_games.get(str(team_id)) != len(game_ids)
-        for team_id, game_ids in expected_game_ids_by_team.items()
-    ) or any(
-        not isinstance(record, Mapping) or record.get("box_games_played") != record.get("games_played")
-        for record in document.get("records") or ()
+    try:
+        shooters = [player_id for player_id, attempts in box_attempts.items() if attempts > 0]
+    except TypeError as error:
+        raise ValueError("publication observation value invalid") from error
+    if (
+        any(
+            team_games.get(str(team_id)) != len(game_ids)
+            for team_id, game_ids in expected_game_ids_by_team.items()
+        )
+        or any(
+            not isinstance(record, Mapping) or record.get("box_games_played") != record.get("games_played")
+            for record in document.get("records") or ()
+        )
+        or any(tracking_games.get(player_id) != box_games.get(player_id) for player_id in shooters)
     ):
         raise _ProviderWindowUnavailable("provider_window_lagging")
-    try:
-        return frozenset(int(player_id) for player_id, attempts in box_attempts.items() if attempts > 0)
-    except (TypeError, ValueError) as error:
-        raise ValueError("publication observation value invalid") from error
 
 
 def _compose_player_diet_observation_payload(
@@ -1396,7 +1404,6 @@ def _compose_player_diet_observation_payload(
     observed_categories: set[str] = set()
     facts: dict[tuple[int, str], dict[str, Any]] = {}
     sources: list[dict[str, str]] = []
-    shooters: set[int] = set()
     for observation in sorted(latest.values(), key=lambda row: row.observation_id):
         if (
             observation.manifest_id != manifest_id
@@ -1419,7 +1426,7 @@ def _compose_player_diet_observation_payload(
         records = document.get("records")
         if not isinstance(records, list):
             raise ValueError("publication observation rows missing")
-        shooters |= _assert_player_shot_types_cover_governed_games(
+        _assert_player_shot_types_cover_governed_games(
             _safe_json_mapping(observation.scope),
             document,
             cutoff=cutoff,
@@ -1477,8 +1484,6 @@ def _compose_player_diet_observation_payload(
         raise ValueError("publication observation rows missing")
     if observed_categories != expected_slices:
         raise ValueError("publication observation categories incomplete")
-    if not shooters <= {player_id for player_id, _slice in facts}:
-        raise _ProviderWindowUnavailable("provider_window_lagging")
     return {
         "base": base,
         "rows": [facts[identity] for identity in sorted(facts)],
@@ -7787,6 +7792,7 @@ class PublicationService(_SessionService):
         season: str,
         authority: tuple[str, str, str] | None = None,
         ledger_lineage: bool = True,
+        readiness_rule: bool = True,
     ) -> str | None:
         """Why a cutover to ``season`` would leave ``candidate`` behind, or ``None``.
 
@@ -7798,9 +7804,11 @@ class PublicationService(_SessionService):
         judges it (crf04/statsplus#330).  Without ``ledger_lineage`` the
         verdict leaves out ``season_candidate_lineage_refusal``, the one check
         a later ledger correction can change, so it holds for the publication.
+        Without ``readiness_rule`` it leaves out the Readiness Rule: a reader
+        who selects the season judges its sample (crf04/statsplus#386).
         """
 
-        if not self._readiness_rule_holds(
+        if readiness_rule and not self._readiness_rule_holds(
             stream.stream_key,
             season=season,
             cutoff=_aware(candidate.cutoff),
