@@ -5286,13 +5286,17 @@ NBA player tracking can trail the box score by game-days while still
 answering, and its only tell is a smaller games played. So the collector
 bounds every read to the cutoff's slate date (`DateTo`) and carries the
 box-score games over the same bound: each player's (`LeagueDashPlayerStats`)
-and each team's (`LeagueDashTeamStats`). The composer refuses with
+and each team's (`LeagueDashTeamStats`), plus tracking's own `Overall` range,
+which lists every player tracking has reached. The composer refuses with
 `provider_window_lagging` unless every team's box-score games equal the games
-the cutoff governs, every player's tracking games equal his box-score
-games, and every player with box-score field-goal attempts appears in at
-least one category (a player with none has no shot type and may be absent);
-an observation without the bound or the evidence is
-`provider_window_unverified`. The refused job is retried by the next upload
+the cutoff governs, every player's tracking games in each category equal his
+box-score games, and every player with box-score field-goal attempts has as
+many games in `Overall` as in the box score. The three types do not cover
+every shot (a floater from 12 feet is none of them), so a fully tracked player
+whose attempts all fall outside them is absent from the Diet; requiring each
+shooter in a category refused the 2026-10-28 collection over one such
+attempt (crf04/statsplus#386). An observation without the bound or the
+evidence is `provider_window_unverified`. The refused job is retried by the next upload
 inside the collection window, so the publication moves as soon as NBA catches
 up and never to a lagging candidate. The version binds the same manifest and Event Catalog
 authority the opponent streams bind, and the strict `decode_player_diet`
