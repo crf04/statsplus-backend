@@ -412,17 +412,19 @@ def test_the_route_serves_a_selected_2026_27_with_its_context(served, client, au
     assert body["season_context"] == {"selected_season": NEW, "published_season": OLD}
 
 
-def test_an_anonymous_caller_is_refused_the_offered_unpublished_season(served, client):
+@pytest.mark.parametrize("waitlisted", [False, True], ids=["anonymous", "waitlisted"])
+def test_a_caller_without_an_admitted_account_reads_the_offered_unpublished_season(
+    served, client, authenticate, make_db_user, waitlisted
+):
     served.hold_opening_week()
+    headers = authenticate(db_user=make_db_user(access_status="waitlisted")) if waitlisted else None
 
-    response = _get_logs(client, NEW)
+    response = _get_logs(client, NEW, headers)
 
-    assert response.status_code == 503
-    error = response.get_json()["error"]
-    assert (error["code"], error["details"]) == (
-        "season_unavailable",
-        {"selected_season": NEW, "published_season": OLD},
-    )
+    assert response.status_code == 200
+    body = response.get_json()
+    assert [row["PTS"] for row in body["game_logs"]] == [12]
+    assert body["season_context"] == {"selected_season": NEW, "published_season": OLD}
 
 
 def test_the_route_refuses_an_unoffered_season_naming_the_published_one(served, client):

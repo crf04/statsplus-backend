@@ -575,16 +575,15 @@ def get_game_logs():
     """Game logs for anyone with a Log Workspace link (crf04/statsplus#381).
 
     Only an admitted caller (signed in, not waitlisted) gets the full answer.
-    Anyone else gets the shared-link view: each posted line without prices,
-    no season after the Published Season, and no research action counted.
+    Anyone else gets the shared-link view: each posted line without prices
+    and no research action counted. Any offered season reads for anyone, so a
+    link to the season after the Published Season loads as its sender saw it.
     """
     admitted = _admitted(get_current_user())
     player_name, query = _parse_game_log_filters()
     selected_season = request.args.get("season_filter") is not None
     if not admitted:
         g.research_action = False
-        if selected_season:
-            refuse_after_published(getattr(game_service, "publication_reader", None), query.season_filter)
     logs = _filtered_logs(player_name, query, selected=selected_season)
     if not admitted and logs.get("posted_line") is not None:
         logs = {**logs, "posted_line": without_prices(logs["posted_line"])}
