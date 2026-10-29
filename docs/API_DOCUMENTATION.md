@@ -2980,8 +2980,9 @@ changes no average.
   without prices: `line_prices` is absent, and each `book_lines[<market>].books`
   entry keeps `book`, `line` and `updated_at` but has no `over`, `under`,
   `best_over` or `best_under`. `lines`, `provider_lines`, `as_of` and `closing`
-  are unchanged. Such a caller also cannot select a season after the Published
-  Season (`503 season_unavailable`, as on the other anonymous routes).
+  are unchanged. Any offered `season_filter` reads for them as for a signed-in
+  caller, including the season after the Published Season while
+  [`/seasons`](#get-seasons) offers it.
 * `matchup` reads from the player's side: `LAL vs GSW` at home, `LAL @ GSW` away.
 * `lines` has one entry per market the stored player pool holds for that game
   (`PTS`, `REB`, `AST`, `PRA`, `3PM`, ...), one value each: the majority line
