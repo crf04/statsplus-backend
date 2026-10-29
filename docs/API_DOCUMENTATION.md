@@ -5943,9 +5943,25 @@ served only when every
 Backtest stream's candidate serves that season; a stream that trails (still on
 `2025-26`), has no candidate, or whose candidate fails its checks is
 `503 season_unavailable` naming it, so 2026-27 logs are never read with
-2025-26 Diets. The result cache keys this read on the candidates it read, so a
-newer candidate is a new entry and a withdrawn one is refused before any
-entry is read. The default season is unchanged by held candidates.
+2025-26 Diets. Each candidate serves at its own cutoff, so a Diet can trail
+the game logs it is read with; the body (and the Draft Target preview's) adds
+`lagging_inputs`, present only on this read, listing each such Diet in stream
+order, `[]` when none trails (crf04/statsplus#386):
+
+```json
+"lagging_inputs": [
+  {
+    "stream_key": "grouped_shot_types",
+    "coverage_cutoff": "2026-10-26T04:00:00+00:00",
+    "game_log_cutoff": "2026-10-29T04:00:00+00:00"
+  }
+]
+```
+
+The result cache keys this read on the candidates it read and on its one-game
+floor, so a newer candidate is a new entry, a withdrawn one is refused before
+any entry is read, and no entry computed at another floor is served. The
+default season is unchanged by held candidates.
 
 If any Backtest stream has no readable Publication for the season in
 either place -- none exists, or the one that exists cannot be read (corrupt,
