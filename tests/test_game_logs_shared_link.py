@@ -1,9 +1,9 @@
 """A shared Log Workspace link on ``/api/games/game_logs`` (crf04/statsplus#381).
 
 Anyone can read the game logs; only a signed-in, admitted caller sees the
-posted line's provider and sportsbook prices.  The route runs over the real
-``GameService`` and ``PostedLinesReader``, with the pool and sportsbook quotes
-stubbed.
+posted line's provider and sportsbook prices.  Anonymous callers are limited
+to 30 reads a minute per IP.  The route runs over the real ``GameService`` and
+``PostedLinesReader``, with the pool and sportsbook quotes stubbed.
 """
 
 from __future__ import annotations
@@ -119,3 +119,14 @@ def test_a_waitlisted_caller_sees_the_logs_without_prices(client, served, waitli
     body = response.get_json()
     assert [game["PTS"] for game in body["game_logs"]] == [27, 22, 31]
     assert body["posted_line"] == UNPRICED
+
+
+def test_the_31st_anonymous_read_in_a_minute_is_refused_but_a_signed_in_caller_is_not(client, served, member):
+    ip = {"X-Forwarded-For": "198.51.100.30"}
+
+    anonymous = [client.get(URL, headers=ip).status_code for _ in range(31)]
+    signed_in = [client.get(URL, headers={**ip, **member}).status_code for _ in range(40)]
+
+    assert anonymous == [200] * 30 + [429]
+    assert signed_in == [200] * 40
+    assert client.get(URL, headers={"X-Forwarded-For": "198.51.100.31"}).status_code == 200

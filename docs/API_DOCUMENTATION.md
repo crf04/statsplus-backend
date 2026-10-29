@@ -284,6 +284,7 @@ reopens), and this body:
 | `GET /api/dfs/board` | 30/min per user |
 | `POST /api/user/feedback` | 10/hour per user |
 | `POST /api/user/reports` | 10/hour and 30/day per user |
+| `GET /api/games/game_logs` without a signed-in user | 30/min per IP, also counted in the 60/min unauthenticated bucket; signed-in callers keep the shared 300/min bucket |
 | every other authenticated `/api` route | 300/min per user, one shared bucket |
 | unauthenticated routes, except `/health` | 60/min per IP |
 
