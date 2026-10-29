@@ -17,6 +17,7 @@ serves requests with worker threads, so no event loop is created per request
 timeouts keep the documented 503 ``provider_unavailable`` contract.
 """
 
+import logging
 import re
 import threading
 from datetime import date
@@ -49,6 +50,8 @@ from ..services.slate_board import BOARD_SOURCES
 from ..utils.auth import get_current_user, is_waitlisted, require_auth, require_auth_optional_allow_waitlisted
 from ._selected_season import season_argument, season_refusals, selected
 from ._service_proxy import CurrentAppService
+
+logger = logging.getLogger(__name__)
 
 # Initialize blueprint and services
 game_bp = Blueprint("games", __name__)
@@ -575,8 +578,7 @@ def get_game_logs():
     Anyone else gets the shared-link view: each posted line without prices,
     no season after the Published Season, and no research action counted.
     """
-    viewer = get_current_user()
-    admitted = viewer is not None and not is_waitlisted(viewer, tolerate_lookup_errors=True)
+    admitted = _admitted(get_current_user())
     player_name, query = _parse_game_log_filters()
     selected_season = request.args.get("season_filter") is not None
     if not admitted:
@@ -587,6 +589,22 @@ def get_game_logs():
     if not admitted and logs.get("posted_line") is not None:
         logs = {**logs, "posted_line": without_prices(logs["posted_line"])}
     return jsonify(logs)
+
+
+def _admitted(viewer: dict[str, Any] | None) -> bool:
+    """Signed in and known not to be waitlisted.
+
+    A failed waitlist lookup is not admission: the read still answers, without
+    prices, rather than showing prices to a caller it could not place.
+    """
+
+    if viewer is None:
+        return False
+    try:
+        return not is_waitlisted(viewer)
+    except Exception as error:
+        logger.warning("Could not resolve access status for a game-log read: %s", error)
+        return False
 
 
 def _preview_query_from(args: Any) -> tuple[str, GameLogQuery]:

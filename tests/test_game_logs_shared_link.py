@@ -8,10 +8,14 @@ to 30 reads a minute per IP.  The route runs over the real ``GameService`` and
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from sqlalchemy import create_engine
 
+import app.utils.auth as auth
 from app.migrations import run_migrations
+from app.services.user_service import UserService
 from tests.test_game_logs_posted_line import LEBRON, TONIGHT, URL, Catalog, Pools, _serve
 
 BOOKS = {
@@ -119,6 +123,42 @@ def test_a_waitlisted_caller_sees_the_logs_without_prices(client, served, waitli
     body = response.get_json()
     assert [game["PTS"] for game in body["game_logs"]] == [27, 22, 31]
     assert body["posted_line"] == UNPRICED
+
+
+class UnreachableAccessStatus(UserService):
+    """A signed-in caller with no synced row whose waitlist lookup fails."""
+
+    def __init__(self):
+        pass
+
+    def create_or_update_user(self, user_data):
+        return None
+
+    def resolve_access_status(self, uid):
+        raise RuntimeError("waitlist database unavailable")
+
+
+def test_a_caller_whose_waitlist_status_cannot_be_read_sees_no_prices(client, served, member, monkeypatch):
+    monkeypatch.setattr(
+        auth, "get_dependencies", lambda: SimpleNamespace(user_service=UnreachableAccessStatus())
+    )
+
+    response = client.get(URL, headers=member)
+
+    assert response.status_code == 200
+    assert response.get_json()["posted_line"] == UNPRICED
+
+
+def test_a_rejected_token_reads_the_shared_link_view(client, served, monkeypatch):
+    def reject(token):
+        raise ValueError("invalid signature")
+
+    monkeypatch.setattr(auth, "verify_firebase_token", reject)
+
+    response = client.get(URL, headers={"Authorization": "Bearer forged"})
+
+    assert response.status_code == 200
+    assert response.get_json()["posted_line"] == UNPRICED
 
 
 def test_the_31st_anonymous_read_in_a_minute_is_refused_but_a_signed_in_caller_is_not(client, served, member):

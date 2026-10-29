@@ -1161,7 +1161,7 @@ GET /api/games/game_logs
 
 The read answers anyone, so a shared Log Workspace link loads signed out. The
 route derives one decision from the caller, admitted (signed in and not
-waitlisted). Anyone else gets `posted_lines.without_prices`, no season after the
+waitlisted; a failed waitlist lookup is not admitted). Anyone else gets `posted_lines.without_prices`, no season after the
 Published Season, and no research action counted. Anonymous callers are also
 limited per IP by `ANONYMOUS_ROUTE_LIMITS` in `app/utils/rate_limit.py`.
 
