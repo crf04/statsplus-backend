@@ -107,7 +107,7 @@ def _is_canonical_player_id(value: str) -> bool:
 @game_bp.route("/slate", methods=["GET"])
 def get_slate():
     """Return the persisted current-season slate for one ET calendar date."""
-    service = selected(slate_service, "slate", season_argument(), anonymous=True)
+    service = selected(slate_service, "slate", season_argument())
     with season_refusals():
         return jsonify(service.get_slate(request.args.get("date"), fallback=request.args.get("fallback")))
 
@@ -115,7 +115,7 @@ def get_slate():
 @game_bp.route("/slate/edges", methods=["GET"])
 def get_slate_edges():
     """Return each slate game's biggest points effects and the slate's picks."""
-    service = selected(slate_edges_service, "slate_edges", season_argument(), anonymous=True)
+    service = selected(slate_edges_service, "slate_edges", season_argument())
     with season_refusals():
         return jsonify(service.get_edges(request.args.get("date"), fallback=request.args.get("fallback")))
 
