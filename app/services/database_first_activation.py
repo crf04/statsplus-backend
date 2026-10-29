@@ -54,7 +54,6 @@ from app.services.collection_control import (
 from app.services.ledger_derivations import ASSIST_DERIVED_METRICS
 from app.services.publication_authority import verify_publication_authority
 from app.services.serving_season import (
-    NOT_READY_REASON,
     PRIOR_SEASON_STATUS,
     READINESS_RULES,
     next_season,
@@ -879,7 +878,14 @@ class SeasonCandidateChecks(Protocol):
     """The cutover's per-publication judgement of one held candidate."""
 
     def season_candidate_refusal(
-        self, session: Session, stream: Any, candidate: Any, *, season: str, ledger_lineage: bool
+        self,
+        session: Session,
+        stream: Any,
+        candidate: Any,
+        *,
+        season: str,
+        ledger_lineage: bool,
+        readiness_rule: bool,
     ) -> str | None: ...
 
     def season_candidate_lineage_refusal(
@@ -1152,11 +1158,9 @@ def _family_states(
     return families
 
 
-def _held_back_reason(stream_key: str, refusal: str | None, *, held: bool) -> str | None:
+def _held_back_reason(stream_key: str, *, held: bool) -> str | None:
     """Why an Unpublished Season read keeps ``stream_key`` off a candidate, in contract words."""
 
-    if refusal == NOT_READY_REASON:
-        return "readiness_not_met"
     family = getattr(readiness_rule(stream_key), "family", None)
     if family == "last_15":
         return "window_not_ready" if held else "season_not_composed"
@@ -1924,19 +1928,22 @@ class DatabaseFirstPublicationReader:
         session: Session,
         as_of: datetime | None = None,
     ) -> PublicationReadSnapshot:
-        """Read the next season as if its Season Cutover had just run.
+        """Read the next season as if its Season Cutover had just run, whatever its sample.
 
         Each enabled stream whose live publication is of another season and
         which holds a candidate of ``season`` (the newest by cutoff, then
         version) would move, exactly the streams ``cutover_season`` moves.  A
         candidate serves, labelled ``candidate``, only if the cutover's own
-        per-publication checks pass it: authority, checksum, decode, coverage
-        of every governed game of all thirty teams, and its family's Readiness
-        Rule.  A coupled family moves as a unit.  Every other stream reads its
-        live publication in ``season``, so a trailing family serves its
-        previous season as ``prior_season`` and the rest read
-        ``window_not_ready``, as after a real cutover, except that Last 15
-        also trails until its first window of ``season`` serves.  Cross-stream manifest
+        per-publication checks pass it: authority, checksum, decode and
+        coverage of every governed game of all thirty teams.  Its family's
+        Readiness Rule is not one of them: the reader selected the season, so
+        a family serves its candidate however few games each team has played,
+        and the season's ``TeamGames`` say how few (crf04/statsplus#386).  A
+        coupled family moves as a unit.  Every other stream reads its live
+        publication in ``season``, so a trailing family serves its previous
+        season as ``prior_season`` and the rest read ``window_not_ready``, as
+        after a real cutover, except that Last 15 also trails until its first
+        window of ``season`` serves.  Cross-stream manifest
         equality is not required: live reads do not require it either.
         ``SeasonUnavailable`` when the game logs cannot move.
 
@@ -2122,11 +2129,7 @@ class DatabaseFirstPublicationReader:
                 refused[key] = reasons[0]
         left_behind = coupled_left_behind(moving, refused)
         serving = {key: version for key, version in chosen.items() if key not in left_behind}
-        held_back = {
-            key: _held_back_reason(key, refused.get(key), held=key in moving)
-            for key in judged
-            if key not in serving
-        }
+        held_back = {key: _held_back_reason(key, held=key in moving) for key in judged if key not in serving}
         return live, serving, held_back
 
     def _unpublished_read(
@@ -2167,7 +2170,7 @@ class DatabaseFirstPublicationReader:
     def _candidate_refusal(
         self, session: Session, stream: PublicationStream, candidate: PublicationVersion, *, season: str
     ) -> str | None:
-        """The cutover's verdict on one candidate.
+        """The cutover's verdict on one candidate, without its Readiness Rule.
 
         Every check but ledger lineage is judged once per publication; a
         ledger correction can withdraw a candidate's games at any time, so
@@ -2184,7 +2187,7 @@ class DatabaseFirstPublicationReader:
                 refusal = self._candidate_refusals[key]
         if not judged:
             refusal = self._season_candidates.season_candidate_refusal(
-                session, stream, candidate, season=season, ledger_lineage=False
+                session, stream, candidate, season=season, ledger_lineage=False, readiness_rule=False
             )
             with self._candidate_refusals_lock:
                 self._candidate_refusals[key] = refusal

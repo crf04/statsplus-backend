@@ -41,6 +41,7 @@ from tests.support.selected_season import (
     PLAY_TYPE_DEFENSE,
     PLAYER_ID,
     PLAYER_NAME,
+    PLAYER_SYNERGY,
     SelectedWorld,
     _StoredInjuries,
 )
@@ -248,6 +249,28 @@ def test_a_selected_2026_27_matchup_reads_play_type_defense_from_its_2026_27_can
     assert _generation(body, "traditional_opponent_season") == [(traditional.publication_id, "candidate")]
     assert body["experience"]["sections"]["season_defense"]["season"] == NEW
     assert body["trailing"] == [DIETS, SYNERGY, LAST_15]
+
+
+def test_a_selected_2026_27_matchup_reads_player_synergy_from_its_candidate_before_ten_games_a_team(
+    served, client
+):
+    served.publish_play_types()
+    served.hold_opening_week()
+    play_types = served.compose_new_play_types(
+        PLAY_TYPE_DEFENSE, THIN_GAMES, cutoff=THIN_CUTOFF, provenance=THIN_PROVENANCE
+    )
+    synergy = served.compose_new_play_types(
+        PLAYER_SYNERGY, THIN_GAMES, cutoff=THIN_CUTOFF, provenance=THIN_PROVENANCE
+    )
+
+    selected = client.get(f"{ROUTES['matchup']}&season={NEW}").get_json()
+    omitted = client.get(ROUTES["matchup"]).get_json()
+
+    assert _generation(selected, PLAYER_SYNERGY) == [(synergy.publication_id, "candidate")]
+    assert _generation(selected, PLAY_TYPE_DEFENSE) == [(play_types.publication_id, "candidate")]
+    assert selected["trailing"] == [DIETS, LAST_15]
+    assert _generation(omitted, PLAYER_SYNERGY) == [(served.live(PLAYER_SYNERGY), "active")]
+    assert omitted["trailing"] == []
 
 
 def test_a_selected_2026_27_matchup_with_no_play_type_defense_composition_trails_team_defense(served, client):

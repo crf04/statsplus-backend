@@ -587,6 +587,13 @@ read of a different season keeps its refusal (`window_not_ready` for an
 earlier one, `publication_season_mismatch` for a later one). A stream in no
 family behaves like `game_logs`.
 
+The rules govern what the default serves, so they gate composition and the
+Season Cutover only. A reader who selects the next season before its cutover
+(an Unpublished Season read, Targets Backtests included) is served each
+family's held candidate that passes the cutover's other per-publication
+checks, however few games each team has played; the season's `team_games` in
+`/api/games/seasons` is that sample (crf04/statsplus#386).
+
 **Hold.** Composition for an enabled stream activates a candidate of season S
 only when the stream has no active Publication yet, or S is the published
 season (while no season is published, only the stream's own current season).

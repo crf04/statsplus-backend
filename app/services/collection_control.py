@@ -7787,6 +7787,7 @@ class PublicationService(_SessionService):
         season: str,
         authority: tuple[str, str, str] | None = None,
         ledger_lineage: bool = True,
+        readiness_rule: bool = True,
     ) -> str | None:
         """Why a cutover to ``season`` would leave ``candidate`` behind, or ``None``.
 
@@ -7798,9 +7799,11 @@ class PublicationService(_SessionService):
         judges it (crf04/statsplus#330).  Without ``ledger_lineage`` the
         verdict leaves out ``season_candidate_lineage_refusal``, the one check
         a later ledger correction can change, so it holds for the publication.
+        Without ``readiness_rule`` it leaves out the Readiness Rule: a reader
+        who selects the season judges its sample (crf04/statsplus#386).
         """
 
-        if not self._readiness_rule_holds(
+        if readiness_rule and not self._readiness_rule_holds(
             stream.stream_key,
             season=season,
             cutoff=_aware(candidate.cutoff),
