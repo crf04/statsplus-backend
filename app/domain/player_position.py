@@ -3,6 +3,8 @@
 A Position Qualifier (crf04/statsplus#351, ADR 0005) names these groups, so the
 mapping is one fixed rule shared by every writer of the athlete catalog.  The
 catalog stores the group, not the listed code: the code is only an input here.
+A short hand-kept list of players whose listed code misplaces them overrides
+the mapping (crf04/statsplus#403).
 """
 
 from __future__ import annotations
@@ -25,10 +27,55 @@ _LISTED_POSITION_GROUPS: Final[Mapping[str, str]] = {
     "C": "Big",
 }
 
+#: ``{NBA player id: group}`` for players NBA.com's listed code misplaces,
+#: chosen by hand from their play (crf04/statsplus#403).
+POSITION_OVERRIDES: Final[Mapping[int, str]] = {
+    203944: "Wing",  # Julius Randle
+    1626171: "Big",  # Bobby Portis Jr.
+    1626172: "Big",  # Kevon Looney
+    1628374: "Wing",  # Lauri Markkanen
+    1628963: "Big",  # Marvin Bagley III
+    1629029: "Guard",  # Luka Dončić
+    1629614: "Guard",  # Andrew Nembhard
+    1629660: "Guard",  # Ty Jerome
+    1629731: "Wing",  # Dean Wade
+    1629750: "Wing",  # Javonte Green
+    1630173: "Big",  # Precious Achiuwa
+    1630182: "Wing",  # Josh Green
+    1630194: "Big",  # Paul Reed
+    1630249: "Wing",  # Vít Krejčí
+    1630541: "Wing",  # Moses Moody
+    1630543: "Big",  # Isaiah Jackson
+    1631119: "Big",  # Jaylin Williams
+    1631124: "Wing",  # Julian Strawther
+    1631128: "Wing",  # Christian Braun
+    1631212: "Wing",  # Peyton Watson
+    1631217: "Big",  # Moussa Diabaté
+    1631218: "Big",  # Trayce Jackson-Davis
+    1631243: "Big",  # Mouhamed Gueye
+    1631321: "Wing",  # Sidy Cissoko
+    1641724: "Wing",  # Jett Howard
+    1641730: "Wing",  # Noah Clowney
+    1641731: "Wing",  # Bilal Coulibaly
+    1641737: "Big",  # Adem Bona
+    1641767: "Wing",  # Ben Sheppard
+    1641774: "Big",  # Tristan Vukčević
+    1641775: "Wing",  # Jordan Walsh
+    1642266: "Wing",  # Ja'Kobe Walter
+    1642277: "Wing",  # Johnny Furphy
+    1642345: "Big",  # Oso Ighodaro
+    1642864: "Wing",  # Hugo González
+    1642882: "Big",  # Julian Reese
+    1642907: "Wing",  # Cedric Coward
+    1642920: "Wing",  # Kobe Sanders
+}
 
-def position_group(listed_position: Any) -> str | None:
-    """Return the group for one listed position, or ``None`` for anything else."""
 
+def position_group(player_id: int, listed_position: Any) -> str | None:
+    """Return one player's group: an override, else the listed position's, else ``None``."""
+
+    if player_id in POSITION_OVERRIDES:
+        return POSITION_OVERRIDES[player_id]
     if not isinstance(listed_position, str):
         return None
     return _LISTED_POSITION_GROUPS.get(listed_position.strip().upper())
@@ -68,6 +115,7 @@ def with_listed_positions(roster: pd.DataFrame, listed: Mapping[int, str]) -> pd
 
 __all__ = [
     "POSITION_GROUPS",
+    "POSITION_OVERRIDES",
     "listed_positions_by_player",
     "position_group",
     "with_listed_positions",

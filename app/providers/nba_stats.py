@@ -182,7 +182,7 @@ def _roster_record(row: dict[str, Any], season: str, start_year: int) -> dict[st
         "team_name": _nullable_text(row.get("team_name")),
         "team_abbreviation": _nullable_text(row.get("team_abbreviation")),
         # Stored as the group, not the listed code (ADR 0005).
-        "position": position_group(row.get("listed_position")),
+        "position": position_group(player_id, row.get("listed_position")),
         "_status_rank": {"active": 0, "inactive": 1, "historical": 2}[roster_status],
     }
 
