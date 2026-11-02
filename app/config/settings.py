@@ -215,15 +215,23 @@ class FeatureSettings(BaseModel):
         return provider
 
 
+#: How long a collector board may still run after its deadline.  It resolves
+#: athlete and event mappings for every market it collected, and nothing renews
+#: the collector lease until it returns.  Production boards ran up to 45 s past
+#: their deadline on 2026-11-02; this allows twice that.
+PROJECTION_BOARD_MAPPING_ALLOWANCE = timedelta(seconds=90)
+
+
 @dataclass(frozen=True, slots=True)
 class ProjectionCollectionSettings:
-    """Cadence, lease, and bounded retry policy for projection collection."""
+    """Cadence, board budget, lease, and bounded retry policy for projection collection."""
 
     slow_interval: timedelta = timedelta(minutes=8)
     fast_interval: timedelta = timedelta(minutes=5)
     pregame_horizon: timedelta = timedelta(hours=24)
     fast_window: timedelta = timedelta(hours=2)
-    lease_duration: timedelta = timedelta(minutes=1)
+    board_deadline: timedelta = timedelta(seconds=45)
+    lease_duration: timedelta = timedelta(minutes=3)
     backoff_base: timedelta = timedelta(minutes=1)
     backoff_max: timedelta = timedelta(minutes=30)
 
@@ -233,6 +241,7 @@ class ProjectionCollectionSettings:
             "fast_interval",
             "pregame_horizon",
             "fast_window",
+            "board_deadline",
             "lease_duration",
             "backoff_base",
             "backoff_max",
@@ -244,6 +253,13 @@ class ProjectionCollectionSettings:
             raise ValueError("fast_window cannot exceed pregame_horizon")
         if self.backoff_base > self.backoff_max:
             raise ValueError("backoff_base cannot exceed backoff_max")
+        if self.lease_duration < self.board_deadline + PROJECTION_BOARD_MAPPING_ALLOWANCE:
+            raise ValueError(
+                "PROJECTION_COLLECTION_LEASE_SECONDS must be at least "
+                "PROJECTION_COLLECTION_BOARD_DEADLINE_SECONDS plus "
+                f"{PROJECTION_BOARD_MAPPING_ALLOWANCE.total_seconds():g} seconds, because the board "
+                "maps its markets after its deadline and before the lease is renewed"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -930,7 +946,10 @@ def _build_settings(
                     hours=reader.decimal("PROJECTION_COLLECTION_PREGAME_HORIZON_HOURS", 24)
                 ),
                 fast_window=timedelta(hours=reader.decimal("PROJECTION_COLLECTION_FAST_WINDOW_HOURS", 2)),
-                lease_duration=timedelta(seconds=reader.decimal("PROJECTION_COLLECTION_LEASE_SECONDS", 60)),
+                board_deadline=timedelta(
+                    seconds=reader.decimal("PROJECTION_COLLECTION_BOARD_DEADLINE_SECONDS", 45)
+                ),
+                lease_duration=timedelta(seconds=reader.decimal("PROJECTION_COLLECTION_LEASE_SECONDS", 180)),
                 backoff_base=timedelta(
                     seconds=reader.decimal("PROJECTION_COLLECTION_BACKOFF_BASE_SECONDS", 60)
                 ),

@@ -448,9 +448,15 @@ exactly one cache decision.
 `DFSBoardService.get_board(query, context)` is the internal collector seam. Its
 provider registry is injected explicitly; it never discovers or constructs
 providers while collecting. Enabled providers run concurrently behind one
-absolute `RetrievalContext` deadline (15 seconds by default), with at most
-three concurrent provider workers. The child context is capped at the lesser
-of the caller deadline and the configured deadline, never above 15 seconds. A
+absolute `RetrievalContext` deadline. The child context is capped at the
+lesser of the caller deadline and the board's configured deadline. Two boards
+share the same providers and collaborators. The request-time board (Comparison
+Board, `/api/dfs/board`) has a 15-second deadline that settings refuse to
+raise, and at most three concurrent provider workers. The projection
+collector's board answers no request: it has its own deadline
+(`PROJECTION_COLLECTION_BOARD_DEADLINE_SECONDS`, 45 seconds) and one worker per
+enabled provider, and the snapshot cache's refresh pool is sized to match, so
+no provider waits behind another. A
 complete empty snapshot is usable, while
 partial snapshots remain one coherent provider observation with their original
 `CoverageEvidence`; failed providers cannot remove usable snapshots from other
@@ -701,7 +707,10 @@ live lease or write future poll/backoff state that suppresses the scheduled
 collector. Dueness is derived from database-timed `last_poll_at` and
 `backoff_until`; no separate poll-deadline column is stored. The owner renews
 that lease around board and per-provider work; an expiry or takeover returns
-the bounded `busy/lease_lost` outcome. SQLite uses
+the bounded `busy/lease_lost` outcome. Nothing renews it while the board runs,
+and the board resolves athlete and event mappings for its markets after its
+deadline, so settings refuse a lease (`PROJECTION_COLLECTION_LEASE_SECONDS`,
+180 seconds) shorter than the collector board deadline plus 90 seconds. SQLite uses
 `BEGIN IMMEDIATE` for local tests but is not evidence for the production
 locking contract. A busy or overlapping run is a safe no-op. Provider outcomes
 are persisted independently through the existing archive recorder, with
