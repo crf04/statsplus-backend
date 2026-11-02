@@ -15,6 +15,7 @@ The backend turns free-text NBA stat questions into structured API parameters. I
 
 - `app/services/nl_service.py`: Orchestrates NLP parsing, LLM fallback, and response formatting.
 - `app/services/nl_query/parser.py`: Extracts player/team names, date ranges, locations, opponent filters, stat thresholds, game counts, and intent. A season the query names (`2024-25`) is read by `named_season()` in `nl_service.py`.
+- `app/services/nl_query/teams.py`: The team alias table and `resolve_team()`, which both paths use to turn a written opponent team into its tricode.
 - `app/services/llm_service.py`: Wraps OpenAI structured-output calls (`LLMParsedQuery`), prompt loading, and retries.
 - `prompts/system_prompt_optimized.txt`: LLM parsing instructions (field meanings, opponent filter vocabulary, rank sign). The output shape comes from the schema, not the prompt.
 
@@ -31,6 +32,7 @@ The backend turns free-text NBA stat questions into structured API parameters. I
   "players_on": [],
   "players_off": [],
   "teams_against": [],
+  "opponent_tricode": null,
   "minutes_filter": null,
   "date_filter": null,
   "date_to": null,
@@ -53,6 +55,26 @@ The backend turns free-text NBA stat questions into structured API parameters. I
 
 `parsed_by` can be `nlp`, `llm`, or `hybrid`. The current service emits `nlp`
 for the deterministic path and `hybrid` for an LLM parse.
+
+## Opponent team
+
+`opponent_tricode` names one team the player played against
+(crf04/statsplus#401). The parser reads it from a team written right after
+`vs`, `vs.`, `v`, `versus` or `against`, with an optional `the`, matching whole
+words without regard to case and preferring the longest alias. Aliases live in
+`app/services/nl_query/teams.py`: each tricode's city or region, nickname and
+short forms ("blazers", "sixers", "cavs", "mavs", "wolves", "pels"), plus the
+tricode and the full names from `app/domain/nba_teams.py`. An alias two teams
+share ("los angeles") names no team, and "LA" is not an alias, so neither sets
+an opponent. A team mentioned without a preposition ("jokic blazers") is not
+an opponent.
+
+The LLM schema carries `opponent_team`, free text that `NLService` resolves
+through the same `resolve_team()`; a value that is not one NBA team becomes
+`null`, and when the model names none the parser's `opponent_tricode` is kept.
+
+Rank-based groups ("against top 10 defenses") stay in `teams_against` and
+`rank_filter`; a query may carry both.
 
 ## spaCy and aliases
 
@@ -119,7 +141,8 @@ that fraction of *confident* queries to the LLM as well, **in the background**:
 - The response is always the NLP result, and it never waits for the LLM.
 - Both results are normalized (tuples vs lists, casing, `both` vs no location)
   and compared on the fields that choose games: player, team, game count,
-  location, teammates on/off, opponent filters with their ranks, minutes,
+  location, teammates on/off, opponent filters with their ranks, the
+  opponent team, minutes,
   stat thresholds, date and season. Confidence, intent and time period are
   not compared.
 - Each sample logs one `nl_shadow {json}` line with `outcome` (`agree`,
@@ -160,6 +183,7 @@ The rule parser is designed around:
 - Date expressions, such as "since January 1".
 - Stat thresholds, such as "30+ points" or "under 5 turnovers".
 - Opponent ranking filters, such as "top 5 defenses" or "worst 10 three-point defenses".
+- One opponent team, such as "against the Blazers" or "vs MIA".
 - Teammate on/off filters.
 - Intent detection for game logs, player profiles, and team stats.
 
