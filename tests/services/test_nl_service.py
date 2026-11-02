@@ -679,7 +679,9 @@ def test_a_team_named_after_vs_or_against_is_the_opponent(seeded_db_url):
     [
         "Curry versus the Lakers last 10 games",
         "Curry versus the Lakers last 10",
+        "Curry versus the Lakers last 10?",
         "Curry last 10 against the Lakers",
+        "Curry past 10 against the Lakers",
     ],
 )
 def test_an_opponent_team_keeps_the_rest_of_the_parse(seeded_db_url, query):
@@ -695,7 +697,10 @@ def test_an_opponent_team_keeps_the_rest_of_the_parse(seeded_db_url, query):
     assert result["game_count"] == 10
 
 
-@pytest.mark.parametrize("query", ["Curry last 10 minutes", "Curry past 3 seasons"])
+@pytest.mark.parametrize(
+    "query",
+    ["Curry last 10 minutes", "Curry past 3 seasons", "Curry past 1.5 seasons", "Curry last 2.5 minutes"],
+)
 def test_a_bare_count_before_another_unit_is_not_a_game_count(seeded_db_url, query):
     assert _real_service(seeded_db_url).process_query(query)["game_count"] is None
 

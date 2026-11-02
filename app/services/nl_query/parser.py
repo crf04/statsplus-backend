@@ -242,6 +242,12 @@ STAT_MAPPINGS = {
     "ft made": "FTM",
 }
 
+# "last 10" with no unit, when the query ends or moves on to another clause; not "last 1.5 seasons".
+BARE_GAME_COUNT = (
+    r"(?:last|past)\s+(\d+)"
+    r"(?=\s*$|\s*(?:[,;?!]|\.(?!\d))|\s+(?:vs\.?|v\.?|versus|against|at|on|in|with|without|home|away|since)\b)"
+)
+
 # Opponent filter mappings for natural language to filter types
 OPPONENT_FILTER_MAPPINGS = {
     # Catch & Shoot variations
@@ -1846,8 +1852,7 @@ class BaseQueryParser:
         game_patterns = [
             r"(?:last|past|recent)\s+(\d+)\s+(?:home\s+|away\s+|road\s+)?(?:games?|matchups?|contests?)",
             r"(?:last|past|recent)\s+(\w+)\s+(?:home\s+|away\s+|road\s+)?(?:games?|matchups?|contests?)",
-            # "last 10" with no unit, when the query moves on to another clause or ends.
-            r"(?:last|past)\s+(\d+)(?=\s*$|\s*[,.;]|\s+(?:vs\.?|v\.?|versus|against|at|on|in|with|without|home|away|since)\b)",
+            BARE_GAME_COUNT,
         ]
         for pattern in game_patterns:
             match = re.search(pattern, query_lower)
@@ -2614,6 +2619,7 @@ class BaseQueryParser:
             game_patterns = [
                 r"(?:last|past|recent)\s+(\d+)\s+(?:games?|matchups?|contests?)",
                 r"(?:last|past|recent)\s+(\w+)\s+(?:games?|matchups?|contests?)",
+                BARE_GAME_COUNT,
             ]
 
             for pattern in game_patterns:
