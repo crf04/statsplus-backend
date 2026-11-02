@@ -1,0 +1,16 @@
+# Gitleaks' default rules, minus false positives the weekly full-history scan
+# raises: ledger stream keys are stream names such as
+# exact_shot_zones_opponent_l15, and review mutation manifests map file paths
+# to content hashes. Either is read by generic-api-key as a key.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Ledger stream keys and review manifest hashes, not credentials"
+regexTarget = "match"
+regexes = [
+  '''stream_key\w*["']?\s*[:=]\s*["'][a-z0-9_]+["']''',
+]
+paths = [
+  '''(^|/)review-\d+-[a-z-]+-manifest\.json$''',
+]
