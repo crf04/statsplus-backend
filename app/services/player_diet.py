@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -1357,10 +1358,17 @@ class PlayerDietService:
             assists = self._number(row["Assists"])
             if assists <= 0:
                 continue
-            for slice_key in _ASSIST_SLICES:
-                if pd.isna(row[slice_key]):
-                    continue
-                volume = self._number(row[slice_key])
+            observed = {
+                slice_key: self._number(row[slice_key])
+                for slice_key in _ASSIST_SLICES
+                if not pd.isna(row[slice_key])
+            }
+            # PBPStats leaves a location blank when the player has no assists
+            # there.  When the observed locations already account for every
+            # assist, a blank can only be zero; otherwise it stays unknown.
+            if math.isclose(sum(observed.values()), assists):
+                observed = {slice_key: observed.get(slice_key, 0.0) for slice_key in _ASSIST_SLICES}
+            for slice_key, volume in observed.items():
                 facts.append(
                     self._fact(
                         {"PLAYER_ID": row["EntityId"]},
