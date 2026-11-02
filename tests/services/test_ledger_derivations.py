@@ -52,6 +52,7 @@ from app.services.ledger_materialization import (
     LedgerMaterializationUnavailable,
 )
 from app.services.ledger_parity import LedgerParityArtifactRepository, compare_ledger_to_legacy
+from app.services.matchup import observed_diet_share
 from tests.services.test_canonical_game_ledger import _game
 
 
@@ -519,7 +520,13 @@ def test_assist_diet_totals_across_games_and_a_mid_season_team_change():
     rows = derive_player_assist_diet_rows((reconciled_game, second_game))
 
     traded_rows = {row["slice_key"]: row for row in rows if row["player_id"] == traded.player_id}
-    assert set(traded_rows) == {"Arc3Assists", "Corner3Assists", "AtRimAssists"}
+    assert set(traded_rows) == {
+        "Arc3Assists",
+        "Corner3Assists",
+        "AtRimAssists",
+        "ShortMidRangeAssists",
+        "LongMidRangeAssists",
+    }
     assert traded_rows["Arc3Assists"]["volume"] == 2.0
     assert traded_rows["Arc3Assists"]["games_played"] == 2
     assert traded_rows["Arc3Assists"]["share"] == 2 / 6
@@ -527,16 +534,32 @@ def test_assist_diet_totals_across_games_and_a_mid_season_team_change():
     assert all(row["provider"] == "pbp_stats" for row in traded_rows.values())
 
 
-def test_assist_diet_zero_volume_slice_is_absent_without_a_synthetic_zero_fact():
+def test_assist_diet_zero_volume_slice_is_a_zero_fact_completing_the_diet():
+    # The ledger proves every location count, so a location with no assists
+    # is a known zero; leaving it out made the Diet an incomplete partition
+    # that the Matchup refused to score (crf04/statsplus#407).
     game = _game()
     reconciled_game = _reconciled_game(game)
+    player_id = game.player_facts[0].player_id
 
     rows = derive_player_assist_diet_rows((reconciled_game,))
+    decoded = decode_player_diet(
+        {"base": "assist_locations", "rows": list(rows)},
+        base="assist_locations",
+        retrieved_at=datetime.now(UTC),
+    )
 
-    slice_keys = {row["slice_key"] for row in rows if row["player_id"] == game.player_facts[0].player_id}
-    assert slice_keys == {"Arc3Assists", "Corner3Assists", "AtRimAssists"}
-    assert "ShortMidRangeAssists" not in slice_keys
-    assert "LongMidRangeAssists" not in slice_keys
+    player_rows = {row["slice_key"]: row for row in rows if row["player_id"] == player_id}
+    assert (player_rows["ShortMidRangeAssists"]["volume"], player_rows["ShortMidRangeAssists"]["share"]) == (
+        0.0,
+        0.0,
+    )
+    assert (player_rows["LongMidRangeAssists"]["volume"], player_rows["LongMidRangeAssists"]["share"]) == (
+        0.0,
+        0.0,
+    )
+    player_facts = [fact for fact in decoded if fact.player_id == player_id]
+    assert observed_diet_share("assist_locations", player_facts) == pytest.approx(1.0)
 
 
 def test_assist_diet_skips_a_zero_assist_player():

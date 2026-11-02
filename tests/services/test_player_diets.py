@@ -15,6 +15,7 @@ from app.migrations import run_migrations
 from app.models.catalogs import PLAY_TYPES, SHOOTING_TYPES
 from app.services.collection_control import ControlPlaneError
 from app.services.database_first_activation import PublicationRead
+from app.services.matchup import observed_diet_share
 from app.services.player_diet import (
     PlayerDietBaseline,
     PlayerDietFact,
@@ -196,6 +197,7 @@ class RecordedPBPPlayerDiets:
         self.arc_assists = 20
         self.extra_rows = []
         self.no_location_observations = False
+        self.assist_total = 100
 
     def fetch_player_diet_totals(self, *, season):
         self.calls.append(season)
@@ -214,7 +216,7 @@ class RecordedPBPPlayerDiets:
                     "EntityId": "2544",
                     "Name": "LeBron James",
                     "GamesPlayed": 40,
-                    "Assists": 100,
+                    "Assists": self.assist_total,
                     **location_values,
                 },
                 *self.extra_rows,
@@ -566,6 +568,23 @@ def test_nan_assist_location_is_absent_without_synthetic_zero_fact(tmp_path):
         "ShortMidRangeAssists",
         "LongMidRangeAssists",
     }
+
+
+def test_blank_assist_location_is_a_zero_when_the_others_account_for_every_assist(tmp_path):
+    # PBPStats leaves a location blank when a player has no assists there.
+    # When the other locations already add up to his total, the blank can
+    # only be zero, and storing it completes the Diet (crf04/statsplus#407).
+    service, _, pbp = _service(tmp_path)
+    pbp.arc_assists = float("nan")
+    pbp.assist_total = 80
+
+    service.refresh("2025-26")
+    result = service.get_for_players("2025-26", [2544])
+
+    facts = {fact.slice_key: fact for fact in result.players[2544] if fact.base == "assist_locations"}
+    assert (facts["Arc3Assists"].volume, facts["Arc3Assists"].share) == (0.0, 0.0)
+    assert facts["AtRimAssists"].share == 30 / 80
+    assert observed_diet_share("assist_locations", list(facts.values())) == pytest.approx(1.0)
 
 
 def test_zero_assist_player_is_skipped_while_other_players_publish(tmp_path):

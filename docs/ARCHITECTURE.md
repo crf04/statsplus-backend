@@ -5308,6 +5308,12 @@ read-side decoder must accept the exact candidate before its pointer moves.
 The fourth Diet stream, `player_assist_locations`, is composed from the
 canonical game ledger by `LedgerMaterializationService`, not from collector
 observations, and so stays out of `PLAYER_DIET_OBSERVATION_STREAM_KEYS`.
+Every player with assists gets all five location slices: the ledger proves
+each count, so a location with none is a known zero, stored with share 0.
+Without it the Diet is not a complete partition and the Matchup cannot score
+AST (crf04/statsplus#407). The legacy collector does the same only when the
+locations PBPStats reports already add up to the player's assists; otherwise
+a blank location stays unknown.
 
 `exact_shot_zones` is the third member of that set and the only one with two
 readers, so it is a third composition branch rather than a set entry: the
