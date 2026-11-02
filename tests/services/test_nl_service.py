@@ -178,6 +178,7 @@ def llm_parse(**overrides):
         "minutes_filter": None,
         "self_filters": [],
         "opponent_filters": [],
+        "opponent_team": None,
         "players_on": [],
         "players_off": [],
         "season": None,
@@ -646,3 +647,113 @@ def test_llm_start_dates_stay_on_date_filter_with_no_end_date():
 
     assert result["date_filter"] == "2026-03-01"
     assert result["date_to"] is None
+
+
+# --- one opponent team: "jokic against the blazers" -------------------------
+
+
+def test_a_team_named_after_vs_or_against_is_the_opponent(seeded_db_url):
+    service = _real_service(seeded_db_url)
+    queries = {
+        "jokic against the blazers": "POR",
+        "Jokic vs the Portland Trail Blazers": "POR",
+        "Jokic vs. Portland": "POR",
+        "Jokic versus the trail blazers": "POR",
+        "Tatum vs MIA": "MIA",
+        "LeBron v the Sixers": "PHI",
+        "Curry against the Cavs": "CLE",
+        "Curry vs the Mavs": "DAL",
+        "LeBron against the Wolves": "MIN",
+        "Curry vs the Pels": "NOP",
+        "LeBron vs LA": None,
+        "LeBron against Los Angeles": None,
+        "Jokic vs Gotham": None,
+        "Jokic last 10 games": None,
+    }
+
+    assert {query: service.process_query(query)["opponent_tricode"] for query in queries} == queries
+
+
+def test_an_opponent_team_keeps_the_rest_of_the_parse(seeded_db_url):
+    result = _real_service(seeded_db_url).process_query("Curry versus the Lakers last 10 games")
+
+    assert result["parsed_by"] == "nlp"
+    assert result["player_name"] == "Stephen Curry"
+    assert result["opponent_tricode"] == "LAL"
+    assert result["game_count"] == 10
+
+
+@pytest.mark.parametrize("query", ["jokic against the blazers", "Jokic vs the Portland Trail Blazers"])
+def test_a_named_opponent_team_needs_no_llm(seeded_db_url, query):
+    service = _real_service(seeded_db_url)
+    service.llm_service = llm = StubLLM(llm_parse())
+
+    result = service.process_query(query)
+
+    assert llm.calls == []
+    assert result["parsed_by"] == "nlp"
+
+
+def test_a_tricode_is_an_opponent_team_and_not_a_ranked_filter(seeded_db_url):
+    from sqlalchemy import create_engine, text
+
+    with create_engine(seeded_db_url).begin() as connection:
+        connection.execute(text("CREATE TABLE team_info (full_name TEXT, abbreviation TEXT)"))
+        connection.execute(text("INSERT INTO team_info VALUES ('Miami Heat', 'MIA')"))
+
+    result = _real_service(seeded_db_url).process_query("LeBron vs MIA")
+
+    assert result["opponent_tricode"] == "MIA"
+    assert result["teams_against"] == []
+    assert result["rank_filter"] == []
+
+
+def test_a_ranked_opponent_group_is_not_an_opponent_team(seeded_db_url):
+    result = _real_service(seeded_db_url).process_query("LeBron against top 10 defenses")
+
+    assert result["opponent_tricode"] is None
+    assert result["teams_against"] == ["OPP_PTS"]
+    assert result["rank_filter"] == ["-10"]
+
+
+def test_a_query_can_name_a_team_and_a_ranked_group(seeded_db_url):
+    result = _real_service(seeded_db_url).process_query("Jokic vs the Blazers against top 10 defenses")
+
+    assert result["opponent_tricode"] == "POR"
+    assert result["teams_against"] == ["OPP_PTS"]
+    assert result["rank_filter"] == ["-10"]
+
+
+@pytest.mark.parametrize(
+    ("opponent_team", "nlp_tricode", "expected"),
+    [
+        ("Trail Blazers", None, "POR"),
+        ("the Portland Trail Blazers", None, "POR"),
+        ("Gotham", None, None),
+        ("Los Angeles", None, None),
+        (None, "POR", "POR"),
+        ("Miami Heat", "POR", "MIA"),
+    ],
+)
+def test_the_llm_opponent_team_is_read_through_the_team_table(opponent_team, nlp_tricode, expected):
+    llm = StubLLM(llm_parse(player_name="Kobe Bryant", opponent_team=opponent_team))
+    parser = RosterParser(components(opponent_tricode=nlp_tricode, should_use_llm=True))
+
+    result = make_service(llm_service=llm, parser=parser).process_query("kobe against them")
+
+    assert result["parsed_by"] == "hybrid"
+    assert result["opponent_tricode"] == expected
+
+
+def test_nl_query_route_returns_the_opponent_tricode(make_client, seeded_db_url, authenticate):
+    headers = authenticate()
+    client = make_client(seeded_db_url)
+
+    named = client.post("/api/nl-query", headers=headers, json={"query": "jokic against the blazers"})
+    unnamed = client.post("/api/nl-query", headers=headers, json={"query": "LeBron last 10 games"})
+
+    assert named.status_code == unnamed.status_code == 200
+    assert named.get_json()["player_name"] == "Nikola Jokić"
+    assert named.get_json()["opponent_tricode"] == "POR"
+    assert "opponent_tricode" in unnamed.get_json()
+    assert unnamed.get_json()["opponent_tricode"] is None

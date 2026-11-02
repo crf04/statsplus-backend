@@ -344,6 +344,7 @@ class FakeOpenAI:
             minutes_filter=None,
             self_filters=[],
             opponent_filters=[],
+            opponent_team=None,
             players_on=[],
             players_off=[],
             season=None,

@@ -22,6 +22,7 @@ from sqlalchemy import text
 
 from ...config.settings import RuntimeSettings, get_runtime_settings
 from ...utils.date_parser import NBADateParser
+from .teams import OPPONENT_TEAM_PATTERN, resolve_team
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +133,7 @@ class QueryComponents:
 
     # Filtering criteria
     opponent_filters: list[tuple[str, int]] = field(default_factory=list)  # [(filter_type, rank), ...]
+    opponent_tricode: str | None = None  # One team named after vs/against
     location: str | None = None  # "home", "away", "both"
     minutes_filter: tuple[int, int] | None = None  # (min_minutes, max_minutes)
     self_filters: list[SelfFilter] = field(default_factory=list)  # Player stat filters
@@ -1516,6 +1518,7 @@ class BaseQueryParser:
             components.date_range = parsed_date
         components.location = self._extract_location_with_coverage(query, coverage)
         components.opponent_filters = self._extract_opponent_filters_with_coverage(query, coverage)
+        components.opponent_tricode = self._extract_opponent_team_with_coverage(query, coverage)
         components.minutes_filter = self._extract_minutes_filter_with_coverage(query, coverage)
         components.self_filters = self._extract_self_filters_with_coverage(query, coverage)
         components.intent = self._classify_intent(query, components)
@@ -1956,18 +1959,11 @@ class BaseQueryParser:
             List[Tuple[str, int]]: List of opponent filter tuples, e.g. [('C&S PTS', 10)].
         Implementation details:
             - Maps natural language to specific filter types using OPPONENT_FILTER_MAPPINGS
-            - Handles team abbreviations and ranking patterns
+            - Handles ranking patterns
             - Supports various natural language constructions
         """
         filters = []
         query_lower = query.lower()
-
-        # First, handle team abbreviations (existing logic)
-        team_pattern = r"\b([A-Z]{2,3})\b"
-        team_matches = re.findall(team_pattern, query)
-        for team in team_matches:
-            if team.lower() in self.teams:
-                filters.append(("team", team.upper()))
 
         # Handle ranking patterns (map to actual NBA stat columns)
         ranking_patterns = [
@@ -2756,20 +2752,6 @@ class BaseQueryParser:
                         )
                     )
 
-            # Track team abbreviations
-            team_pattern = r"\b([A-Z]{2,3})\b"
-            for match in re.finditer(team_pattern, query):
-                if match.group(1).lower() in self.teams:
-                    coverage.add_component(
-                        ParsedComponent(
-                            value=match.group(0),
-                            start_pos=match.start(),
-                            end_pos=match.end(),
-                            component_type="team_filter",
-                            extraction_method="regex",
-                        )
-                    )
-
             # NEW: Track coverage for enhanced opponent filter patterns
             for pattern, pattern_type in OPPONENT_FILTER_PATTERNS:
                 matches = re.findall(pattern, query.lower())
@@ -2805,6 +2787,22 @@ class BaseQueryParser:
                                 )
 
         return filters
+
+    def _extract_opponent_team_with_coverage(self, query: str, coverage: QueryCoverage) -> str | None:
+        """The tricode of the one team named after vs/against, e.g. "against the Blazers"."""
+        match = OPPONENT_TEAM_PATTERN.search(query)
+        if not match:
+            return None
+        coverage.add_component(
+            ParsedComponent(
+                value=match.group(0),
+                start_pos=match.start(),
+                end_pos=match.end(),
+                component_type="opponent_team",
+                extraction_method="regex",
+            )
+        )
+        return resolve_team(match.group("team"))
 
     def _extract_minutes_filter_with_coverage(
         self, query: str, coverage: QueryCoverage
