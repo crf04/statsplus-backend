@@ -9,6 +9,7 @@ from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.services import nl_shadow
 from app.services.llm_service import LLMBudgetExhausted, LLMParsedQuery, LLMService
 from app.services.nl_query.parser import BaseQueryParser, PlayerReference
+from app.services.nl_query.teams import resolve_team
 from app.services.research_season import research_service
 
 # A season written the NBA's way, e.g. "2024-25", but not the start of a date.
@@ -244,6 +245,8 @@ class NLService:
             "players_off": players_off,
             "player_choices": player_choices,
             "teams_against": teams_against,
+            "opponent_tricode": resolve_team(llm_query.opponent_team)
+            or getattr(nlp_components, "opponent_tricode", None),
             "minutes_filter": minutes_filter,
             "date_filter": llm_query.date_range,
             "date_to": None,
@@ -306,6 +309,7 @@ class NLService:
             "players_off": parsed_components.players_off,
             "player_choices": parsed_components.player_choices,
             "teams_against": teams_against,
+            "opponent_tricode": parsed_components.opponent_tricode,
             "minutes_filter": parsed_components.minutes_filter,
             "date_filter": parsed_components.date_range,
             "date_to": parsed_components.date_to,

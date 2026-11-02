@@ -538,6 +538,7 @@ Response shape:
   "players_off": [],
   "player_choices": [],
   "teams_against": ["OPP_PTS"],
+  "opponent_tricode": null,
   "minutes_filter": null,
   "date_filter": null,
   "date_to": null,
@@ -559,6 +560,16 @@ Response shape:
 ```
 
 `parsed_by` can be `nlp`, `llm`, or `hybrid`.
+
+`opponent_tricode` (crf04/statsplus#401) is always present: the tricode of one
+team the query names after `vs`, `vs.`, `v`, `versus` or `against` (an
+optional `the` allowed), or `null`. The team may be written as its full name,
+nickname, city or region, tricode or a common short form ("jokic against the
+blazers" is `"POR"`, "Tatum vs MIA" is `"MIA"`, "Sixers", "Cavs", "Mavs",
+"Wolves" and "Pels" are understood). A city two teams share ("LA", "Los
+Angeles") is `null`, as is a ranked group ("against top 10 defenses"), which
+stays in `teams_against`/`rank_filter`. It maps directly onto the game-log
+`opponent_tricode` filter.
 
 `player_choices` (crf04/statsplus#264) is always present and is `[]` when every
 player name resolved. A name that matches more than one current-season player
