@@ -674,13 +674,30 @@ def test_a_team_named_after_vs_or_against_is_the_opponent(seeded_db_url):
     assert {query: service.process_query(query)["opponent_tricode"] for query in queries} == queries
 
 
-def test_an_opponent_team_keeps_the_rest_of_the_parse(seeded_db_url):
-    result = _real_service(seeded_db_url).process_query("Curry versus the Lakers last 10 games")
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Curry versus the Lakers last 10 games",
+        "Curry versus the Lakers last 10",
+        "Curry last 10 against the Lakers",
+    ],
+)
+def test_an_opponent_team_keeps_the_rest_of_the_parse(seeded_db_url, query):
+    service = _real_service(seeded_db_url)
+    service.llm_service = llm = StubLLM(llm_parse())
 
+    result = service.process_query(query)
+
+    assert llm.calls == []
     assert result["parsed_by"] == "nlp"
     assert result["player_name"] == "Stephen Curry"
     assert result["opponent_tricode"] == "LAL"
     assert result["game_count"] == 10
+
+
+@pytest.mark.parametrize("query", ["Curry last 10 minutes", "Curry past 3 seasons"])
+def test_a_bare_count_before_another_unit_is_not_a_game_count(seeded_db_url, query):
+    assert _real_service(seeded_db_url).process_query(query)["game_count"] is None
 
 
 @pytest.mark.parametrize("query", ["jokic against the blazers", "Jokic vs the Portland Trail Blazers"])

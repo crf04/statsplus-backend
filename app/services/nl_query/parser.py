@@ -1846,6 +1846,8 @@ class BaseQueryParser:
         game_patterns = [
             r"(?:last|past|recent)\s+(\d+)\s+(?:home\s+|away\s+|road\s+)?(?:games?|matchups?|contests?)",
             r"(?:last|past|recent)\s+(\w+)\s+(?:home\s+|away\s+|road\s+)?(?:games?|matchups?|contests?)",
+            # "last 10" with no unit, when the query moves on to another clause or ends.
+            r"(?:last|past)\s+(\d+)(?=\s*$|\s*[,.;]|\s+(?:vs\.?|v\.?|versus|against|at|on|in|with|without|home|away|since)\b)",
         ]
         for pattern in game_patterns:
             match = re.search(pattern, query_lower)
