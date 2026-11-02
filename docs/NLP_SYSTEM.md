@@ -14,7 +14,7 @@ The backend turns free-text NBA stat questions into structured API parameters. I
 ## Main modules
 
 - `app/services/nl_service.py`: Orchestrates NLP parsing, LLM fallback, and response formatting.
-- `app/services/nl_query/parser.py`: Extracts player/team names, date ranges, locations, opponent filters, stat thresholds, game counts, seasons, and intent.
+- `app/services/nl_query/parser.py`: Extracts player/team names, date ranges, locations, opponent filters, stat thresholds, game counts, and intent. A season the query names (`2024-25`) is read by `named_season()` in `nl_service.py`.
 - `app/services/llm_service.py`: Wraps OpenAI structured-output calls (`LLMParsedQuery`), prompt loading, and retries.
 - `prompts/system_prompt_optimized.txt`: LLM parsing instructions (field meanings, opponent filter vocabulary, rank sign). The output shape comes from the schema, not the prompt.
 
