@@ -53,7 +53,7 @@ from app.domain.nba_teams import (
     canonical_nba_team_abbreviation,
 )
 from app.domain.player_diet_taxonomy import PLAYER_DIET_OBSERVATION_STREAM_KEYS
-from app.domain.player_position import POSITION_GROUPS
+from app.domain.player_position import POSITION_GROUPS, POSITION_OVERRIDES
 from app.domain.publication_integrity import (
     canonical_publication_json,
     publication_payload_checksum,
@@ -3384,8 +3384,11 @@ class CollectionControlService(_SessionService):
                 row.get("team_abbreviation", row.get("tricode", row.get("team"))),
                 team_id=team_id,
             ),
-            # Overwritten on every refresh, so a relabel follows NBA.com.
-            "position": CollectionControlService._catalog_position(row.get("position")),
+            # Overwritten on every refresh, so a relabel follows NBA.com.  An
+            # override wins even over a collector built before it existed.
+            "position": POSITION_OVERRIDES.get(
+                player_id, CollectionControlService._catalog_position(row.get("position"))
+            ),
             "published_at": now,
         }
         if existing is None:

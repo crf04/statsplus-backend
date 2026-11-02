@@ -4874,12 +4874,47 @@ def test_roster_normalizer_stores_the_group_for_each_listed_position():
 
 
 def test_the_collector_and_backend_map_listed_positions_identically():
-    from app.collector.normalizers import LISTED_POSITION_GROUPS
-    from app.domain.player_position import position_group
+    from app.collector import normalizers
+    from app.domain import player_position
 
     for code, group in _LISTED_POSITION_GROUPS.items():
-        assert position_group(code) == group
-    assert {code: position_group(code) for code in LISTED_POSITION_GROUPS} == LISTED_POSITION_GROUPS
+        assert player_position.position_group(0, code) == group
+    assert {
+        code: player_position.position_group(0, code) for code in normalizers.LISTED_POSITION_GROUPS
+    } == normalizers.LISTED_POSITION_GROUPS
+    assert normalizers.POSITION_OVERRIDES == player_position.POSITION_OVERRIDES
+
+
+def test_roster_normalizer_stores_an_overridden_players_chosen_group():
+    listed = {
+        1630194: ("Paul Reed", "F", "Big"),
+        203944: ("Julius Randle", "F-C", "Wing"),
+        1642277: ("Johnny Furphy", "G", "Wing"),
+        1629029: ("Luka Doncic", "F-G", "Guard"),
+        1628983: ("Shai Gilgeous-Alexander", "G", "Guard"),
+    }
+    rows = [
+        {
+            "PERSON_ID": player_id,
+            "DISPLAY_FIRST_LAST": name,
+            "ROSTERSTATUS": 1,
+            "FROM_YEAR": "2020",
+            "TO_YEAR": "2026",
+            "TEAM_ID": 1610612737,
+            "POSITION": code,
+        }
+        for player_id, (name, code, _group) in listed.items()
+    ]
+
+    records = normalize_roster_response(rows, season="2025-26", cutoff=NOW).payload["records"]
+
+    assert {record["player_id"]: record["position"] for record in records} == {
+        1630194: "Big",
+        203944: "Wing",
+        1642277: "Wing",
+        1629029: "Guard",
+        1628983: "Guard",
+    }
 
 
 def test_the_standalone_provider_joins_each_teams_listed_position_onto_the_roster(monkeypatch):

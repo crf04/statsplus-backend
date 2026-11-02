@@ -190,6 +190,67 @@ def test_a_player_the_team_rosters_never_list_has_no_position():
     assert adapter.get_player_roster(season="2024-25")["position"].tolist() == [None]
 
 
+def test_an_overridden_player_gets_his_chosen_group_whatever_nba_com_lists():
+    listed = [
+        (1630194, "Paul Reed", "F"),
+        (203944, "Julius Randle", "F-C"),
+        (1629029, "Luka Doncic", "F-G"),
+        (1626172, "Kevon Looney", None),
+        (1628983, "Shai Gilgeous-Alexander", "G"),
+    ]
+
+    class AllPlayers:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_data_frames(self):
+            return [
+                pd.DataFrame(
+                    [
+                        {
+                            "PERSON_ID": pid,
+                            "DISPLAY_FIRST_LAST": name,
+                            "ROSTERSTATUS": 1,
+                            "FROM_YEAR": 2020,
+                            "TO_YEAR": 2026,
+                            "TEAM_ID": LAKERS,
+                            "TEAM_NAME": "Team",
+                            "TEAM_ABBREVIATION": "TM",
+                        }
+                        for pid, name, _position in listed
+                    ]
+                )
+            ]
+
+    class TeamRoster:
+        def __init__(self, **kwargs):
+            self.team_id = kwargs["team_id"]
+
+        def get_data_frames(self):
+            rows = [
+                {"PLAYER_ID": pid, "POSITION": position}
+                for pid, _name, position in listed
+                if self.team_id == LAKERS and position is not None
+            ]
+            return [pd.DataFrame(rows, columns=["PLAYER_ID", "POSITION"])]
+
+    adapter = NBAStatsAdapter(
+        settings=_settings(),
+        roster_endpoint_factory=AllPlayers,
+        team_roster_endpoint_factory=TeamRoster,
+    )
+
+    frame = adapter.get_player_roster(season="2025-26")
+
+    assert dict(zip(frame["player_id"], frame["position"], strict=True)) == {
+        1630194: "Big",
+        203944: "Wing",
+        1629029: "Guard",
+        1626172: "Big",
+        1628983: "Guard",
+    }
+
+
 def test_roster_normalization_distinguishes_inactive_and_historical_players():
     frame = normalize_player_roster(
         pd.DataFrame(

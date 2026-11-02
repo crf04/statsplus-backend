@@ -79,7 +79,8 @@ PLAYER_ZONE_PROFILE_IDENTITY = (
 # NBA.com's listed position, mapped to the Position group a Target may name
 # (crf04/statsplus#351).  ``app.domain.player_position`` owns the backend copy;
 # this package ships as a standalone wheel, so the rule is repeated here and
-# pinned equal by the collector tests.  Anything else maps to no Position.
+# pinned equal by the collector tests.  Anything else maps to no Position, and
+# POSITION_OVERRIDES wins over the listed code (crf04/statsplus#403).
 LISTED_POSITION_GROUPS = {
     "G": "Guard",
     "G-F": "Wing",
@@ -88,6 +89,46 @@ LISTED_POSITION_GROUPS = {
     "F-C": "Big",
     "C-F": "Big",
     "C": "Big",
+}
+POSITION_OVERRIDES = {
+    203944: "Wing",  # Julius Randle
+    1626171: "Big",  # Bobby Portis Jr.
+    1626172: "Big",  # Kevon Looney
+    1628374: "Wing",  # Lauri Markkanen
+    1628963: "Big",  # Marvin Bagley III
+    1629029: "Guard",  # Luka Dončić
+    1629614: "Guard",  # Andrew Nembhard
+    1629660: "Guard",  # Ty Jerome
+    1629731: "Wing",  # Dean Wade
+    1629750: "Wing",  # Javonte Green
+    1630173: "Big",  # Precious Achiuwa
+    1630182: "Wing",  # Josh Green
+    1630194: "Big",  # Paul Reed
+    1630249: "Wing",  # Vít Krejčí
+    1630541: "Wing",  # Moses Moody
+    1630543: "Big",  # Isaiah Jackson
+    1631119: "Big",  # Jaylin Williams
+    1631124: "Wing",  # Julian Strawther
+    1631128: "Wing",  # Christian Braun
+    1631212: "Wing",  # Peyton Watson
+    1631217: "Big",  # Moussa Diabaté
+    1631218: "Big",  # Trayce Jackson-Davis
+    1631243: "Big",  # Mouhamed Gueye
+    1631321: "Wing",  # Sidy Cissoko
+    1641724: "Wing",  # Jett Howard
+    1641730: "Wing",  # Noah Clowney
+    1641731: "Wing",  # Bilal Coulibaly
+    1641737: "Big",  # Adem Bona
+    1641767: "Wing",  # Ben Sheppard
+    1641774: "Big",  # Tristan Vukčević
+    1641775: "Wing",  # Jordan Walsh
+    1642266: "Wing",  # Ja'Kobe Walter
+    1642277: "Wing",  # Johnny Furphy
+    1642345: "Big",  # Oso Ighodaro
+    1642864: "Wing",  # Hugo González
+    1642882: "Big",  # Julian Reese
+    1642907: "Wing",  # Cedric Coward
+    1642920: "Wing",  # Kobe Sanders
 }
 REGULAR_SEASON_TYPE = "Regular Season"
 _GAME_TYPE_BY_ID_PREFIX = {
@@ -99,9 +140,11 @@ _GAME_TYPE_BY_ID_PREFIX = {
 }
 
 
-def listed_position_group(listed_position: Any) -> str | None:
-    """Return the Position group for one listed position, or ``None``."""
+def listed_position_group(player_id: int, listed_position: Any) -> str | None:
+    """Return one player's Position group: an override, else the listed code's, or ``None``."""
 
+    if player_id in POSITION_OVERRIDES:
+        return POSITION_OVERRIDES[player_id]
     if not isinstance(listed_position, str):
         return None
     return LISTED_POSITION_GROUPS.get(listed_position.strip().upper())
@@ -529,7 +572,7 @@ def normalize_roster_response(
                 "team_abbreviation": _value(row, "team_abbreviation", "TEAM_ABBREVIATION", "TEAM_ABBR"),
                 "roster_status": "active",
                 "status": "active",
-                "position": listed_position_group(_value(row, "position", "POSITION")),
+                "position": listed_position_group(player_id, _value(row, "position", "POSITION")),
                 "season_coverage": season,
                 "event_ids": [str(item) for item in coverage_ids if str(item).strip()],
             }
