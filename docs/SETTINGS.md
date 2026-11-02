@@ -29,6 +29,12 @@ General process settings (`environment`, `port`, `debug`, and `log_level`) are
 also fields on `RuntimeSettings` and map to `FLASK_ENV`, `PORT`, `FLASK_DEBUG`,
 and `LOG_LEVEL`.
 
+Error reporting is the one exception: `app/utils/sentry_setup.py` reads
+`SENTRY_DSN`, `SENTRY_TRACES_SAMPLE_RATE` (default `0.05`) and
+`SENTRY_ENVIRONMENT` straight from the environment, because Gunicorn's
+`post_fork` hook starts the SDK in each worker outside the settings model. The
+README's environment table describes them.
+
 `NBA_STATS_MAX_CONCURRENCY` is a **per-worker-process** bound: all
 `NBAStatsAdapter` instances in one worker share one
 `threading.BoundedSemaphore`, while each Gunicorn worker has its own gate. It
