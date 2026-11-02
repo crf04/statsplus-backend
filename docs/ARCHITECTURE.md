@@ -250,7 +250,10 @@ release (`RAILWAY_GIT_COMMIT_SHA`). The `before_send` scrubber drops request
 bodies, cookies, query strings, every request header outside a short allowlist
 (`Accept*`, `Content-*`, `Host`, `User-Agent`, `X-Request-ID`), users and
 breadcrumbs, and redacts credentials, e-mail addresses, SQL bind parameters and
-Postgres `DETAIL:` lines from messages. Tracing is off. The `app.errors` handlers report a 5xx failure as one exception event with its
+Postgres `DETAIL:` lines from messages. Tracing samples
+`SENTRY_TRACES_SAMPLE_RATE` of user requests (default `0.05`; an out-of-range
+value falls back to the default); collector ingestion (`/api/collector/`),
+health checks and `/api/internal/` routes are never traced. The `app.errors` handlers report a 5xx failure as one exception event with its
 traceback (exception messages pass through the same credential redaction as the
 logs) and the ERROR log record for that failure is dropped, so nothing is
 reported twice; other ERROR logs become log events.
@@ -294,7 +297,7 @@ not counted twice:
 | PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 | Underdog | `UnderdogAdapter` (shared DFS snapshot contract) | Appearance, player, and game joins remain inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 | Kalshi | `KalshiAdapter` (shared DFS snapshot contract) | One open-game lookup (`open_games`: the `KXNBAGAME` events with their milestones, which carry the exact tip-off) and one paginated read per player series (`series_markets`: `KXNBAPTS`, `KXNBAREB`, `KXNBAAST`, `KXNBA3PT`, `KXNBABLK`, `KXNBASTL`). The shared DFS transport owns one safe-GET retry. A failed series makes the snapshot partial; a failed game lookup keeps Kalshi's estimated start times and also makes it partial. |
-| Polymarket | `PolymarketAdapter` (shared DFS snapshot contract) | A prediction market, read from the unauthenticated Gamma `/events?tag_slug=nba&closed=false` listing (100 events per page, bounded page count); each player prop is one Yes (Over) / No (Under) market inside a game event. Over is priced at `1 / bestAsk` and Under at `1 / (1 - bestBid)` as decimal prices rounded to six places at selection scope, and a market missing either ask prices neither side. Per player, statistic and game, the line whose Over midpoint is nearest 0.5 is the one `standard` line (ties to the lower line); every other line is `alternate`, and several lines with no midpoint are all `alternate`. Only a book at most 0.10 wide (`bestAsk - bestBid`) has a midpoint, because an empty book such as 0.01 / 0.97 sits near 0.5 by construction and would otherwise beat the traded line; a lone line with such a book is `alternate` too. Game, period-scoped, futures and unmapped markets are excluded with typed coverage. The closed telemetry operation is `get_snapshot`; no retry strategy is configured. |
+| Polymarket | `PolymarketAdapter` (shared DFS snapshot contract) | A prediction market, read from the unauthenticated Gamma `/events?tag_slug=nba&closed=false` listing (100 events per page, bounded page count); each player prop is one Yes (Over) / No (Under) market inside a game event. Over is priced at `1 / bestAsk` and Under at `1 / (1 - bestBid)` as decimal prices rounded to six places at selection scope, and a market missing either ask prices neither side. Per player, statistic and game, the line whose Over midpoint is nearest 0.5 is the one `standard` line (ties to the lower line); every other line is `alternate`, and several lines with no midpoint are all `alternate`. Only a book at most 0.10 wide (`bestAsk - bestBid`) has a midpoint, because an empty book such as 0.01 / 0.97 sits near 0.5 by construction and would otherwise beat the traded line; a lone line with such a book is `alternate` too. Only a midpoint within 0.15 of 0.5 can be standard: a tight book on a far rung is `alternate`, and a group with no line that close has no `standard` line. Game, period-scoped, futures and unmapped markets are excluded with typed coverage. The closed telemetry operation is `get_snapshot`; no retry strategy is configured. |
 | Novig | `NovigAdapter` (shared DFS snapshot contract) | Market-list pages and one paginated event list (`/catalog/events?league=NBA`, joined to markets by `eventId`; the per-event route is throttled) come from the public v3 catalog; prices and player identity come from the web app's batch book endpoint (`api.novig.us/nbx/v1/markets/book/batch`, at most 150 market ids per call, browser-like headers). The closed telemetry operations are `market_page`, `event_page`, and `market_book_batch`, with bounded concurrency from the registry's `detail_concurrency` (at most four). A batch that answers 404 (one settled or removed market) is split in halves recursively until the stale market stands alone, and only that market is dropped, excluded as `ineligible_status`; a market whose batch entry is malformed, or whose batch cannot be read, is a malformed record and the snapshot is partial. Market-list pages hold 1,000 rows, so the whole catalog fits well inside the 25-page cap; overflowing the cap still makes the snapshot partial. A ladder of strikes collapses to at most one `standard` line per (player, statistic, game): the Over midpoint nearest 0.5, ties to the lower strike, counting only midpoints within 0.25 of 0.5. A group with no such midpoint, a lone strike included, is all `alternate`. A market that could not be read has no midpoint. No retry strategy is configured beyond the shared transport's one safe retry. |
 | NBA injury report (`nba_injury_report`) | `NBAInjuryReportProvider` | One league-wide report read with the closed operation `get_injuries`; the newest report at or before now is found by stepping back through both file-name formats in at most 12 requests, where 403/404 means unpublished. Raw statuses are retained and only Probable, Questionable, Doubtful, and Out normalize canonically; `Available` stays raw with no canonical status. |
 
@@ -501,8 +504,9 @@ explicit match; the provider's coverage evidence and observation remain
 unchanged.
 
 The catalog maps full-game points, rebounds, assists, three-pointers made,
-steals, blocks, turnovers, PRA, PA, PR, RA, STKS, and field-goal,
-three-pointer, and two-pointer attempts. Composite identities use
+steals, blocks, turnovers, PRA, PA, PR, RA, STKS, field-goal, three-pointer,
+two-pointer, and free-throw attempts, and field goals, two-pointers, and free
+throws made. Composite identities use
 the reviewed component order (`PRA` is points, rebounds, assists) regardless of
 the source label order. Dabble, PrizePicks, Underdog, Kalshi, Polymarket, and Novig labels are accepted
 only when explicitly listed in the definition; provider evidence is matched
@@ -1645,8 +1649,8 @@ identity fails closed even when additions produce net growth. Corrections that
 retain all identities, pure growth, and the exact governed recovery above
 remain publishable. Every rejected refresh records
 bounded scalar rejection and accumulated coverage counts without identities.
-Only raw box-score inputs are stored: minutes, PTS/REB/AST, FGM/FGA, FG3M/FG3A,
-TOV/STL/BLK, and canonical game/team/opponent identity. PRA, PA, PR, RA, STKS,
+Only raw box-score inputs are stored: minutes, PTS/REB/AST, OREB/DREB, FGM/FGA,
+FG3M/FG3A, FTM/FTA, TOV/STL/BLK/PF, and canonical game/team/opponent identity. PRA, PA, PR, RA, STKS,
 FG2A, FG2M, season rates, and rolling selections are derived at read time rather
 than persisted in redundant tables.
 

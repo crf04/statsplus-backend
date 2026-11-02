@@ -123,7 +123,8 @@ Never commit `.env`, Firebase service-account JSON, OpenAI keys, database dumps 
 The internal DFS board loads the reviewed statistic definitions from
 `app/config/statistic_catalog.yaml` during dependency assembly. The immutable
 catalog supports full-game points, rebounds, assists, three-pointers made,
-steals, blocks, turnovers, PRA, PA, PR, and RA. Unknown, period-specific, and
+steals, blocks, turnovers, PRA, PA, PR, RA, STKS, FGA, FG3A, FG2A, FTA, FTM,
+FGM, and FG2M. Unknown, period-specific, and
 provider fantasy labels remain visible as unmapped evidence; they are not
 silently compared. Invalid catalog schema or conflicting mappings fail startup.
 
