@@ -858,7 +858,7 @@ def test_an_idle_opponent_has_no_game_and_no_players(targets, resolve):
     assert resolved == {
         "target": created,
         "game": None,
-        "stat_columns": ["PTS", "PTS/36", "3PA", "3PA/36"],
+        "stat_columns": ["3PA", "3PA/36", "PTS", "PTS/36"],
         "context": [],
         "availability": {
             "status": "unavailable",
@@ -2568,7 +2568,7 @@ def test_a_fit_carries_the_targets_default_stat_columns_not_only_points(targets,
 
     entry = resolve_rules()[created["title"]]
 
-    assert entry["stat_columns"] == ["PTS", "PTS/36", "3PA", "3PA/36"]
+    assert entry["stat_columns"] == ["3PA", "3PA/36", "PTS", "PTS/36"]
     assert [(p["name"], p["season_averages"]["3PA"]) for p in entry["players"]] == [
         ("Corner Sniper", 8.0),
         ("Unlisted Guy", 9.0),
