@@ -1069,6 +1069,12 @@ that are never flagged.
   the `season_span` each was computed over. `baseline.on_floor_season_span` and
   `off_floor.season_span` name only the seasons that supplied on/off minutes.
 - `flagged`: both shifts at least +10%, or both at most -10%.
+- `on_off_sources` and `on_off_games_missing` (crf04/statsplus#410): the
+  sorted, distinct `source` values (`pbpstats`, `statsplus`) of the on/off
+  splits the row's numbers summed (the on-floor split, plus the off-floor one
+  in `sits` where the row has `off_floor`), and the union of their
+  `games_missing` entries (`{game_id, game_date, matchup}`, oldest first;
+  `[]` when none). A split with no copy adds nothing to either.
 - `limits`: `insufficient` (under 3 games without or under 150 off-floor
   minutes; never flagged), `no_line`, `stale_report`, `no_baseline`, and the
   on/off limits `on_off_not_warmed` (no cached split; a request without
