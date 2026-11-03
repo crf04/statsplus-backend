@@ -32,10 +32,13 @@ Only the five on-floor players get counts; a count credited to a player not
 in the segment's lineup is dropped, as a WOWY split drops it.
 
 Periods come from the final box score's period count, and a period begins at
-its first action whether or not the feed has its start action.  A game with
-an action past its last period, or a segment that runs backwards (so the
-segments would not last the game exactly), is :class:`RotationRejected`: it
-has no segments rather than wrong ones.
+its first action whether or not the feed has its start action.  A lineup is
+checked once its substitutions are all in, so a batch spanning the end of one
+period and the start of the next (the same moment) changes it once.  A game
+with an action past its last period, a segment that runs backwards (so the
+segments would not last the game exactly), or a segment that lasts or records
+anything without five on the floor is :class:`RotationRejected`: it has no
+segments rather than wrong ones.
 """
 
 from __future__ import annotations
@@ -147,10 +150,7 @@ def derive_segments(box: Mapping[str, Any], play_by_play: Mapping[str, Any], sea
     current: dict[int, _Open] = {}
 
     def open_segment(team_id: int, start_cs: int) -> None:
-        players = frozenset(on[team_id])
-        if len(players) != ON_COURT:
-            raise RotationRejected(f"team {team_id} has {len(players)} on court at {start_cs} cs")
-        current[team_id] = _Open(team_id, start_cs, players)
+        current[team_id] = _Open(team_id, start_cs, frozenset(on[team_id]))
         segments[team_id].append(current[team_id])
 
     for team_id in sides:
@@ -228,6 +228,10 @@ def derive_segments(box: Mapping[str, Any], play_by_play: Mapping[str, Any], sea
             duration = segment.end_cs - segment.start_cs
             if not (duration > 0 or segment.counts or segment.team or segment.off_poss):
                 continue
+            if len(segment.players) != ON_COURT:
+                raise RotationRejected(
+                    f"team {team_id} has {len(segment.players)} on court at {segment.start_cs} cs"
+                )
             stored.append(
                 Segment(
                     team_id=team_id,

@@ -474,6 +474,17 @@ def test_a_substitution_listed_after_a_later_one_rejects_the_game_instead_of_a_n
         derive_segments(_box(), play_by_play, "2025-26")
 
 
+def test_a_lineup_short_a_player_for_any_time_rejects_the_game():
+    play_by_play = _game(
+        ("substitution", "PT06M00.00S", {"teamId": BOS, "personId": 2, "subType": "out"}),
+        ("2pt", "PT05M00.00S", {"teamId": BOS, "personId": 1, "shotResult": "Missed"}),
+        ("substitution", "PT05M00.00S", {"teamId": BOS, "personId": 6, "subType": "in"}),
+    )
+
+    with pytest.raises(RotationRejected, match=f"team {BOS} has 4 on court at 36000 cs"):
+        derive_segments(_box(), play_by_play, "2025-26")
+
+
 def test_an_action_past_the_box_scores_last_period_rejects_the_game(tmp_path, bos_games):
     game = copy.deepcopy(bos_games["0022500017"])
     actions = game["pbp"]["game"]["actions"]
@@ -486,6 +497,28 @@ def test_an_action_past_the_box_scores_last_period_rejects_the_game(tmp_path, bo
         {"game_id": "0022500017", "reason": "action in period 5 of a 4-period game"}
     ]
     assert _dump(engine)["lineup_segment_players"] == []
+
+
+def test_a_substitution_batch_across_a_period_boundary_is_stored_like_one_at_the_period_start(
+    tmp_path, bos_games
+):
+    """Q1 0:00 and Q2 12:00 are the same moment, so a batch that starts at one
+    and finishes at the other is one lineup change at the boundary."""
+
+    game = copy.deepcopy(bos_games["0022500017"])
+    out = next(action for action in game["pbp"]["game"]["actions"] if action["actionNumber"] == 200)
+    assert (out["subType"], out["period"], out["clock"]) == ("out", 2, "PT12M00.00S")
+    out["period"], out["clock"] = 1, "PT00M00.00S"
+    (tmp_path / "moved").mkdir()
+    (tmp_path / "recorded").mkdir()
+    moved, recorded = _engine(tmp_path / "moved"), _engine(tmp_path / "recorded")
+
+    result = _collection(moved, {"0022500017": game}).collect("2025-26", game_ids=["0022500017"])
+    _collection(recorded, bos_games).collect("2025-26", game_ids=["0022500017"])
+
+    assert (result["stored"], result["rejected"]) == (1, [])
+    assert len(_dump(moved)["lineup_segment_players"]) == 5 * 49
+    assert _dump(moved) == _dump(recorded)
 
 
 # -- writes ---------------------------------------------------------------------
