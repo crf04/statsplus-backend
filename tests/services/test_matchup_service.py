@@ -1326,6 +1326,58 @@ def test_games_composed_for_one_request_read_the_schedule_refresh_once():
     assert schedules == [{"status": "fresh", "retrieved_at": "2026-01-15T10:00:00+00:00"}] * 2
 
 
+def test_games_of_two_schedule_seasons_each_report_their_seasons_refresh():
+    """Opening night: a 2026-27 game beside 2025-26 ones, the evidence still 2025-26."""
+
+    next_season = {**_event(), "nba_game_id": "0022600001", "season": "2026-27"}
+    later = {**_event(), "nba_game_id": "0022500585", "scheduled_at": "2026-01-16T03:00:00+00:00"}
+    refreshed = {SEASON: RETRIEVED_AT, "2026-27": datetime(2026, 1, 15, 11, tzinfo=UTC)}
+
+    class SeasonEvents(RecordedEvents):
+        freshness_calls = 0
+
+        def count_events(self, season):
+            return self.count
+
+        def get_event(self, season, game_id):
+            return next(
+                (
+                    event
+                    for event in self.events
+                    if (event["season"], event["nba_game_id"]) == (season, game_id)
+                ),
+                None,
+            )
+
+        def get_freshness(self, season, *, now):
+            self.freshness_calls += 1
+            return {"last_success_at": refreshed[season].isoformat(), "fresh": True}
+
+    events = SeasonEvents(events=[_event(), next_season, later])
+    service = _service(events=events)
+    # Unpinned, so each game's schedule facts are the season its ID names.
+    service.settings = RuntimeSettings(environment="testing")
+    compose_cache = MatchupComposeCache()
+
+    schedules = [
+        service.get_matchup_from_snapshot(
+            game_id=game_id,
+            publication_snapshot=None,
+            injuries=None,
+            compose_cache=compose_cache,
+            season=SEASON,
+        )["freshness"]["schedule"]
+        for game_id in (GAME_ID, "0022600001", "0022500585")
+    ]
+
+    assert schedules == [
+        {"status": "fresh", "retrieved_at": "2026-01-15T10:00:00+00:00"},
+        {"status": "fresh", "retrieved_at": "2026-01-15T11:00:00+00:00"},
+        {"status": "fresh", "retrieved_at": "2026-01-15T10:00:00+00:00"},
+    ]
+    assert events.freshness_calls == 2
+
+
 def test_missing_pool_and_stats_are_degraded_without_provider_fallback():
     payload = _service(
         pool=False,
