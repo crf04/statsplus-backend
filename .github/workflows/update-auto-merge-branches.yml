@@ -1,0 +1,38 @@
+name: Update auto-merge branches
+
+# The default branch requires pull requests to be up to date, and auto-merge
+# never updates a branch, so a pull request whose base moves while its checks
+# run stalls as BEHIND. After every push to master, update each open pull request
+# that has auto-merge on. A personal or app token is required: pushes made with
+# GITHUB_TOKEN do not start the pull request's checks.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: update-auto-merge-branches
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Update auto-merge pull requests
+        env:
+          GH_TOKEN: ${{ secrets.AUTO_UPDATE_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::Set the AUTO_UPDATE_TOKEN secret (fine-grained token: Contents and Pull requests read/write)."
+            exit 1
+          fi
+          gh pr list --state open --json number,isDraft,autoMergeRequest \
+            --jq '.[] | select(.autoMergeRequest != null and (.isDraft | not)) | .number' |
+          while read -r number; do
+            gh pr update-branch "$number" || echo "::warning::Could not update #$number"
+          done
