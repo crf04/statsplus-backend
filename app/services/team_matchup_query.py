@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
+from functools import partial
 from math import isfinite
 from statistics import fmean, pstdev
 from types import MappingProxyType
@@ -48,6 +49,8 @@ from app.services.team_matchup_repository import (
     StoredTeamMatchupObservation,
     TeamMatchupRepository,
     TeamMatchupSnapshotScope,
+    TeamMetricFact,
+    TeamMetricSummary,
 )
 from app.services.traditional_opponent_publications import (
     normalize_traditional_opponent_window,
@@ -255,11 +258,13 @@ class TeamMatchupQueryService:
         publication_snapshot=None,
         connection: Connection | None = None,
         bases: Collection[str] | None = None,
+        governance=None,
     ) -> TeamMatchupWindow | None:
         """Read the newest stored window on or before an optional slate date.
 
         ``bases`` names the only surfaces the caller reads; the window may
-        then leave the others out.
+        then leave the others out.  ``governance`` is a ``request_governance``
+        result shared with the request's other windows.
 
         This is the completed-season read: it honors the #41 completed-season
         exemption, so a finished season's aggregate answers for any date inside
@@ -279,6 +284,7 @@ class TeamMatchupQueryService:
             publication_snapshot=publication_snapshot,
             connection=connection,
             bases=bases,
+            governance=governance,
         )
 
     def get_focal_safe_window(
@@ -323,6 +329,7 @@ class TeamMatchupQueryService:
         publication_snapshot=None,
         connection: Connection | None = None,
         bases: Collection[str] | None = None,
+        governance=None,
     ) -> TeamMatchupWindow | None:
         current_date = assume_utc(self._clock()).astimezone(EASTERN).date()
         if as_of is not None and as_of > current_date:
@@ -344,8 +351,10 @@ class TeamMatchupQueryService:
                 strict_as_of=strict_as_of,
                 publication_snapshot=publication_snapshot,
                 bases=bases,
+                connection=connection,
+                governance=governance,
             )
-        observation_scope = self.repository.get_latest_scope(
+        observation_scope, observations = self.repository.get_latest_observations(
             season,
             window_games=window_games,
             as_of=cutoff,
@@ -359,54 +368,88 @@ class TeamMatchupQueryService:
                 legacy=None,
                 strict_as_of=strict_as_of,
                 publication_snapshot=publication_snapshot,
+                connection=connection,
+                governance=governance,
             )
-        observation_snapshot = self.repository.get_snapshot(observation_scope, connection=connection)
-        observations = observation_snapshot.observations
-        fact_scopes = self.repository.get_latest_fact_scopes(
-            season,
-            window_games=window_games,
-            as_of=cutoff,
-            connection=connection,
-        )
-        surfaces_by_scope = defaultdict(set)
-        for surface, fact_scope in fact_scopes.items():
-            surfaces_by_scope[fact_scope].add(surface)
-        snapshots_by_scope = {observation_scope: observation_snapshot}
-        facts = []
-        for fact_scope, surfaces in surfaces_by_scope.items():
-            if fact_scope not in snapshots_by_scope:
-                snapshots_by_scope[fact_scope] = self.repository.get_snapshot(
-                    fact_scope, connection=connection
-                )
-            facts.extend(fact for fact in snapshots_by_scope[fact_scope].facts if fact.base in surfaces)
-        legacy_window = self._build_window(
-            observation_scope,
-            fact_scopes=fact_scopes,
-            facts=facts,
-            observations=observations,
-        )
         return self._database_first_window(
             season,
             cutoff=cutoff,
             window_games=window_games,
-            legacy=legacy_window,
+            legacy=partial(
+                self._stored_window,
+                observation_scope,
+                window_games=window_games,
+                cutoff=cutoff,
+                observations=observations,
+                connection=connection,
+            ),
             strict_as_of=strict_as_of,
             publication_snapshot=publication_snapshot,
+            connection=connection,
+            governance=governance,
+        )
+
+    def _stored_window(
+        self,
+        scope: TeamMatchupSnapshotScope,
+        *,
+        window_games: int | None,
+        cutoff: date,
+        observations: tuple[StoredTeamMatchupObservation, ...],
+        connection: Connection | None,
+        unranked_bases: Collection[str] = (),
+    ) -> TeamMatchupWindow:
+        """Build the stored-fact window, reading rows only for the bases it ranks.
+
+        A base in ``unranked_bases`` is validated from its stats' summaries,
+        unless a value the database could not prove rankable, or stats of
+        thirty teams each that are not the same thirty, send it through the
+        row check and the ranking, which refuse or fail on it as they would
+        for any other base.
+        """
+
+        summaries = self.repository.get_latest_metric_summaries(
+            scope.season,
+            window_games=window_games,
+            as_of=cutoff,
+            connection=connection,
+        )
+        fact_scopes = {
+            summary.base: TeamMatchupSnapshotScope(scope.season, summary.as_of_date, window_games)
+            for summary in summaries
+        }
+        row_bases = {
+            summary.base
+            for summary in summaries
+            if summary.base not in unranked_bases
+            or summary.unproven
+            or (summary.distinct_teams == 30 and summary.base_teams != 30)
+        }
+        return self._build_window(
+            scope,
+            fact_scopes=fact_scopes,
+            facts=self.repository.get_metric_facts(
+                {base: fact_scopes[base] for base in row_bases},
+                connection=connection,
+            ),
+            summaries=tuple(summary for summary in summaries if summary.base not in row_bases),
+            observations=observations,
+            unranked_bases=frozenset(unranked_bases) - row_bases,
         )
 
     def get_window(self, scope: TeamMatchupSnapshotScope, *, publication_snapshot=None) -> TeamMatchupWindow:
         snapshot = self.repository.get_snapshot(scope)
-        legacy_window = self._build_window(
-            scope,
-            fact_scopes={fact.base: scope for fact in snapshot.facts},
-            facts=snapshot.facts,
-            observations=snapshot.observations,
-        )
         return self._database_first_window(
             scope.season,
             cutoff=scope.as_of,
             window_games=scope.window_games,
-            legacy=legacy_window,
+            legacy=partial(
+                self._build_window,
+                scope,
+                fact_scopes={fact.base: scope for fact in snapshot.facts},
+                facts=snapshot.facts,
+                observations=snapshot.observations,
+            ),
             publication_snapshot=publication_snapshot,
         )
 
@@ -416,15 +459,23 @@ class TeamMatchupQueryService:
         *,
         cutoff: date,
         window_games: int | None,
-        legacy: TeamMatchupWindow | None,
+        legacy: Callable[..., TeamMatchupWindow] | None,
         strict_as_of: bool = False,
         publication_snapshot=None,
         bases: Collection[str] | None = None,
+        connection: Connection | None = None,
+        governance=None,
     ) -> TeamMatchupWindow | None:
-        """Overlay only activated windows; inactive bases remain legacy-backed."""
+        """Overlay only activated windows; inactive bases remain legacy-backed.
+
+        ``legacy`` builds the stored-fact window; it is given the bases a
+        publication replaces, which it validates but does not rank.
+        """
 
         if self._publication_reader is None:
-            return legacy
+            return None if legacy is None else legacy()
+        if governance is None:
+            governance = self.request_governance(connection)
         window = "l15" if window_games is not None else "season"
         stream_by_base = dict(TEAM_MATCHUP_PUBLICATION_STREAMS[window])
         optional_by_base = TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAMS[window]
@@ -485,6 +536,7 @@ class TeamMatchupQueryService:
             or base == REBOUND_TYPES_BASE
             or not read.legacy_fallback_allowed
         }
+        legacy = None if legacy is None else legacy(unranked_bases=frozenset(active))
         legacy_observations = () if legacy is None else legacy.observations
         # Durable Last-15 observations are league-wide authority for their own
         # scope.  The waiting reason outranks any older still-active
@@ -523,7 +575,7 @@ class TeamMatchupQueryService:
                         base=base,
                         window=window,
                         season_is_complete=self._publication_season_is_complete(
-                            read, requested_season=season
+                            read, requested_season=season, governance=governance
                         ),
                     )
                 )
@@ -555,6 +607,7 @@ class TeamMatchupQueryService:
                     read,
                     requested_season=season,
                     window=window,
+                    governance=governance,
                 )
                 if publication_game_ids is None:
                     base_windows[base] = None
@@ -761,7 +814,7 @@ class TeamMatchupQueryService:
             observations=(observation,),
         )
 
-    def _publication_game_ids(self, read, *, requested_season: str, window: str):
+    def _publication_game_ids(self, read, *, requested_season: str, window: str, governance):
         """Resolve governance at this immutable publication's own boundary.
 
         A trailing family's previous-season read is governed by its own season.
@@ -779,7 +832,7 @@ class TeamMatchupQueryService:
             return None
         try:
             return resolve_governed_team_game_ids(
-                self._governance_source,
+                governance,
                 read.season,
                 cutoff,
                 window=window,
@@ -789,6 +842,17 @@ class TeamMatchupQueryService:
             )
         except PublicationGovernanceUnavailable:
             return None
+
+    def request_governance(self, connection: Connection | None = None):
+        """One request's governance source: on its connection, each manifest read once.
+
+        A caller building several windows for one request passes the result
+        to each ``get_latest_window`` so they share it.
+        """
+
+        source = self._governance_source
+        for_request = getattr(source, "for_request", None)
+        return for_request(connection) if callable(for_request) else source
 
     @property
     def _governance_source(self):
@@ -818,7 +882,7 @@ class TeamMatchupQueryService:
             )
         )
 
-    def _publication_season_is_complete(self, read, *, requested_season: str) -> bool:
+    def _publication_season_is_complete(self, read, *, requested_season: str, governance=None) -> bool:
         """Ask this publication's own governance whether its season is over."""
 
         if read.season != requested_season or read.cutoff is None:
@@ -832,7 +896,7 @@ class TeamMatchupQueryService:
         except (TypeError, ValueError):
             return False
         return resolve_governed_season_is_complete(
-            self._governance_source,
+            self._governance_source if governance is None else governance,
             read.season,
             cutoff,
             manifest_id=getattr(read, "manifest_id", None),
@@ -845,9 +909,13 @@ class TeamMatchupQueryService:
         scope: TeamMatchupSnapshotScope,
         *,
         fact_scopes: dict[str, TeamMatchupSnapshotScope],
-        facts: Iterable[StoredTeamMatchupFact],
+        facts: Iterable[StoredTeamMatchupFact | TeamMetricFact],
         observations: Iterable[StoredTeamMatchupObservation],
+        unranked_bases: Collection[str] = (),
+        summaries: Iterable[TeamMetricSummary] = (),
     ) -> TeamMatchupWindow:
+        """Validate and rank ``facts``; validate the bases ``summaries`` stand in for."""
+
         grouped = defaultdict(list)
         invalid_surfaces: dict[str, str] = {}
         fact_rows = tuple(facts)
@@ -872,6 +940,12 @@ class TeamMatchupQueryService:
             )
         }
         fact_rows = tuple(fact for fact in fact_rows if fact.base not in unavailable_nba_surfaces)
+        summary_rows = tuple(summary for summary in summaries if summary.base not in unavailable_nba_surfaces)
+        retrieved_by_surface: dict[str, datetime] = {}
+        for item in (*fact_rows, *summary_rows):
+            newest = retrieved_by_surface.get(item.base)
+            if newest is None or item.retrieved_at > newest:
+                retrieved_by_surface[item.base] = item.retrieved_at
         for surface in unavailable_nba_surfaces:
             observation = observations_by_surface[surface]
             invalid_surfaces[surface] = observation.unavailable_reason or "surface_unavailable"
@@ -888,11 +962,14 @@ class TeamMatchupQueryService:
                 len(team_values) != 30 or len({team_id for team_id, _ in team_values}) != 30
             ):
                 invalid_surfaces[key[0]] = "legacy_surface_incomplete"
+        for summary in summary_rows:
+            if summary.base not in invalid_surfaces and (summary.teams != 30 or summary.distinct_teams != 30):
+                invalid_surfaces[summary.base] = "legacy_surface_incomplete"
 
         league_metrics = []
         team_metrics = defaultdict(list)
         for key in sorted(grouped):
-            if key[0] in invalid_surfaces:
+            if key[0] in invalid_surfaces or key[0] in unranked_bases:
                 continue
             team_values = grouped[key]
             values = [value for _, value in team_values]
@@ -912,7 +989,7 @@ class TeamMatchupQueryService:
                         rank=ranks[value],
                     )
                 )
-        if "shot_types" not in invalid_surfaces:
+        if "shot_types" not in invalid_surfaces and "shot_types" not in unranked_bases:
             legacy_table = {
                 f"{slice_key}_{stat_key}": league_metric_column(dict(team_values))
                 for (base, slice_key, stat_key), team_values in grouped.items()
@@ -939,12 +1016,11 @@ class TeamMatchupQueryService:
         for surface, reason in invalid_surfaces.items():
             observation = observations_by_surface.get(surface)
             if observation is None:
-                retrieved_at = max(fact.retrieved_at for fact in fact_rows if fact.base == surface)
                 observations_by_surface[surface] = StoredTeamMatchupObservation(
                     surface=surface,
                     status="unavailable",
                     unavailable_reason=reason,
-                    retrieved_at=retrieved_at,
+                    retrieved_at=retrieved_by_surface[surface],
                 )
             else:
                 observations_by_surface[surface] = replace(
@@ -960,7 +1036,7 @@ class TeamMatchupQueryService:
                 if surface not in invalid_surfaces
             },
             fact_retrieved_at={
-                surface: max(fact.retrieved_at for fact in fact_rows if fact.base == surface)
+                surface: retrieved_by_surface[surface]
                 for surface in fact_scopes
                 if surface not in invalid_surfaces
             },

@@ -21,8 +21,9 @@ from datetime import date
 
 from app.config.settings import current_nba_season
 from app.domain.nba_events import season_for_game_id
+from app.domain.utc import parse_utc_iso
 from app.errors import SeasonAfterGameError, SelectedSeasonUnavailableError
-from app.services.database_first_activation import ReadSeason
+from app.services.database_first_activation import ReadSeason, SeasonMode
 from app.services.publication_snapshot_calls import call_with_read_scope
 
 
@@ -129,6 +130,21 @@ def season_context(publication_reader, snapshot, default_season) -> dict[str, st
         "selected_season": selected,
         "published_season": getattr(snapshot, "published_season", None) or default_season(),
     }
+
+
+def game_capture(publication_reader, snapshot, scheduled_at, *, session=None):
+    """``snapshot`` as a game scheduled at ``scheduled_at`` reads it (crf04/statsplus-backend#626).
+
+    An Unpublished Season capture is taken again as of a game of an earlier
+    slate day (the reader's ``snapshot_as_of``); every other capture, and a
+    reader that cannot, reads ``snapshot`` itself.  ``scheduled_at`` is the
+    event's ISO tip time, read only for an Unpublished Season capture.
+    """
+
+    snapshot_as_of = getattr(publication_reader, "snapshot_as_of", None)
+    if getattr(snapshot, "mode", None) is not SeasonMode.UNPUBLISHED or not callable(snapshot_as_of):
+        return snapshot
+    return snapshot_as_of(snapshot, parse_utc_iso(str(scheduled_at)), session=session)
 
 
 def refuse_evidence_after_game(publication_reader, game_season: str | None) -> None:

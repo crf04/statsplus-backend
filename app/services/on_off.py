@@ -1,12 +1,18 @@
-"""PBPStats on/off-floor (WOWY) splits behind ``GET /api/on_off`` (#424).
+"""On/off-floor (WOWY) splits behind ``GET /api/on_off`` (#424).
 
 One call asks: for this team and season, how did every teammate play while
 the ``on`` players were on the floor and the ``off`` players were off it?
-Players are StatsPlus player ids; the provider translates them to PBPStats
-ids.  Per-36 rates are derived here from the provider's raw totals and
-minutes.
+Players are StatsPlus player ids.  Per-36 rates are derived here from raw
+totals and minutes.
 
-Results are cached in Redis, keyed by team, season, on-set and off-set.  An
+A season whose lineup segments are recorded as complete (crf04/statsplus#410)
+is answered from them: one SQL aggregate, ``source: "statsplus"``, never stale,
+with no cache, throttle, quota or deadline.  ``cached_at`` is when the newest
+included game's segments were written and ``games_missing`` lists the
+team-season's games that have none.  Every other season is a PBP Stats call,
+as below; the provider translates the ids to PBP Stats ids.
+
+PBP Stats results are cached in Redis, keyed by team, season, on-set and off-set.  An
 entry is fresh for ``on_off_ttl_seconds`` (24 hours) and is kept for a week
 more as a stale fallback: when a fetch fails the cached copy is served with
 ``stale: true``, and with no copy the answer is ``unavailable``.  Upstream
@@ -42,6 +48,13 @@ logger = logging.getLogger(__name__)
 #: (statsplus#229 follow-up); an entry of another shape is refetched.
 ENTRY_SCHEMA = 2
 SOURCE = "pbpstats"
+SEGMENTS_SOURCE = "statsplus"
+#: StatsPlus usage: the player's FGA + 0.44 FTA + TOV over the team's on-floor
+#: FGA + player-less heaves + 0.44 FTA + TOV in the lineup state.
+USAGE_FTA_WEIGHT = 0.44
+#: Half a minute in centiseconds: minutes round half up, as PBP Stats rounds.
+_HALF_MINUTE_CS = 3000
+_MINUTE_CS = 6000
 CACHE_KEY_PREFIX = "on_off:v1:"
 #: How long past its freshness an entry is kept as the stale fallback.
 STALE_RETENTION_SECONDS = 7 * 86400
@@ -162,6 +175,28 @@ def normalize_rows(rows: Iterable[WowyPlayerRow]) -> list[dict[str, Any]]:
     return players
 
 
+def segment_row(sums: Mapping[str, Any]) -> WowyPlayerRow:
+    """One player's summed segments as the row a PBP Stats split returns."""
+
+    used = sums["fga"] + USAGE_FTA_WEIGHT * sums["fta"] + sums["tov"]
+    team = sums["team_fga"] + sums["team_heaves"] + USAGE_FTA_WEIGHT * sums["team_fta"] + sums["team_tov"]
+    return WowyPlayerRow(
+        player_id=int(sums["player_id"]),
+        name=str(sums["name"]),
+        minutes=(int(sums["duration_cs"]) + _HALF_MINUTE_CS) // _MINUTE_CS,
+        possessions=int(sums["off_poss"]),
+        usage=100 * used / team if team else None,
+        points=int(sums["pts"]),
+        rebounds=int(sums["reb"]),
+        assists=int(sums["ast"]),
+        fg3m=int(sums["fg3m"]),
+        fga=int(sums["fga"]),
+        fg3a=int(sums["fg3a"]),
+        tov=int(sums["tov"]),
+        fta=int(sums["fta"]),
+    )
+
+
 class _SlotBusyError(ProviderUnavailableError):
     """The upstream slot is taken and the caller may not wait for it."""
 
@@ -177,11 +212,13 @@ class OnOffService:
         settings: RuntimeSettings,
         *,
         redis_client: Any | None = None,
+        segments: Any | None = None,
         clock: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._provider = provider
+        self._segments = segments
         self._ttl = settings.cache.on_off_ttl_seconds
         self._min_interval = settings.cache.on_off_min_interval_seconds
         self._redis = redis_client if redis_client is not None and settings.cache.on_off_enabled else None
@@ -218,9 +255,14 @@ class OnOffService:
         waiting for.  It needs the shared budget and spacing, so without Redis
         (or with its breaker open) it does not reach upstream.  Out of time or
         slot, the split is served stale or ``unavailable``.
+
+        A season served from segments ignores ``user_id`` and ``deadline``.
         """
 
         request = build_request(team, season, on, off)
+        served = self._from_segments(request)
+        if served is not None:
+            return served
         cached = self._cache_read(request)
         if cached is not None and self._is_current(cached):
             return self._response(request, cached, stale=False)
@@ -265,16 +307,24 @@ class OnOffService:
         ``not_warmed`` (the warm has not stored it yet), or ``unavailable``
         when there is no cache to read at all.  Injury Scenarios read this way
         so a request without a named player never waits on throttled upstream
-        calls.
+        calls.  A season served from segments is answered from them.
         """
 
         request = build_request(team, season, on, off)
+        served = self._from_segments(request)
+        if served is not None:
+            return served
         if self._redis is None:
             return self._unavailable(request)
         cached = self._cache_read(request)
         if cached is None:
             return {**self._unavailable(request), "status": "not_warmed"}
         return self._response(request, cached, stale=not self._is_fresh(cached))
+
+    def serves_from_segments(self, season: str) -> bool:
+        """Whether ``season``'s splits come from stored segments, not PBP Stats."""
+
+        return self._segments is not None and self._segments.covered(season)
 
     def warm(self, requests: Iterable[OnOffRequest]) -> dict[str, Any]:
         """Fill missing or expired entries; idempotent within the TTL.
@@ -329,6 +379,25 @@ class OnOffService:
             "failed": failed,
             "aborted": aborted,
             "cache_write_failed": cache_write_failed,
+        }
+
+    # -- segments --------------------------------------------------------
+
+    def _from_segments(self, request: OnOffRequest) -> dict[str, Any] | None:
+        if self._segments is None:
+            return None
+        split = self._segments.read_split(
+            request.season, NBA_TEAM_TRICODE_TO_ID[request.team], request.on, request.off
+        )
+        if split is None:
+            return None
+        return {
+            "status": "ok",
+            **self._envelope(request, source=SEGMENTS_SOURCE),
+            "cached_at": None if split.written_at is None else split.written_at.astimezone(UTC).isoformat(),
+            "stale": False,
+            "players": normalize_rows(segment_row(sums) for sums in split.rows),
+            "games_missing": list(split.games_missing),
         }
 
     # -- upstream --------------------------------------------------------
@@ -530,9 +599,9 @@ class OnOffService:
     # -- responses -------------------------------------------------------
 
     @staticmethod
-    def _envelope(request: OnOffRequest) -> dict[str, Any]:
+    def _envelope(request: OnOffRequest, *, source: str = SOURCE) -> dict[str, Any]:
         return {
-            "source": SOURCE,
+            "source": source,
             "team": request.team,
             "season": request.season,
             "on": list(request.on),
@@ -600,4 +669,5 @@ __all__ = [
     "build_request",
     "injury_warm_requests",
     "normalize_rows",
+    "segment_row",
 ]

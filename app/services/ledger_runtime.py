@@ -6,6 +6,7 @@ import json
 import logging
 from collections import OrderedDict
 from collections.abc import Mapping
+from copy import copy
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from threading import Lock
@@ -45,6 +46,7 @@ from app.services.ledger_materialization import (
     LedgerMaterializationService,
     LedgerMaterializationUnavailable,
 )
+from app.services.request_reads import read_connection
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
     PublicationGovernanceUnavailable,
@@ -82,18 +84,13 @@ class LedgerGovernance:
 
     @property
     def expected_season_game_ids(self) -> dict[int, frozenset[str]]:
-        return {
-            team_id: frozenset(
-                str(event["nba_game_id"])
-                for event in self.events
-                if team_id
-                in {
-                    int(event["home_team_id"]),
-                    int(event["away_team_id"]),
-                }
-            )
-            for team_id in self.team_ids
-        }
+        # One pass over the events, not one per team (crf04/statsplus-backend#612).
+        game_ids: dict[int, set[str]] = {team_id: set() for team_id in self.team_ids}
+        for event in self.events:
+            for team_id in {int(event["home_team_id"]), int(event["away_team_id"])}:
+                if team_id in game_ids:
+                    game_ids[team_id].add(str(event["nba_game_id"]))
+        return {team_id: frozenset(game_ids[team_id]) for team_id in self.team_ids}
 
     @property
     def expected_l15_date_from_by_team(self) -> dict[int, str]:
@@ -154,12 +151,29 @@ class ActiveManifestLedgerGovernanceReader:
     def __init__(self, engine, *, clock=None) -> None:
         self.engine = engine
         self.clock = clock or (lambda: datetime.now(UTC))
+        self._connection = None
+        #: Governance a request-bound reader already read, by (season,
+        #: cutoff, manifest); ``None`` on the shared reader, which never keeps it.
+        self._request_governance: dict[tuple, LedgerGovernance] | None = None
         # Parsed Event Catalog payloads by (publication, checksum, season,
         # cutoff): a payload that matched its checksum is not fetched again.
         self._catalog_events: OrderedDict[tuple, tuple[tuple[Mapping[str, object], ...], bool]] = (
             OrderedDict()
         )
         self._catalog_events_lock = Lock()
+
+    def for_request(self, connection) -> ActiveManifestLedgerGovernanceReader:
+        """This reader for one request: on its connection, reading each manifest's governance once.
+
+        The Season and Last-15 windows of one Matchup are governed by the same
+        manifests; the request holds one bound reader for both and drops it
+        when it ends.
+        """
+
+        bound = copy(self)
+        bound._connection = connection
+        bound._request_governance = {}
+        return bound
 
     def read(self, season: str, cutoff: datetime) -> LedgerGovernance:
         return self._read(
@@ -174,12 +188,23 @@ class ActiveManifestLedgerGovernanceReader:
         cutoff: datetime,
         manifest_id: str | None = None,
     ) -> LedgerGovernance:
-        return self._read(
-            season,
-            cutoff,
-            require_collection_authorization=False,
-            manifest_id=manifest_id,
-        )
+        if self._request_governance is None:
+            return self._read(
+                season,
+                cutoff,
+                require_collection_authorization=False,
+                manifest_id=manifest_id,
+            )
+        key = (season, cutoff, manifest_id)
+        governance = self._request_governance.get(key)
+        if governance is None:
+            governance = self._request_governance[key] = self._read(
+                season,
+                cutoff,
+                require_collection_authorization=False,
+                manifest_id=manifest_id,
+            )
+        return governance
 
     def resolve_l15_game_ids(self, season: str, cutoff: date | datetime):
         """Return the exact governed L15 IDs for one season and cutoff.
@@ -289,7 +314,7 @@ class ActiveManifestLedgerGovernanceReader:
             governed_cutoff = cutoff
         elif isinstance(cutoff, date):
             start, end = slate_day_bounds_utc(cutoff)
-            with self.engine.connect() as connection:
+            with read_connection(self.engine, self._connection) as connection:
                 statement = select(CollectionManifest.cutoff).where(
                     CollectionManifest.season == season,
                     CollectionManifest.cutoff >= start,
@@ -324,7 +349,7 @@ class ActiveManifestLedgerGovernanceReader:
         require_collection_authorization: bool,
         manifest_id: str | None = None,
     ) -> LedgerGovernance:
-        with self.engine.connect() as connection:
+        with read_connection(self.engine, self._connection) as connection:
             active = (
                 connection.execute(
                     select(ActiveSeason).where(
@@ -336,9 +361,26 @@ class ActiveManifestLedgerGovernanceReader:
                 if require_collection_authorization
                 else True
             )
-            manifest_query = select(CollectionManifest).where(
-                CollectionManifest.season == season,
-                CollectionManifest.cutoff == cutoff,
+            # The bound Event Catalog's identity rides along, so a catalog whose
+            # parsed events are already held needs no read of its own.
+            catalog_table = CatalogPublication.__table__
+            manifest_query = (
+                select(
+                    CollectionManifest,
+                    *(
+                        column.label(f"catalog_{column.name}")
+                        for column in catalog_table.c
+                        if column is not catalog_table.c.payload
+                    ),
+                )
+                .outerjoin(
+                    catalog_table,
+                    catalog_table.c.publication_id == CollectionManifest.event_catalog_publication_id,
+                )
+                .where(
+                    CollectionManifest.season == season,
+                    CollectionManifest.cutoff == cutoff,
+                )
             )
             if manifest_id is not None:
                 manifest_query = manifest_query.where(
@@ -377,14 +419,12 @@ class ActiveManifestLedgerGovernanceReader:
             int(team_id) for event in events for team_id in (event["home_team_id"], event["away_team_id"])
         )
         expected = frozenset(str(event["nba_game_id"]) for event in events)
-        by_team = {
-            team_id: tuple(
-                str(event["nba_game_id"])
-                for event in reversed(events)
-                if team_id in {event["home_team_id"], event["away_team_id"]}
-            )
-            for team_id in team_ids
-        }
+        newest_first: dict[int, list[str]] = {team_id: [] for team_id in team_ids}
+        for event in reversed(events):
+            for team_id in {event["home_team_id"], event["away_team_id"]}:
+                if team_id in newest_first:
+                    newest_first[team_id].append(str(event["nba_game_id"]))
+        by_team = {team_id: tuple(newest_first[team_id]) for team_id in team_ids}
         return LedgerGovernance(
             season=season,
             cutoff=cutoff,
@@ -423,19 +463,31 @@ class ActiveManifestLedgerGovernanceReader:
             if parsed is not None:
                 self._catalog_events.move_to_end(key)
         table = CatalogPublication.__table__
-        catalog = (
-            connection.execute(
-                select(
-                    *(column for column in table.c if parsed is None or column is not table.c.payload)
-                ).where(
-                    CatalogPublication.publication_id == publication_id,
-                )
+        if parsed is not None and "catalog_publication_id" in manifest:
+            # ``_read`` joined the catalog's identity onto the manifest row.
+            catalog = (
+                {
+                    column.name: manifest[f"catalog_{column.name}"]
+                    for column in table.c
+                    if column is not table.c.payload
+                }
+                if manifest["catalog_publication_id"] is not None
+                else None
             )
-            .mappings()
-            .one_or_none()
-            if publication_id
-            else None
-        )
+        else:
+            catalog = (
+                connection.execute(
+                    select(
+                        *(column for column in table.c if parsed is None or column is not table.c.payload)
+                    ).where(
+                        CatalogPublication.publication_id == publication_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+                if publication_id
+                else None
+            )
         if catalog is None:
             raise PublicationGovernanceUnavailable(
                 "active manifest and immutable Event Catalog governance are required"

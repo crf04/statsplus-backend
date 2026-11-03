@@ -53,6 +53,7 @@ from app.domain.nba_teams import (
     canonical_nba_team_abbreviation,
 )
 from app.domain.player_diet_taxonomy import PLAYER_DIET_OBSERVATION_STREAM_KEYS
+from app.domain.player_position import POSITION_GROUPS, POSITION_OVERRIDES
 from app.domain.publication_integrity import (
     canonical_publication_json,
     publication_payload_checksum,
@@ -131,6 +132,9 @@ MIN_REPAIR_GROUP_MEMBERS = 2
 MAX_REPAIR_GROUP_MEMBERS = 8
 MAX_REPAIR_GROUP_REASON = 255
 OBSERVATION_RETENTION_DAYS = 30
+#: An Unpublished Season keeps every superseded version this recent, and only
+#: the newest of each week before (crf04/statsplus-backend#626).
+AS_OF_DAILY_RETENTION_DAYS = 14
 ATHLETE_REUSE_DAYS = 7
 # A complete roster snapshot may drop at most this share of the governed
 # roster (preseason cuts); a larger drop reads as a truncated provider response.
@@ -1264,19 +1268,19 @@ def _assert_player_shot_types_cover_governed_games(
     *,
     cutoff: datetime,
     expected_game_ids_by_team: Mapping[int, frozenset[str]] | None,
-) -> frozenset[int]:
+) -> None:
     """Refuse player tracking that does not yet cover every governed game.
 
     NBA player tracking can trail the box score by game-days while still
     answering, and its only tell is a smaller games played.  The observation
-    proves its window twice over: every team's box-score games equal the
-    games the cutoff governs, and every player's tracking games equal his
-    box-score games over the same date bound.
-
-    Returns the players with box-score field-goal attempts.  A player tracking
-    has not reached has no record here at all, so the caller requires each of
-    them in at least one category.  A player with no attempts has no shot
-    type and is legitimately absent from every category.
+    proves its window three times over: every team's box-score games equal
+    the games the cutoff governs, every player's tracking games in each
+    category equal his box-score games over the same date bound, and every
+    player with box-score field-goal attempts has as many games in tracking's
+    Overall range as in the box score.  A player tracking has not reached has
+    no Overall record at all.  A player whose shots are none of the three
+    types has an Overall record and no category record, and is legitimately
+    absent from the Diet (crf04/statsplus#386).
     """
 
     if not expected_game_ids_by_team:
@@ -1284,25 +1288,33 @@ def _assert_player_shot_types_cover_governed_games(
     endpoint_window = scope.get("endpoint_window")
     team_games = document.get("team_games_played")
     box_attempts = document.get("box_field_goal_attempts")
+    box_games = document.get("box_games_played")
+    tracking_games = document.get("tracking_games_played")
     if (
         not isinstance(endpoint_window, Mapping)
         or endpoint_window.get("date_to") != slate_date_for_instant(cutoff).strftime("%m/%d/%Y")
         or not isinstance(team_games, Mapping)
         or not isinstance(box_attempts, Mapping)
+        or not isinstance(box_games, Mapping)
+        or not isinstance(tracking_games, Mapping)
     ):
         raise _ProviderWindowUnavailable("provider_window_unverified")
-    if any(
-        team_games.get(str(team_id)) != len(game_ids)
-        for team_id, game_ids in expected_game_ids_by_team.items()
-    ) or any(
-        not isinstance(record, Mapping) or record.get("box_games_played") != record.get("games_played")
-        for record in document.get("records") or ()
+    try:
+        shooters = [player_id for player_id, attempts in box_attempts.items() if attempts > 0]
+    except TypeError as error:
+        raise ValueError("publication observation value invalid") from error
+    if (
+        any(
+            team_games.get(str(team_id)) != len(game_ids)
+            for team_id, game_ids in expected_game_ids_by_team.items()
+        )
+        or any(
+            not isinstance(record, Mapping) or record.get("box_games_played") != record.get("games_played")
+            for record in document.get("records") or ()
+        )
+        or any(tracking_games.get(player_id) != box_games.get(player_id) for player_id in shooters)
     ):
         raise _ProviderWindowUnavailable("provider_window_lagging")
-    try:
-        return frozenset(int(player_id) for player_id, attempts in box_attempts.items() if attempts > 0)
-    except (TypeError, ValueError) as error:
-        raise ValueError("publication observation value invalid") from error
 
 
 def _compose_player_diet_observation_payload(
@@ -1392,7 +1404,6 @@ def _compose_player_diet_observation_payload(
     observed_categories: set[str] = set()
     facts: dict[tuple[int, str], dict[str, Any]] = {}
     sources: list[dict[str, str]] = []
-    shooters: set[int] = set()
     for observation in sorted(latest.values(), key=lambda row: row.observation_id):
         if (
             observation.manifest_id != manifest_id
@@ -1415,7 +1426,7 @@ def _compose_player_diet_observation_payload(
         records = document.get("records")
         if not isinstance(records, list):
             raise ValueError("publication observation rows missing")
-        shooters |= _assert_player_shot_types_cover_governed_games(
+        _assert_player_shot_types_cover_governed_games(
             _safe_json_mapping(observation.scope),
             document,
             cutoff=cutoff,
@@ -1473,8 +1484,6 @@ def _compose_player_diet_observation_payload(
         raise ValueError("publication observation rows missing")
     if observed_categories != expected_slices:
         raise ValueError("publication observation categories incomplete")
-    if not shooters <= {player_id for player_id, _slice in facts}:
-        raise _ProviderWindowUnavailable("provider_window_lagging")
     return {
         "base": base,
         "rows": [facts[identity] for identity in sorted(facts)],
@@ -2213,6 +2222,29 @@ def _revoke_pointer_history(
             PublicationPointerHistory.revoked_at.is_(None),
         )
         .values(revoked_at=now, revoked_fence=int(fence))
+    )
+
+
+def _retention_week(cutoff: datetime) -> tuple[int, int]:
+    """The ISO ``(year, week)`` of the US/Eastern date a version was cut on."""
+
+    year, week, _weekday = slate_date_for_instant(cutoff).isocalendar()
+    return year, week
+
+
+def publication_withdrawn(publication_id: Any) -> Any:
+    """SQL: the publication ``publication_id`` names activated, and every activation was withdrawn.
+
+    A reverted cutover or a same-season rollback revokes a version's
+    pointer-history row; a candidate that never activated has none.
+    """
+
+    history = PublicationPointerHistory
+    return (
+        select(history.history_id).where(history.publication_id == publication_id).exists()
+        & ~select(history.history_id)
+        .where(history.publication_id == publication_id, history.revoked_at.is_(None))
+        .exists()
     )
 
 
@@ -3321,6 +3353,12 @@ class CollectionControlService(_SessionService):
         return game_id
 
     @staticmethod
+    def _catalog_position(value: Any) -> str | None:
+        """Keep a Position group; anything else is no Position."""
+
+        return value if value in POSITION_GROUPS else None
+
+    @staticmethod
     def _upsert_athlete_catalog_row(
         session: Session, season: str, row: Mapping[str, Any], now: datetime
     ) -> str:
@@ -3345,6 +3383,11 @@ class CollectionControlService(_SessionService):
             "team_abbreviation": CollectionControlService._catalog_team_tricode(
                 row.get("team_abbreviation", row.get("tricode", row.get("team"))),
                 team_id=team_id,
+            ),
+            # Overwritten on every refresh, so a relabel follows NBA.com.  An
+            # override wins even over a collector built before it existed.
+            "position": POSITION_OVERRIDES.get(
+                player_id, CollectionControlService._catalog_position(row.get("position"))
             ),
             "published_at": now,
         }
@@ -5160,6 +5203,7 @@ PRUNE_KEEP_REASONS: Final[tuple[str, ...]] = (
     "candidate",
     "season_latest",
     "cutover_restore",
+    "as_of",
 )
 
 
@@ -7056,22 +7100,38 @@ class PublicationService(_SessionService):
         """Validate exact accepted canonical-game evidence for a ledger write."""
         if not provenance:
             raise ControlPlaneError("ledger_provenance_required")
-        rows = list(
-            session.scalars(
-                select(CollectionObservation).where(
-                    CollectionObservation.observation_id.in_(tuple(provenance)),
-                )
+        # Only the evidence's identity is judged, never its payload.
+        rows = session.execute(
+            select(
+                CollectionObservation.observation_id,
+                CollectionObservation.manifest_id,
+                CollectionObservation.provider,
+                CollectionObservation.observation_type,
+                CollectionObservation.scope,
+                CollectionObservation.season,
+                CollectionObservation.cutoff,
+                CollectionObservation.schema_version,
+                CollectionObservation.retrieved_at,
+                CollectionObservation.accepted_at,
+            ).where(
+                CollectionObservation.observation_id.in_(tuple(provenance)),
             )
-        )
+        ).all()
         if {row.observation_id for row in rows} != set(provenance):
             raise ControlPlaneError("ledger_provenance_not_accepted")
         # Each game's evidence is judged by the manifest that accepted it:
         # one of this season's ledger manifests, from this cutoff or an
         # earlier night, collected before that manifest's own deadline.
-        manifests = {
-            manifest_key: session.get(CollectionManifest, manifest_key) if manifest_key else None
-            for manifest_key in {row.manifest_id for row in rows}
+        manifest_keys = {row.manifest_id for row in rows}
+        found = {
+            manifest.manifest_id: manifest
+            for manifest in session.scalars(
+                select(CollectionManifest).where(
+                    CollectionManifest.manifest_id.in_(tuple(key for key in manifest_keys if key))
+                )
+            )
         }
+        manifests = {manifest_key: found.get(manifest_key) for manifest_key in manifest_keys}
         for manifest in manifests.values():
             if (
                 manifest is None
@@ -7105,7 +7165,16 @@ class PublicationService(_SessionService):
             (str(game_id), str(observation_id)) for observation_id, game_id in provenance.items()
         }
         game_ids = tuple(sorted({game_id for game_id, _ in expected_pairs}))
-        observation_ids = tuple(sorted({observation_id for _, observation_id in expected_pairs}))
+        # Each game with whether the ledger recorded its current source
+        # observation as evidence of that game.
+        evidenced = (
+            select(LedgerObservationEvidence.game_id)
+            .where(
+                LedgerObservationEvidence.game_id == CanonicalGameLedgerGame.game_id,
+                LedgerObservationEvidence.observation_id == CanonicalGameLedgerGame.source_observation_id,
+            )
+            .exists()
+        )
         games = session.execute(
             select(
                 CanonicalGameLedgerGame.game_id,
@@ -7113,34 +7182,28 @@ class PublicationService(_SessionService):
                 CanonicalGameLedgerGame.game_date,
                 CanonicalGameLedgerGame.home_team_id,
                 CanonicalGameLedgerGame.away_team_id,
+                evidenced.label("evidenced"),
             ).where(CanonicalGameLedgerGame.game_id.in_(game_ids))
         ).all()
         current_pairs = {(str(game.game_id), str(game.source_observation_id)) for game in games}
-        evidence_pairs = {
-            (str(game_id), str(observation_id))
-            for game_id, observation_id in session.execute(
-                select(
-                    LedgerObservationEvidence.game_id,
-                    LedgerObservationEvidence.observation_id,
-                ).where(
-                    LedgerObservationEvidence.game_id.in_(game_ids),
-                    LedgerObservationEvidence.observation_id.in_(observation_ids),
-                )
-            )
-        }
-        if current_pairs != expected_pairs or not expected_pairs <= evidence_pairs:
+        if current_pairs != expected_pairs or not all(game.evidenced for game in games):
             raise ControlPlaneError("ledger_provenance_not_accepted")
         # Every game, whichever night accepted it, must be the game the
-        # composing manifest's Event Catalog lists.
+        # composing manifest's Event Catalog lists.  The catalog is held with
+        # its payload, so the authority check verifies the very payload the
+        # games are read from, downloaded once.
+        catalog = (
+            session.get(CatalogPublication, composing.event_catalog_publication_id)
+            if composing.event_catalog_publication_id
+            else None
+        )
         try:
-            authority = resolve_publication_authority(
+            resolve_publication_authority(
                 session, season=season, cutoff=cutoff, manifest_id=composing.manifest_id
             )
         except PublicationGovernanceUnavailable as error:
             raise ControlPlaneError("event_catalog_required") from error
-        governed = _catalog_game_identities(
-            session.get(CatalogPublication, authority.event_catalog_publication_id).payload, cutoff
-        )
+        governed = _catalog_game_identities(catalog.payload, cutoff)
         for game in games:
             if governed.get(str(game.game_id)) != (game.game_date, game.home_team_id, game.away_team_id):
                 raise ControlPlaneError("ledger_provenance_catalog_mismatch")
@@ -7665,8 +7728,28 @@ class PublicationService(_SessionService):
     def _candidate_ledger_lineage(session: Session, candidate: PublicationVersion) -> dict[str, str]:
         """A ledger candidate's recorded ``{observation_id: game_id}``."""
 
+        provenance = PublicationService._candidate_ledger_lineages(session, [candidate.publication_id])[
+            candidate.publication_id
+        ]
+        if provenance is None:
+            raise ControlPlaneError("ledger_provenance_not_accepted")
+        return provenance
+
+    @staticmethod
+    def _candidate_ledger_lineages(
+        session: Session, publication_ids: Sequence[str]
+    ) -> dict[str, dict[str, str] | None]:
+        """Each ledger candidate's recorded ``{observation_id: game_id}``, by publication ID.
+
+        ``None`` for a candidate that recorded a game without its game ID.
+        """
+
+        lineages: dict[str, dict[str, str] | None] = {
+            publication_id: {} for publication_id in publication_ids
+        }
         lineage_rows = session.execute(
             select(
+                PublicationObservation.publication_id,
                 PublicationObservation.observation_id,
                 PublicationObservation.slice_key,
                 CollectionObservation.scope,
@@ -7676,7 +7759,7 @@ class PublicationService(_SessionService):
                 CollectionObservation.observation_id == PublicationObservation.observation_id,
             )
             .where(
-                PublicationObservation.publication_id == candidate.publication_id,
+                PublicationObservation.publication_id.in_(tuple(lineages)),
                 PublicationObservation.role.in_(
                     (
                         "completeness_evidence",
@@ -7685,14 +7768,17 @@ class PublicationService(_SessionService):
                 ),
             )
         ).all()
-        provenance = {}
-        for observation_id, slice_key, scope_json in lineage_rows:
+        for publication_id, observation_id, slice_key, scope_json in lineage_rows:
+            provenance = lineages[str(publication_id)]
+            if provenance is None:
+                continue
             scope = _safe_json_mapping(scope_json)
             game_id = str(slice_key or scope.get("game_id") or "")
             if not game_id:
-                raise ControlPlaneError("ledger_provenance_not_accepted")
+                lineages[str(publication_id)] = None
+                continue
             provenance[str(observation_id)] = game_id
-        return provenance
+        return lineages
 
     def _cutover_refusal(
         self,
@@ -7751,6 +7837,7 @@ class PublicationService(_SessionService):
         season: str,
         authority: tuple[str, str, str] | None = None,
         ledger_lineage: bool = True,
+        readiness_rule: bool = True,
     ) -> str | None:
         """Why a cutover to ``season`` would leave ``candidate`` behind, or ``None``.
 
@@ -7760,11 +7847,13 @@ class PublicationService(_SessionService):
         ``player_game_logs`` candidate's manifest and Event Catalog); without
         it the candidate is judged on its own, as an Unpublished Season read
         judges it (crf04/statsplus#330).  Without ``ledger_lineage`` the
-        verdict leaves out ``season_candidate_lineage_refusal``, the one check
+        verdict leaves out ``season_candidate_lineage_refusals``, the one check
         a later ledger correction can change, so it holds for the publication.
+        Without ``readiness_rule`` it leaves out the Readiness Rule: a reader
+        who selects the season judges its sample (crf04/statsplus#386).
         """
 
-        if not self._readiness_rule_holds(
+        if readiness_rule and not self._readiness_rule_holds(
             stream.stream_key,
             season=season,
             cutoff=_aware(candidate.cutoff),
@@ -7779,22 +7868,51 @@ class PublicationService(_SessionService):
             return error.reason
         return None
 
-    def season_candidate_lineage_refusal(
-        self, session: Session, stream: PublicationStream, candidate: PublicationVersion
-    ) -> str | None:
-        """Why a ledger candidate's games are no longer the ledger's accepted evidence, or ``None``.
+    def season_candidate_lineage_refusals(
+        self, session: Session, candidates: Sequence[tuple[PublicationStream, PublicationVersion]]
+    ) -> dict[str, str | None]:
+        """Why each ledger candidate's games are no longer the ledger's accepted evidence, by publication ID.
 
         The ledger replaces a corrected game's source observation in place, so
-        this can refuse a candidate whose other checks passed.
+        this can refuse a candidate whose other checks passed.  Candidates
+        that record the same games under the same manifest and cutoff share
+        one verdict, judged once.
         """
 
-        if stream.provider != "ledger":
-            return None
-        try:
-            self._assert_candidate_ledger_lineage(session, candidate)
-        except ControlPlaneError as error:
-            return error.reason
-        return None
+        refusals: dict[str, str | None] = {
+            candidate.publication_id: None for _stream, candidate in candidates
+        }
+        ledger = [candidate for stream, candidate in candidates if stream.provider == "ledger"]
+        lineages = self._candidate_ledger_lineages(
+            session, [candidate.publication_id for candidate in ledger]
+        )
+        verdicts: dict[tuple[str, datetime, str | None, frozenset[tuple[str, str]]], str | None] = {}
+        for candidate in ledger:
+            provenance = lineages[candidate.publication_id]
+            if provenance is None:
+                refusals[candidate.publication_id] = "ledger_provenance_not_accepted"
+                continue
+            lineage = (
+                candidate.season,
+                _aware(candidate.cutoff),
+                candidate.manifest_id,
+                frozenset(provenance.items()),
+            )
+            if lineage not in verdicts:
+                try:
+                    self._assert_ledger_provenance(
+                        session,
+                        season=candidate.season,
+                        cutoff=_aware(candidate.cutoff),
+                        provenance=provenance,
+                        manifest_id=candidate.manifest_id,
+                    )
+                except ControlPlaneError as error:
+                    verdicts[lineage] = error.reason
+                else:
+                    verdicts[lineage] = None
+            refusals[candidate.publication_id] = verdicts[lineage]
+        return refusals
 
     def _assert_cutover_candidate(
         self,
@@ -8333,9 +8451,15 @@ class PublicationService(_SessionService):
 
         A publication keeps its payload and projection only while it is the
         pointer's active or previous (rollback target) publication, a candidate
-        awaiting activation, or the latest eligible (activated, unrevoked,
-        unretired) version of its season.  The keep set is computed per stream
-        across all seasons even when ``season`` narrows what may be deleted.
+        awaiting activation, the latest eligible (activated, unrevoked,
+        unretired) version of its season, or a superseded version of a season
+        after the stream's active one that was never withdrawn
+        (``publication_withdrawn``), which an Unpublished Season read of a
+        past game may still serve: every such version cut in the last
+        ``AS_OF_DAILY_RETENTION_DAYS`` days, and before that the newest
+        version of its stream and season in each week (``_retention_week``).
+        The keep set is computed per stream across all seasons even when
+        ``season`` narrows what may be deleted.
         A history row whose publication is already gone never shadows an older
         row that still exists.  The stream row, then the pointer, are locked first
         in the order every writer uses, so a concurrent rollback finishes before
@@ -8391,16 +8515,48 @@ class PublicationService(_SessionService):
                 )
             ):
                 season_latest.setdefault(stream, set()).add(publication_id)
+            active_seasons = dict(
+                session.execute(
+                    select(PublicationVersion.stream_key, PublicationVersion.season).where(
+                        PublicationVersion.publication_id.in_(
+                            sorted(
+                                pointer.active_publication_id
+                                for pointer in pointers.values()
+                                if pointer.active_publication_id
+                            )
+                        )
+                    )
+                ).all()
+            )
             version_query = select(
                 PublicationVersion.publication_id,
                 PublicationVersion.stream_key,
                 PublicationVersion.status,
+                PublicationVersion.season,
+                PublicationVersion.cutoff,
+                PublicationVersion.version,
+                publication_withdrawn(PublicationVersion.publication_id),
             ).where(PublicationVersion.stream_key.in_(locked_streams))
             if season is not None:
                 version_query = version_query.where(PublicationVersion.season == season)
             restore_targets = _reversible_cutover_targets(session)
+            versions = session.execute(version_query).all()
+            horizon = _aware(self.clock()) - timedelta(days=AS_OF_DAILY_RETENTION_DAYS)
+            # The newest servable version of each held stream, season and week.
+            week_newest: dict[tuple[str, str, tuple[int, int]], tuple[tuple[datetime, int], str]] = {}
+            for publication_id, stream, status, version_season, cutoff, version, withdrawn in versions:
+                if (
+                    stream in active_seasons
+                    and version_season > active_seasons[stream]
+                    and (status == "candidate" or (status == "superseded" and not withdrawn))
+                ):
+                    week = (stream, version_season, _retention_week(cutoff))
+                    rank = (_aware(cutoff), int(version))
+                    if week not in week_newest or rank > week_newest[week][0]:
+                        week_newest[week] = (rank, publication_id)
+            weekly = {publication_id for _rank, publication_id in week_newest.values()}
             doomed: list[str] = []
-            for publication_id, stream, status in session.execute(version_query).all():
+            for publication_id, stream, status, version_season, cutoff, _version, withdrawn in versions:
                 pointer = pointers.get(stream)
                 if pointer is not None and pointer.active_publication_id == publication_id:
                     reason = "active"
@@ -8412,6 +8568,14 @@ class PublicationService(_SessionService):
                     reason = "season_latest"
                 elif publication_id in restore_targets:
                     reason = "cutover_restore"
+                elif (
+                    status == "superseded"
+                    and not withdrawn
+                    and stream in active_seasons
+                    and version_season > active_seasons[stream]
+                    and (_aware(cutoff) >= horizon or publication_id in weekly)
+                ):
+                    reason = "as_of"
                 else:
                     doomed.append(publication_id)
                     continue
@@ -10489,5 +10653,6 @@ __all__ = [
     "SurfaceDefinition",
     "composing_ledger_manifest",
     "decompress_gzip_limited",
+    "publication_withdrawn",
     "reconciliation_item_view",
 ]

@@ -580,10 +580,11 @@ def derive_player_assist_diet_rows(games: Iterable[CanonicalGame]) -> tuple[dict
 
     Mirrors legacy ``PlayerDietService._collect_assists`` so a parity check
     against ``player_diet_facts`` is meaningful: totals are summed by player
-    across the season (including across a mid-season team change), a player
-    with no assists is skipped, and a slice with no volume is omitted rather
-    than published as a synthetic zero -- the Diet reports an absent slice as
-    absent.  ``games_played`` counts distinct games with a retained
+    across the season (including across a mid-season team change) and a
+    player with no assists is skipped.  Every location count is proven, so a
+    slice with no volume is a known zero and is published with share 0: the
+    Diet stays a complete partition the Matchup can score
+    (crf04/statsplus#407).  ``games_played`` counts distinct games with a retained
     ``PlayerGameFact`` row -- an appearance, matching the provider's
     ``GamesPlayed`` -- including a zero-minute appearance; a player with
     assists necessarily has at least one such row.  Raises
@@ -619,8 +620,6 @@ def derive_player_assist_diet_rows(games: Iterable[CanonicalGame]) -> tuple[dict
         games_played = len(games_by_player[player_id])
         for slice_key in ASSIST_SLICES:
             volume = entry[slice_key]
-            if volume == 0:
-                continue
             output.append(
                 {
                     "player_id": player_id,

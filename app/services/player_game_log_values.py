@@ -12,8 +12,13 @@ def _two_pointer_attempts(record: Any) -> float:
     return float(record.field_goals_attempted - record.three_pointers_attempted)
 
 
+def _two_pointers_made(record: Any) -> float:
+    return float(record.field_goals_made - record.three_pointers_made)
+
+
 _DERIVED_COMPONENT_VALUES = {
     "two_pointers_attempted": _two_pointer_attempts,
+    "two_pointers_made": _two_pointers_made,
 }
 
 

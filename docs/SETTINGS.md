@@ -15,7 +15,7 @@ The model is intentionally grouped by responsibility:
 | `CacheSettings` | `enabled`, Redis URL/host/port/database/password/TLS, and the saved-Target Backtest result cache flag/TTL, precompute budget, the slate-edges cache flag/TTL, the on/off (WOWY) cache flag/TTL/upstream spacing, the composed-Matchup cache flag/TTL, and the snapshot-reuse age | `ENABLE_CACHE`, `REDIS_URL`, `REDISHOST`/`REDIS_HOST`, `REDISPORT`/`REDIS_PORT`, `REDISDB`/`REDIS_DB`, `REDISPASSWORD`/`REDIS_PASSWORD`, `REDISTLS`/`REDIS_TLS`, `TARGET_BACKTEST_CACHE_ENABLED` (default `true`), `TARGET_BACKTEST_CACHE_TTL_SECONDS` (default `86400`), `TARGET_BACKTEST_PRECOMPUTE_BUDGET_SECONDS` (default `180`), `SLATE_EDGES_CACHE_ENABLED` (default `true`), `SLATE_EDGES_CACHE_TTL_SECONDS` (default `300`), `MATCHUP_CACHE_ENABLED` (default `true`), `MATCHUP_CACHE_TTL_SECONDS` (default `300`), `SNAPSHOT_REUSE_MAX_AGE_SECONDS` (default `60`), `ON_OFF_CACHE_ENABLED` (default `true`), `ON_OFF_CACHE_TTL_SECONDS` (default `86400`), `ON_OFF_MIN_INTERVAL_SECONDS` (default `2`) |
 | `FeatureSettings` | DFS Board, injury-report, and database-first projection-reader exposure gates plus its deprecated recorder-default identity | `DFS_BOARD_ENABLED`, `INJURY_REPORT_ENABLED`, `PROJECTION_ARCHIVE_READ_ENABLED` (all default `false`), `PROJECTION_ARCHIVE_READ_PROVIDER` (default `dabble`) |
 | `ProviderSettings` | NBA Stats/PBP settings, internal DFS provider settings, projection archive evidence bounds, and injury-report transport settings | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE`, `DFS_ENABLED_PROVIDERS`, `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`, `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_DABBLE_DETAIL_CONCURRENCY`, `DFS_CACHE_FRESH_SECONDS`, `DFS_CACHE_STALE_IF_ERROR_SECONDS`, `DFS_COMPARISON_MAX_MARKETS`, `PROJECTION_ARCHIVE_MAX_MARKETS`, provider-specific `DFS_<PROVIDER>_CACHE_*` overrides, `INJURY_REPORT_CONNECT_TIMEOUT_SECONDS` (`3`), `INJURY_REPORT_READ_TIMEOUT_SECONDS` (`8`), and `INJURY_REPORT_DEADLINE_SECONDS` (`12`), `INJURY_REPORT_FAILURE_COOLDOWN_SECONDS` (`300`), and `INJURY_REPORT_PROBE_DELAY_SECONDS` (`0.1`) |
-| `ProjectionCollectionSettings` | Board-wide scheduler cadence, governed pregame horizon, lease duration, and bounded provider backoff | `PROJECTION_COLLECTION_SLOW_INTERVAL_MINUTES` (`8`; with the five-minute service beat it must stay under the 15-minute live window), `PROJECTION_COLLECTION_FAST_INTERVAL_MINUTES` (`5`), `PROJECTION_COLLECTION_PREGAME_HORIZON_HOURS` (`24`), `PROJECTION_COLLECTION_FAST_WINDOW_HOURS` (`2`), `PROJECTION_COLLECTION_LEASE_SECONDS` (`60`), `PROJECTION_COLLECTION_BACKOFF_BASE_SECONDS` (`60`), `PROJECTION_COLLECTION_BACKOFF_MAX_SECONDS` (`1800`) |
+| `ProjectionCollectionSettings` | Board-wide scheduler cadence, governed pregame horizon, the collector's board deadline, lease duration, and bounded provider backoff | `PROJECTION_COLLECTION_SLOW_INTERVAL_MINUTES` (`8`; with the five-minute service beat it must stay under the 15-minute live window), `PROJECTION_COLLECTION_FAST_INTERVAL_MINUTES` (`5`), `PROJECTION_COLLECTION_PREGAME_HORIZON_HOURS` (`24`), `PROJECTION_COLLECTION_FAST_WINDOW_HOURS` (`2`), `PROJECTION_COLLECTION_BOARD_DEADLINE_SECONDS` (`45`), `PROJECTION_COLLECTION_LEASE_SECONDS` (`180`; at least the board deadline plus 90, or settings refuse to load), `PROJECTION_COLLECTION_BACKOFF_BASE_SECONDS` (`60`), `PROJECTION_COLLECTION_BACKOFF_MAX_SECONDS` (`1800`) |
 | `OddsApiSettings` | Player-prop collection from The Odds API (#377, crf04/statsplus#215): off in code by default, key from the environment only (never repr'd or logged), plan size, reserve, and the budget guard's assumed posting lead | `ODDS_API_ENABLED` (`false`; set `true` on the odds cron service, and for `ODDS_API_REGIONS=us`, the production feed, also on the web service, which then serves stored `book_lines`; the `us_dfs` feed needs it on the cron service only), `ODDS_API_KEY` (secret; odds cron service only), `ODDS_API_BASE_URL` (`https://api.the-odds-api.com`), `ODDS_API_RESET_DAY` (`1`; day of month the plan's credits reset, no API header states it), `ODDS_API_PLAN_CREDITS` (`20000`), `ODDS_API_RESERVE_CREDITS` (`1000`), `ODDS_API_ASSUMED_LEAD_HOURS` (`10`), `ODDS_API_REGIONS` (code default `us_dfs`: PrizePicks lines into the DFS projection archive as provider `prizepicks`, crf04/statsplus#215; `us`: the sportsbook `book_lines` feed, which production runs since 2026-10-19 because `us_dfs` returns a placeholder -137 on every DFS leg; exactly one, never both) |
 | `FeedbackSettings` | In-app feedback email (`POST /api/user/feedback`, crf04/statsplus#258): Resend key (never repr'd or logged), recipient, sender, and delivery mode | `RESEND_API_KEY` (secret; web service; without it the endpoint answers 503 `feedback_unavailable`), `FEEDBACK_TO` (`support@courtai.app`), `FEEDBACK_FROM` (`CourtAI Feedback <feedback@courtai.app>`), `FEEDBACK_DELIVERY` (`resend`; `log` writes the composed email to the application log instead of sending, for local and QA runs; anything else fails startup) |
 | `LLMSettings` | API key, model, temperature, token/time limits, retries, fallback, confidence threshold | `OPENAI_API_KEY`, `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT`, `LLM_MAX_RETRIES`, `ENABLE_LLM_FALLBACK`, `LLM_CONFIDENCE_THRESHOLD`, `LLM_SHADOW_SAMPLE_RATE` |
@@ -28,6 +28,12 @@ The model is intentionally grouped by responsibility:
 General process settings (`environment`, `port`, `debug`, and `log_level`) are
 also fields on `RuntimeSettings` and map to `FLASK_ENV`, `PORT`, `FLASK_DEBUG`,
 and `LOG_LEVEL`.
+
+Error reporting is the one exception: `app/utils/sentry_setup.py` reads
+`SENTRY_DSN`, `SENTRY_TRACES_SAMPLE_RATE` (default `0.05`) and
+`SENTRY_ENVIRONMENT` straight from the environment, because Gunicorn's
+`post_fork` hook starts the SDK in each worker outside the settings model. The
+README's environment table describes them.
 
 `NBA_STATS_MAX_CONCURRENCY` is a **per-worker-process** bound: all
 `NBAStatsAdapter` instances in one worker share one
@@ -191,12 +197,16 @@ deployment opts in explicitly. `DFS_BOARD_ENABLED=true` with an empty registry
 is refused at startup with `ConfigurationError` in every environment, rather
 than exposing a route that could never call a provider.
 
-The board deadline defaults to 15 seconds. Each DFS GET defaults to a 3-second
+A request-time board read has a 15-second deadline by default
+(`DFS_BOARD_DEADLINE_SECONDS`, which cannot exceed 15). The projection
+collector reads through its own board, with
+`PROJECTION_COLLECTION_BOARD_DEADLINE_SECONDS` (45 seconds) and every enabled
+provider in flight at once. Each DFS GET defaults to a 3-second
 connect cap and an 8-second read cap, both reduced to the remaining absolute
 budget. A safe GET receives at most one retry for a timeout or HTTP 429, 500,
 502, 503, or 504; access-denied, ordinary 4xx, and malformed responses
 are not retried. Dabble fixture-detail concurrency defaults to 3. These
-settings apply only to the internal collector and do not change NBA Stats or
+settings apply only to DFS providers and do not change NBA Stats or
 PBP Stats timeout/health signals.
 
 The injected DFS snapshot cache stores only complete, normalized

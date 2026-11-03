@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 from collections import OrderedDict
 from copy import copy
@@ -8,7 +9,20 @@ from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.services import nl_shadow
 from app.services.llm_service import LLMBudgetExhausted, LLMParsedQuery, LLMService
 from app.services.nl_query.parser import BaseQueryParser, PlayerReference
+from app.services.nl_query.teams import resolve_team
 from app.services.research_season import research_service
+
+# A season written the NBA's way, e.g. "2024-25", but not the start of a date.
+NAMED_SEASON = re.compile(r"\b(\d{4})-(\d{2})\b(?!-\d)")
+
+
+def named_season(query_text: str) -> str | None:
+    """The season `query_text` names, or None when it names none."""
+    for start, end in NAMED_SEASON.findall(query_text or ""):
+        if (int(start) + 1) % 100 == int(end):
+            return f"{start}-{end}"
+    return None
+
 
 logger = logging.getLogger(__name__)
 
@@ -231,12 +245,15 @@ class NLService:
             "players_off": players_off,
             "player_choices": player_choices,
             "teams_against": teams_against,
+            "opponent_tricode": resolve_team(llm_query.opponent_team)
+            or getattr(nlp_components, "opponent_tricode", None),
             "minutes_filter": minutes_filter,
             "date_filter": llm_query.date_range,
             "date_to": None,
             "self_filters": self_filters,
             "rank_filter": rank_filter,
-            "season": llm_query.season or self.settings.nba.current_season,
+            # A season the query does not name is left to the reader's own default.
+            "season": llm_query.season,
             "confidence": llm_query.confidence,
             "intent": llm_query.intent or "game_logs",
             "time_period": llm_query.time_period,
@@ -292,12 +309,14 @@ class NLService:
             "players_off": parsed_components.players_off,
             "player_choices": parsed_components.player_choices,
             "teams_against": teams_against,
+            "opponent_tricode": parsed_components.opponent_tricode,
             "minutes_filter": parsed_components.minutes_filter,
             "date_filter": parsed_components.date_range,
             "date_to": parsed_components.date_to,
             "self_filters": parsed_components.self_filters,
             "rank_filter": rank_filter,
-            "season": getattr(parsed_components, "season", self.settings.nba.current_season),
+            # A season the query does not name is left to the reader's own default.
+            "season": named_season(query_text),
             "confidence": parsed_components.confidence,
             "intent": parsed_components.intent,
             "time_period": parsed_components.time_period,

@@ -2,23 +2,33 @@
 
 2025-26 is the Published Season; 2026-27 candidates are held.  Only a read
 scoped to an explicit selection may serve them, and only a candidate that
-passes the cutover's own per-publication checks.  Families that are not ready
-keep their 2025-26 Publication labelled ``prior_season``; game logs that cannot
-serve make the season unavailable.  Every test reads through the real reader,
+passes the cutover's own per-publication checks; a family's Readiness Rule is
+not one of them (statsplus#386).  Families with no candidate keep their 2025-26
+Publication labelled ``prior_season``; game logs that cannot serve make the
+season unavailable.  Every test reads through the real reader,
 repositories and services of ``tests/support/selected_season``.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+from datetime import timedelta
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 
+from app.models.collection_control import (
+    CatalogPublication,
+    CollectionManifest,
+    CollectionObservation,
+    PublicationVersion,
+)
 from app.models.game_logs import GameLogQuery
 from app.services.database_first_activation import ReadSeason, SeasonMode, SeasonUnavailable
 from app.services.research_season import season_scoped
 from app.services.serving_season import trailing
+from tests.services.test_serving_season_matchup import _log_payload
 from tests.support.season_cutover import (
     L15_STREAM,
     NEW,
@@ -32,6 +42,7 @@ from tests.support.season_cutover import (
     THIN_GAMES,
     THIN_PROVENANCE,
     accept_ledger,
+    provenance,
     team_defense_waits_for_ten_games,
 )
 from tests.support.selected_season import PLAY_TYPE_DEFENSE, PLAYER_NAME, PLAYER_SYNERGY, SelectedWorld
@@ -101,19 +112,29 @@ def test_an_opening_week_selection_with_no_team_defense_composition_keeps_2025_2
     }
 
 
-def test_a_family_whose_rule_does_not_hold_keeps_2025_26_until_it_does(world, monkeypatch):
+def test_a_selection_serves_a_family_before_its_readiness_rule_holds(world, monkeypatch):
+    # A reader who chose 2026-27 judges its one game a team themselves
+    # (crf04/statsplus#386); the rule still decides what the default serves.
     team_defense_waits_for_ten_games(monkeypatch)
-    world.hold_opening_week()
+    _logs, defense = world.hold_opening_week()
 
-    reads = _reads(world.reader.for_season(NEW).snapshot(KEYS, season=ReadSeason(OLD)))
-    families = world.games.list_seasons()["choices"][0]["families"]
+    selected = world.reader.for_season(NEW).snapshot(KEYS, season=ReadSeason(OLD))
+    choice = world.games.list_seasons()["choices"][0]
 
-    assert reads[SEASON_STREAM] == ("prior_season", OLD, None, _live(world, SEASON_STREAM))
-    assert families["team_defense"] == {
-        "served_season": OLD,
-        "state": "trailing",
-        "reason": "readiness_not_met",
-    }
+    assert _reads(selected)[SEASON_STREAM] == ("candidate", NEW, None, defense.publication_id)
+    assert trailing(selected.reads.values()) == [
+        {"family": "last_15", "serving_season": OLD, "rule": "its first window of the season is composed"},
+    ]
+    assert (choice["families"]["team_defense"], choice["team_games"]) == (
+        {"served_season": NEW, "state": "serving"},
+        {"min": 1, "max": 1},
+    )
+    assert _reads(world.reader.snapshot(KEYS, season=ReadSeason(OLD)))[SEASON_STREAM] == (
+        "active",
+        OLD,
+        None,
+        _live(world, SEASON_STREAM),
+    )
 
 
 # --- play-type defense follows team defense (crf04/statsplus-backend#610) ---
@@ -171,24 +192,17 @@ def test_an_opening_week_selection_with_no_play_type_defense_composition_trails_
     }
 
 
-def test_player_synergy_still_waits_for_ten_games_a_team(world):
+def test_a_selection_serves_player_synergy_before_ten_games_a_team(world):
     world.publish_play_types()
     world.hold_opening_week()
-    world.compose_new_play_types(PLAYER_SYNERGY, THIN_GAMES, cutoff=THIN_CUTOFF, provenance=THIN_PROVENANCE)
-
-    reads, _trailing, families = _play_type_selection(world)
-
-    assert reads[PLAYER_SYNERGY] == ("prior_season", OLD, None, _live(world, PLAYER_SYNERGY))
-    assert families["synergy"] == {"served_season": OLD, "state": "trailing", "reason": "readiness_not_met"}
-
-    world.hold_ten_games()
-    ready = world.compose_new_play_types(
-        PLAYER_SYNERGY, NEW_GAMES, cutoff=NEW_CUTOFF, provenance=NEW_PROVENANCE
+    synergy = world.compose_new_play_types(
+        PLAYER_SYNERGY, THIN_GAMES, cutoff=THIN_CUTOFF, provenance=THIN_PROVENANCE
     )
 
-    reads, _trailing, families = _play_type_selection(world)
+    reads, trailing_families, families = _play_type_selection(world)
 
-    assert reads[PLAYER_SYNERGY] == ("candidate", NEW, None, ready.publication_id)
+    assert reads[PLAYER_SYNERGY] == ("candidate", NEW, None, synergy.publication_id)
+    assert [entry["family"] for entry in trailing_families] == ["team_defense", "last_15"]
     assert families["synergy"] == {"served_season": NEW, "state": "serving"}
 
 
@@ -290,6 +304,195 @@ def test_a_ledger_correction_withdraws_a_candidate_already_served(world):
 
     with pytest.raises(SeasonUnavailable):
         _logs(world, NEW, selected=True)
+
+
+def test_a_candidate_on_games_the_ledger_since_corrected_trails_beside_one_on_its_current_games(world):
+    world.hold_opening_week(defense=False)
+    accept_ledger(world.engine, NEW_GAMES[len(THIN_GAMES) :], "pbp")
+    world.compose_new_defense(
+        NEW_GAMES,
+        cutoff=NEW_CUTOFF,
+        provenance={**THIN_PROVENANCE, **provenance(NEW_GAMES[len(THIN_GAMES) :])},
+    )
+    # The ledger then accepts newer observations of the opening week's games,
+    # and the game logs are composed from them that same night.
+    accept_ledger(world.engine, THIN_GAMES, "pbp")
+    logs = world.publications.recompose_ledger(
+        PLAYER_LOGS,
+        season=NEW,
+        cutoff=NEW_CUTOFF,
+        payload=_log_payload(NEW, NEW_GAMES),
+        provenance=NEW_PROVENANCE,
+        reason="2026-27 ledger composition",
+    )
+
+    reads = _reads(world.reader.for_season(NEW).snapshot(KEYS, season=ReadSeason(OLD)))
+
+    # One night, one manifest: only the games each candidate rests on differ.
+    assert reads[PLAYER_LOGS] == ("candidate", NEW, None, logs.publication_id)
+    assert reads[SEASON_STREAM] == ("prior_season", OLD, None, _live(world, SEASON_STREAM))
+
+
+@pytest.mark.parametrize(
+    "unaccept",
+    [
+        # The ledger no longer records the observation as its game's evidence.
+        "DELETE FROM canonical_game_ledger_observation_evidence WHERE game_id = :game AND observation_id = :observation",
+        # No manifest accepted the observation.
+        "UPDATE collection_observations SET manifest_id = NULL WHERE observation_id = :observation",
+    ],
+    ids=["evidence_dropped", "no_manifest"],
+)
+def test_game_logs_on_a_game_the_ledger_never_accepted_make_the_season_unavailable(world, unaccept):
+    world.hold_ten_games()
+    game_id = NEW_GAMES[0][0]
+    with world.engine.begin() as connection:
+        connection.execute(text(unaccept), {"game": game_id, "observation": f"pbp:{game_id}"})
+
+    with pytest.raises(SeasonUnavailable):
+        world.reader.for_season(NEW).snapshot(KEYS, season=ReadSeason(OLD))
+
+
+#: The observation the ledger accepted as the first game's evidence.
+FIRST_GAME = NEW_GAMES[0][0]
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        pytest.param({"provider": "nba_stats"}, id="provider"),
+        pytest.param({"observation_type": "player_game_logs"}, id="observation_type"),
+        pytest.param({"season": OLD}, id="season"),
+        pytest.param({"cutoff": NEW_CUTOFF - timedelta(days=1)}, id="cutoff"),
+        pytest.param({"schema_version": 2}, id="schema_version"),
+        pytest.param(
+            {"scope": json.dumps({"game_id": FIRST_GAME, "surface": "synergy_play_types"})},
+            id="scope_surface",
+        ),
+        # The candidate records its game apart from the scope, which now names another.
+        pytest.param(
+            {"scope": json.dumps({"game_id": NEW_GAMES[1][0], "surface": "canonical_game_ledger"})},
+            id="scope_game_id",
+        ),
+    ],
+)
+def test_evidence_that_no_longer_matches_its_manifest_withdraws_a_candidate_already_served(world, values):
+    logs, _defense = world.hold_ten_games()
+    selected = world.reader.for_season(NEW)
+    assert _reads(selected.snapshot(KEYS, season=ReadSeason(OLD)))[PLAYER_LOGS] == (
+        "candidate",
+        NEW,
+        None,
+        logs.publication_id,
+    )
+    with world.engine.begin() as connection:
+        connection.execute(
+            CollectionObservation.__table__.update()
+            .where(CollectionObservation.observation_id == f"pbp:{FIRST_GAME}")
+            .values(**values)
+        )
+
+    # The candidate's once-per-publication checks already passed; its lineage
+    # is judged again on this read.
+    with pytest.raises(SeasonUnavailable):
+        selected.snapshot(KEYS, season=ReadSeason(OLD))
+
+
+def test_evidence_that_loses_its_recorded_game_withdraws_a_candidate_already_served(world):
+    logs, _defense = world.hold_ten_games()
+    selected = world.reader.for_season(NEW)
+    assert _reads(selected.snapshot(KEYS, season=ReadSeason(OLD)))[PLAYER_LOGS][3] == logs.publication_id
+    with world.engine.begin() as connection:
+        connection.execute(
+            CollectionObservation.__table__.update()
+            .where(CollectionObservation.observation_id == f"pbp:{FIRST_GAME}")
+            .values(scope=json.dumps({"surface": "canonical_game_ledger"}))
+        )
+        connection.execute(
+            text(
+                "UPDATE publication_observations SET slice_key = NULL"
+                " WHERE publication_id = :publication AND observation_id = :observation"
+            ),
+            {"publication": logs.publication_id, "observation": f"pbp:{FIRST_GAME}"},
+        )
+
+    with pytest.raises(SeasonUnavailable):
+        selected.snapshot(KEYS, season=ReadSeason(OLD))
+
+
+def test_candidates_on_the_same_games_under_different_manifests_are_judged_apart(world):
+    logs, defense = world.hold_ten_games()
+    # A second manifest of the same night whose Event Catalog, checksummed as
+    # a real one is, swaps the first game's home and away teams.  The defense
+    # candidate is bound to it.
+    with world.engine.begin() as connection:
+        manifest = dict(
+            connection.execute(
+                select(CollectionManifest.__table__).where(CollectionManifest.manifest_id == logs.manifest_id)
+            )
+            .mappings()
+            .one()
+        )
+        catalog = dict(
+            connection.execute(
+                select(CatalogPublication.__table__).where(
+                    CatalogPublication.publication_id == manifest["event_catalog_publication_id"]
+                )
+            )
+            .mappings()
+            .one()
+        )
+        document = json.loads(catalog["payload"])
+        event = next(event for event in document["events"] if event["nba_game_id"] == FIRST_GAME)
+        event["home_team_id"], event["away_team_id"] = event["away_team_id"], event["home_team_id"]
+        catalog["publication_id"] = "catalog-swapped"
+        catalog["payload"] = json.dumps(document, sort_keys=True, separators=(",", ":"))
+        catalog["checksum"] = hashlib.sha256(catalog["payload"].encode()).hexdigest()
+        connection.execute(CatalogPublication.__table__.insert().values(**catalog))
+        manifest.update(
+            manifest_id="manifest-swapped",
+            checksum="manifest-swapped",
+            event_catalog_publication_id=catalog["publication_id"],
+            event_catalog_checksum=catalog["checksum"],
+        )
+        connection.execute(CollectionManifest.__table__.insert().values(**manifest))
+        connection.execute(
+            PublicationVersion.__table__.update()
+            .where(PublicationVersion.publication_id == defense.publication_id)
+            .values(
+                manifest_id=manifest["manifest_id"],
+                event_catalog_publication_id=catalog["publication_id"],
+                event_catalog_checksum=catalog["checksum"],
+            )
+        )
+
+    reads = _reads(world.reader.for_season(NEW).snapshot(KEYS, season=ReadSeason(OLD)))
+
+    # Same season, cutoff and games: only the manifest tells the lineages apart.
+    assert reads[PLAYER_LOGS] == ("candidate", NEW, None, logs.publication_id)
+    assert reads[SEASON_STREAM] == ("prior_season", OLD, None, _live(world, SEASON_STREAM))
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        pytest.param(lambda payload: payload + " ", id="payload_changed"),
+        pytest.param(lambda payload: "{not json", id="payload_malformed"),
+    ],
+)
+def test_an_event_catalog_changed_under_its_checksum_withdraws_a_candidate_already_served(world, edit):
+    logs, _defense = world.hold_ten_games()
+    selected = world.reader.for_season(NEW)
+    assert _reads(selected.snapshot(KEYS, season=ReadSeason(OLD)))[PLAYER_LOGS][3] == logs.publication_id
+    with world.engine.begin() as connection:
+        catalog = CatalogPublication.__table__
+        where = catalog.c.publication_id == logs.event_catalog_publication_id
+        payload = connection.scalar(select(catalog.c.payload).where(where))
+        connection.execute(catalog.update().where(where).values(payload=edit(payload)))
+
+    # The checksum is verified before the payload is parsed.
+    with pytest.raises(SeasonUnavailable):
+        selected.snapshot(KEYS, season=ReadSeason(OLD))
 
 
 def test_an_unscoped_reader_never_serves_a_candidate(world):
@@ -397,14 +600,29 @@ def served(world, dependencies):
     return world
 
 
-def _get_logs(client, season):
-    return client.get(f"/api/games/game_logs?player_name=Player+0&season_filter={season}")
+def _get_logs(client, season, headers=None):
+    return client.get(f"/api/games/game_logs?player_name=Player+0&season_filter={season}", headers=headers)
 
 
-def test_the_route_serves_a_selected_2026_27_with_its_context(served, client):
+def test_the_route_serves_a_selected_2026_27_with_its_context(served, client, authenticate):
     served.hold_opening_week()
 
-    response = _get_logs(client, NEW)
+    response = _get_logs(client, NEW, authenticate())
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert [row["PTS"] for row in body["game_logs"]] == [12]
+    assert body["season_context"] == {"selected_season": NEW, "published_season": OLD}
+
+
+@pytest.mark.parametrize("waitlisted", [False, True], ids=["anonymous", "waitlisted"])
+def test_a_caller_without_an_admitted_account_reads_the_offered_unpublished_season(
+    served, client, authenticate, make_db_user, waitlisted
+):
+    served.hold_opening_week()
+    headers = authenticate(db_user=make_db_user(access_status="waitlisted")) if waitlisted else None
+
+    response = _get_logs(client, NEW, headers)
 
     assert response.status_code == 200
     body = response.get_json()

@@ -27,6 +27,9 @@ class AthleteCatalog(Base):
     team_id = Column(Integer, nullable=True)
     team_name = Column(String(255), nullable=True)
     team_abbreviation = Column(String(16), nullable=True)
+    # Guard, Wing or Big, mapped from NBA.com's listed position for the season
+    # and overwritten by each refresh; NULL when the listing maps to no group.
+    position = Column(String(8), nullable=True)
     published_at = Column(DateTime(timezone=True), nullable=False)
 
 

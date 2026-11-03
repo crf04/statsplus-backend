@@ -75,3 +75,18 @@ def test_injury_refresh_cron_covers_the_eastern_window_in_both_halves_of_the_yea
         for tick in ticks:
             utc = tick.astimezone(UTC)
             assert (utc.hour, utc.minute) in runs
+
+
+def test_tracking_refresh_cron_runs_the_collector_for_both_tracked_seasons_twice_a_morning():
+    deploy = json.loads(Path("railway.tracking.json").read_text(encoding="utf-8"))["deploy"]
+
+    # Tracking publishes hours after the box score; two morning runs (06:30 and
+    # 10:30 Eastern) retry a game whose tracking was not out at the first.
+    assert deploy["cronSchedule"] == "30 10,14 * * *"
+    assert deploy["startCommand"] == (
+        "python scripts/tracking_refresh.py --season 2025-26 --season 2026-27 "
+        '--database-url "$DATABASE_URL" --max-games 80'
+    )
+    assert deploy["preDeployCommand"] == "python scripts/migrate.py"
+    assert deploy["restartPolicyType"] == "NEVER"
+    assert "healthcheckPath" not in deploy

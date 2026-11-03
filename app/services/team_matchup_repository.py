@@ -8,10 +8,12 @@ from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime
+from functools import lru_cache
 from math import isfinite
+from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, func, insert, select
+from sqlalchemy import and_, case, delete, func, insert, or_, select, tuple_
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
@@ -38,6 +40,11 @@ from app.services.team_matchup_publications import (
 from app.utils.db import is_demo_database_url
 
 EASTERN = ZoneInfo("America/New_York")
+#: The values a summary proves rankable: a raw value within +-1e100 over a
+#: denominator in [1e-100, 1e308] is at most ~3e203 allowed per 48, so the
+#: league mean, deviation and shot-type sums over 30 of them stay finite.
+_RANKABLE_RAW = 1e100
+_RANKABLE_DENOMINATOR = (1e-100, 1e308)
 
 _LEDGER_SURFACE_BY_STREAM = {
     "traditional_opponent_season": (0, "traditional"),
@@ -356,6 +363,37 @@ class StoredTeamMatchupFact(TeamMatchupFact):
 @dataclass(frozen=True, slots=True)
 class StoredTeamMatchupObservation(TeamMatchupObservation):
     retrieved_at: datetime = datetime.min
+
+
+class TeamMetricFact(NamedTuple):
+    """The columns of one stored fact that a Defense Sheet window ranks."""
+
+    team_id: int
+    base: str
+    slice_key: str
+    stat_key: str
+    raw_value: float | None
+    denominator_value: float | None
+    denominator_unit: str | None
+    retrieved_at: datetime
+
+
+class TeamMetricSummary(NamedTuple):
+    """One stored stat's league column, summarized for a window that does not rank it."""
+
+    base: str
+    slice_key: str
+    stat_key: str
+    as_of_date: date
+    teams: int
+    distinct_teams: int
+    #: Distinct teams across every stat of the base at this scope; thirty
+    #: teams per stat prove the same thirty only when this is thirty too.
+    base_teams: int
+    #: Values the database could not prove rankable; the window reads the
+    #: base's rows and checks them itself when any are.
+    unproven: int
+    retrieved_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -1200,27 +1238,108 @@ class TeamMatchupRepository:
                 )
                 for row in fact_rows
             ),
-            observations=tuple(
-                StoredTeamMatchupObservation(
-                    surface=row["surface"],
-                    status=row["status"],
-                    unavailable_reason=row["unavailable_reason"],
-                    retrieved_at=assume_utc(row["retrieved_at"]),
-                    game_ids=_parse_game_ids(row["game_ids"]),
-                    ledger_checksum=row["ledger_checksum"],
-                    source_observation_ids=_parse_source_observation_ids(row["source_observation_ids"]),
-                    game_set_checksum=row["game_set_checksum"],
-                    cutoff=_optional_aware(row["cutoff"]),
-                    recomposition_reason=row["recomposition_reason"],
-                    manifest_id=row["manifest_id"],
-                    event_catalog_publication_id=row["event_catalog_publication_id"],
-                    event_catalog_checksum=row["event_catalog_checksum"],
-                    provider_window_identity=row["provider_window_identity"],
-                    publication=_publication_from_row(row),
-                )
-                for row in observation_rows
-            ),
+            observations=tuple(_observation_from_row(row) for row in observation_rows),
         )
+
+    def get_latest_metric_summaries(
+        self,
+        season: str,
+        *,
+        window_games: int | None = None,
+        as_of: date,
+        connection: Connection | None = None,
+    ) -> tuple[TeamMetricSummary, ...]:
+        """Summarize every stored stat at its base's newest scope through ``as_of``.
+
+        One statement, one row per stat: what a window needs to validate a
+        base it does not rank, without reading the base's rows.
+        """
+
+        requested = TeamMatchupSnapshotScope(season, as_of, window_games)
+        table = TeamMatchupFactRow.__table__
+        conditions = (
+            table.c.season == season,
+            table.c.window_kind == requested.window_kind,
+            table.c.window_games == requested.stored_window_games,
+        )
+        newest_by_base = (
+            select(table.c.base, func.max(table.c.as_of_date))
+            .where(*conditions, table.c.as_of_date <= as_of)
+            .group_by(table.c.base)
+        )
+        # Proves a value one the window would rank without refusing or
+        # failing on it; NULL, NaN, the infinities and any value whose per-48
+        # could overflow all fail it, so a row it cannot prove is left to the
+        # window's own check and ranking.
+        proven = and_(
+            table.c.raw_value.between(-_RANKABLE_RAW, _RANKABLE_RAW),
+            table.c.denominator_value.between(*_RANKABLE_DENOMINATOR),
+            table.c.denominator_unit.in_(("minutes", "seconds")),
+        )
+        newest = tuple_(table.c.base, table.c.as_of_date).in_(newest_by_base)
+        base_teams = (
+            select(table.c.base, func.count(table.c.team_id.distinct()).label("teams"))
+            .where(*conditions, newest)
+            .group_by(table.c.base)
+            .subquery()
+        )
+        statement = (
+            select(
+                table.c.base,
+                table.c.slice_key,
+                table.c.stat_key,
+                table.c.as_of_date,
+                func.count(),
+                func.count(table.c.team_id.distinct()),
+                base_teams.c.teams,
+                func.sum(case((proven, 0), else_=1)),
+                func.max(table.c.retrieved_at),
+            )
+            .join(base_teams, base_teams.c.base == table.c.base)
+            .where(*conditions, newest)
+            .group_by(
+                table.c.base, table.c.as_of_date, table.c.slice_key, table.c.stat_key, base_teams.c.teams
+            )
+            .order_by(table.c.base, table.c.slice_key, table.c.stat_key)
+        )
+        with read_connection(self.engine, connection) as connection:
+            rows = connection.execute(statement).all()
+        return tuple(TeamMetricSummary(*row[:8], retrieved_at=assume_utc(row[8])) for row in rows)
+
+    def get_metric_facts(
+        self,
+        fact_scopes: Mapping[str, TeamMatchupSnapshotScope],
+        *,
+        connection: Connection | None = None,
+    ) -> tuple[TeamMetricFact, ...]:
+        """Read the values a window ranks, each base from its own scope, in one statement.
+
+        A window ranks each stat across the league from these columns alone, so
+        the lineage columns (``game_ids`` JSON is most of a row's bytes) stay
+        unread.
+        """
+
+        if not fact_scopes:
+            return ()
+        bases_by_scope: dict[TeamMatchupSnapshotScope, list[str]] = defaultdict(list)
+        for base, scope in fact_scopes.items():
+            bases_by_scope[scope].append(base)
+        table = TeamMatchupFactRow.__table__
+        statement = (
+            select(*(table.c[name] for name in TeamMetricFact._fields))
+            .where(
+                or_(
+                    *(
+                        and_(*self._scope(table, scope), table.c.base.in_(sorted(bases)))
+                        for scope, bases in bases_by_scope.items()
+                    )
+                )
+            )
+            .order_by(table.c.team_id, table.c.base, table.c.slice_key, table.c.stat_key)
+        )
+        with read_connection(self.engine, connection) as connection:
+            rows = connection.execute(statement).all()
+        return tuple(TeamMetricFact(*row[:-1], retrieved_at=assume_utc(row.retrieved_at)) for row in rows)
 
     def get_latest_scope(
         self,
@@ -1246,33 +1365,40 @@ class TeamMatchupRepository:
             return None
         return TeamMatchupSnapshotScope(season, latest_as_of, window_games)
 
-    def get_latest_fact_scopes(
+    def get_latest_observations(
         self,
         season: str,
         *,
         window_games: int | None = None,
         as_of: date,
         connection: Connection | None = None,
-    ) -> dict[str, TeamMatchupSnapshotScope]:
-        """Return each surface's newest fact-bearing scope through ``as_of``."""
+    ) -> tuple[TeamMatchupSnapshotScope | None, tuple[StoredTeamMatchupObservation, ...]]:
+        """Return the newest observation scope through ``as_of`` with its observations.
+
+        One statement: the scope lookup is a subquery of the observation read.
+        """
 
         requested = TeamMatchupSnapshotScope(season, as_of, window_games)
-        table = TeamMatchupFactRow.__table__
-        statement = (
-            select(table.c.base, func.max(table.c.as_of_date).label("as_of_date"))
-            .where(
-                table.c.season == season,
-                table.c.window_kind == requested.window_kind,
-                table.c.window_games == requested.stored_window_games,
-                table.c.as_of_date <= as_of,
-            )
-            .group_by(table.c.base)
+        table = TeamMatchupSurfaceObservationRow.__table__
+        conditions = (
+            table.c.season == season,
+            table.c.window_kind == requested.window_kind,
+            table.c.window_games == requested.stored_window_games,
         )
-        with read_connection(self.engine, connection) as scoped:
-            rows = scoped.execute(statement).mappings().all()
-        return {
-            row["base"]: TeamMatchupSnapshotScope(season, row["as_of_date"], window_games) for row in rows
-        }
+        latest_as_of = (
+            select(func.max(table.c.as_of_date))
+            .where(*conditions, table.c.as_of_date <= as_of)
+            .scalar_subquery()
+        )
+        statement = (
+            select(table).where(*conditions, table.c.as_of_date == latest_as_of).order_by(table.c.surface)
+        )
+        with read_connection(self.engine, connection) as connection:
+            rows = connection.execute(statement).mappings().all()
+        if not rows:
+            return None, ()
+        scope = TeamMatchupSnapshotScope(season, rows[0]["as_of_date"], window_games)
+        return scope, tuple(_observation_from_row(row) for row in rows)
 
 
 def _game_ids_json(game_ids: tuple[str, ...]) -> str | None:
@@ -1283,8 +1409,13 @@ def _game_ids_json(game_ids: tuple[str, ...]) -> str | None:
     return json.dumps(sorted(game_ids), separators=(",", ":"))
 
 
+@lru_cache(maxsize=4096)
 def _parse_game_ids(value: str | None) -> tuple[str, ...]:
-    """Parse a stored game-id lineage column back to a tuple."""
+    """Parse a stored game-id lineage column back to a tuple.
+
+    Memoized: a snapshot's facts repeat one lineage string per team, and the
+    same snapshot is read again by every Matchup (crf04/statsplus-backend#612).
+    """
 
     if not value:
         return ()
@@ -1305,8 +1436,9 @@ def _source_observation_ids_json(observation_ids: tuple[str, ...]) -> str | None
     return json.dumps(sorted(set(observation_ids)), separators=(",", ":"))
 
 
+@lru_cache(maxsize=4096)
 def _parse_source_observation_ids(value: str | None) -> tuple[str, ...]:
-    """Parse source-observation lineage, failing closed for legacy rows."""
+    """Parse source-observation lineage, failing closed for legacy rows (memoized like game ids)."""
 
     if not value:
         return ()
@@ -1323,6 +1455,26 @@ def _optional_aware(value: datetime | None) -> datetime | None:
     """Normalize nullable database timestamps for deterministic signatures."""
 
     return None if value is None else assume_utc(value)
+
+
+def _observation_from_row(row) -> StoredTeamMatchupObservation:
+    return StoredTeamMatchupObservation(
+        surface=row["surface"],
+        status=row["status"],
+        unavailable_reason=row["unavailable_reason"],
+        retrieved_at=assume_utc(row["retrieved_at"]),
+        game_ids=_parse_game_ids(row["game_ids"]),
+        ledger_checksum=row["ledger_checksum"],
+        source_observation_ids=_parse_source_observation_ids(row["source_observation_ids"]),
+        game_set_checksum=row["game_set_checksum"],
+        cutoff=_optional_aware(row["cutoff"]),
+        recomposition_reason=row["recomposition_reason"],
+        manifest_id=row["manifest_id"],
+        event_catalog_publication_id=row["event_catalog_publication_id"],
+        event_catalog_checksum=row["event_catalog_checksum"],
+        provider_window_identity=row["provider_window_identity"],
+        publication=_publication_from_row(row),
+    )
 
 
 def _publication_columns(
@@ -1362,5 +1514,7 @@ __all__ = [
     "TeamMatchupObservation",
     "TeamMatchupRepository",
     "TeamMatchupSnapshotScope",
+    "TeamMetricFact",
+    "TeamMetricSummary",
     "create_publication_write_capability",
 ]

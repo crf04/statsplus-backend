@@ -1461,6 +1461,138 @@ def test_mixed_live_closing_and_missing_games_keep_state_specific_freshness(tmp_
     assert pool.players
 
 
+def test_a_closed_games_pool_serves_only_its_own_closing_set(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-two-closed.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    query = NBAMarketQuery(season=SEASON)
+    other_game_id = "0022500502"
+    start_at = OBSERVED_AT + timedelta(minutes=5)
+    source = _closing_snapshot(catalog, OBSERVED_AT)
+    other_market = replace(
+        source.markets[0],
+        market_id="other-market",
+        athlete=replace(source.markets[0].athlete, canonical_id=201939, name="Stephen Curry"),
+        event=EventEvidence(canonical_id=other_game_id),
+    )
+    archive.ingest_complete_snapshot(
+        replace(source, markets=(*source.markets, other_market)),
+        query=query,
+        accepted_at=OBSERVED_AT,
+    )
+    events = tuple(
+        {
+            "nba_game_id": game_id,
+            "scheduled_at": start_at.isoformat(),
+            "status_text": "Q1",
+            "status_code": 2,
+            "first_observed_started_at": start_at.isoformat(),
+        }
+        for game_id in (GAME_ID, other_game_id)
+    )
+    ProjectionRecordingService(
+        archive,
+        ProjectionArchiveReadScope(provider="dabble", query=query),
+    ).freeze_closing_projection_sets(events=events, query=query, created_at=start_at)
+
+    class ScopedEvents:
+        def get_events_by_ids(self, _season, game_ids):
+            return tuple(event for event in events if event["nba_game_id"] in set(game_ids))
+
+    reader = LatestProjectionPlayerPoolReader(
+        engine,
+        ProjectionArchiveReadScope(provider="dabble", query=query),
+        clock=lambda: OBSERVED_AT + timedelta(minutes=10),
+        event_reader=ScopedEvents(),
+    )
+
+    pools = {
+        game_id: reader.get_pool_for_game(season=SEASON, game_id=game_id)
+        for game_id in (GAME_ID, other_game_id)
+    }
+
+    assert {
+        game_id: [player.canonical_player_id for player in pool.players] for game_id, pool in pools.items()
+    } == {
+        GAME_ID: [2544],
+        other_game_id: [201939],
+    }
+    assert pools[other_game_id].game_states == {
+        other_game_id: {"state": "closing", "observed_at": OBSERVED_AT.isoformat()}
+    }
+
+
+def test_a_closing_pool_reads_its_own_providers_and_query_in_provider_order(tmp_path):
+    """Closing sets of another provider or another query for the same game are
+    not the reader's; a player two providers name differently takes the name
+    of the first provider alphabetically, whatever order the scopes list."""
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-closing-scopes.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    query = NBAMarketQuery(season=SEASON)
+    available_only = NBAMarketQuery(season=SEASON, market_statuses=(MarketStatus.AVAILABLE,))
+    start_at = OBSERVED_AT + timedelta(minutes=5)
+    source = _closing_snapshot(catalog, OBSERVED_AT)
+    events = (
+        {
+            "nba_game_id": GAME_ID,
+            "scheduled_at": start_at.isoformat(),
+            "status_text": "Q1",
+            "status_code": 2,
+            "first_observed_started_at": start_at.isoformat(),
+        },
+    )
+    for provider, market_query, players in (
+        ("dabble", query, ((2544, "LeBron James"),)),
+        ("prizepicks", query, ((2544, "Lebron James"), (203999, "Nikola Jokic"))),
+        ("dabble", available_only, ((201939, "Stephen Curry"),)),
+    ):
+        template = source.markets[0]
+        markets = tuple(
+            replace(
+                template,
+                provider=provider,
+                market_id=f"{provider}-{player_id}",
+                athlete=replace(template.athlete, canonical_id=player_id, name=name),
+                statistic_match=replace(template.statistic_match, provider=provider),
+            )
+            for player_id, name in players
+        )
+        archive.ingest_complete_snapshot(
+            replace(source, provider=provider, markets=markets), query=market_query, accepted_at=OBSERVED_AT
+        )
+        ProjectionRecordingService(
+            archive, ProjectionArchiveReadScope(provider=provider, query=market_query)
+        ).freeze_closing_projection_sets(events=events, query=market_query, created_at=start_at)
+
+    class ScopedEvents:
+        def get_events_by_ids(self, _season, game_ids):
+            return tuple(event for event in events if event["nba_game_id"] in set(game_ids))
+
+    def pool(*providers):
+        reader = LatestProjectionPlayerPoolReader(
+            engine,
+            [ProjectionArchiveReadScope(provider=provider, query=query) for provider in providers],
+            clock=lambda: OBSERVED_AT + timedelta(minutes=10),
+            event_reader=ScopedEvents(),
+        )
+        return [
+            (player.canonical_player_id, player.name, player.provenance)
+            for player in reader.get_pool_for_game(season=SEASON, game_id=GAME_ID).players
+        ]
+
+    assert pool("dabble") == [(2544, "LeBron James", {"dabble": ("PTS",)})]
+    both = [
+        (2544, "LeBron James", {"dabble": ("PTS",), "prizepicks": ("PTS",)}),
+        (203999, "Nikola Jokic", {"prizepicks": ("PTS",)}),
+    ]
+    assert pool("dabble", "prizepicks") == both
+    assert pool("prizepicks", "dabble") == both
+
+
 def _catalog_stale_slate(tmp_path, name):
     engine = create_engine(f"sqlite:///{tmp_path / name}")
     run_migrations(engine)
@@ -2558,6 +2690,7 @@ def test_replay_does_not_extend_a_provider_board_live_window(tmp_path):
         engine,
         ProjectionArchiveReadScope(provider="dabble", query=query),
         clock=lambda: OBSERVED_AT + timedelta(minutes=20),
+        required_providers=(),
     ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
 
     assert pool.players == ()
@@ -3580,6 +3713,73 @@ def test_stale_served_dabble_lines_never_include_one_a_complete_poll_superseded(
     (player,) = pool.players
     assert player.provenance == {"dabble": ("AST", "PTS")}
     assert player.lines == {"dabble": {"AST": 6.5, "PTS": 31.5}}
+
+
+def _dabble_reader_at(engine, query, now, *, required_providers=None):
+    return LatestProjectionPlayerPoolReader(
+        engine,
+        ProjectionArchiveReadScope(provider="dabble", query=query),
+        clock=lambda: now,
+        required_providers=required_providers,
+    )
+
+
+def test_a_required_dabble_poll_that_is_overdue_keeps_its_lines_stale_served_for_six_hours(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'dabble-overdue.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    _service, query, record = _dabble_recording(engine, catalog)
+    record((("pts-29.5", "points", "29.5"), ("reb-7.5", "rebounds", "7.5")), OBSERVED_AT, complete=True)
+
+    overdue = _dabble_reader_at(engine, query, OBSERVED_AT + timedelta(minutes=16))
+    pool = overdue.get_pool_for_game(season=SEASON, game_id=GAME_ID)
+
+    assert pool.freshness["providers"] == {
+        "dabble": {"status": "stale-served", "retrieved_at": OBSERVED_AT.isoformat()}
+    }
+    (player,) = pool.players
+    assert player.lines == {"dabble": {"PTS": 29.5, "REB": 7.5}}
+
+    at_fallback = _dabble_reader_at(engine, query, OBSERVED_AT + timedelta(hours=6))
+    assert len(at_fallback.get_pool_for_game(season=SEASON, game_id=GAME_ID).players) == 1
+    expired = _dabble_reader_at(engine, query, OBSERVED_AT + timedelta(hours=6, microseconds=1))
+    assert expired.get_pool_for_game(season=SEASON, game_id=GAME_ID).players == ()
+
+
+def test_an_overdue_dabble_poll_that_is_not_required_expires_at_the_live_window(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'dabble-overdue-optional.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    _service, query, record = _dabble_recording(engine, catalog)
+    record((("pts-29.5", "points", "29.5"),), OBSERVED_AT, complete=True)
+
+    reader = _dabble_reader_at(engine, query, OBSERVED_AT + timedelta(minutes=16), required_providers=())
+
+    assert reader.get_pool_for_game(season=SEASON, game_id=GAME_ID).players == ()
+
+
+@pytest.mark.parametrize(
+    ("minutes_after_partial", "status"),
+    ((5, "fresh"), (16, "stale-served")),
+    ids=("latest-poll-recent", "latest-poll-overdue"),
+)
+def test_a_dabble_line_a_newer_partial_poll_omitted_expires_at_the_live_window(
+    tmp_path, minutes_after_partial, status
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'dabble-omitted.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    _service, query, record = _dabble_recording(engine, catalog)
+    partial_at = OBSERVED_AT + timedelta(minutes=11)
+    record((("pts-29.5", "points", "29.5"), ("reb-7.5", "rebounds", "7.5")), OBSERVED_AT, complete=False)
+    record((("pts-29.5", "points", "29.5"),), partial_at, complete=False)
+
+    reader = _dabble_reader_at(engine, query, partial_at + timedelta(minutes=minutes_after_partial))
+    pool = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
+
+    assert pool.freshness["providers"]["dabble"]["status"] == status
+    (player,) = pool.players
+    assert player.lines == {"dabble": {"PTS": 29.5}}
 
 
 def test_the_pre_tip_freeze_never_keeps_a_dabble_line_a_complete_poll_superseded(tmp_path):

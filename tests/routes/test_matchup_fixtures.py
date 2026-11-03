@@ -2772,6 +2772,7 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
         settings=settings,
         injuries=_injuries(engine),
         clock=lambda: NOW,
+        statistic_catalog=catalog,
     )
     dependencies = SimpleNamespace(
         settings=settings,
@@ -2809,6 +2810,34 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
     assert payload["players"][0]["canonical_id"] == 2544
     assert payload["players"][0]["season_scoring"] == 25.0
     assert payload["players"][0]["last_10_minutes"] == [35.0]
+    # One game, so the season averages are that game's line.
+    one_game = {
+        "3PM": 3.0,
+        "AST": 7.0,
+        "BLK": 1.0,
+        "FG2A": 11.0,
+        "FG3A": 7.0,
+        "FGA": 18.0,
+        "PA": 32.0,
+        "PR": 33.0,
+        "PRA": 40.0,
+        "PTS": 25.0,
+        "RA": 15.0,
+        "REB": 8.0,
+        "STKS": 2.0,
+        "STL": 1.0,
+        "TOV": 3.0,
+    }
+    assert payload["players"][0]["season_averages"] == one_game
+    assert payload["players"][0]["last_five_games"] == [
+        {
+            "game_id": "0022500500",
+            "game_date": "2026-01-10",
+            "matchup": "LAL vs. BOS",
+            "minutes": 35.0,
+            "stats": one_game,
+        }
+    ]
     play_diet = payload["players"][0]["diet_shares"]["play_types"]
     assert {row["key"] for row in play_diet} == {
         "Transition",
@@ -4459,13 +4488,16 @@ def test_authenticated_projection_routes_cover_partial_failure_and_recovery(
     failed_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
     assert failed_matchup.status_code == 200
     failed_freshness = failed_matchup.get_json()["freshness"]["pool"]
-    assert "status" not in failed_freshness
+    assert failed_freshness["status"] == "stale-served"
     assert failed_freshness["providers"] == {
         "dabble": {
             "status": "stale-served",
             "retrieved_at": partial_at.isoformat(),
         },
-        "prizepicks": {"status": "missing", "retrieved_at": None},
+        "prizepicks": {
+            "status": "stale-served",
+            "retrieved_at": rematerialized_at.isoformat(),
+        },
     }
     assert [player["canonical_id"] for player in failed_matchup.get_json()["players"]] == [2544]
 
@@ -4482,7 +4514,7 @@ def test_authenticated_projection_routes_cover_partial_failure_and_recovery(
     )
     route_now[0] = late_accepted_at
     late_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
-    assert "status" not in late_matchup.get_json()["freshness"]["pool"]
+    assert late_matchup.get_json()["freshness"]["pool"]["status"] == "stale-served"
     assert [player["canonical_id"] for player in late_matchup.get_json()["players"]] == [2544]
 
     assembled.projection_recorder.record_complete_snapshot(
@@ -4505,12 +4537,13 @@ def test_authenticated_projection_routes_cover_partial_failure_and_recovery(
     late_empty_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
     late_empty_slate = client.get("/api/games/slate?date=2026-01-15")
     assert [player["canonical_id"] for player in late_empty_matchup.get_json()["players"]] == [2544]
-    assert (
-        late_empty_matchup.get_json()["freshness"]["pool"]["providers"]["dabble"]["status"] == "stale-served"
-    )
+    assert late_empty_matchup.get_json()["freshness"]["pool"]["providers"]["dabble"] == {
+        "status": "stale-served",
+        "retrieved_at": partial_at.isoformat(),
+    }
     assert late_empty_slate.get_json()["games"][0]["projection_state"] == {
         "state": "live",
-        "observed_at": partial_at.isoformat(),
+        "observed_at": rematerialized_at.isoformat(),
     }
 
     recovered_at = failed_at + timedelta(minutes=1)
@@ -5501,6 +5534,114 @@ def test_authenticated_live_matchup_serves_dabbles_price_on_each_side(
     (player,) = response.get_json()["players"]
     assert player["lines"] == {"dabble": {"PTS": 27.5}}
     assert player["line_prices"] == {"dabble": {"PTS": {"over": -110, "under": None}}}
+
+
+#: Dabble's feed spelling of each stat (crf04/statsplus#370), the component the
+#: adapter aliases it to, and a line.
+_DABBLE_SHOOTING_MARKETS = (
+    ("ft-attempted", "free-throws-attempted", "6.5"),
+    ("ft-made", "free-throws-made", "4.5"),
+    ("fg-made", "field-goals-made", "8.5"),
+    ("two-made", "two-pointers-made", "5.5"),
+)
+
+
+def _dabble_snapshot(catalog, markets, *, retrieved_at):
+    """A Dabble snapshot whose markets carry the adapter's evidence, resolved as the board does."""
+
+    resolver = catalog.resolver
+    built = []
+    for label, component, threshold in markets:
+        market = PlayerProjectionMarket(
+            provider="dabble",
+            market_id=f"fixture-market-{label}",
+            athlete=AthleteEvidence(
+                provider_id="fixture-lebron",
+                canonical_id=2544,
+                name="LeBron James",
+                team=TeamEvidence(canonical_id=LAL, abbreviation="LAL"),
+            ),
+            event=EventEvidence(provider_id="fixture-event", canonical_id=GAME_ID),
+            team=TeamEvidence(canonical_id=LAL, abbreviation="LAL"),
+            statistic=StatisticEvidence(label=label, components=(component,)),
+            threshold=MarketThreshold(threshold, "count"),
+            status=MarketStatus.AVAILABLE,
+            variant=MarketVariant.STANDARD,
+            scoring_period=ScoringPeriod.FULL_GAME,
+            selections=(
+                Selection(selection_id="over", direction=SelectionDirection.HIGHER, american_price=-122),
+                Selection(selection_id="under", direction=SelectionDirection.LOWER, american_price=-104),
+            ),
+        )
+        built.append(replace(market, statistic_match=resolver.resolve_market(market)))
+    return ProviderSnapshot(
+        provider="dabble",
+        status=SnapshotStatus.COMPLETE,
+        markets=tuple(built),
+        coverage=CoverageEvidence(
+            fetched_count=len(built),
+            eligible_count=len(built),
+            normalized_count=len(built),
+            expected_total=len(built),
+        ),
+        retrieved_at=retrieved_at,
+    )
+
+
+def test_dabble_shooting_lines_are_targetable_and_served_without_a_matchup_score(
+    projection_route_context,
+):
+    context = projection_route_context
+    query = NBAMarketQuery(season=SEASON)
+    points = (("points", "points", "27.5"),)
+    context.assembled.projection_recorder.record_complete_snapshot(
+        _dabble_snapshot(context.catalog, points, retrieved_at=NOW),
+        query=query,
+        accepted_at=NOW,
+    )
+    (points_only,) = context.client.get(f"/api/games/matchup?game_id={GAME_ID}").get_json()["players"]
+
+    later = NOW + timedelta(minutes=1)
+    context.route_now[0] = later
+    context.assembled.projection_recorder.record_complete_snapshot(
+        _dabble_snapshot(context.catalog, points + _DABBLE_SHOOTING_MARKETS, retrieved_at=later),
+        query=query,
+        accepted_at=later,
+    )
+    response = context.client.get(f"/api/games/matchup?game_id={GAME_ID}")
+
+    with context.engine.connect() as connection:
+        stored = connection.execute(
+            select(
+                ProjectionObservation.statistic_provider_label,
+                ProjectionObservation.market_category,
+                ProjectionObservation.targetable,
+            )
+            .where(ProjectionObservation.statistic_provider_label != "points")
+            .distinct()
+            .order_by(ProjectionObservation.statistic_provider_label)
+        ).all()
+    assert [tuple(row) for row in stored] == [
+        ("fg-made", "FGM", True),
+        ("ft-attempted", "FTA", True),
+        ("ft-made", "FTM", True),
+        ("two-made", "FG2M", True),
+    ]
+    assert response.status_code == 200
+    (player,) = response.get_json()["players"]
+    assert player["posted_markets"] == ["FG2M", "FGM", "FTA", "FTM", "PTS"]
+    assert player["stat_categories"] == ["FG2M", "FGM", "FTA", "FTM", "PTS"]
+    assert player["provenance"] == {"dabble": ["FG2M", "FGM", "FTA", "FTM", "PTS"]}
+    assert player["lines"] == {"dabble": {"FG2M": 5.5, "FGM": 8.5, "FTA": 6.5, "FTM": 4.5, "PTS": 27.5}}
+    assert player["line_prices"] == {
+        "dabble": {market: {"over": -122, "under": -104} for market in ("FG2M", "FGM", "FTA", "FTM", "PTS")}
+    }
+    unscored = {"components": {}, "blend": None, "missing_inputs": []}
+    assert {market: player["scores"][market] for market in ("FG2M", "FGM", "FTA", "FTM")} == {
+        market: {"season": unscored, "last_15": unscored} for market in ("FG2M", "FGM", "FTA", "FTM")
+    }
+    assert player["scores"]["PTS"] == points_only["scores"]["PTS"]
+    assert player["scores"]["PTS"]["season"]["blend"] is not None
 
 
 def test_authenticated_live_matchup_declares_the_current_experience(

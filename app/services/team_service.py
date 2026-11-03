@@ -11,6 +11,7 @@ date is accepted and ignored because the rankings are always whole-season.
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import copy
 
 from nba_api.stats.static import teams
 
@@ -30,8 +31,10 @@ from app.domain.team_matchup_taxonomy import (
     defense_sheet_row_key,
 )
 from app.errors import InvalidInputError
-from app.services.research_season import research_service
-from app.services.team_filter_rankings import TEAM_FILTER_RANKINGS, TeamFilterRanking
+from app.services.database_first_activation import ReadSeason
+from app.services.research_season import research_service, season_context, selected_season
+from app.services.serving_season import snapshot_trailing
+from app.services.team_filter_rankings import TEAM_FILTER_RANKINGS, TeamFilterRanking, season_stream_key
 from app.services.team_matchup_query import (
     LeagueMetricColumn,
     combined_league_column,
@@ -98,7 +101,32 @@ class TeamService:
         return team_names
 
     def get_team_stats(self, category, team, date=None):
-        return research_service(self, self.publication_reader)._get_team_stats(category, team, date)
+        if selected_season(self.publication_reader) is None:
+            return research_service(self, self.publication_reader)._get_team_stats(category, team, date)
+        return self._selected_team_stats(category, team, date)
+
+    #: An explicit selection's one capture; set on its scoped copy only.
+    _selected_capture = None
+
+    def _selected_team_stats(self, category, team, date):
+        """Today's body as ``data`` beside ``season_context`` (crf04/statsplus#369).
+
+        One capture of the category's Season stream decides the season,
+        refusing one that is not offered, so a ``team_defense`` family that is
+        not ready serves its previous season and ``trailing`` names it.
+        """
+
+        base = _category(category)[0]
+        capture = self.publication_reader.snapshot(
+            (season_stream_key(base),), season=ReadSeason(self.settings.nba.current_season)
+        )
+        scoped = copy(self)
+        scoped._selected_capture = capture
+        return {
+            "data": scoped._get_team_stats(category, team, date),
+            "season_context": season_context(self.publication_reader, capture, lambda: capture.season),
+            "trailing": snapshot_trailing(capture),
+        }
 
     def _get_team_stats(self, category, team, date=None):
         """Serve one opponent's Season profile for one panel category.
@@ -108,9 +136,7 @@ class TeamService:
         serves nothing rather than a partial league.
         """
 
-        if category not in _CATEGORIES:
-            raise InvalidInputError(f"Unsupported team stats category: {category}.")
-        base, profile, empty = _CATEGORIES[category]
+        base, profile, empty = _category(category)
         team_id = _resolve_team_id(team)
         rows = self._season_rows(base)
         if team_id is None or rows is None:
@@ -122,7 +148,18 @@ class TeamService:
 
         if self.publications is None:
             return None
+        capture = self._selected_capture
+        if capture is not None:
+            return self.publications.season_rows_by_base(
+                (base,), capture.season, publication_snapshot=capture
+            )[base]
         return self.publications.season_rows(base, self.settings.nba.current_season)
+
+
+def _category(category):
+    if category not in _CATEGORIES:
+        raise InvalidInputError(f"Unsupported team stats category: {category}.")
+    return _CATEGORIES[category]
 
 
 def _resolve_team_id(team_name) -> int | None:

@@ -32,7 +32,7 @@ from app.utils.redis_breaker import RedisCircuitBreaker
 
 #: Bumped whenever the Matchup document's shape changes, so a stored document
 #: of the old shape is never served.
-MATCHUP_CACHE_SCHEMA = 5
+MATCHUP_CACHE_SCHEMA = 6
 #: A snapshot of the live generation plus, briefly, the one it replaced.
 _SNAPSHOT_REUSE_ENTRIES = 2
 
@@ -59,8 +59,8 @@ ACCEPTED_LAG_INPUTS: Mapping[str, str] = {
 #:
 #: * KEYED: its inputs are in the cache key (``ComposedMatchupCache.key``), so
 #:   a changed input misses and recomposes; the stored copy is served.
-#: * REBUILT: recomputed on every read from the request's own snapshot, Slate
-#:   or a small stats read (``SnapshotMatchups._with_current_provenance``), so
+#: * REBUILT: recomputed on every read from the request's own snapshot or Slate
+#:   (``SnapshotMatchups._with_current_provenance``), so
 #:   the stored copy is never served.
 #: * ACCEPTED_LAG: also reads an ``ACCEPTED_LAG_INPUTS`` input, so the stored
 #:   copy can be that much behind.
@@ -123,8 +123,8 @@ SECTION_TREATMENT: Mapping[str, tuple[tuple[str, ...], str, tuple[str, ...]]] = 
     "freshness.schedule": ((REBUILT,), "the request's Slate schedule stamp", ()),
     "freshness.pool": ((KEYED,), "the Slate's pool block with each provider's stamp", ()),
     "freshness.stats": (
-        (REBUILT,),
-        "stats completion and the latest final game: two small reads per request",
+        (KEYED,),
+        "stats completion and the latest final game, read on the compose's scope",
         (),
     ),
     "freshness.team_matchups": (
@@ -244,6 +244,8 @@ class ComposedMatchupCache:
         retained: Any = (),
         pool: Mapping[str, Any] | None = None,
         started: bool = False,
+        as_of: Any = None,
+        stats: Mapping[str, Any] | None = None,
     ) -> str | None:
         """``matchup:composed:v<schema>:<sha256>``, or ``None`` when uncacheable.
 
@@ -257,9 +259,13 @@ class ComposedMatchupCache:
         new poll misses though the oldest stamp holds), each stream's freshness
         label in the snapshot (a fresh capture and a stale one of one
         generation compose different freshness sections), and every setting
-        the scores read.  Only an injury change the Slate's counts do not show
-        can lag, by the TTL.  The user is
-        not in it: a Matchup is the same for everyone.
+        the scores read.  ``as_of`` is the capture a past game reads in place
+        of ``snapshot`` (``MatchupService.game_snapshot``), keyed beside it:
+        the game's evidence is ``as_of``'s, its own box score ``snapshot``'s.
+        ``stats`` is the ``freshness.stats`` block the compose reports, read on
+        the compose's scope.  Only an injury change the Slate's counts do not
+        show can lag, by the TTL.  The user is not in it: a Matchup is the same
+        for everyone.
         """
 
         if self._redis is None or settings is None or not settings.cache.matchup_enabled or season is None:
@@ -284,6 +290,7 @@ class ComposedMatchupCache:
                 for stream, read in (getattr(snapshot, "reads", None) or {}).items()
             ),
             "pool": pool,
+            "stats": stats,
             "settings": {
                 "matchup_scores": settings.matchup_scores.model_dump(mode="json"),
                 "player_diet_baseline": settings.player_diet_baseline.model_dump(mode="json"),
@@ -291,6 +298,13 @@ class ComposedMatchupCache:
                 "pinned_season": (settings.nba.current_season if season_is_pinned(settings) else None),
             },
         }
+        if as_of is not None:
+            body["as_of"] = {
+                "generation": [list(entry) for entry in as_of.generation],
+                "labels": sorted(
+                    [stream, read.freshness, read.status] for stream, read in as_of.reads.items()
+                ),
+            }
         digest = hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode("utf-8")).hexdigest()
         return f"matchup:composed:v{MATCHUP_CACHE_SCHEMA}:{digest}"
 

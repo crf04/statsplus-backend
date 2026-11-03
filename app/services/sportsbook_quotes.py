@@ -311,27 +311,31 @@ def build_market_entry(rows: Iterable[Any]) -> dict[str, Any] | None:
 
 
 class SportsbookQuoteReader:
-    """Read the ``book_lines`` of one game from the latest rows."""
+    """Read the latest rows: one game's ``book_lines``, or several games' rows at once."""
 
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
+
+    def latest_quotes(self, game_ids: Iterable[str], *, connection: Connection | None = None) -> list[Any]:
+        """The served books' latest rows for every game in ``game_ids``, in one statement."""
+
+        latest = SportsbookPropLatest.__table__
+        with read_connection(self.engine, connection) as active:
+            return active.execute(
+                select(latest).where(
+                    latest.c.canonical_game_id.in_(sorted({str(game_id) for game_id in game_ids})),
+                    latest.c.book.in_(sorted(BOOK_ALLOWLIST)),
+                    latest.c.market_category.in_(BOOK_LINE_CATEGORIES),
+                )
+            ).all()
 
     def book_lines(
         self, game_id: str, *, connection: Connection | None = None
     ) -> dict[int, dict[str, dict[str, Any]]]:
         """``{canonical_player_id: {category: entry}}`` for one game."""
 
-        latest = SportsbookPropLatest.__table__
-        with read_connection(self.engine, connection) as active:
-            rows = active.execute(
-                select(latest).where(
-                    latest.c.canonical_game_id == game_id,
-                    latest.c.book.in_(sorted(BOOK_ALLOWLIST)),
-                    latest.c.market_category.in_(BOOK_LINE_CATEGORIES),
-                )
-            ).all()
         grouped: dict[tuple[int, str], list[Any]] = {}
-        for row in rows:
+        for row in self.latest_quotes((game_id,), connection=connection):
             grouped.setdefault((row.canonical_player_id, row.market_category), []).append(row)
         result: dict[int, dict[str, dict[str, Any]]] = {}
         for (player_id, category), group in sorted(grouped.items()):

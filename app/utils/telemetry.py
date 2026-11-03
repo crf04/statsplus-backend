@@ -62,6 +62,7 @@ NBA_STATS_OPERATIONS = frozenset(
         "player_diets_recorded",
         "player_roster",
         "player_roster_recorded",
+        "team_roster",
         "league_opponent_team_stats",
         "league_opponent_shot_chart",
         "league_opponent_shooting_zone",

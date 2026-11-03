@@ -36,20 +36,21 @@ concurrency:
 # installed packages, and restoring the wheel cache beside it cost about six
 # seconds per job for nothing.
 jobs:
-  # The suite runs as five parallel shards (a crc32 of the test node id picks
-  # the shard, see tests/conftest.py). Each uploads its coverage data; `checks`
-  # combines it and enforces the floor.
+  # The suite runs as twelve parallel shards of whole test files, balanced by the
+  # seconds recorded in tests/shard_weights.json (see tests/conftest.py;
+  # scripts/shard_weights.py rebuilds it from a run's logs). Each uploads its
+  # coverage data; `checks` combines it and enforces the floor.
   tests:
-    name: tests (${{ matrix.shard }}/5)
+    name: tests (${{ matrix.shard }}/12)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     env:
       CHECK_MODE: shard
-      STATSPLUS_TEST_SHARD: ${{ matrix.shard }}/5
+      STATSPLUS_TEST_SHARD: ${{ matrix.shard }}/12
       COVERAGE_FILE: ${{ github.workspace }}/.coverage.shard${{ matrix.shard }}
 
     steps:
@@ -105,8 +106,12 @@ jobs:
           [[ "$(cat /tmp/poppler-utils.status)" == 0 ]]
           command -v pdftotext
 
+      # Hosted runners differ in CPU, and a slow one sets the wall time; the
+      # model in the log explains a slow shard.
       - name: Run this shard
-        run: ./scripts/check.sh
+        run: |
+          grep -m1 'model name' /proc/cpuinfo
+          ./scripts/check.sh
 
       # Uploaded even when this shard's tests fail, so the coverage data
       # survives for diagnosis; the aggregate `checks` job still goes red.
@@ -120,7 +125,8 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-  # Fails if the shards do not partition the full collection exactly.
+  # Fails if the unit or integration shards do not partition their full
+  # collection exactly.
   shard-partition:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -157,7 +163,9 @@ jobs:
         run: ./scripts/bootstrap.sh
 
       - name: Verify shards cover the suite exactly once
-        run: .venv/bin/python scripts/verify_test_shards.py 5
+        run: |
+          .venv/bin/python scripts/verify_test_shards.py 12 unit
+          .venv/bin/python scripts/verify_test_shards.py 2 integration
 
   # Lint, format check, migrations and the demo database need no test
   # results, so they run beside the shards instead of after them.
@@ -267,13 +275,22 @@ jobs:
       - name: Combine coverage and enforce the floor
         run: ./scripts/check.sh
 
-  integration:
+  # The Postgres tests run as two shards of whole files, balanced by their own
+  # recorded seconds; `integration` below keeps the required check's name.
+  integration-tests:
+    name: integration (${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     env:
       # Deliberately separate from DATABASE_URL so these destructive tests can
       # never touch a real application database.
       TEST_DATABASE_URL: postgresql+psycopg2://statsplus:statsplus@localhost:5432/statsplus_test
+      STATSPLUS_TEST_SHARD: ${{ matrix.shard }}/2
+      STATSPLUS_TEST_SHARD_WEIGHTS: integration
 
     services:
       postgres:
@@ -356,4 +373,17 @@ jobs:
       # Four workers, each on its own database (tests/conftest.py creates
       # <database>_<worker>), because every test rebuilds the schema.
       - name: Run Postgres integration tests
-        run: .venv/bin/python -m pytest -m integration -n 4 --dist worksteal
+        run: |
+          grep -m1 'model name' /proc/cpuinfo
+          .venv/bin/python -m pytest -m integration -n 4 --dist worksteal
+
+  integration:
+    needs: [integration-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every integration shard
+        env:
+          RESULT: ${{ needs.integration-tests.result }}
+        run: '[[ "$RESULT" == success ]] || { echo "integration shards: $RESULT"; exit 1; }'

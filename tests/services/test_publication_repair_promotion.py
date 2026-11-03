@@ -505,6 +505,7 @@ def test_pruning_after_a_promotion_deletes_the_displaced_pair_and_keeps_the_decl
         "candidate": 0,
         "season_latest": 0,
         "cutover_restore": 0,
+        "as_of": 0,
     }
     statuses = read_statuses(engine)
     for stream_key in (SEASON_ZONES, L15_ZONES):

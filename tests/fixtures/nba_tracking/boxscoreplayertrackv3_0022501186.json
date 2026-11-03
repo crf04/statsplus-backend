@@ -1,0 +1,165 @@
+{
+ "boxScorePlayerTrack": {
+  "awayTeam": {
+   "players": [
+    {
+     "familyName": "Banchero",
+     "personId": 1631094,
+     "statistics": {
+      "assists": 11,
+      "contestedFieldGoalPercentage": 0.412,
+      "contestedFieldGoalsAttempted": 17,
+      "contestedFieldGoalsMade": 7,
+      "defendedAtRimFieldGoalPercentage": 0.667,
+      "defendedAtRimFieldGoalsAttempted": 6,
+      "defendedAtRimFieldGoalsMade": 4,
+      "distance": 2.63,
+      "fieldGoalPercentage": 0.318,
+      "freeThrowAssists": 0,
+      "minutes": "37:55",
+      "passes": 61,
+      "reboundChancesDefensive": 9,
+      "reboundChancesOffensive": 5,
+      "reboundChancesTotal": 14,
+      "secondaryAssists": 0,
+      "speed": 4.18,
+      "touches": 86,
+      "uncontestedFieldGoalsAttempted": 5,
+      "uncontestedFieldGoalsMade": 0,
+      "uncontestedFieldGoalsPercentage": 0.0
+     }
+    },
+    {
+     "familyName": "Carter",
+     "personId": 1628975,
+     "statistics": {
+      "assists": 0,
+      "contestedFieldGoalPercentage": 0.0,
+      "contestedFieldGoalsAttempted": 0,
+      "contestedFieldGoalsMade": 0,
+      "defendedAtRimFieldGoalPercentage": 0.0,
+      "defendedAtRimFieldGoalsAttempted": 1,
+      "defendedAtRimFieldGoalsMade": 0,
+      "distance": 1.06,
+      "fieldGoalPercentage": 0.333,
+      "freeThrowAssists": 0,
+      "minutes": "14:36",
+      "passes": 16,
+      "reboundChancesDefensive": 2,
+      "reboundChancesOffensive": 0,
+      "reboundChancesTotal": 2,
+      "secondaryAssists": 0,
+      "speed": 4.36,
+      "touches": 17,
+      "uncontestedFieldGoalsAttempted": 3,
+      "uncontestedFieldGoalsMade": 1,
+      "uncontestedFieldGoalsPercentage": 0.333
+     }
+    }
+   ],
+   "teamCity": "Orlando",
+   "teamId": 1610612753,
+   "teamName": "Magic",
+   "teamSlug": "magic",
+   "teamTricode": "ORL"
+  },
+  "awayTeamId": 1610612753,
+  "gameId": "0022501186",
+  "homeTeam": {
+   "players": [
+    {
+     "familyName": "Scheierman",
+     "personId": 1631248,
+     "statistics": {
+      "assists": 7,
+      "contestedFieldGoalPercentage": 0.4,
+      "contestedFieldGoalsAttempted": 5,
+      "contestedFieldGoalsMade": 2,
+      "defendedAtRimFieldGoalPercentage": 0.375,
+      "defendedAtRimFieldGoalsAttempted": 8,
+      "defendedAtRimFieldGoalsMade": 3,
+      "distance": 2.83,
+      "fieldGoalPercentage": 0.4,
+      "freeThrowAssists": 0,
+      "minutes": "38:48",
+      "passes": 37,
+      "reboundChancesDefensive": 12,
+      "reboundChancesOffensive": 0,
+      "reboundChancesTotal": 12,
+      "secondaryAssists": 1,
+      "speed": 4.4,
+      "touches": 61,
+      "uncontestedFieldGoalsAttempted": 15,
+      "uncontestedFieldGoalsMade": 6,
+      "uncontestedFieldGoalsPercentage": 0.4
+     }
+    },
+    {
+     "familyName": "Garza",
+     "personId": 1630568,
+     "statistics": {
+      "assists": 1,
+      "contestedFieldGoalPercentage": 0.556,
+      "contestedFieldGoalsAttempted": 9,
+      "contestedFieldGoalsMade": 5,
+      "defendedAtRimFieldGoalPercentage": 0.8,
+      "defendedAtRimFieldGoalsAttempted": 5,
+      "defendedAtRimFieldGoalsMade": 4,
+      "distance": 2.97,
+      "fieldGoalPercentage": 0.556,
+      "freeThrowAssists": 0,
+      "minutes": "38:02",
+      "passes": 61,
+      "reboundChancesDefensive": 14,
+      "reboundChancesOffensive": 13,
+      "reboundChancesTotal": 27,
+      "secondaryAssists": 0,
+      "speed": 4.69,
+      "touches": 83,
+      "uncontestedFieldGoalsAttempted": 9,
+      "uncontestedFieldGoalsMade": 5,
+      "uncontestedFieldGoalsPercentage": 0.556
+     }
+    },
+    {
+     "familyName": "Pritchard",
+     "personId": 1630202,
+     "statistics": {
+      "assists": 0,
+      "contestedFieldGoalPercentage": 0.0,
+      "contestedFieldGoalsAttempted": 0,
+      "contestedFieldGoalsMade": 0,
+      "defendedAtRimFieldGoalPercentage": 0.0,
+      "defendedAtRimFieldGoalsAttempted": 0,
+      "defendedAtRimFieldGoalsMade": 0,
+      "distance": 0.0,
+      "fieldGoalPercentage": 0.0,
+      "freeThrowAssists": 0,
+      "minutes": "0:00",
+      "passes": 0,
+      "reboundChancesDefensive": 0,
+      "reboundChancesOffensive": 0,
+      "reboundChancesTotal": 0,
+      "secondaryAssists": 0,
+      "speed": 0.0,
+      "touches": 0,
+      "uncontestedFieldGoalsAttempted": 0,
+      "uncontestedFieldGoalsMade": 0,
+      "uncontestedFieldGoalsPercentage": 0.0
+     }
+    }
+   ],
+   "teamCity": "Boston",
+   "teamId": 1610612738,
+   "teamName": "Celtics",
+   "teamSlug": "celtics",
+   "teamTricode": "BOS"
+  },
+  "homeTeamId": 1610612738
+ },
+ "meta": {
+  "request": "http://nba.cloud/games/0022501186/boxscoreplayertrack?Format=json",
+  "time": "2026-10-27T01:38:00.38Z",
+  "version": 1
+ }
+}

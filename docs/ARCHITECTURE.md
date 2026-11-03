@@ -250,7 +250,10 @@ release (`RAILWAY_GIT_COMMIT_SHA`). The `before_send` scrubber drops request
 bodies, cookies, query strings, every request header outside a short allowlist
 (`Accept*`, `Content-*`, `Host`, `User-Agent`, `X-Request-ID`), users and
 breadcrumbs, and redacts credentials, e-mail addresses, SQL bind parameters and
-Postgres `DETAIL:` lines from messages. Tracing is off. The `app.errors` handlers report a 5xx failure as one exception event with its
+Postgres `DETAIL:` lines from messages. Tracing samples
+`SENTRY_TRACES_SAMPLE_RATE` of user requests (default `0.05`; an out-of-range
+value falls back to the default); collector ingestion (`/api/collector/`),
+health checks and `/api/internal/` routes are never traced. The `app.errors` handlers report a 5xx failure as one exception event with its
 traceback (exception messages pass through the same credential redaction as the
 logs) and the ERROR log record for that failure is dropped, so nothing is
 reported twice; other ERROR logs become log events.
@@ -287,14 +290,14 @@ not counted twice:
 
 | Provider | Seam | Operations |
 | --- | --- | --- |
-| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_season`, `player_game_logs_recorded`, `player_diets_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `team_game_log`, `league_player_shot_type`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_totals_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
+| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_season`, `player_game_logs_recorded`, `player_diets_recorded`, `player_roster`, `team_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `team_game_log`, `league_player_shot_type`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_totals_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
 | NBA LiveData | `NBALiveDataBoxscoreAdapter` | `game_boxscore`; every governed ledger game reads its final score here, and the box score becomes evidence only after primary PBP evidence fails validation, with both source documents retained in the accepted composite observation. `game_playbyplay` for every 2026-27 ledger game, to exclude heaves from attempts; the same box score checks the corrected attempts of a game with heaves |
 | PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_player_diet`, `get_totals_opponent`, `health_probe`, `player_game_logs`, `game_player_stats`, `team_game_log` |
 | Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests share one pooled Requests session built once per adapter (pool sized for the capped detail fan-out); explicitly injected sessions serialize only their `get` call. The shared DFS transport owns one safe-GET retry. Dabble names a multi-player offering (first scorer, `to_score_25_plus_points`) with one `marketId` for every player, so a repeated market id with different content is excluded as `conflicting_source_identity` (skipped, warning kept) rather than malformed; it leaves the snapshot complete. |
 | PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 | Underdog | `UnderdogAdapter` (shared DFS snapshot contract) | Appearance, player, and game joins remain inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 | Kalshi | `KalshiAdapter` (shared DFS snapshot contract) | One open-game lookup (`open_games`: the `KXNBAGAME` events with their milestones, which carry the exact tip-off) and one paginated read per player series (`series_markets`: `KXNBAPTS`, `KXNBAREB`, `KXNBAAST`, `KXNBA3PT`, `KXNBABLK`, `KXNBASTL`). The shared DFS transport owns one safe-GET retry. A failed series makes the snapshot partial; a failed game lookup keeps Kalshi's estimated start times and also makes it partial. |
-| Polymarket | `PolymarketAdapter` (shared DFS snapshot contract) | A prediction market, read from the unauthenticated Gamma `/events?tag_slug=nba&closed=false` listing (100 events per page, bounded page count); each player prop is one Yes (Over) / No (Under) market inside a game event. Over is priced at `1 / bestAsk` and Under at `1 / (1 - bestBid)` as decimal prices rounded to six places at selection scope, and a market missing either ask prices neither side. Per player, statistic and game, the line whose Over midpoint is nearest 0.5 is the one `standard` line (ties to the lower line); every other line is `alternate`, and several lines with no midpoint are all `alternate`. Only a book at most 0.10 wide (`bestAsk - bestBid`) has a midpoint, because an empty book such as 0.01 / 0.97 sits near 0.5 by construction and would otherwise beat the traded line; a lone line with such a book is `alternate` too. Game, period-scoped, futures and unmapped markets are excluded with typed coverage. The closed telemetry operation is `get_snapshot`; no retry strategy is configured. |
+| Polymarket | `PolymarketAdapter` (shared DFS snapshot contract) | A prediction market, read from the unauthenticated Gamma `/events?tag_slug=nba&closed=false` listing (100 events per page, bounded page count); each player prop is one Yes (Over) / No (Under) market inside a game event. Over is priced at `1 / bestAsk` and Under at `1 / (1 - bestBid)` as decimal prices rounded to six places at selection scope, and a market missing either ask prices neither side. Per player, statistic and game, the line whose Over midpoint is nearest 0.5 is the one `standard` line (ties to the lower line); every other line is `alternate`, and several lines with no midpoint are all `alternate`. Only a book at most 0.10 wide (`bestAsk - bestBid`) has a midpoint, because an empty book such as 0.01 / 0.97 sits near 0.5 by construction and would otherwise beat the traded line; a lone line with such a book is `alternate` too. Only a midpoint within 0.15 of 0.5 can be standard: a tight book on a far rung is `alternate`, and a group with no line that close has no `standard` line. Game, period-scoped, futures and unmapped markets are excluded with typed coverage. The closed telemetry operation is `get_snapshot`; no retry strategy is configured. |
 | Novig | `NovigAdapter` (shared DFS snapshot contract) | Market-list pages and one paginated event list (`/catalog/events?league=NBA`, joined to markets by `eventId`; the per-event route is throttled) come from the public v3 catalog; prices and player identity come from the web app's batch book endpoint (`api.novig.us/nbx/v1/markets/book/batch`, at most 150 market ids per call, browser-like headers). The closed telemetry operations are `market_page`, `event_page`, and `market_book_batch`, with bounded concurrency from the registry's `detail_concurrency` (at most four). A batch that answers 404 (one settled or removed market) is split in halves recursively until the stale market stands alone, and only that market is dropped, excluded as `ineligible_status`; a market whose batch entry is malformed, or whose batch cannot be read, is a malformed record and the snapshot is partial. Market-list pages hold 1,000 rows, so the whole catalog fits well inside the 25-page cap; overflowing the cap still makes the snapshot partial. A ladder of strikes collapses to at most one `standard` line per (player, statistic, game): the Over midpoint nearest 0.5, ties to the lower strike, counting only midpoints within 0.25 of 0.5. A group with no such midpoint, a lone strike included, is all `alternate`. A market that could not be read has no midpoint. No retry strategy is configured beyond the shared transport's one safe retry. |
 | NBA injury report (`nba_injury_report`) | `NBAInjuryReportProvider` | One league-wide report read with the closed operation `get_injuries`; the newest report at or before now is found by stepping back through both file-name formats in at most 12 requests, where 403/404 means unpublished. Raw statuses are retained and only Probable, Questionable, Doubtful, and Out normalize canonically; `Available` stays raw with no canonical status. |
 
@@ -445,9 +448,15 @@ exactly one cache decision.
 `DFSBoardService.get_board(query, context)` is the internal collector seam. Its
 provider registry is injected explicitly; it never discovers or constructs
 providers while collecting. Enabled providers run concurrently behind one
-absolute `RetrievalContext` deadline (15 seconds by default), with at most
-three concurrent provider workers. The child context is capped at the lesser
-of the caller deadline and the configured deadline, never above 15 seconds. A
+absolute `RetrievalContext` deadline. The child context is capped at the
+lesser of the caller deadline and the board's configured deadline. Two boards
+share the same providers and collaborators. The request-time board (Comparison
+Board, `/api/dfs/board`) has a 15-second deadline that settings refuse to
+raise, and at most three concurrent provider workers. The projection
+collector's board answers no request: it has its own deadline
+(`PROJECTION_COLLECTION_BOARD_DEADLINE_SECONDS`, 45 seconds) and one worker per
+enabled provider, and the snapshot cache's refresh pool is sized to match, so
+no provider waits behind another. A
 complete empty snapshot is usable, while
 partial snapshots remain one coherent provider observation with their original
 `CoverageEvidence`; failed providers cannot remove usable snapshots from other
@@ -501,8 +510,9 @@ explicit match; the provider's coverage evidence and observation remain
 unchanged.
 
 The catalog maps full-game points, rebounds, assists, three-pointers made,
-steals, blocks, turnovers, PRA, PA, PR, RA, STKS, and field-goal,
-three-pointer, and two-pointer attempts. Composite identities use
+steals, blocks, turnovers, PRA, PA, PR, RA, STKS, field-goal, three-pointer,
+two-pointer, and free-throw attempts, and field goals, two-pointers, and free
+throws made. Composite identities use
 the reviewed component order (`PRA` is points, rebounds, assists) regardless of
 the source label order. Dabble, PrizePicks, Underdog, Kalshi, Polymarket, and Novig labels are accepted
 only when explicitly listed in the definition; provider evidence is matched
@@ -697,7 +707,10 @@ live lease or write future poll/backoff state that suppresses the scheduled
 collector. Dueness is derived from database-timed `last_poll_at` and
 `backoff_until`; no separate poll-deadline column is stored. The owner renews
 that lease around board and per-provider work; an expiry or takeover returns
-the bounded `busy/lease_lost` outcome. SQLite uses
+the bounded `busy/lease_lost` outcome. Nothing renews it while the board runs,
+and the board resolves athlete and event mappings for its markets after its
+deadline, so settings refuse a lease (`PROJECTION_COLLECTION_LEASE_SECONDS`,
+180 seconds) shorter than the collector board deadline plus 90 seconds. SQLite uses
 `BEGIN IMMEDIATE` for local tests but is not evidence for the production
 locking contract. A busy or overlapping run is a safe no-op. Provider outcomes
 are persisted independently through the existing archive recorder, with
@@ -761,8 +774,12 @@ Board or calling a provider registry. Each offering has a separate confirmation
 time. Complete and unchanged Complete polls confirm the whole scope; Partial
 polls confirm only included references. Confirmation is live through the
 inclusive 15-minute window. After a failed poll it may be stale-served only
-through the inclusive six-hour fallback. A disabled provider receives no new
-confirmations and expires without deleting Latest or immutable history.
+through the inclusive six-hour fallback. A required provider whose latest
+successful poll is past the live window with no newer poll is overdue and
+falls back the same way, but only for what that poll confirmed: a reference it
+omitted is older than the poll and still expires at the live window. A
+disabled provider receives no new confirmations and expires without deleting
+Latest or immutable history.
 Both the 15-minute live maximum and six-hour failure-fallback maximum enter
 through `app.domain.freshness`, including direct reader-constructor overrides.
 Populated Latest rows and successful Complete-empty evidence share one
@@ -1148,12 +1165,20 @@ Game logs:
 
 ```text
 GET /api/games/game_logs
-  → Firebase auth (or explicit local-only bypass)
+  → optional Firebase auth, waitlisted caller attached (crf04/statsplus#381)
   → GameService.get_filtered_logs
   → durable player-game-log publication
   → local/database and request filters
-  → serialized logs and averages
+  → serialized logs and averages; posted-line prices stripped unless admitted
 ```
+
+The read answers anyone, so a shared Log Workspace link loads signed out. The
+route derives one decision from the caller, admitted (signed in and not
+waitlisted; a failed waitlist lookup is not admitted). Anyone else gets `posted_lines.without_prices` and no research action
+counted. An offered season after the Published Season reads for anyone, so a
+link its sender copied from that season loads the same logs. Every caller
+reads the same seasons, so a next season not yet offered is refused for all. Anonymous callers are also
+limited per IP by `ANONYMOUS_ROUTE_LIMITS` in `app/utils/rate_limit.py`.
 
 `GameService.get_player_id` resolves the `player_name` query parameter against
 the injected Athlete Catalog (`AthleteCatalogReader.get_catalog`, an
@@ -1633,9 +1658,9 @@ identity fails closed even when additions produce net growth. Corrections that
 retain all identities, pure growth, and the exact governed recovery above
 remain publishable. Every rejected refresh records
 bounded scalar rejection and accumulated coverage counts without identities.
-Only raw box-score inputs are stored: minutes, PTS/REB/AST, FGM/FGA, FG3M/FG3A,
-TOV/STL/BLK, and canonical game/team/opponent identity. PRA, PA, PR, RA, STKS,
-FG2A, season rates, and rolling selections are derived at read time rather
+Only raw box-score inputs are stored: minutes, PTS/REB/AST, OREB/DREB, FGM/FGA,
+FG3M/FG3A, FTM/FTA, TOV/STL/BLK/PF, and canonical game/team/opponent identity. PRA, PA, PR, RA, STKS,
+FG2A, FG2M, season rates, and rolling selections are derived at read time rather
 than persisted in redundant tables.
 
 `PlayerGameLogRepository` is the internal query seam used by later matchup
@@ -2227,7 +2252,8 @@ the selected player from the archetype peer query, and asks the durable log
 repository for H2H/archetype rows. Rows without positive minutes or a usable
 stored Regular Season rate are omitted rather than assigned a synthetic
 baseline. Posted Market Categories are derived from the reviewed Statistic
-Catalog components, including combinations and FG2A (`FGA - FG3A`). Each game
+Catalog components, including combinations, FG2A (`FGA - FG3A`) and FG2M
+(`FGM - FG3M`). Each game
 delta is `stat / minutes - own Regular Season rate`. An AVG row reports
 per-game mean stats/minutes and a minutes-weighted rate delta; this preserves
 each archetype sample player's own baseline instead of inventing one aggregate
@@ -2468,10 +2494,12 @@ through the caller's stored-only reader, never the live one `get_matchup`
 would consult, so a pre-tip game with a stale stored override cannot start a
 synchronous provider refresh -- let alone a write -- inside this GET.
 `SnapshotMatchups` also owns a per-request `MatchupComposeCache`: the two
-league-wide Defense Sheet windows (keyed by `season, window_games, as_of`) and
-the league-wide Diet baseline population (keyed by the snapshot's immutable
-generation) are identical across every game the one captured snapshot composes,
-so they are read or built once per resolve rather than once per game. A
+league-wide Defense Sheet windows (keyed by the snapshot's immutable generation
+and `season, window_games, as_of`) and the league-wide Diet baseline population
+(keyed by the generation) are identical across every game that reads one
+generation, so they are read or built once per resolve rather than once per
+game. Past games of an Unpublished Season each read their own generation, as
+of their tip, so they never share one another's window. A
 deployment missing any of the three gating collaborators keeps calling
 `MatchupService.get_matchup` once per game, live injuries included, unchanged.
 
@@ -2737,12 +2765,15 @@ are US Eastern dates, stored in `day` so the report can index them.
 | --- | --- | --- |
 | `active` | noted where a verified token is synced to its user row (`_sync_firebase_user`, so required and optional auth alike), written after the response | once per uid, day, source |
 | `matchup_viewed`, `game_logs_queried`, `query_prompt_parsed`, `backtest_viewed` | `after_request`, on a 2xx `web`-source response for a verified non-bypass account (`WEB_ACTION_ENDPOINTS`) | once per uid, day, source, name |
+| `report_published` | `after_request`, on a 2xx publish of a `builder` report (the route sets `g.usage_web_action`), source `web` whichever client posted it (migration 083) | once per uid, day, source, name |
 | `mcp_tool_call` | `POST /api/usage/mcp-tool-calls` | never deduplicated |
 
 The source is the request header `X-CourtAI-Client`: the exact value `mcp` is
 `mcp`, anything else (or none) is `web`. The header grants nothing and changes no
 response. A web action is recorded only for `web` requests, so the backend calls
-an MCP tool makes do not count as web feature use.
+an MCP tool makes do not count as web feature use. `report_published` is the
+exception: a Report Builder report with Cards reaches the backend through the
+MCP server, and the builder is still a web surface.
 
 A daily event is `INSERT ... ON CONFLICT DO NOTHING` against the partial unique
 index `uq_usage_events_daily` (`name <> 'mcp_tool_call'`), behind a process-local
@@ -2780,7 +2811,10 @@ columns (`JSONB` on PostgreSQL). `ReportService` (`app/services/reports.py`) is
 its only reader and writer, and `app/domain/report_document.py` holds the
 schema and limits, mirroring the MCP tool's, so a caller other than the MCP
 cannot store anything bigger. The route lifts the app-wide 1 MB body cap to
-2 MB for this one request, as the feedback route does.
+2 MB for this one request, as the feedback route does. `reports.origin`
+(migration 082, crf04/statsplus#382) records who wrote a report, `assistant`
+or `builder` (the Report Builder), parsed into `ReportOrigin` at the body
+boundary and returned on every read so the report footer can say so.
 
 The public reads (`app/routes/report_routes.py`, `/api/reports/<id>`, `/meta`,
 `/preview.png`) are anonymous. The report read uses
@@ -3782,7 +3816,16 @@ when a `season` argument narrows what may be deleted. The method returns a
 `PruneResult` with `deleted` and `kept` (the maintenance command prints both as
 `publications_pruned` and `publications_kept`), where `kept` counts survivors by the
 first matching reason (`active`, `previous`, `candidate`, `season_latest`,
-`cutover_restore`). Pruning takes the pointer row locks first, in stream
+`cutover_restore`, `as_of`). `as_of` keeps a superseded version of any
+stream in a season after the stream's active one, unless every activation of
+it was withdrawn (`publication_withdrawn`: a reverted cutover or same-season
+rollback revoked its history): an Unpublished Season read of a past game
+serves the newest such version cut before that game tipped
+(crf04/statsplus-backend#626). It keeps every such version cut in the last 14
+days and, before that, only the newest version of each stream and season in
+each ISO week of the US/Eastern cutoff date (a candidate counts as that week's
+newest), so a game older than 14 days reads the newest kept version cut before
+its tip. Pruning takes the pointer row locks first, in stream
 order, then touches versions, the same stream, pointer, version order as every
 other writer, so it waits for a concurrent rollback (or makes it wait) and
 cannot delete a target the rollback is reading. History rows carry no foreign
@@ -3840,6 +3883,15 @@ season, and team identity. A `(season, player_id)` key lets a later official
 display-name update replace that season's label without rewriting prior
 history. Active, inactive, and historical rows remain distinguishable.
 
+Each row also carries a nullable `position` (Guard, Wing or Big), the player's
+Position for that season. `CommonAllPlayers` has no listed position, so the
+roster pull also requests `CommonTeamRoster` for every team (`team_roster`, about
+30 calls a season) and joins `POSITION` on player id, in the direct service and
+in the residential collector alike. The listed position maps to a group by one
+fixed rule (`G` Guard; `G-F`, `F-G`, `F` Wing; `F-C`, `C-F`, `C` Big; anything
+else none), and each refresh overwrites it. Target Position Qualifiers read it
+(ADR 0005 in the coordination repository).
+
 Provider collection happens before publication. Each requested season's
 catalog rows and success metadata are written in one transaction, so an
 interrupted publication rolls back to the prior catalog. Failure metadata is
@@ -3854,21 +3906,29 @@ database is rejected as a migration or catalog target.
 
 ### Provider athlete mappings
 
-`AthleteResolver.resolve(provider, evidence, season)` accepts one typed
-provider `AthleteEvidence` value and an explicit requested season;
-`resolve_market(market, season)` is the board-facing spelling that lifts a
-market's athlete and team evidence, and `for_board(season, identities)`
-returns the same two calls served from one read of the catalog and mapping
-state for a whole board. There is no other call shape. Resolution
-compares only the accent/case/punctuation-normalized official name among
-active `is_active_for_season` catalog rows. Normalization strips combining
-marks and folds the documented non-decomposing Latin letters (`ø`→`o`,
-`œ`→`oe`, `æ`→`ae`, `ł`→`l`, `đ`→`d`, `ð`→`d`, `þ`→`th`, `ħ`→`h`, `ŧ`→`t`,
-`ı`→`i`) to ASCII; it applies no aliases, nicknames, or fuzzy similarity.
-Exactly one candidate with non-conflicting canonical team evidence is
-automatically qualifying; missing team evidence is allowed. Duplicate names,
-inactive-only rows, aliases, fuzzy matches, and team conflicts remain typed
-non-matches. `AthleteMappingRepository` persists one current
+`AthleteResolver.resolve(provider, evidence, season, event_teams=())` accepts
+one typed provider `AthleteEvidence` value, an explicit requested season, and
+the teams of the market's game; `resolve_market(market, season)` is the
+board-facing spelling that lifts a market's athlete, team, and event-team
+evidence, and `for_board(season, identities)` returns the same two calls served
+from one read of the catalog and mapping state for a whole board. There is no
+other call shape. Resolution first compares the accent/case/punctuation-normalized
+official name among active `is_active_for_season` catalog rows. Normalization
+strips combining marks and folds the documented non-decomposing Latin letters
+(`ø`→`o`, `œ`→`oe`, `æ`→`ae`, `ł`→`l`, `đ`→`d`, `ð`→`d`, `þ`→`th`, `ħ`→`h`,
+`ŧ`→`t`, `ı`→`i`) to ASCII. A posted name with no exact row is then read
+against one roster: the athlete's team when the provider names it, otherwise
+the event's teams (Novig and Polymarket post no athlete team). A roster player
+fits when the names agree once a generational suffix is set aside and a listed
+nickname is folded (`athlete_resolver.NAME_VARIANTS`): `Robert Williams` for
+`Robert Williams III`, `Alexandre Sarr` for `Alex Sarr`. One fit is the
+candidate; two or more are ambiguous whatever their status; no team and no
+event teams leaves the name unmatched. Nothing else applies aliases or fuzzy
+similarity. Exactly one candidate with non-conflicting canonical team evidence
+is automatically qualifying; missing team evidence is allowed. Duplicate names,
+inactive-only rows, fuzzy matches, and team conflicts remain typed
+non-matches. The board resolves one identity's markets together with the
+union of their event teams, so the merged observation reads the same roster. `AthleteMappingRepository` persists one current
 `provider_athlete_mappings` row per provider identity, an append-only
 `athlete_mapping_decisions` audit log, and durable
 `athlete_mapping_rejections` suppressions. Provider names, provider team IDs,
@@ -4811,6 +4871,8 @@ beat (every 5 min, its own Railway cron service: scripts/collect_odds.py)
     change, plus every closing snapshot) + sportsbook_prop_latest
 Matchup read (only when ODDS_API_ENABLED): MatchupService._book_lines →
   SportsbookQuoteReader (savepoint)
+Board read (only when ODDS_API_ENABLED): SlateBoardService →
+  SportsbookQuoteReader.latest_quotes (every slate game, one statement)
 ```
 
 Schedule: polling starts 13 hours before tip (an empty response costs
@@ -5108,14 +5170,16 @@ scripts/backfill_closing_lines.py   (operator, from a laptop; needs ODDS_API_KEY
   normalized match resolves to the one roster player it fits: the same name once
   a generational suffix (Jr., Sr., II, III, IV) is set aside on both sides
   (`Jimmy Butler` for `Jimmy Butler III`, `Isaiah Stewart II` for
-  `Isaiah Stewart`), or once a listed nickname is folded (`odds_identity.
+  `Isaiah Stewart`), or once a listed nickname is folded (`athlete_resolver.
   NAME_VARIANTS`: `Nicolas Claxton` and `Nic Claxton`, `Herb Jones` and
   `Herbert Jones`, `Carlton Carrington` and `Bub Carrington`, ...). An exact
   match always wins; two suffixes that disagree (`Jr.` and `Sr.`) name different
   men; with two candidates (active or not) the resolver records the name as
   ambiguous, and with none it is unmatched, so neither resolves and an earlier
-  mapping of the name is not kept. The roster's spelling is only the catalog
-  lookup: the evidence, the provider identity
+  mapping of the name is not kept. This is the resolver's one spelling rule,
+  shared with the DFS and prediction-market board (see Provider athlete
+  mappings); `RosterNameResolver` passes the game's two teams as the event
+  teams. The roster's spelling is only the catalog lookup: the evidence, the provider identity
   (`name:<posted>`) and the recorded provider name stay what was posted, so a
   rejection or an approval of that identity is honoured as for any other name,
   and the live collector, which shares the resolver, resolves the same names. A
@@ -5235,13 +5299,17 @@ NBA player tracking can trail the box score by game-days while still
 answering, and its only tell is a smaller games played. So the collector
 bounds every read to the cutoff's slate date (`DateTo`) and carries the
 box-score games over the same bound: each player's (`LeagueDashPlayerStats`)
-and each team's (`LeagueDashTeamStats`). The composer refuses with
+and each team's (`LeagueDashTeamStats`), plus tracking's own `Overall` range,
+which lists every player tracking has reached. The composer refuses with
 `provider_window_lagging` unless every team's box-score games equal the games
-the cutoff governs, every player's tracking games equal his box-score
-games, and every player with box-score field-goal attempts appears in at
-least one category (a player with none has no shot type and may be absent);
-an observation without the bound or the evidence is
-`provider_window_unverified`. The refused job is retried by the next upload
+the cutoff governs, every player's tracking games in each category equal his
+box-score games, and every player with box-score field-goal attempts has as
+many games in `Overall` as in the box score. The three types do not cover
+every shot (a floater from 12 feet is none of them), so a fully tracked player
+whose attempts all fall outside them is absent from the Diet; requiring each
+shooter in a category refused the 2026-10-28 collection over one such
+attempt (crf04/statsplus#386). An observation without the bound or the
+evidence is `provider_window_unverified`. The refused job is retried by the next upload
 inside the collection window, so the publication moves as soon as NBA catches
 up and never to a lagging candidate. The version binds the same manifest and Event Catalog
 authority the opponent streams bind, and the strict `decode_player_diet`
@@ -5249,6 +5317,12 @@ read-side decoder must accept the exact candidate before its pointer moves.
 The fourth Diet stream, `player_assist_locations`, is composed from the
 canonical game ledger by `LedgerMaterializationService`, not from collector
 observations, and so stays out of `PLAYER_DIET_OBSERVATION_STREAM_KEYS`.
+Every player with assists gets all five location slices: the ledger proves
+each count, so a location with none is a known zero, stored with share 0.
+Without it the Diet is not a complete partition and the Matchup cannot score
+AST (crf04/statsplus#407). The legacy collector does the same only when the
+locations PBPStats reports already add up to the player's assists; otherwise
+a blank location stays unknown.
 
 `exact_shot_zones` is the third member of that set and the only one with two
 readers, so it is a third composition branch rather than a set entry: the
@@ -5446,6 +5520,32 @@ runs nightly after `scripts/ledger_refresh.py` in the `ledger-refresh` Railway
 service and is also the season backfill. `RotationService` serves
 `GET /api/games/rotation`, computing every average and comparison from the
 stored centiseconds.
+
+### Player tracking (crf04/statsplus#349)
+
+`player_game_tracking` (migration 078, `app/models/player_tracking.py`) holds
+NBA.com rebound chances (total, offensive, defensive) and potential assists per
+(game, player), all nullable, with the season, game date and fetch time. It is a
+plain table outside the publication pipeline: tracking arrives separately from
+the box score and can lag it by hours, so it never holds up or alters ledger
+checksums or publications. `StoredGameLogsSource` joins it onto game-log rows by
+(game, player) when Game Logs is read; no stored row serves `null`, never `0`.
+Game Logs responses are not cached, so a row gains its values on the first read
+after collection (only the link-preview card facts cache for an hour).
+
+`app/providers/nba_tracking.py` fetches `boxscoreplayertrackv3` (one call per
+game) and the `leaguedashptstats` Passing day feed (one call per game day) with
+`nba_api`'s `STATS_HEADERS`, retrying empty bodies and timeouts. The `Rebounding`
+day feed is not used: it omits every player with 0 rebounds.
+`PlayerTrackingCollectionService` collects each completed regular-season Event
+Catalog game with no stored rows, oldest first, and stores a game only once both
+feeds have published for it (the box score has a player with minutes and the day
+feed lists one of them); otherwise the game is reported as `not_published` and a
+later run retries it. Each unsuccessful attempt is remembered in `player_tracking_attempts` (also migration 078); candidates run never-tried first, then least recently tried, so games whose tracking never publishes cannot starve newer ones under `--max-games`. `replace_game` takes a per-game Postgres advisory lock, so a backfill overlapping the cron serializes instead of raising a duplicate key. A player missing from the day feed stores
+`potential_ast = NULL`. `PlayerTrackingRepository.replace_game` rewrites one game
+in a single transaction and writes nothing when the values are unchanged, so
+reruns leave identical rows. `scripts/tracking_refresh.py` is the nightly step
+(`railway.tracking.json`, 10:30 and 14:30 UTC) and the season backfill.
 
 ### Season player stats (crf04/statsplus#277)
 

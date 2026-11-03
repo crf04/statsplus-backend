@@ -4,8 +4,10 @@ The slate, slate-edges and ladder reads (crf04/statsplus#211) and the
 game-log, Slate and Matchup preview images (crf04/statsplus#285, #320) are
 anonymous:
 they carry no auth decorator, so an ``Authorization`` header is ignored and
-the rate limiter counts the caller by IP. Every other route here requires
-authentication.
+the rate limiter counts the caller by IP. The game-log read (crf04/statsplus#381)
+answers anyone too, but attaches a valid token, waitlisted included, so a
+signed-in caller keeps the uid bucket and only an admitted one sees prices.
+Every other route here requires authentication.
 
 The slate route delegates one optional ET date to the persisted-schedule
 service. The game-log route parses query parameters into one typed
@@ -15,17 +17,20 @@ serves requests with worker threads, so no event loop is created per request
 timeouts keep the documented 503 ``provider_unavailable`` contract.
 """
 
+import logging
 import re
 import threading
+from datetime import date
 from typing import Any
 
 import requests
-from flask import Blueprint, Response, current_app, jsonify, request
+from flask import Blueprint, Response, current_app, g, jsonify, request
 from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.datastructures import MultiDict
 
 from ..dependencies import get_dependencies
+from ..domain.nba_teams import NBA_TEAM_TRICODES
 from ..errors import (
     InvalidInputError,
     ProviderUnavailableError,
@@ -39,10 +44,14 @@ from ..services.database_first_activation import SeasonUnavailable
 from ..services.game_log_preview import GameLogPreviewService, parse_line, parse_line_type
 from ..services.matchup_slate_preview import MatchupSlatePreviewService
 from ..services.nba_stats_adapter import validate_canonical_season
+from ..services.posted_lines import without_prices
 from ..services.research_season import refuse_after_published, season_scoped
-from ..utils.auth import get_current_user, require_auth
+from ..services.slate_board import BOARD_SOURCES
+from ..utils.auth import get_current_user, is_waitlisted, require_auth, require_auth_optional_allow_waitlisted
 from ._selected_season import season_argument, season_refusals, selected
 from ._service_proxy import CurrentAppService
+
+logger = logging.getLogger(__name__)
 
 # Initialize blueprint and services
 game_bp = Blueprint("games", __name__)
@@ -65,6 +74,7 @@ matchup_selection_service = CurrentAppService("matchup_selection")
 injuries_service = CurrentAppService("injury_listing")
 rotation_service = CurrentAppService("rotation")
 injury_scenarios_service = CurrentAppService("injury_scenario")
+slate_board_service = CurrentAppService("slate_board")
 
 _MATCHUP_PARAMETERS = frozenset({"game_id"})
 #: The optional Evidence season on Matchup and selection (crf04/statsplus#330).
@@ -83,6 +93,7 @@ _ROTATION_DEFAULT_LAST_N = 5
 _ROTATION_MAX_LAST_N = 20
 _LAST_N = re.compile(r"[0-9]{1,2}\Z")
 _NBA_GAME_ID = re.compile(r"[0-9]{10}\Z")
+_BOARD_PARAMETERS = frozenset({"date", "season", "market", "game", "team", "sources"})
 
 
 def _is_canonical_player_id(value: str) -> bool:
@@ -96,7 +107,7 @@ def _is_canonical_player_id(value: str) -> bool:
 @game_bp.route("/slate", methods=["GET"])
 def get_slate():
     """Return the persisted current-season slate for one ET calendar date."""
-    service = selected(slate_service, "slate", season_argument(), anonymous=True)
+    service = selected(slate_service, "slate", season_argument())
     with season_refusals():
         return jsonify(service.get_slate(request.args.get("date"), fallback=request.args.get("fallback")))
 
@@ -104,7 +115,7 @@ def get_slate():
 @game_bp.route("/slate/edges", methods=["GET"])
 def get_slate_edges():
     """Return each slate game's biggest points effects and the slate's picks."""
-    service = selected(slate_edges_service, "slate_edges", season_argument(), anonymous=True)
+    service = selected(slate_edges_service, "slate_edges", season_argument())
     with season_refusals():
         return jsonify(service.get_edges(request.args.get("date"), fallback=request.args.get("fallback")))
 
@@ -139,6 +150,57 @@ def get_injury_scenarios():
             game_id=request.args.get("game_id"),
             player=request.args.get("player"),
             user_id=user.get("uid"),
+        )
+    )
+
+
+def _invalid_board(*parameters: str) -> InvalidInputError:
+    return InvalidInputError(
+        f"The board parameters are invalid: {', '.join(parameters)}.",
+        public_details={"parameters": list(parameters)},
+    )
+
+
+@game_bp.route("/board", methods=["GET"])
+@require_auth
+def get_board():
+    """Every posted line for one market across one ET date, or the date's market index."""
+
+    unknown = sorted(set(request.args) - _BOARD_PARAMETERS)
+    if unknown:
+        raise _invalid_board(*(sanitize_public_value(name) for name in unknown))
+    for name in _BOARD_PARAMETERS - {"sources"}:
+        if len(request.args.getlist(name)) > 1:
+            raise _invalid_board(name)
+    try:
+        slate_date = date.fromisoformat(request.args.get("date", ""))
+    except ValueError:
+        raise _invalid_board("date") from None
+    if slate_date.isoformat() != request.args["date"]:
+        raise _invalid_board("date")
+    game_id = request.args.get("game")
+    if game_id is not None and _NBA_GAME_ID.fullmatch(game_id) is None:
+        raise _invalid_board("game")
+    team = request.args.get("team")
+    if team is not None:
+        team = team.upper()
+        if team not in NBA_TEAM_TRICODES:
+            raise _invalid_board("team")
+    sources = None
+    if "sources" in request.args:
+        sources = frozenset(
+            name.strip().casefold() for value in request.args.getlist("sources") for name in value.split(",")
+        )
+        if not sources or not sources <= BOARD_SOURCES:
+            raise _invalid_board("sources")
+    return jsonify(
+        slate_board_service.get_board(
+            slate_date=slate_date,
+            season=season_argument(),
+            market=request.args.get("market"),
+            game_id=game_id,
+            team=team,
+            sources=sources,
         )
     )
 
@@ -508,10 +570,40 @@ def _filtered_logs(player_name: str, query: GameLogQuery, *, selected: bool = Fa
 
 
 @game_bp.route("/game_logs", methods=["GET"])
-@require_auth
+@require_auth_optional_allow_waitlisted
 def get_game_logs():
+    """Game logs for anyone with a Log Workspace link (crf04/statsplus#381).
+
+    Only an admitted caller (signed in, not waitlisted) gets the full answer.
+    Anyone else gets the shared-link view: each posted line without prices
+    and no research action counted. Any offered season reads for anyone, so a
+    link to the season after the Published Season loads as its sender saw it.
+    """
+    admitted = _admitted(get_current_user())
     player_name, query = _parse_game_log_filters()
-    return jsonify(_filtered_logs(player_name, query, selected=request.args.get("season_filter") is not None))
+    selected_season = request.args.get("season_filter") is not None
+    if not admitted:
+        g.research_action = False
+    logs = _filtered_logs(player_name, query, selected=selected_season)
+    if not admitted and logs.get("posted_line") is not None:
+        logs = {**logs, "posted_line": without_prices(logs["posted_line"])}
+    return jsonify(logs)
+
+
+def _admitted(viewer: dict[str, Any] | None) -> bool:
+    """Signed in and known not to be waitlisted.
+
+    A failed waitlist lookup is not admission: the read still answers, without
+    prices, rather than showing prices to a caller it could not place.
+    """
+
+    if viewer is None:
+        return False
+    try:
+        return not is_waitlisted(viewer)
+    except Exception as error:
+        logger.warning("Could not resolve access status for a game-log read: %s", error)
+        return False
 
 
 def _preview_query_from(args: Any) -> tuple[str, GameLogQuery]:

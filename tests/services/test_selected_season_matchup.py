@@ -34,12 +34,14 @@ from tests.support.season_cutover import (
     THIN_PROVENANCE,
 )
 from tests.support.selected_season import (
+    _PLAY_TYPE_PAYLOADS,
     GAME_ID,
     OLD_GAME_ID,
     OLD_SLATE_DATE,
     PLAY_TYPE_DEFENSE,
     PLAYER_ID,
     PLAYER_NAME,
+    PLAYER_SYNERGY,
     SelectedWorld,
     _StoredInjuries,
 )
@@ -75,6 +77,7 @@ def served(world, dependencies):
     dependencies.slate_edges_service = world.edges
     dependencies.player_service = world.profiles
     dependencies.diet_baselines_service = world.baselines
+    dependencies.team_service = world.teams
     return world
 
 
@@ -86,9 +89,12 @@ ROUTES = {
     "profile": "/api/players/profile?player_name=Player+0&category=Shooting+Type",
     "diet_baselines": "/api/diet/baselines?",
     "unscheduled": f"/api/matchups/unscheduled?player_id={PLAYER_ID}&opponent={TRICODES[BOS]}",
+    "team_stats": "/api/teams/stats?category=Traditional&team=Boston+Celtics",
 }
-#: Slate, edges and profile also answer anonymous callers.
-ANONYMOUS = ("slate", "slate_edges", "profile")
+#: Slate, edges, profile and team stats also answer anonymous callers.
+ANONYMOUS = ("slate", "slate_edges", "profile", "team_stats")
+#: The home page's reads: an anonymous caller selects any offered season.
+HOME = ("slate", "slate_edges")
 
 
 def _with_season(path):
@@ -135,10 +141,28 @@ def test_every_route_names_an_explicit_published_season_in_its_context(served, c
     assert body["season_context"] == {"selected_season": OLD, "published_season": OLD}
 
 
-@pytest.mark.parametrize("route", ANONYMOUS)
+@pytest.mark.parametrize("route", sorted(set(ANONYMOUS) - set(HOME)))
 def test_an_anonymous_caller_cannot_select_a_held_season(served, client, route):
     served.hold_opening_week()
 
+    response = client.get(f"{_with_season(ROUTES[route])}{NEW}")
+
+    assert _refusal(response) == (503, "season_unavailable", CONTEXT)
+
+
+@pytest.mark.parametrize("route", HOME)
+def test_an_anonymous_home_read_selects_the_offered_2026_27(served, client, route):
+    served.hold_opening_week()
+
+    response = client.get(f"{_with_season(ROUTES[route])}{NEW}")
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert (body["season_context"], body["trailing"]) == (CONTEXT, [DIETS, LAST_15])
+
+
+@pytest.mark.parametrize("route", HOME)
+def test_an_anonymous_home_read_of_an_unoffered_season_is_refused(served, client, route):
     response = client.get(f"{_with_season(ROUTES[route])}{NEW}")
 
     assert _refusal(response) == (503, "season_unavailable", CONTEXT)
@@ -245,6 +269,28 @@ def test_a_selected_2026_27_matchup_reads_play_type_defense_from_its_2026_27_can
     assert _generation(body, "traditional_opponent_season") == [(traditional.publication_id, "candidate")]
     assert body["experience"]["sections"]["season_defense"]["season"] == NEW
     assert body["trailing"] == [DIETS, SYNERGY, LAST_15]
+
+
+def test_a_selected_2026_27_matchup_reads_player_synergy_from_its_candidate_before_ten_games_a_team(
+    served, client
+):
+    served.publish_play_types()
+    served.hold_opening_week()
+    play_types = served.compose_new_play_types(
+        PLAY_TYPE_DEFENSE, THIN_GAMES, cutoff=THIN_CUTOFF, provenance=THIN_PROVENANCE
+    )
+    synergy = served.compose_new_play_types(
+        PLAYER_SYNERGY, THIN_GAMES, cutoff=THIN_CUTOFF, provenance=THIN_PROVENANCE
+    )
+
+    selected = client.get(f"{ROUTES['matchup']}&season={NEW}").get_json()
+    omitted = client.get(ROUTES["matchup"]).get_json()
+
+    assert _generation(selected, PLAYER_SYNERGY) == [(synergy.publication_id, "candidate")]
+    assert _generation(selected, PLAY_TYPE_DEFENSE) == [(play_types.publication_id, "candidate")]
+    assert selected["trailing"] == [DIETS, LAST_15]
+    assert _generation(omitted, PLAYER_SYNERGY) == [(served.live(PLAYER_SYNERGY), "active")]
+    assert omitted["trailing"] == []
 
 
 def test_a_selected_2026_27_matchup_with_no_play_type_defense_composition_trails_team_defense(served, client):
@@ -647,6 +693,51 @@ def test_baselines_selected_after_the_cutover_still_name_their_trailing_diets(se
 # --- game logs (B1) carry the sample too ----------------------------------------
 
 
+# --- Opposing Team Profile (crf04/statsplus#369) --------------------------------
+
+PLAY_TYPE_POINTS = "/api/teams/stats?category=Playtype+Points&team=Boston+Celtics"
+
+
+def _isolation(body):
+    return {key: body[key] for key in ("Isolation", "Isolation_RANK", "Cut", "Cut_RANK")}
+
+
+def test_a_selected_2026_27_team_profile_ranks_its_held_play_type_defense(served, client, authenticate):
+    served.publish_play_types()
+    served.hold_opening_week()
+    held = _PLAY_TYPE_PAYLOADS[PLAY_TYPE_DEFENSE](THIN_GAMES)
+    for row in held["rows"]:
+        if row["team_id"] == BOS:
+            row["per48"] = {**row["per48"], "Isolation_PTS": 4.0}
+    served.publications.recompose_ledger(
+        PLAY_TYPE_DEFENSE,
+        season=NEW,
+        cutoff=THIN_CUTOFF,
+        payload=held,
+        provenance=THIN_PROVENANCE,
+        reason="2026-27 ledger composition",
+    )
+
+    selected = client.get(f"{PLAY_TYPE_POINTS}&season={NEW}", headers=authenticate()).get_json()
+    omitted = client.get(PLAY_TYPE_POINTS).get_json()
+
+    # The 2026-27 candidate passes governance: BOS allows the most isolation points.
+    assert _isolation(selected["data"]) == {"Isolation": 4.0, "Isolation_RANK": 30, "Cut": 1.0, "Cut_RANK": 1}
+    assert (selected["season_context"], selected["trailing"]) == (CONTEXT, [])
+    # No season reads today's bare 2025-26 body.
+    assert _isolation(omitted) == {"Isolation": 1.0, "Isolation_RANK": 1, "Cut": 1.0, "Cut_RANK": 1}
+
+
+def test_a_selected_2026_27_team_profile_trails_team_defense_on_2025_26(served, client, authenticate):
+    served.publish_play_types()
+    served.hold_opening_week()
+
+    body = client.get(f"{PLAY_TYPE_POINTS}&season={NEW}", headers=authenticate()).get_json()
+
+    assert _isolation(body["data"]) == {"Isolation": 1.0, "Isolation_RANK": 1, "Cut": 1.0, "Cut_RANK": 1}
+    assert (body["season_context"], body["trailing"]) == (CONTEXT, [TEAM_DEFENSE])
+
+
 def test_selected_game_logs_list_their_trailing_families_with_their_sample(served):
     served.hold_ten_games()
 
@@ -664,23 +755,37 @@ def test_selected_game_logs_list_their_trailing_families_with_their_sample(serve
 # --- cost -----------------------------------------------------------------------
 
 
-def test_slate_edges_judge_each_candidate_once_however_many_games_they_score(served, client, authenticate):
+def test_slate_edges_prove_one_shared_ledger_lineage_once_without_evidence_payloads(
+    served, client, authenticate
+):
     served.hold_ten_games()
     second = {**_game_event(), "nba_game_id": "0022600161", "scheduled_at": "2026-10-27T00:00:00+00:00"}
     served.slates.event_catalog.events_by_season[NEW].append(second)
     served.service.event_catalog = served.slates.event_catalog
-    judged = []
-    lineage = served.publications.season_candidate_lineage_refusal
+    path = f"{ROUTES['slate_edges']}&season={NEW}"
+    proved = []
+    prove = served.publications._assert_ledger_provenance
 
-    def counted(session, stream, candidate):
-        judged.append(candidate.stream_key)
-        return lineage(session, stream, candidate)
+    def counted(session, **kwargs):
+        proved.append(kwargs["manifest_id"])
+        return prove(session, **kwargs)
 
-    served.publications.season_candidate_lineage_refusal = counted
+    served.publications._assert_ledger_provenance = counted
+    statements = []
 
-    body = client.get(f"{ROUTES['slate_edges']}&season={NEW}", headers=authenticate()).get_json()
+    def record(connection, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(served.engine, "before_cursor_execute", record)
+    try:
+        body = client.get(path, headers=authenticate()).get_json()
+    finally:
+        event.remove(served.engine, "before_cursor_execute", record)
 
     assert [game["game_id"] for game in body["games"]] == [GAME_ID, "0022600161"]
-    # Both candidates pass their memoized checks; each one's ledger lineage is
-    # rechecked once for the request, not once per game.
-    assert sorted(judged) == sorted([PLAYER_LOGS, "traditional_opponent_season"])
+    # Both candidates record the same games under one manifest and cutoff, so
+    # the ledger proves their lineage once for the request: not once per
+    # stream, nor once per game.
+    assert proved == ["manifest-new"]
+    # Evidence is judged by its identity; no read loads an observation's payload.
+    assert [statement for statement in statements if "collection_observations.payload" in statement] == []

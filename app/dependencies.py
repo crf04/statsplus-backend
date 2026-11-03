@@ -89,7 +89,9 @@ class ApplicationDependencies:
     rotation_service: Any | None = None
     player_season_stats_service: Any | None = None
     rotation_collection_service: Any | None = None
+    player_tracking_collection_service: Any | None = None
     injury_scenario_service: Any | None = None
+    slate_board_service: Any | None = None
 
 
 logger = getLogger(__name__)
@@ -150,6 +152,7 @@ def build_dependencies(
     from app.providers.nba_injury_report import NBAInjuryReportProvider
     from app.providers.nba_live_data import NBALiveDataBoxscoreAdapter
     from app.providers.nba_stats import NBAStatsAdapter
+    from app.providers.nba_tracking import NBATrackingProvider
     from app.providers.pbp_game_logs import PBPGameLogAdapter
     from app.providers.pbp_stats import PBPStatsAdapter
     from app.services.athlete_catalog_service import (
@@ -178,6 +181,7 @@ def build_dependencies(
     from app.services.injury_scenarios import InjuryScenarioService
     from app.services.injury_snapshot_repository import InjurySnapshotRepository
     from app.services.job_service import build_data_refresh_job_service
+    from app.services.lineup_segment_repository import LineupSegmentRepository
     from app.services.llm_budget import LLMDailyBudget
     from app.services.matchup import MatchupService
     from app.services.matchup_injuries import MatchupInjuryService, StoredMatchupInjuryReader
@@ -194,6 +198,8 @@ def build_dependencies(
     from app.services.player_game_log_repository import PlayerGameLogRepository
     from app.services.player_season_stats import PlayerSeasonStatsRepository, PlayerSeasonStatsService
     from app.services.player_service import PlayerProfileReader, PlayerService
+    from app.services.player_tracking_collection import PlayerTrackingCollectionService
+    from app.services.player_tracking_repository import PlayerTrackingRepository
     from app.services.projection_archive import (
         LatestProjectionPlayerPoolReader,
         ProjectionArchive,
@@ -321,7 +327,10 @@ def build_dependencies(
 
     dfs_providers: dict[str, Any] = {}
     cached_dfs_providers: dict[str, Any] = {}
-    dfs_snapshot_cache = ProviderSnapshotCacheCoordinator()
+    # Every enabled provider can be in flight at once, so the collector board
+    # never queues a slow provider behind the others.
+    dfs_provider_slots = max(1, len(settings.providers.dfs_enabled_providers))
+    dfs_snapshot_cache = ProviderSnapshotCacheCoordinator(max_workers=dfs_provider_slots)
     dfs_runtime = DFSProviderRuntime(
         connect_timeout_seconds=settings.providers.dfs_provider_connect_timeout_seconds,
         read_timeout_seconds=settings.providers.dfs_provider_read_timeout_seconds,
@@ -549,16 +558,19 @@ def build_dependencies(
         player_service=player_service,
     )
 
+    board_collaborators = {
+        "provider_registry": cached_dfs_providers,
+        "settings": settings,
+        "statistic_catalog": statistic_catalog,
+        "athlete_resolver": athlete_resolver,
+        "athlete_mapping_repository": athlete_mapping_repository,
+        "event_resolver": event_resolver,
+        "event_mapping_repository": event_mapping_repository,
+    }
     dfs_board_service = DFSBoardService(
-        provider_registry=cached_dfs_providers,
         max_concurrency=3,
         deadline_seconds=settings.providers.dfs_board_deadline_seconds,
-        settings=settings,
-        statistic_catalog=statistic_catalog,
-        athlete_resolver=athlete_resolver,
-        athlete_mapping_repository=athlete_mapping_repository,
-        event_resolver=event_resolver,
-        event_mapping_repository=event_mapping_repository,
+        **board_collaborators,
     )
     comparison_board_service = ComparisonBoardService(
         dfs_board_service,
@@ -575,7 +587,9 @@ def build_dependencies(
     matchup_injury_service = MatchupInjuryService(
         provider=injury_provider,
         snapshot_repository=injury_snapshot_repository,
-        athlete_catalog=athlete_catalog_service,
+        # The engine-bound reader takes the request's connection, so a report
+        # reconciled on a Matchup's read reads the catalog from its snapshot.
+        athlete_catalog=(AthleteCatalogReader(engine) if athlete_catalog_service is not None else None),
         enabled=settings.features.injury_report_enabled,
     )
     projection_archive = (
@@ -633,7 +647,13 @@ def build_dependencies(
 
         projection_collection_coordinator = ProjectionCollectionCoordinator(
             engine,
-            board_service=dfs_board_service,
+            # The collector answers no request, so it is not held to the
+            # request-time ceiling.
+            board_service=DFSBoardService(
+                max_concurrency=dfs_provider_slots,
+                deadline_seconds=settings.projection_collection.board_deadline.total_seconds(),
+                **board_collaborators,
+            ),
             recording_service=projection_recorder,
             event_reader=(event_catalog_service.get_events if event_catalog_service is not None else None),
             season=settings.nba.current_season,
@@ -684,8 +704,10 @@ def build_dependencies(
         StoredGameLogsSource,
     )
 
+    player_tracking_repository = PlayerTrackingRepository(engine)
     game_logs_source = StoredGameLogsSource(
         player_game_log_repository,
+        tracking=player_tracking_repository,
     )
     from app.services.event_catalog_repository import EventCatalogRepository
     from app.services.posted_lines import PostedLinesReader, StoredSchedule
@@ -791,6 +813,20 @@ def build_dependencies(
         # if quotes were stored earlier.
         sportsbook_reader=sportsbook_quote_reader,
     )
+    from app.services.slate_board import SlateBoardService
+
+    # The board reads the Slate's pool, the stored injury report, the
+    # Matchup's sportsbook reader and the athlete catalog; it composes no Matchup.
+    slate_board_service = SlateBoardService(
+        event_catalog=event_catalog_service,
+        player_pool=projection_player_pool_reader,
+        injuries=matchup_injury_service,
+        sportsbook_reader=sportsbook_quote_reader,
+        statistic_catalog=statistic_catalog,
+        settings=settings,
+        athlete_catalog=athlete_catalog_reader,
+        engine=engine,
+    )
     user_service = UserService(
         engine,
         settings=settings,
@@ -816,6 +852,10 @@ def build_dependencies(
         settings=settings,
         snapshot_reuse=snapshot_reuse,
         matchup_cache=matchup_cache,
+        # A Position and a season average are read from the engine-bound
+        # catalog and the Regular Season logs, never from a provider.
+        player_logs=player_game_log_repository,
+        athlete_catalog=athlete_catalog_reader,
     )
     # The home page's slate edges compose the same two documents under the same
     # promises: one Publication snapshot, stored-only injuries, no provider.
@@ -846,6 +886,7 @@ def build_dependencies(
         publication_reader=research_publications,
         engine=engine,
         redis_client=redis_client,
+        athlete_catalog=athlete_catalog_reader,
     )
     # A preview composes the two Target reads from one Publication snapshot
     # and reads injuries stored-only: the Matchup route may refresh them from
@@ -860,7 +901,12 @@ def build_dependencies(
     )
 
     rotation_repository = RotationRepository(engine)
-    on_off_service = OnOffService(pbp_stats_provider, settings, redis_client=redis_client)
+    on_off_service = OnOffService(
+        pbp_stats_provider,
+        settings,
+        redis_client=redis_client,
+        segments=None if demo_database else LineupSegmentRepository(engine),
+    )
     return ApplicationDependencies(
         settings=settings,
         engine=engine,
@@ -930,6 +976,11 @@ def build_dependencies(
             rotation_repository,
             (event_catalog_service.get_events if event_catalog_service is not None else (lambda season: [])),
         ),
+        player_tracking_collection_service=PlayerTrackingCollectionService(
+            NBATrackingProvider(),
+            player_tracking_repository,
+            (event_catalog_service.get_events if event_catalog_service is not None else (lambda season: [])),
+        ),
         on_off_service=on_off_service,
         injury_scenario_service=InjuryScenarioService(
             injuries=injury_listing_service,
@@ -954,6 +1005,7 @@ def build_dependencies(
         research_activity_service=ResearchActivityService(engine, counting=not demo_database),
         usage_event_service=UsageEventService(engine, recording=not demo_database),
         report_service=ReportService(engine),
+        slate_board_service=slate_board_service,
     )
 
 

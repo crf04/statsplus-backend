@@ -45,6 +45,8 @@ from nba_api.stats import endpoints
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.domain.nba_events import display_event_classification
+from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
+from app.domain.player_position import listed_positions_by_player, with_listed_positions
 from app.errors import ProviderUnavailableError
 from app.utils.nba_api_config import get_nba_stats_timeout
 from app.utils.telemetry import (
@@ -734,6 +736,7 @@ class NBAStatsAdapter:
         *,
         endpoint_factory: Callable[..., object] | None = None,
         roster_endpoint_factory: Callable[..., object] | None = None,
+        team_roster_endpoint_factory: Callable[..., object] | None = None,
         team_game_log_endpoint_factory: Callable[..., object] | None = None,
     ):
         self.settings = settings or get_runtime_settings()
@@ -748,6 +751,7 @@ class NBAStatsAdapter:
         self._endpoint_factory = endpoint_factory
         self._schedule_endpoint_factory = endpoint_factory
         self._roster_endpoint_factory = roster_endpoint_factory
+        self._team_roster_endpoint_factory = team_roster_endpoint_factory
         self._team_game_log_endpoint_factory = team_game_log_endpoint_factory
 
     @property
@@ -1413,6 +1417,9 @@ class NBAStatsAdapter:
                 lambda timeout: factory(is_only_current_season=0, season=canonical, timeout=timeout),
                 validator=lambda candidate: normalize_player_roster(candidate, season=canonical),
             )
+            # CommonAllPlayers carries no listed position, so the season's
+            # per-team rosters (one call per team) supply it.
+            frame = with_listed_positions(frame, self._listed_positions(canonical))
             return normalize_player_roster(frame, season=canonical)
         except ProviderResponseError as error:
             raise ProviderUnavailableError(
@@ -1424,6 +1431,21 @@ class NBAStatsAdapter:
             ) from error
         except requests.exceptions.RequestException as error:
             raise ProviderUnavailableError("The NBA Stats provider is unavailable.", detail=error) from error
+
+    def _listed_positions(self, season: str) -> dict[int, str]:
+        """Return ``{player id: listed position}`` from every team's roster."""
+
+        factory = self._team_roster_endpoint_factory or endpoints.commonteamroster.CommonTeamRoster
+        frames = []
+        for team_id in sorted(NBA_TEAM_ID_TO_TRICODE):
+            frames.append(
+                self.run_endpoint(
+                    "team_roster",
+                    lambda timeout, team_id=team_id: factory(team_id=team_id, season=season, timeout=timeout),
+                    required_columns=("PLAYER_ID", "POSITION"),
+                )
+            )
+        return listed_positions_by_player(frames)
 
     def fetch_whole_season_schedule(self, *, season: str) -> pd.DataFrame:
         """Fetch one explicit season through the instrumented schedule seam."""

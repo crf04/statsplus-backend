@@ -10,6 +10,7 @@ FIELDS:
 - minutes_filter: {min, max} for minute ranges such as "20-35 minutes".
 - self_filters: the player's own stat thresholds. stat_column uses box-score columns (PTS, REB, AST, STL, BLK, TOV, FGM, FGA, FG3M, FG3A, FTM, FTA, PLUS_MINUS). "30+ points" = gte 30; "under 5 turnovers" = lt 5; "between" needs value2, otherwise value2 is null.
 - opponent_filters: {filter_type, rank} pairs describing opponents.
+- opponent_team: a single NBA team the player played against, e.g. "vs the Blazers"; not a ranked group of teams.
 - players_on / players_off: teammates on or off the court ("with X" / "without X").
 - season: e.g. "2024-25" when a season is named.
 - intent: game_logs unless the query asks for a profile or team stats.

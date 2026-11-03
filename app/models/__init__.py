@@ -121,6 +121,12 @@ from .event_mapping import (  # noqa: E402
 )
 from .injury_snapshot import InjurySnapshot, InjurySourceSnapshot  # noqa: E402
 from .job import DataRefreshJob  # noqa: E402
+from .lineup_segments import (  # noqa: E402
+    LineupRosterSlot,
+    LineupSegmentGame,
+    LineupSegmentPlayer,
+    LineupSegmentSeason,
+)
 from .player_game_log import (  # noqa: E402
     PlayerGameLog,
     PlayerGameLogRefresh,
@@ -129,6 +135,7 @@ from .player_game_log import (  # noqa: E402
 )
 from .player_pool_snapshot import PlayerPoolSnapshot  # noqa: E402
 from .player_season_stats import PlayerSeasonStats  # noqa: E402
+from .player_tracking import PlayerGameTracking, PlayerTrackingAttempt  # noqa: E402
 from .projection_archive import (  # noqa: E402
     ClosingProjectionMembership,
     ClosingProjectionSet,
@@ -144,7 +151,7 @@ from .projection_collection import (  # noqa: E402
     ProjectionCollectionLease,
     ProjectionCollectionProviderState,
 )
-from .report import Report  # noqa: E402
+from .report import Report, ReportListing  # noqa: E402
 from .research_activity import AccountCohort, ResearchActivityDay  # noqa: E402
 from .rotation import RotationAttempt, RotationGame, RotationPlayerGame, RotationStint  # noqa: E402
 from .saved_filter_set import SavedFilterSet  # noqa: E402
@@ -204,12 +211,18 @@ __all__ = [
     "LedgerBackfillState",
     "LedgerParityArtifact",
     "LedgerPublication",
+    "LineupRosterSlot",
+    "LineupSegmentGame",
+    "LineupSegmentPlayer",
+    "LineupSegmentSeason",
     "OperatorJob",
     "PlayerGameLog",
     "PlayerGameLogRefresh",
     "PlayerGameLogSync",
+    "PlayerGameTracking",
     "PlayerPoolSnapshot",
     "PlayerSeasonStats",
+    "PlayerTrackingAttempt",
     "ProjectionArchiveScopeLock",
     "ProjectionCollectionLease",
     "ProjectionCollectionProviderState",
@@ -230,6 +243,7 @@ __all__ = [
     "PublicationVersion",
     "ReconciliationItem",
     "Report",
+    "ReportListing",
     "ResearchActivityDay",
     "RotationAttempt",
     "RotationGame",

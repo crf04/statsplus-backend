@@ -1036,7 +1036,7 @@ def test_same_evidence_mapping_change_replays_the_first_materialization(tmp_path
     assert latest_categories == ["PTS", "PRA"]
 
 
-def test_provider_scopes_union_and_an_unpolled_provider_expires_independently(tmp_path):
+def test_provider_scopes_union_and_an_overdue_provider_is_stale_served_independently(tmp_path):
     engine = _engine(tmp_path)
     catalog = StatisticCatalog.load_default()
     archive = ProjectionArchive(engine, catalog)
@@ -1058,14 +1058,14 @@ def test_provider_scopes_union_and_an_unpolled_provider_expires_independently(tm
     pool = _reader(engine, ("dabble", "prizepicks"), refreshed_at).get_pool_for_game(
         season=SEASON, game_id=GAME_ID
     )
-    assert [player.canonical_player_id for player in pool.players] == [7]
+    assert [player.canonical_player_id for player in pool.players] == [7, 8]
     assert "status" not in pool.freshness
     assert pool.freshness["providers"] == {
         "dabble": {
             "status": "fresh",
             "retrieved_at": refreshed_at.isoformat(),
         },
-        "prizepicks": {"status": "missing", "retrieved_at": None},
+        "prizepicks": {"status": "stale-served", "retrieved_at": OBSERVED_AT.isoformat()},
     }
     with engine.connect() as connection:
         assert (
@@ -1314,6 +1314,30 @@ def test_complete_empty_is_fresh_live_evidence_not_a_missing_pool(tmp_path):
         )
         is not None
     )
+
+
+def test_complete_empty_whose_next_poll_is_overdue_is_stale_served_through_the_fallback(tmp_path):
+    engine = _engine(tmp_path)
+    catalog = StatisticCatalog.load_default()
+    ProjectionArchive(engine, catalog).ingest_snapshot(
+        _snapshot("dabble", SnapshotStatus.COMPLETE, (), OBSERVED_AT),
+        query=QUERY,
+        accepted_at=OBSERVED_AT,
+    )
+
+    overdue = _reader(engine, ("dabble",), OBSERVED_AT + timedelta(minutes=16)).get_pool_for_game(
+        season=SEASON, game_id=GAME_ID
+    )
+    assert overdue.players == ()
+    assert overdue.game_states[GAME_ID] == {"state": "live", "observed_at": OBSERVED_AT.isoformat()}
+    assert overdue.freshness["providers"] == {
+        "dabble": {"status": "stale-served", "retrieved_at": OBSERVED_AT.isoformat()}
+    }
+
+    expired = _reader(
+        engine, ("dabble",), OBSERVED_AT + timedelta(hours=6, microseconds=1)
+    ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert expired.game_states[GAME_ID] == {"state": "missing", "observed_at": None}
 
 
 @pytest.mark.parametrize(

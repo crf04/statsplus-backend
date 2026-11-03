@@ -55,6 +55,8 @@ DAILY = [
     ("team@example.com", "2026-10-13", "web", "matchup_viewed"),
     ("c@example.com", "2026-10-06", "web", "query_prompt_parsed"),
     ("d@example.com", "2026-10-14", "web", "backtest_viewed"),
+    ("c@example.com", "2026-10-14", "web", "report_published"),
+    ("team@example.com", "2026-10-13", "web", "report_published"),
     # Before the window: counted nowhere.
     ("a@example.com", "2026-09-27", "web", "active"),
 ]
@@ -89,10 +91,10 @@ cohort      users   wk0  wk1  wk2
 2026-10-12      1  100%    -    -
 
 Weekly users per web action
-week        matchup_viewed  game_logs_queried  query_prompt_parsed  backtest_viewed
-2026-09-28               0                  2                    0                0
-2026-10-05               1                  0                    1                0
-2026-10-12               4                  0                    0                1
+week        matchup_viewed  game_logs_queried  query_prompt_parsed  backtest_viewed  report_published
+2026-09-28               0                  2                    0                0                 0
+2026-10-05               1                  0                    1                0                 0
+2026-10-12               4                  0                    0                1                 2
 
 MCP tool calls, 2026-09-28 to today
 tool             calls  users  error  limit  needs_choice  p50_ms  p95_ms
@@ -116,10 +118,10 @@ cohort      users   wk0  wk1  wk2
 2026-10-12      1  100%    -    -
 
 Weekly users per web action
-week        matchup_viewed  game_logs_queried  query_prompt_parsed  backtest_viewed
-2026-09-28               0                  2                    0                0
-2026-10-05               1                  0                    1                0
-2026-10-12               3                  0                    0                1
+week        matchup_viewed  game_logs_queried  query_prompt_parsed  backtest_viewed  report_published
+2026-09-28               0                  2                    0                0                 0
+2026-10-05               1                  0                    1                0                 0
+2026-10-12               3                  0                    0                1                 1
 
 MCP tool calls, 2026-09-28 to today
 tool             calls  users  error  limit  needs_choice  p50_ms  p95_ms

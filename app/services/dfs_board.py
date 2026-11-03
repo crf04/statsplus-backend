@@ -440,6 +440,7 @@ def _merged_observation(resolutions: Iterable[Any], resolve: Any) -> Any:
         merged,
         ordered[0].season,
         observed_at=ordered[0].observed_at,
+        event_teams=tuple(dict.fromkeys(team for resolution in ordered for team in resolution.event_teams)),
     )
 
 
@@ -945,7 +946,7 @@ class DFSBoardService:
         self.enabled_providers = tuple(sorted(enabled))
         self.disabled_providers = tuple(sorted(set(known) - set(self.enabled_providers)))
         self.max_concurrency = min(max_concurrency, max(1, len(self.enabled_providers)))
-        self.deadline_seconds = min(float(deadline_seconds), DEFAULT_BOARD_DEADLINE_SECONDS)
+        self.deadline_seconds = float(deadline_seconds)
         self.clock = clock or (lambda: datetime.now(UTC))
         self.monotonic = monotonic or time.monotonic
         self.telemetry_recorder = telemetry_recorder or BoundedBoardTelemetryRecorder()
@@ -1013,7 +1014,7 @@ class DFSBoardService:
         elif not isinstance(context, RetrievalContext):
             raise TypeError("context must be RetrievalContext")
         # Adapters receive a child context so a caller cannot accidentally
-        # extend this board's absolute fifteen-second ceiling.
+        # extend this board's configured ceiling.
         context = RetrievalContext(
             deadline=min(
                 context.deadline,

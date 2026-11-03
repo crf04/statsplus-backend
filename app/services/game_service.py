@@ -69,6 +69,32 @@ _PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
 _DECODED_ONLY_STREAM_KEYS = frozenset(_PUBLICATION_STREAM_KEYS) - _PROJECTION_ONLY_STREAM_KEYS
 
 
+def _tracking_averages(frame: pd.DataFrame) -> dict[str, float | None]:
+    """Tracking averages for one set of games; ``None`` when no game qualifies.
+
+    Chances are a mean over games where the stat is not null.  A conversion
+    rate is a ratio of sums over games whose chances are not null (not the mean
+    of per-game ratios), on the 0-1 scale.
+    """
+
+    def column(name):
+        return frame[name].astype("Float64") if name in frame else pd.Series([], dtype="Float64")
+
+    averages: dict[str, float | None] = {}
+    for chances_name, conversion_name, made_name in (
+        ("REB_CHANCES", "REB_CONV_PCT", "REB"),
+        ("POTENTIAL_AST", "AST_CONV_PCT", "AST"),
+    ):
+        chances, made = column(chances_name), column(made_name)
+        tracked = chances.notna()
+        total = chances[tracked].sum()
+        averages[chances_name] = round(float(chances[tracked].mean()), 2) if tracked.any() else None
+        averages[conversion_name] = (
+            round(float(made[tracked].sum() / total), 3) if tracked.any() and total > 0 else None
+        )
+    return averages
+
+
 def _records(frame: pd.DataFrame):
     """Convert a DataFrame to JSON-safe dictionaries (empty frame -> [])."""
     if frame is None or frame.shape[0] == 0:
@@ -677,6 +703,7 @@ class GameService:
         if not filtered_logs.empty:
             filtered_averages = filtered_logs[average_columns].mean().round(2)
             filtered_average_rows = _records(filtered_averages.to_frame().T)
+            filtered_average_rows[0].update(_tracking_averages(filtered_logs))
         else:
             filtered_average_rows = []
         # Season-to-date rule: only ``date_to`` bounds the season average and
@@ -688,6 +715,7 @@ class GameService:
         if not season_logs.empty:
             season_averages = season_logs[average_columns].mean().round(2)
             season_average_rows = _records(season_averages.to_frame().T)
+            season_average_rows[0].update(_tracking_averages(season_logs))
         closing_lines = self._closing_lines_for(filtered_logs)
         filtered_logs.drop(
             [

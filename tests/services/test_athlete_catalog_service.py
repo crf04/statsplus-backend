@@ -58,6 +58,7 @@ def _frame(display_name: str = "LeBron James", *, season: str = "2024-25") -> pd
                 "team_id": 1610612747,
                 "team_name": "Los Angeles Lakers",
                 "team_abbreviation": "LAL",
+                "position": "Wing",
             }
         ]
     )
@@ -75,6 +76,7 @@ def _empty_frame() -> pd.DataFrame:
             "team_id",
             "team_name",
             "team_abbreviation",
+            "position",
         ]
     )
 

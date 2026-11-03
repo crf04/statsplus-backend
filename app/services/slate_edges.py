@@ -46,7 +46,8 @@ from app.services.matchup_snapshot import (
     read_game_matchup,
     request_matchups,
 )
-from app.services.request_reads import request_read_scope
+from app.services.publication_snapshot_calls import accepts_keyword
+from app.services.request_reads import read_savepoint, request_read_scope
 from app.services.research_season import refuse_evidence_after_game, season_context, selected_season
 from app.services.serving_season import merge_trailing
 from app.services.slate_fallback import read_slate
@@ -114,18 +115,18 @@ class SlateEdgesService:
         a malformed one is its ``invalid_input`` refusal; ``fallback`` is the
         Slate's ``previous_game_day``/``next_game_day`` rule (``slate_fallback.read_slate``)."""
 
-        slate = read_slate(self.slates.get_slate, requested_date, fallback)
+        slate = read_slate(self._slate, requested_date, fallback)
         # Each game's schedule facts are its own season's (crf04/statsplus#330 AC9).
         for game in slate["games"]:
             refuse_evidence_after_game(self.publication_reader, season_for_game_id(game["game_id"]))
         # A selection's capture and every game's reads share one REPEATABLE
         # READ snapshot, as a selected Matchup's do, so a prune that commits
         # in between cannot empty a later game's projection reads.  None of
-        # them writes.
+        # them writes.  Otherwise each game composes on a scope of its own.
         engine = None if selected_season(self.publication_reader) is None else self._engine
         with request_read_scope(engine, repeatable_read=True) as read_scope:
             matchups = self._request_matchups(read_scope=None if engine is None else read_scope)
-            _slate, response = self._read(slate, matchups, may_compose=lambda: True)
+            _slate, response = self._read(slate, matchups, may_compose=lambda: True, read_scope=read_scope)
         context = season_context(self.publication_reader, getattr(matchups, "snapshot", None), lambda: None)
         return {
             **({} if context is None else {"season_context": context}),
@@ -135,6 +136,18 @@ class SlateEdgesService:
                 for game in response["games"]
             ],
         }
+
+    def _slate(self, requested_date: str | None) -> dict[str, Any]:
+        """The Slate of ``requested_date``, its neighbouring dates read only for a day without games.
+
+        The edges never show them, and ``read_slate`` falls back on them only
+        when the day lists no game.
+        """
+
+        if not accepts_keyword(self.slates.get_slate, "neighbours"):
+            return self.slates.get_slate(requested_date)
+        slate = self.slates.get_slate(requested_date, neighbours=False)
+        return slate if slate["games"] else self.slates.get_slate(requested_date)
 
     def preview_read(
         self,
@@ -165,8 +178,15 @@ class SlateEdgesService:
         return self._read(slate, self._request_matchups(), may_compose=may_compose)
 
     def _read(
-        self, slate: dict[str, Any], matchups: MatchupReader, *, may_compose: Callable[[], bool]
+        self,
+        slate: dict[str, Any],
+        matchups: MatchupReader,
+        *,
+        may_compose: Callable[[], bool],
+        read_scope: tuple[Any, Any] = (None, None),
     ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        """``read_scope`` is the request's, which every game composes on."""
+
         slate_games = list(slate["games"])
         if not slate_games:
             return slate, self._response(slate["slate_date"], [], [], [])
@@ -178,10 +198,13 @@ class SlateEdgesService:
             return None
 
         reads = slate.get("freshness") or {}
-        composed = [
-            self._compose_game(matchups, game, reads.get("pool"), reads.get("schedule"))
-            for game in slate_games
-        ]
+        # One game's failed read must not abort the transaction the later
+        # games compose in.
+        with read_savepoint(read_scope) as recover:
+            composed = [
+                self._compose_game(matchups, game, reads.get("pool"), reads.get("schedule"), recover)
+                for game in slate_games
+            ]
         response = self._response(
             slate["slate_date"],
             [entry for entry, _, _ in composed],
@@ -198,11 +221,13 @@ class SlateEdgesService:
         game: Mapping[str, Any],
         pool: Mapping[str, Any] | None = None,
         schedule: Mapping[str, Any] | None = None,
+        recover: Callable[[], None] = lambda: None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, str]]]:
         """One game's entry, its spotlight candidates and its trailing families,
         from its Matchup.
 
         The Matchup is reduced here, so only one document is held at a time.
+        ``recover`` restores the request's connection after a failed read.
         """
 
         outage = False
@@ -216,6 +241,7 @@ class SlateEdgesService:
             ]
             listed = list(matchup.get("trailing") or ())
         except _UNREADABLE as error:
+            recover()
             players, picks, listed = [], [], []
             outage = isinstance(error, _OUTAGES)
         return (

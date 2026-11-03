@@ -6,10 +6,41 @@ cards with their results, and a snapshot of each card's HTML, so an old report
 keeps rendering after a card's design changes.  The public id is random base62;
 the row is kept until its author deletes it or an admin takes it down, and both
 are soft (``deleted_at``, ``taken_down_at``).
+
+A report its author lists (``listed_at``) appears in the public Research feed
+(crf04/statsplus#372); an admin may pin a listed one as Featured
+(``featured_at``).  ``report_listings`` records every move to listed, which is
+what the 5-per-24-hours listing cap counts: unlisting clears ``listed_at`` but
+never a listing it already spent.
+
+Its author may edit it (crf04/statsplus#377): ``edits`` holds the last saved
+edit body (title, notes, hidden items and each item's cards), applied over the
+published ``document`` and ``calls`` on every read, so neither is ever
+overwritten and every removal can be undone.  ``title`` is the title readers
+see, edited or not; ``notes`` the author's own words.
+
+``origin`` (crf04/statsplus#382) records who wrote it: ``assistant`` for an AI
+assistant through the connector, ``builder`` for its author in the Report
+Builder.  Reports published before it existed are all ``assistant``.
 """
 
-from sqlalchemy import JSON, Boolean, Column, DateTime, ForeignKey, Index, String, false
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    false,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
+
+from app.domain.report_document import ReportOrigin
 
 from . import Base
 
@@ -18,6 +49,9 @@ REPORT_ID_MAX_LENGTH = 12
 REPORT_TITLE_MAX_LENGTH = 120
 
 _DOCUMENT_JSON = JSON().with_variant(JSONB, "postgresql")
+_FEED_WHERE = "listed_at IS NOT NULL AND deleted_at IS NULL AND taken_down_at IS NULL"
+REPORT_ORIGIN_MAX_LENGTH = 16
+REPORT_ORIGIN_CHECK = f"origin IN ({', '.join(repr(origin.value) for origin in ReportOrigin)})"
 
 
 class Report(Base):
@@ -33,7 +67,9 @@ class Report(Base):
         comment="Author account",
     )
     created_at = Column(DateTime(timezone=True), nullable=False, comment="When it was published")
-    title = Column(String(REPORT_TITLE_MAX_LENGTH), nullable=False, comment="The document's title")
+    title = Column(
+        String(REPORT_TITLE_MAX_LENGTH), nullable=False, comment="The title readers see, edited or not"
+    )
     document = Column(_DOCUMENT_JSON, nullable=False, comment="The validated Report document")
     calls = Column(_DOCUMENT_JSON, nullable=False, comment="The calls behind the cards, with results")
     cards = Column(_DOCUMENT_JSON, nullable=False, comment="Card name to its HTML snapshot")
@@ -42,8 +78,51 @@ class Report(Base):
     )
     deleted_at = Column(DateTime(timezone=True), comment="When the author deleted it")
     taken_down_at = Column(DateTime(timezone=True), comment="When an admin took it down")
+    listed_at = Column(DateTime(timezone=True), comment="When its author listed it; null is unlisted")
+    featured_at = Column(DateTime(timezone=True), comment="When an admin pinned it as Featured")
+    covers = Column(_DOCUMENT_JSON, comment="Games and players its card calls name, set when listed")
+    notes = Column(Text, comment="The author's own words, plain text; null is none")
+    edited_at = Column(DateTime(timezone=True), comment="When its author last saved edits")
+    edits = Column(_DOCUMENT_JSON, comment="The last saved edit body; null is as published")
+    # A column CHECK, not a table one, so SQLite can still drop the column.
+    origin = Column(
+        String(REPORT_ORIGIN_MAX_LENGTH),
+        CheckConstraint(REPORT_ORIGIN_CHECK, name="ck_reports_origin"),
+        nullable=False,
+        default=ReportOrigin.ASSISTANT.value,
+        server_default=ReportOrigin.ASSISTANT.value,
+        comment="Who wrote it: assistant or builder",
+    )
 
-    __table_args__ = (Index("idx_reports_owner_created", "firebase_uid", "created_at"),)
+    __table_args__ = (
+        Index("idx_reports_owner_created", "firebase_uid", "created_at"),
+        # The feed reads listed, visible reports newest listing first.
+        Index(
+            "idx_reports_feed",
+            "listed_at",
+            "id",
+            postgresql_where=text(_FEED_WHERE),
+            sqlite_where=text(_FEED_WHERE),
+        ),
+    )
 
     def __repr__(self):
         return f"<Report(id='{self.id}', firebase_uid='{self.firebase_uid}')>"
+
+
+class ReportListing(Base):
+    """One move of a report to listed, kept for the rolling listing cap."""
+
+    __tablename__ = "report_listings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    firebase_uid = Column(
+        String(128),
+        ForeignKey("users.firebase_uid", ondelete="CASCADE"),
+        nullable=False,
+        comment="The account that listed it",
+    )
+    report_id = Column(String(REPORT_ID_MAX_LENGTH), nullable=False, comment="The report listed")
+    listed_at = Column(DateTime(timezone=True), nullable=False, comment="When it was listed")
+
+    __table_args__ = (Index("idx_report_listings_owner_listed", "firebase_uid", "listed_at"),)

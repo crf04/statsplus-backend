@@ -7,6 +7,11 @@ every team has played that many games in the Published Season; its next
 composition then activates.  A family with no count switches at the Season
 Cutover, as every stream did before; its previous season is never served.
 A stream in no family behaves the same way.
+
+The rules decide what the default serves.  A reader who selects the next
+season before its cutover reads every family's held candidate whatever its
+sample, and judges the sample from the season's team games
+(crf04/statsplus#386).
 """
 
 from __future__ import annotations

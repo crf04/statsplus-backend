@@ -19,7 +19,7 @@ from app.services.database_first_activation import (
     DatabaseFirstPublicationReader,
     PublicationRead,
 )
-from app.services.matchup import MatchupService
+from app.services.matchup import MatchupComposeCache, MatchupService
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_diet import (
     PlayerDietBaseline,
@@ -371,6 +371,7 @@ def _service(
     injuries=None,
     diets=None,
     player_logs=None,
+    statistic_catalog=None,
 ):
     if pool is None:
         pool = PlayerPool(
@@ -413,6 +414,7 @@ def _service(
             nba=NBASeasonSettings(current_season=SEASON),
         ),
         clock=lambda: NOW,
+        statistic_catalog=statistic_catalog,
     )
 
 
@@ -570,6 +572,9 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
         },
         "line_prices": {"underdog": {"PTS": {"over": -112, "under": None}}},
         "season_scoring": 25.4,
+        # The fake summary has a points rate but no rows behind it.
+        "last_five_games": [],
+        "season_averages": {"PTS": 25.4},
         "last_10_minutes": [31.0, 32.0, 33.0],
         "diet_shares": {
             "play_types": [
@@ -1228,6 +1233,151 @@ def test_future_matchup_queries_both_team_windows_without_a_future_cutoff():
     ]
 
 
+def test_games_composed_for_one_request_read_each_slate_dates_windows_once():
+    # Today's started game reads the windows as of today, the date a pending
+    # game's undated read resolves to; an earlier game reads its own date.
+    started = {**_event(), "nba_game_id": "0022500585", "scheduled_at": "2026-01-15T11:00:00+00:00"}
+    earlier = {**_event(), "nba_game_id": "0022500586", "scheduled_at": "2026-01-14T00:30:00+00:00"}
+    service = _service(events=RecordedEvents(events=[started, _event(), earlier]))
+    compose_cache = MatchupComposeCache()
+
+    for game_id in ("0022500585", GAME_ID, "0022500586"):
+        service.get_matchup_from_snapshot(
+            game_id=game_id, publication_snapshot=None, injuries=None, compose_cache=compose_cache
+        )
+
+    assert service.team_matchups.calls == [
+        (SEASON, None, date(2026, 1, 15), False),
+        (SEASON, 15, date(2026, 1, 15), False),
+        (SEASON, None, date(2026, 1, 13), False),
+        (SEASON, 15, date(2026, 1, 13), False),
+    ]
+
+
+def test_games_sharing_a_team_compose_together_as_each_composes_alone():
+    # LAL @ BOS three times: started today, pending tonight, and two days ago,
+    # whose Defense Sheet windows differ from today's.
+    started = {**_event(), "nba_game_id": "0022500585", "scheduled_at": "2026-01-15T11:00:00+00:00"}
+    earlier = {**_event(), "nba_game_id": "0022500586", "scheduled_at": "2026-01-14T00:30:00+00:00"}
+    earlier_traditional = (
+        ("traditional", "OPP_TOV", "OPP_TOV", 20.0),
+        ("traditional", "OPP_STL", "OPP_STL", 9.0),
+        ("traditional", "OPP_BLK", "OPP_BLK", 3.0),
+    )
+
+    class DatedWindows(RecordedTeamWindows):
+        def get_latest_window(self, season, *, window_games=None, as_of=None):
+            self.calls.append((season, window_games, as_of, False))
+            return _window(
+                last_15=window_games is not None,
+                traditional_metrics=earlier_traditional if as_of == date(2026, 1, 13) else None,
+            )
+
+    def service():
+        built = _service(events=RecordedEvents(events=[started, _event(), earlier]))
+        built.team_matchups = DatedWindows(None, None)
+        return built
+
+    game_ids = ("0022500585", GAME_ID, "0022500586")
+    together = service()
+    compose_cache = MatchupComposeCache()
+    composed = [
+        together.get_matchup_from_snapshot(
+            game_id=game_id, publication_snapshot=None, injuries=None, compose_cache=compose_cache
+        )
+        for game_id in game_ids
+    ]
+    alone = [
+        service().get_matchup_from_snapshot(game_id=game_id, publication_snapshot=None, injuries=None)
+        for game_id in game_ids
+    ]
+
+    assert [json.dumps(document, sort_keys=True) for document in composed] == [
+        json.dumps(document, sort_keys=True) for document in alone
+    ]
+    tov = [
+        next(row for row in document["league"]["defense_sheet"]["traditional"] if row["key"] == "OPP_TOV")
+        for document in composed
+    ]
+    assert [row["season"]["average_allowed_per_48"] for row in tov] == [13.0, 13.0, 20.0]
+
+
+def test_games_composed_for_one_request_read_the_schedule_refresh_once():
+    class CountedEvents(RecordedEvents):
+        freshness_calls = 0
+
+        def get_freshness(self, season, *, now):
+            self.freshness_calls += 1
+            return super().get_freshness(season, now=now)
+
+    later = {**_event(), "nba_game_id": "0022500585", "scheduled_at": "2026-01-16T03:00:00+00:00"}
+    events = CountedEvents(events=[_event(), later])
+    service = _service(events=events)
+    compose_cache = MatchupComposeCache()
+
+    schedules = [
+        service.get_matchup_from_snapshot(
+            game_id=game_id, publication_snapshot=None, injuries=None, compose_cache=compose_cache
+        )["freshness"]["schedule"]
+        for game_id in (GAME_ID, "0022500585")
+    ]
+
+    assert events.freshness_calls == 1
+    assert schedules == [{"status": "fresh", "retrieved_at": "2026-01-15T10:00:00+00:00"}] * 2
+
+
+def test_games_of_two_schedule_seasons_each_report_their_seasons_refresh():
+    """Opening night: a 2026-27 game beside 2025-26 ones, the evidence still 2025-26."""
+
+    next_season = {**_event(), "nba_game_id": "0022600001", "season": "2026-27"}
+    later = {**_event(), "nba_game_id": "0022500585", "scheduled_at": "2026-01-16T03:00:00+00:00"}
+    refreshed = {SEASON: RETRIEVED_AT, "2026-27": datetime(2026, 1, 15, 11, tzinfo=UTC)}
+
+    class SeasonEvents(RecordedEvents):
+        freshness_calls = 0
+
+        def count_events(self, season):
+            return self.count
+
+        def get_event(self, season, game_id):
+            return next(
+                (
+                    event
+                    for event in self.events
+                    if (event["season"], event["nba_game_id"]) == (season, game_id)
+                ),
+                None,
+            )
+
+        def get_freshness(self, season, *, now):
+            self.freshness_calls += 1
+            return {"last_success_at": refreshed[season].isoformat(), "fresh": True}
+
+    events = SeasonEvents(events=[_event(), next_season, later])
+    service = _service(events=events)
+    # Unpinned, so each game's schedule facts are the season its ID names.
+    service.settings = RuntimeSettings(environment="testing")
+    compose_cache = MatchupComposeCache()
+
+    schedules = [
+        service.get_matchup_from_snapshot(
+            game_id=game_id,
+            publication_snapshot=None,
+            injuries=None,
+            compose_cache=compose_cache,
+            season=SEASON,
+        )["freshness"]["schedule"]
+        for game_id in (GAME_ID, "0022600001", "0022500585")
+    ]
+
+    assert schedules == [
+        {"status": "fresh", "retrieved_at": "2026-01-15T10:00:00+00:00"},
+        {"status": "fresh", "retrieved_at": "2026-01-15T11:00:00+00:00"},
+        {"status": "fresh", "retrieved_at": "2026-01-15T10:00:00+00:00"},
+    ]
+    assert events.freshness_calls == 2
+
+
 def test_missing_pool_and_stats_are_degraded_without_provider_fallback():
     payload = _service(
         pool=False,
@@ -1425,7 +1575,7 @@ def _log_row(*, game_id: str, game_date: str, points: int, minutes: float):
     }
 
 
-def _published_matchup_service(tmp_path, rows):
+def _published_matchup_service(tmp_path, rows, *, statistic_catalog=None):
     """Build a matchup service over one real activated player-log publication."""
 
     engine = create_engine(f"sqlite:///{tmp_path / 'matchup-logs.sqlite3'}")
@@ -1487,6 +1637,7 @@ def _published_matchup_service(tmp_path, rows):
         ),
         clock=lambda: NOW,
         publication_reader=reader,
+        statistic_catalog=statistic_catalog,
     )
     return engine, service, publication
 
@@ -1916,6 +2067,8 @@ class RecordedGameLogs:
                     else None
                 ),
                 last_ten_minutes=(31.0 + focal, 32.0),
+                # The completed season's rows, focal game included.
+                rate_rows=tuple(row for row in self.rows if row.player_id == player_id),
             )
             for player_id in player_ids
         }
@@ -3068,3 +3221,207 @@ def test_a_base_not_yet_stored_is_listed_but_never_changes_an_existing_freshness
         == with_base["experience"]["sections"]["season_defense"]
     )
     assert without_base["players"][0]["scores"] == with_base["players"][0]["scores"]
+
+
+def _last_five_row(**overrides):
+    return {**_log_row(game_id="0022500001", game_date="2026-01-01", points=0, minutes=30.0), **overrides}
+
+
+def _last_five_player(tmp_path, rows):
+    engine, service, _ = _published_matchup_service(
+        tmp_path, rows, statistic_catalog=StatisticCatalog.load_default()
+    )
+    (player,) = service.get_matchup(game_id=GAME_ID)["players"]
+    engine.dispose()
+    return player
+
+
+def test_a_current_row_serves_its_last_five_rate_games_oldest_first_and_its_season_averages(tmp_path):
+    """crf04/statsplus-backend#654: the rows behind season_scoring, newest five."""
+
+    rows = [
+        # Stored out of date order: the newest five are chosen by date, then id.
+        _last_five_row(game_id="0022500007", game_date="2026-01-12", points=27, minutes=36.0),
+        _last_five_row(game_id="0022500001", game_date="2026-01-02", points=20, minutes=30.0),
+        _last_five_row(game_id="0022500005", game_date="2026-01-09", points=24, minutes=33.5),
+        _last_five_row(game_id="0022500002", game_date="2026-01-04", points=21, minutes=31.0),
+        _last_five_row(game_id="0022500004", game_date="2026-01-08", points=23, minutes=33.0),
+        _last_five_row(game_id="0022500006", game_date="2026-01-11", points=25, minutes=35.0),
+        _last_five_row(game_id="0022500003", game_date="2026-01-06", points=22, minutes=32.0),
+    ]
+
+    player = _last_five_player(tmp_path, rows)
+
+    assert player["last_five_games"] == [
+        {
+            "game_id": "0022500003",
+            "game_date": "2026-01-06",
+            "matchup": "LAL @ BOS",
+            "minutes": 32.0,
+            "stats": {"PTS": 22.0, "FGA": 18.0},
+        },
+        {
+            "game_id": "0022500004",
+            "game_date": "2026-01-08",
+            "matchup": "LAL @ BOS",
+            "minutes": 33.0,
+            "stats": {"PTS": 23.0, "FGA": 18.0},
+        },
+        {
+            "game_id": "0022500005",
+            "game_date": "2026-01-09",
+            "matchup": "LAL @ BOS",
+            "minutes": 33.5,
+            "stats": {"PTS": 24.0, "FGA": 18.0},
+        },
+        {
+            "game_id": "0022500006",
+            "game_date": "2026-01-11",
+            "matchup": "LAL @ BOS",
+            "minutes": 35.0,
+            "stats": {"PTS": 25.0, "FGA": 18.0},
+        },
+        {
+            "game_id": "0022500007",
+            "game_date": "2026-01-12",
+            "matchup": "LAL @ BOS",
+            "minutes": 36.0,
+            "stats": {"PTS": 27.0, "FGA": 18.0},
+        },
+    ]
+    # 162 points over seven Regular Season games, rounded as season_scoring is.
+    assert player["season_averages"] == {"PTS": 23.142857, "FGA": 18.0}
+    assert player["season_scoring"] == 23.142857
+
+
+def test_a_current_row_with_fewer_than_five_games_serves_only_those(tmp_path):
+    rows = [
+        _last_five_row(game_id="0022500002", game_date="2026-01-05", points=31, minutes=37.0),
+        _last_five_row(game_id="0022500001", game_date="2026-01-02", points=25, minutes=35.0),
+    ]
+
+    player = _last_five_player(tmp_path, rows)
+
+    assert player["last_five_games"] == [
+        {
+            "game_id": "0022500001",
+            "game_date": "2026-01-02",
+            "matchup": "LAL @ BOS",
+            "minutes": 35.0,
+            "stats": {"PTS": 25.0, "FGA": 18.0},
+        },
+        {
+            "game_id": "0022500002",
+            "game_date": "2026-01-05",
+            "matchup": "LAL @ BOS",
+            "minutes": 37.0,
+            "stats": {"PTS": 31.0, "FGA": 18.0},
+        },
+    ]
+    assert player["season_averages"] == {"PTS": 28.0, "FGA": 18.0}
+
+
+def test_a_row_without_a_season_rate_serves_no_games_and_no_averages(tmp_path):
+    # A summary whose one game has no minutes, so it has no season rate.
+    rows = [_last_five_row(game_id="0022500001", game_date="2026-01-02", points=0, minutes=0.0)]
+
+    player = _last_five_player(tmp_path, rows)
+
+    assert player["season_scoring"] is None
+    assert player["last_five_games"] == []
+    assert player["season_averages"] == {}
+
+
+class _UnorderedRateRowLogs(RecordedLogs):
+    """A summary whose rows arrive in payload order, as a payload read's may."""
+
+    def get_player_summaries(self, season, player_ids):
+        (summary,) = super().get_player_summaries(season, player_ids).values()
+        rows = tuple(
+            _game_log_record(
+                player_id=2544,
+                player_name="LeBron James",
+                team_id=LAL,
+                team_tricode="LAL",
+                opponent_team_id=BOS,
+                opponent_team_tricode="BOS",
+                game_id=game_id,
+                game_date=date.fromisoformat(game_date),
+                points=points,
+            )
+            for game_id, game_date, points in (
+                ("0022500006", "2026-01-11", 26),
+                ("0022500002", "2026-01-04", 22),
+                ("0022500001", "2026-01-02", 21),
+                ("0022500004", "2026-01-08", 24),
+                ("0022500003", "2026-01-08", 23),
+                ("0022500005", "2026-01-09", 25),
+                # Rescheduled: the lowest id, played last.
+                ("0022500000", "2026-01-12", 27),
+            )
+        )
+        return {2544: replace(summary, rate_rows=rows)}
+
+
+def test_last_five_games_are_ordered_by_date_then_game_id_whatever_order_the_rows_arrive_in():
+    service = _service(player_logs=_UnorderedRateRowLogs(), statistic_catalog=StatisticCatalog.load_default())
+
+    (player,) = service.get_matchup(game_id=GAME_ID)["players"]
+
+    assert [(game["game_id"], game["game_date"], game["stats"]) for game in player["last_five_games"]] == [
+        ("0022500003", "2026-01-08", {"PTS": 23.0, "FGA": 18.0}),
+        ("0022500004", "2026-01-08", {"PTS": 24.0, "FGA": 18.0}),
+        ("0022500005", "2026-01-09", {"PTS": 25.0, "FGA": 18.0}),
+        ("0022500006", "2026-01-11", {"PTS": 26.0, "FGA": 18.0}),
+        ("0022500000", "2026-01-12", {"PTS": 27.0, "FGA": 18.0}),
+    ]
+
+
+def test_last_five_games_carry_every_posted_market_not_only_scoreable_ones():
+    """FTA, FTM, FGM and FG2M have no Matchup Score but are rail tabs."""
+
+    markets = ("PTS", "FTA", "FTM", "FGM", "FG2M")
+    pool = PlayerPool(
+        players=(PoolPlayer(2544, "LeBron James", LAL, markets, {"prizepicks": markets}),),
+        team_counts={LAL: 1},
+        freshness={"status": "fresh", "retrieved_at": RETRIEVED_AT.isoformat(), "providers": {}},
+    )
+    service = _service(
+        pool=pool, player_logs=_UnorderedRateRowLogs(), statistic_catalog=StatisticCatalog.load_default()
+    )
+
+    (player,) = service.get_matchup(game_id=GAME_ID)["players"]
+
+    assert player["stat_categories"] == list(markets)
+    # 9 of 18 field goals with 3 threes, 3 of 4 free throws, in every game.
+    assert [game["stats"] for game in player["last_five_games"]] == [
+        {"PTS": float(points), "FTA": 4.0, "FTM": 3.0, "FGM": 9.0, "FG2M": 6.0}
+        for points in (23, 24, 25, 26, 27)
+    ]
+
+
+class _NoSummaryLogs(RecordedLogs):
+    def get_player_summaries(self, season, player_ids):
+        return {}
+
+
+def test_a_row_without_a_summary_serves_no_games_and_no_averages():
+    (player,) = _service(player_logs=_NoSummaryLogs()).get_matchup(game_id=GAME_ID)["players"]
+
+    assert player["last_five_games"] == []
+    assert player["season_averages"] == {}
+
+
+def test_a_historical_row_serves_no_games_and_no_averages():
+    """Its summary holds the focal game and later ones, so neither is served."""
+
+    logs = RecordedGameLogs()
+    payload = _historical_service(player_logs=logs).get_matchup(game_id=GAME_ID)
+
+    assert payload["experience"]["mode"] == "historical"
+    assert {row["canonical_id"] for row in payload["players"]} == {AWAY_PARTICIPANT, HOME_PARTICIPANT}
+    for player in payload["players"]:
+        # The summary has a rate and rows; historical mode withholds both.
+        assert player["season_scoring"] == 21.0
+        assert player["last_five_games"] == []
+        assert player["season_averages"] == {}

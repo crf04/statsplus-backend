@@ -2009,6 +2009,55 @@ def _create_rotation_tables(connection: Connection) -> None:
         model.__table__.create(connection, checkfirst=True)
 
 
+def _create_lineup_segment_tables(connection: Connection) -> None:
+    """Create the on/off lineup segment tables (crf04/statsplus#410).
+
+    Repeatable: ``checkfirst`` skips an existing table and never touches its
+    rows.  Nothing is backfilled: ``scripts/lineup_segment_backfill.py`` fills a
+    season and records its coverage, and until then the season keeps the PBP
+    Stats on/off path.
+    """
+    from app.models.lineup_segments import (
+        LineupRosterSlot,
+        LineupSegmentGame,
+        LineupSegmentPlayer,
+        LineupSegmentSeason,
+    )
+
+    for model in (LineupRosterSlot, LineupSegmentGame, LineupSegmentPlayer, LineupSegmentSeason):
+        model.__table__.create(connection, checkfirst=True)
+
+
+def downgrade_lineup_segments(connection: Connection) -> None:
+    """Reverse ``084_lineup_segments``; also forgets its migration record.
+
+    Migrations here are forward-only at runtime.  This exists so the change is
+    provably reversible: it drops only the four lineup segment tables.
+    """
+    from app.models.lineup_segments import (
+        LineupRosterSlot,
+        LineupSegmentGame,
+        LineupSegmentPlayer,
+        LineupSegmentSeason,
+    )
+
+    for model in (LineupSegmentSeason, LineupSegmentPlayer, LineupSegmentGame, LineupRosterSlot):
+        model.__table__.drop(connection, checkfirst=True)
+    connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 84))
+
+
+def _create_player_game_tracking_table(connection: Connection) -> None:
+    """Create the player-tracking table (crf04/statsplus-backend#604).
+
+    Repeatable: ``checkfirst`` skips an existing table and never touches its
+    rows.  Nothing is backfilled; ``scripts/tracking_refresh.py`` fills a season.
+    """
+    from app.models.player_tracking import PlayerGameTracking, PlayerTrackingAttempt
+
+    for model in (PlayerGameTracking, PlayerTrackingAttempt):
+        model.__table__.create(connection, checkfirst=True)
+
+
 def _create_player_season_stats_table(connection: Connection) -> None:
     """Create the season player stats table (crf04/statsplus-backend#509).
 
@@ -2157,8 +2206,328 @@ def downgrade_user_public_handle(connection: Connection) -> None:
 
     existing = {column["name"] for column in inspect(connection).get_columns("users")}
     if "public_handle" in existing:
+        # SQLite cannot drop an indexed column; 080's unique index goes first.
+        connection.execute(text("DROP INDEX IF EXISTS uq_users_public_handle"))
         connection.execute(text("ALTER TABLE users DROP COLUMN public_handle"))
     connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 77))
+
+
+_RESEARCH_FEED_COLUMNS = ("listed_at", "featured_at", "covers")
+
+
+def _add_research_feed(connection: Connection) -> None:
+    """Listing, Featured and unique handles for the Research feed (crf04/statsplus#372).
+
+    Adds the nullable ``reports.listed_at``, ``featured_at`` and ``covers``,
+    so every existing report stays unlisted and unfeatured; the feed index; the
+    ``report_listings`` table the listing cap counts; and a case-insensitive
+    unique index on ``users.public_handle``.
+
+    Existing handles are normalised first, as the app now stores them:
+    surrounding space and one leading ``@`` dropped and lowercased, so
+    ``@bighatprops`` becomes ``bighatprops``.  A handle that is then not 3-20
+    of ``a-z0-9_``, or two that become the same, stop the migration with an
+    error naming the accounts, and nothing is changed: an admin must fix the
+    rows first.  Rerun-safe: each step looks at the current schema first, and
+    already normalised handles are left alone.
+    """
+
+    from app.models.report import Report, ReportListing
+    from app.models.user import User, normalize_public_handle
+
+    # Checked before any DDL: SQLite commits DDL as it goes, so a refusal
+    # after it would leave the schema half changed.
+    User.__table__.create(connection, checkfirst=True)
+    handles = connection.execute(
+        text("SELECT firebase_uid, public_handle FROM users WHERE public_handle IS NOT NULL")
+    ).all()
+    invalid = sorted(uid for uid, handle in handles if normalize_public_handle(handle) is None)
+    if invalid:
+        raise ValueError(
+            "080_research_feed: users.public_handle cannot be normalised to 3-20 of a-z0-9_ for "
+            f"firebase_uid {', '.join(invalid)}; fix or clear them, then rerun."
+        )
+    owners: dict[str, list[str]] = {}
+    for uid, handle in handles:
+        owners.setdefault(normalize_public_handle(handle), []).append(uid)
+    collisions = sorted(
+        f"{handle} ({', '.join(sorted(uids))})" for handle, uids in owners.items() if len(uids) > 1
+    )
+    if collisions:
+        raise ValueError(
+            "080_research_feed: users.public_handle values collide once normalised: "
+            f"{'; '.join(collisions)}; change all but one, then rerun."
+        )
+    Report.__table__.create(connection, checkfirst=True)
+    ReportListing.__table__.create(connection, checkfirst=True)
+
+    existing = {column["name"] for column in inspect(connection).get_columns("reports")}
+    for name in _RESEARCH_FEED_COLUMNS:
+        if name not in existing:
+            column = Report.__table__.c[name]
+            connection.execute(
+                text(
+                    f"ALTER TABLE reports ADD COLUMN {name} {column.type.compile(dialect=connection.dialect)}"
+                )
+            )
+    for index in Report.__table__.indexes:
+        # ``IF NOT EXISTS`` on a rerun: SQLite cannot reflect the users expression index.
+        connection.execute(CreateIndex(index, if_not_exists=True))
+
+    for uid, handle in handles:
+        normalized = normalize_public_handle(handle)
+        if normalized != handle:
+            connection.execute(
+                text("UPDATE users SET public_handle = :handle WHERE firebase_uid = :uid"),
+                {"handle": normalized, "uid": uid},
+            )
+    for index in User.__table__.indexes:
+        if index.name == "uq_users_public_handle":
+            connection.execute(CreateIndex(index, if_not_exists=True))
+
+
+def downgrade_research_feed(connection: Connection) -> None:
+    """Reverse ``080_research_feed``; also forgets its migration record.
+
+    Migrations here are forward-only at runtime.  This exists so the change is
+    provably reversible: it drops the two indexes, ``report_listings`` and the
+    three report columns.  Normalised handles stay normalised.
+    """
+    from app.models.report import ReportListing
+
+    connection.execute(text("DROP INDEX IF EXISTS uq_users_public_handle"))
+    connection.execute(text("DROP INDEX IF EXISTS idx_reports_feed"))
+    ReportListing.__table__.drop(connection, checkfirst=True)
+    if inspect(connection).has_table("reports"):
+        existing = {column["name"] for column in inspect(connection).get_columns("reports")}
+        for name in _RESEARCH_FEED_COLUMNS:
+            if name in existing:
+                connection.execute(text(f"ALTER TABLE reports DROP COLUMN {name}"))
+    connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 80))
+
+
+_REPORT_EDITS_COLUMNS = ("notes", "edited_at", "edits")
+
+
+def _add_report_edits(connection: Connection) -> None:
+    """Author edits of a published report (crf04/statsplus#377).
+
+    Adds the nullable ``reports.notes``, ``edited_at`` and ``edits``, so every
+    existing report reads as published, with no notes and never edited.  The
+    published ``document`` and ``calls`` are left alone.  Rerun-safe: a column
+    is added only when missing, and a fresh database already has all three
+    from the model-created table.
+    """
+    from app.models.report import Report
+
+    Report.__table__.create(connection, checkfirst=True)
+    existing = {column["name"] for column in inspect(connection).get_columns("reports")}
+    for name in _REPORT_EDITS_COLUMNS:
+        if name not in existing:
+            column = Report.__table__.c[name]
+            connection.execute(
+                text(
+                    f"ALTER TABLE reports ADD COLUMN {name} {column.type.compile(dialect=connection.dialect)}"
+                )
+            )
+
+
+def downgrade_report_edits(connection: Connection) -> None:
+    """Reverse ``081_report_edits``; also forgets its migration record.
+
+    Migrations here are forward-only at runtime.  This exists so the change is
+    provably reversible: it drops only the three columns, which loses saved
+    edits and notes but never a published report.
+    """
+    if inspect(connection).has_table("reports"):
+        existing = {column["name"] for column in inspect(connection).get_columns("reports")}
+        for name in _REPORT_EDITS_COLUMNS:
+            if name in existing:
+                connection.execute(text(f"ALTER TABLE reports DROP COLUMN {name}"))
+    connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 81))
+
+
+def _add_report_origin(connection: Connection) -> None:
+    """Record who wrote each report (crf04/statsplus#382).
+
+    Adds ``reports.origin``, NOT NULL with default ``assistant`` and a CHECK
+    admitting only ``assistant`` and ``builder``, so every existing report,
+    all published by an assistant, becomes ``assistant``.  Rerun-safe: the
+    column is added only when missing, and a fresh database already has it
+    from the model-created table.
+    """
+    from app.models.report import REPORT_ORIGIN_CHECK, REPORT_ORIGIN_MAX_LENGTH, Report
+    from app.models.user import User
+
+    User.__table__.create(connection, checkfirst=True)
+    Report.__table__.create(connection, checkfirst=True)
+    existing = {column["name"] for column in inspect(connection).get_columns("reports")}
+    if "origin" not in existing:
+        connection.execute(
+            text(
+                f"ALTER TABLE reports ADD COLUMN origin VARCHAR({REPORT_ORIGIN_MAX_LENGTH}) "
+                f"NOT NULL DEFAULT 'assistant' CONSTRAINT ck_reports_origin CHECK ({REPORT_ORIGIN_CHECK})"
+            )
+        )
+
+
+def downgrade_report_origin(connection: Connection) -> None:
+    """Reverse ``082_report_origin``; also forgets its migration record.
+
+    Migrations here are forward-only at runtime.  This exists so the change is
+    provably reversible: it drops only the column, which forgets which reports
+    the Report Builder wrote.
+    """
+    if inspect(connection).has_table("reports"):
+        existing = {column["name"] for column in inspect(connection).get_columns("reports")}
+        if "origin" in existing:
+            connection.execute(text("ALTER TABLE reports DROP COLUMN origin"))
+    connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 82))
+
+
+def _admit_report_published_usage_event(connection: Connection) -> None:
+    """Let ``usage_events`` record the ``report_published`` web action (crf04/statsplus#382).
+
+    ``ck_usage_events_name`` enumerates the event names, so a table created
+    before this one rejects its rows.  PostgreSQL swaps the constraint in
+    place; SQLite cannot alter a CHECK, so it rebuilds the table from the
+    current model.  Rerun-safe: the PostgreSQL swap is a drop-if-exists plus
+    add, and a SQLite table whose definition already names the event is left
+    alone.
+    """
+    from sqlalchemy import CheckConstraint
+
+    from app.models.usage_event import EVENT_REPORT_PUBLISHED, UsageEvent
+    from app.models.user import User
+
+    table = UsageEvent.__table__
+    User.__table__.create(connection, checkfirst=True)
+    if not inspect(connection).has_table(table.name):
+        table.create(connection)
+        return
+    if connection.dialect.name == "sqlite":
+        current_sql = _sqlite_table_sql(connection, table.name)
+        if EVENT_REPORT_PUBLISHED not in current_sql:
+            _rebuild_sqlite_usage_events(connection, table)
+        return
+    [constraint] = [
+        constraint
+        for constraint in table.constraints
+        if isinstance(constraint, CheckConstraint) and constraint.name == "ck_usage_events_name"
+    ]
+    connection.execute(text("ALTER TABLE usage_events DROP CONSTRAINT IF EXISTS ck_usage_events_name"))
+    # NOT VALID skips the scan: every stored row passed the narrower CHECK.
+    connection.execute(
+        text(
+            "ALTER TABLE usage_events ADD CONSTRAINT ck_usage_events_name "
+            f"CHECK ({constraint.sqltext}) NOT VALID"
+        )
+    )
+
+
+def _rebuild_sqlite_usage_events(connection: Connection, table) -> None:
+    """Rebuild ``usage_events`` from the model in one transaction, keeping every row and id.
+
+    The renamed table keeps its indexes' names, so they are dropped before the
+    model's are created.
+    """
+    driver = connection.connection.driver_connection
+    if not getattr(driver, "in_transaction", True):
+        connection.exec_driver_sql("BEGIN")
+    connection.execute(text("ALTER TABLE usage_events RENAME TO usage_events__083"))
+    for index in table.indexes:
+        connection.execute(text(f"DROP INDEX IF EXISTS {index.name}"))
+    table.create(connection)
+    columns = ", ".join(column.name for column in table.columns)
+    connection.execute(text(f"INSERT INTO usage_events ({columns}) SELECT {columns} FROM usage_events__083"))
+    connection.execute(text("DROP TABLE usage_events__083"))
+
+
+def _rebuild_sqlite_target_qualifiers(connection: Connection) -> None:
+    """Rebuild ``target_qualifiers`` on SQLite so its Diet columns may be null.
+
+    SQLite cannot drop a NOT NULL.  The rename, create, copy and drop run in one
+    explicit transaction, so an interruption leaves the original table.  A
+    ``target_qualifiers__079`` left by an interrupted run is reconciled on
+    retry: its rows are copied into the current table, ignoring any already
+    there, and it is dropped.  Every step is therefore safe to repeat.
+    """
+
+    from app.models.target import TargetQualifier
+
+    table = TargetQualifier.__table__
+    preparer = connection.dialect.identifier_preparer
+    quoted = preparer.quote(table.name)
+    leftover_name = f"{table.name}__079"
+    legacy = preparer.quote(leftover_name)
+    leftover_sql = _sqlite_table_sql(connection, leftover_name)
+    driver = connection.connection.driver_connection
+    if not getattr(driver, "in_transaction", True):
+        connection.exec_driver_sql("BEGIN")
+    if leftover_sql is None:
+        # The index travels with the renamed table, so it is dropped first and
+        # the create below makes it again under its own name.
+        connection.execute(text("DROP INDEX IF EXISTS idx_target_qualifiers_target"))
+        connection.execute(text(f"ALTER TABLE {quoted} RENAME TO {legacy}"))
+    table.create(connection, checkfirst=True)
+    shared = [
+        column["name"]
+        for column in inspect(connection).get_columns(leftover_name)
+        if column["name"] in table.columns
+    ]
+    columns = ", ".join(preparer.quote(name) for name in shared)
+    connection.execute(text(f"INSERT OR IGNORE INTO {quoted} ({columns}) SELECT {columns} FROM {legacy}"))
+    connection.execute(text(f"DROP TABLE {legacy}"))
+
+
+def _add_position_qualifiers(connection: Connection) -> None:
+    """Store a player's Position and the Position and Average Qualifiers (#607).
+
+    ``athlete_catalog.position`` is the Guard/Wing/Big group mapped from
+    NBA.com's listed position, null until a refresh writes it.  The
+    ``target_qualifiers`` Diet columns (slice, comparator, threshold) become
+    nullable because a Position Qualifier has none of them and an Average
+    Qualifier has no slice, and two columns are added: ``average_stat`` and
+    ``position_groups``.  Existing rows keep every value.
+
+    Rerun-safe: each step looks at the current schema first, and a fresh
+    database already has the final shape from its model-created tables.
+    """
+
+    from app.models.athlete_catalog import AthleteCatalog
+    from app.models.target import Target, TargetQualifier
+
+    AthleteCatalog.__table__.create(connection, checkfirst=True)
+    Target.__table__.create(connection, checkfirst=True)
+    if connection.dialect.name == "sqlite" and _sqlite_table_sql(connection, "target_qualifiers__079"):
+        # An interrupted rebuild: finish it before anything else creates the
+        # current table empty beside the leftover's rows.
+        _rebuild_sqlite_target_qualifiers(connection)
+    TargetQualifier.__table__.create(connection, checkfirst=True)
+    preparer = connection.dialect.identifier_preparer
+
+    catalog_columns = {column["name"] for column in inspect(connection).get_columns("athlete_catalog")}
+    if "position" not in catalog_columns:
+        connection.execute(text("ALTER TABLE athlete_catalog ADD COLUMN position VARCHAR(8)"))
+
+    qualifier_columns = {
+        column["name"]: column for column in inspect(connection).get_columns("target_qualifiers")
+    }
+    diet_columns = ("slice_key", "comparator", "threshold")
+    required = [name for name in diet_columns if not qualifier_columns[name]["nullable"]]
+    if required:
+        if connection.dialect.name == "sqlite":
+            _rebuild_sqlite_target_qualifiers(connection)
+        else:
+            for name in required:
+                connection.execute(
+                    text(f"ALTER TABLE target_qualifiers ALTER COLUMN {preparer.quote(name)} DROP NOT NULL")
+                )
+    existing = {column["name"] for column in inspect(connection).get_columns("target_qualifiers")}
+    if "average_stat" not in existing:
+        connection.execute(text("ALTER TABLE target_qualifiers ADD COLUMN average_stat VARCHAR(16)"))
+    if "position_groups" not in existing:
+        connection.execute(text("ALTER TABLE target_qualifiers ADD COLUMN position_groups JSON"))
 
 
 #: The indexes migration 075 adds for projection retention, by table: the
@@ -3162,6 +3531,13 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     ),
     Migration(76, "076_create_reports", _create_reports_table),
     Migration(77, "077_user_public_handle", _add_user_public_handle),
+    Migration(78, "078_player_game_tracking", _create_player_game_tracking_table),
+    Migration(79, "079_position_qualifiers", _add_position_qualifiers),
+    Migration(80, "080_research_feed", _add_research_feed),
+    Migration(81, "081_report_edits", _add_report_edits),
+    Migration(82, "082_report_origin", _add_report_origin),
+    Migration(83, "083_usage_report_published", _admit_report_published_usage_event),
+    Migration(84, "084_lineup_segments", _create_lineup_segment_tables),
 )
 
 

@@ -2,9 +2,10 @@
 
 A selected 2026-27 game-log, Matchup, selection or profile read captures a held
 candidate, then reads its rows from the candidate's projection.  A recomposition that supersedes the
-candidate and a prune that deletes it can both commit in between; the request
-reads one database snapshot, so its answer is the one it captured.  Skipped
-unless ``TEST_DATABASE_URL`` names a disposable database.
+candidate and a deletion of it (a prune, once 2026-27 is no longer held) can
+both commit in between; the request reads one database snapshot, so its answer
+is the one it captured.  Skipped unless ``TEST_DATABASE_URL`` names a
+disposable database.
 """
 
 from __future__ import annotations
@@ -20,7 +21,17 @@ from app.models.game_logs import GameLogQuery
 from app.services.player_service import _ARCHETYPE_RATE_COLUMNS
 from app.services.research_season import season_scoped
 from tests.services.test_serving_season_matchup import BOS
-from tests.support.season_cutover import NEW, OLD
+from tests.services.test_unpublished_as_of_reads import (
+    AFTER_THE_OPENING_WEEK,
+    _cut_over_and_revert_the_opening_week,
+    _game_at,
+    _hold_a_week_then_ten_games,
+    _matchup,
+    _served,
+    _status,
+    season_in_progress,
+)
+from tests.support.season_cutover import NEW, OLD, OLD_CUTOFF, PLAYER_LOGS, SEASON_STREAM, THIN_CUTOFF
 from tests.support.selected_season import GAME_ID, PLAYER_ID, PLAYER_NAME, SelectedWorld
 
 pytestmark = pytest.mark.integration
@@ -63,15 +74,33 @@ def _versions(world, publication_id):
         )
 
 
-def test_a_prune_between_capture_and_projection_read_leaves_the_answer_unchanged(world):
+def _supersede_and_delete(world):
+    """Supersede the held game-log candidate and delete it; return its replacement.
+
+    Pruning keeps a superseded version of a held season, which a past game
+    may read, so the deletion stands in for the prune that follows a cutover.
+    """
+
+    replacement = world.hold_ten_games()[0].publication_id
+    with world.engine.begin() as connection:
+        connection.execute(
+            text(
+                "DELETE FROM publication_versions"
+                " WHERE stream_key = 'player_game_logs' AND season = :season AND status = 'superseded'"
+            ),
+            {"season": NEW},
+        )
+    return replacement
+
+
+def test_a_deletion_between_capture_and_projection_read_leaves_the_answer_unchanged(world):
     held, _defense = world.hold_opening_week()
     projected = world.logs._projected_player_rows
     raced = []
 
     def supersede_and_prune_first(*args, **kwargs):
         if not raced:
-            raced.append(world.hold_ten_games()[0].publication_id)
-            world.publications.prune_history(stream_key="player_game_logs")
+            raced.append(_supersede_and_delete(world))
         return projected(*args, **kwargs)
 
     world.logs._projected_player_rows = supersede_and_prune_first
@@ -108,20 +137,19 @@ def test_choices_and_a_selected_read_on_postgres(world):
 
 
 def _race_once(world, read):
-    """``read`` that first supersedes and prunes the held game-log candidate, once."""
+    """``read`` that first supersedes and deletes the held game-log candidate, once."""
 
     raced = []
 
     def raced_read(*args, **kwargs):
         if not raced:
-            raced.append(world.hold_ten_games()[0].publication_id)
-            world.publications.prune_history(stream_key="player_game_logs")
+            raced.append(_supersede_and_delete(world))
         return read(*args, **kwargs)
 
     return raced, raced_read
 
 
-def test_a_matchup_keeps_the_candidate_it_captured_through_a_prune(world):
+def test_a_matchup_keeps_the_candidate_it_captured_through_a_deletion(world):
     held, _defense = world.hold_opening_week()
     logs = world.service.player_logs
     summaries = logs.get_player_summaries
@@ -139,7 +167,7 @@ def test_a_matchup_keeps_the_candidate_it_captured_through_a_prune(world):
     assert raced
 
 
-def test_a_selection_keeps_the_candidate_it_captured_through_a_prune(world):
+def test_a_selection_keeps_the_candidate_it_captured_through_a_deletion(world):
     world.hold_opening_week()
     h2h = world.logs.list_h2h_rows
     raced, world.logs.list_h2h_rows = _race_once(world, h2h)
@@ -154,7 +182,7 @@ def test_a_selection_keeps_the_candidate_it_captured_through_a_prune(world):
     assert raced
 
 
-def test_slate_edges_keep_the_candidate_they_captured_through_a_prune(world):
+def test_slate_edges_keep_the_candidate_they_captured_through_a_deletion(world):
     held, _defense = world.hold_opening_week()
     logs = world.service.player_logs
     summaries = logs.get_player_summaries
@@ -182,7 +210,7 @@ def test_slate_edges_keep_the_candidate_they_captured_through_a_prune(world):
     assert raced
 
 
-def test_an_unscheduled_matchup_keeps_the_candidate_it_captured_through_a_prune(world):
+def test_an_unscheduled_matchup_keeps_the_candidate_it_captured_through_a_deletion(world):
     held, _defense = world.hold_opening_week()
     logs = world.service.player_logs
     summaries = logs.get_player_summaries
@@ -214,7 +242,7 @@ def _archetype_profile(world):
     return profiles
 
 
-def test_a_profile_keeps_the_rows_it_captured_through_a_prune(world):
+def test_a_profile_keeps_the_rows_it_captured_through_a_deletion(world):
     held, _defense = world.hold_opening_week()
     profiles = _archetype_profile(world)
     rows = world.logs.list_archetype_rows
@@ -252,3 +280,29 @@ def test_a_selected_profile_and_unscheduled_matchup_only_read(world):
 
     assert statements
     assert set(statements) <= {"SELECT", "WITH", "SAVEPOINT", "RELEASE", "ROLLBACK"}
+
+
+def test_a_past_game_reads_the_2026_27_evidence_composed_before_it_through_a_prune(world, monkeypatch):
+    season_in_progress(monkeypatch)
+    opening_week, _ten_games = _hold_a_week_then_ten_games(world)
+    _game_at(world, AFTER_THE_OPENING_WEEK)
+
+    world.publications.prune_history(season=NEW)
+
+    assert _served(_matchup(world), SEASON_STREAM, PLAYER_LOGS) == {
+        SEASON_STREAM: ("candidate", NEW, opening_week.publication_id, THIN_CUTOFF.isoformat()),
+        PLAYER_LOGS: ("candidate", NEW, world.opening_week_logs.publication_id, THIN_CUTOFF.isoformat()),
+    }
+
+
+def test_a_past_game_never_reads_and_prune_deletes_a_withdrawn_defense(world, monkeypatch):
+    season_in_progress(monkeypatch)
+    withdrawn, logs = _cut_over_and_revert_the_opening_week(world)
+    _game_at(world, AFTER_THE_OPENING_WEEK)
+
+    assert _served(_matchup(world), SEASON_STREAM, PLAYER_LOGS) == {
+        SEASON_STREAM: ("prior_season", OLD, world.live(SEASON_STREAM), OLD_CUTOFF.isoformat()),
+        PLAYER_LOGS: ("candidate", NEW, logs.publication_id, THIN_CUTOFF.isoformat()),
+    }
+    world.publications.prune_history(season=NEW)
+    assert _status(world, withdrawn.publication_id) is None

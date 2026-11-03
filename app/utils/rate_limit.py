@@ -44,6 +44,7 @@ NL_QUERY_LIMIT = "30/minute"
 DFS_BOARD_LIMIT = "30/minute"
 FEEDBACK_LIMIT = "10/hour"
 REPORT_PUBLISH_LIMIT = "10/hour;30/day"
+ANONYMOUS_GAME_LOGS_LIMIT = "30/minute"
 
 #: Redis commands must not hold a request slot when the store is wedged.
 _STORAGE_TIMEOUT_SECONDS = 1
@@ -128,6 +129,17 @@ ROUTE_LIMITS = {
     "users.create_report": REPORT_PUBLISH_LIMIT,
 }
 
+#: Endpoints that also answer callers with no user, and their per-IP limit for
+#: those callers alone, counted on top of the unauthenticated bucket.  A
+#: signed-in caller is exempt and keeps the shared default (crf04/statsplus#381).
+ANONYMOUS_ROUTE_LIMITS = {
+    "games.get_game_logs": ANONYMOUS_GAME_LOGS_LIMIT,
+}
+
+
+def _signed_in() -> bool:
+    return get_current_user() is not None
+
 
 def _authenticate_before_limiting() -> None:
     if request.method == "OPTIONS" or get_current_user() is not None:
@@ -175,6 +187,10 @@ def init_rate_limiting(app: Flask, settings: RuntimeSettings) -> None:
     limiter.init_app(app)
     for endpoint, limit in ROUTE_LIMITS.items():
         app.view_functions[endpoint] = limiter.limit(limit, key_func=user_key)(app.view_functions[endpoint])
+    for endpoint, limit in ANONYMOUS_ROUTE_LIMITS.items():
+        app.view_functions[endpoint] = limiter.limit(
+            limit, key_func=user_key, exempt_when=_signed_in, override_defaults=False
+        )(app.view_functions[endpoint])
     app.register_error_handler(RateLimitExceeded, rate_limited)
     app.extensions["rate_limiter"] = limiter
 

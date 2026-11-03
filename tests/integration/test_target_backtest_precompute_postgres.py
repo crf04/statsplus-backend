@@ -52,3 +52,7 @@ def test_after_a_generation_bump_recent_targets_are_hits_on_postgres(world):
     assert service.backtest(seasons.OWNER, first["id"])[1] == "hit"
     assert service.backtest(seasons.OWNER, second["id"])[1] == "hit"
     assert precompute._statuses(service, precompute.STALE_OWNER) == ["uncached"]
+
+
+def test_position_and_average_targets_precompute_on_postgres(world):
+    precompute.exercise_position_and_average_targets(world)

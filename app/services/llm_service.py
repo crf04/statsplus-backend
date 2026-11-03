@@ -95,6 +95,7 @@ class LLMParsedQuery(BaseModel):
     minutes_filter: LLMMinutesRange | None
     self_filters: list[LLMSelfFilter]
     opponent_filters: list[LLMOpponentFilter]
+    opponent_team: str | None
     players_on: list[str]
     players_off: list[str]
     season: str | None

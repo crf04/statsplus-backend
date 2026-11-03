@@ -587,6 +587,13 @@ read of a different season keeps its refusal (`window_not_ready` for an
 earlier one, `publication_season_mismatch` for a later one). A stream in no
 family behaves like `game_logs`.
 
+The rules govern what the default serves, so they gate composition and the
+Season Cutover only. A reader who selects the next season before its cutover
+(an Unpublished Season read, Targets Backtests included) is served each
+family's held candidate that passes the cutover's other per-publication
+checks, however few games each team has played; the season's `team_games` in
+`/api/games/seasons` is that sample (crf04/statsplus#386).
+
 **Hold.** Composition for an enabled stream activates a candidate of season S
 only when the stream has no active Publication yet, or S is the published
 season (while no season is published, only the stream's own current season).
@@ -634,6 +641,17 @@ after the rule holds activates.
   completed regular-season game's starters and on-court stints for
   `GET /api/games/rotation` (crf04/statsplus#223); it runs whatever the ledger
   step's outcome, and the run fails if either step failed.
+- `tracking-refresh` (settings in `railway.tracking.json`, plus `DATABASE_URL`)
+  runs `scripts/tracking_refresh.py --season 2025-26 --season 2026-27
+  --max-games 80` at 10:30 and 14:30 UTC (crf04/statsplus-backend#604). It
+  stores NBA.com rebound chances and potential assists for each completed
+  regular-season game without them; a game whose tracking is not published yet
+  is retried by the next run, and the run fails only when a feed could not be
+  fetched. Backfill a season by hand, repeating until `remaining` is 0:
+  `python scripts/tracking_refresh.py --season 2025-26 --database-url
+  "$DATABASE_URL" --max-games 400 --throttle 0.6` (about 1,230 box-score calls
+  and 164 day calls, roughly 20 minutes). It needs only `DATABASE_URL` and
+  egress to `stats.nba.com`.
 
 A game's identity, including its date, never changes once accepted, so a
 recheck that observes a different date fails that game on every run. Before

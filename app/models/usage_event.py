@@ -1,7 +1,7 @@
 """Usage events (crf04/statsplus#261).
 
 One append-only table records what accounts do: a daily ``active`` row per
-source, four daily-deduplicated web actions, and one ``mcp_tool_call`` row per
+source, five daily-deduplicated web actions, and one ``mcp_tool_call`` row per
 connector tool call.  The backend writes it; nothing is backfilled.  The
 ``day`` column is the US Eastern date of ``occurred_at``, stored so the report
 can index on it.
@@ -32,6 +32,7 @@ EVENT_MATCHUP_VIEWED = "matchup_viewed"
 EVENT_GAME_LOGS_QUERIED = "game_logs_queried"
 EVENT_QUERY_PROMPT_PARSED = "query_prompt_parsed"
 EVENT_BACKTEST_VIEWED = "backtest_viewed"
+EVENT_REPORT_PUBLISHED = "report_published"
 EVENT_MCP_TOOL_CALL = "mcp_tool_call"
 
 #: The web actions, which (like ``active``) record at most once per day.
@@ -40,6 +41,7 @@ WEB_ACTIONS = (
     EVENT_GAME_LOGS_QUERIED,
     EVENT_QUERY_PROMPT_PARSED,
     EVENT_BACKTEST_VIEWED,
+    EVENT_REPORT_PUBLISHED,
 )
 EVENT_NAMES = (EVENT_ACTIVE, *WEB_ACTIONS, EVENT_MCP_TOOL_CALL)
 

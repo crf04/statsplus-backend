@@ -1322,3 +1322,353 @@ def test_the_contract_walks_end_to_end_against_a_real_database(
         "targets": [],
     }
     get_engine.cache_clear()
+
+
+# --- Position and Average Qualifiers (crf04/statsplus#351) -----------------
+
+WING_BIG = {"base": "position", "groups": ["Wing", "Big"]}
+THREE_PA_AVERAGE = {
+    "base": "season_average",
+    "stat": "3PA",
+    "comparator": "at_or_above",
+    "threshold": 0.3,
+}
+
+
+def test_a_position_and_an_average_are_stored_and_listed_as_sent(targets):
+    created = targets.create_target(
+        OWNER, opponent="MEM", qualifiers=[WING_BIG, THREE_PA_AVERAGE, CORNER_THREE], note=None
+    )
+
+    assert created["qualifiers"] == [WING_BIG, THREE_PA_AVERAGE, CORNER_THREE]
+    assert targets.list_targets(OWNER)[0]["qualifiers"] == [WING_BIG, THREE_PA_AVERAGE, CORNER_THREE]
+    assert targets.get_target(OWNER, created["id"])["qualifiers"] == [
+        WING_BIG,
+        THREE_PA_AVERAGE,
+        CORNER_THREE,
+    ]
+
+
+def test_groups_come_back_in_guard_wing_big_order_whatever_order_they_were_sent(targets):
+    created = targets.create_target(
+        OWNER,
+        opponent="MEM",
+        qualifiers=[{"base": "position", "groups": ["Big", "Guard", "Wing"]}],
+        note=None,
+    )
+
+    assert created["qualifiers"] == [{"base": "position", "groups": ["Guard", "Wing", "Big"]}]
+    assert created["title"] == "MEM vs Guard/Wing/Big"
+
+
+@pytest.mark.parametrize(
+    ("qualifiers", "title"),
+    [
+        ([{"base": "position", "groups": ["Big"]}], "MEM vs Big"),
+        ([WING_BIG], "MEM vs Wing/Big"),
+        ([THREE_PA_AVERAGE], "MEM vs 3PA avg ≥ 0.3"),
+        (
+            [{**THREE_PA_AVERAGE, "stat": "3PA/36", "comparator": "at_or_below", "threshold": 2}],
+            "MEM vs 3PA/36 avg ≤ 2",
+        ),
+        ([{**THREE_PA_AVERAGE, "stat": "FG%", "threshold": 45.55}], "MEM vs FG% avg ≥ 45.55"),
+        ([{**THREE_PA_AVERAGE, "threshold": 0.004}], "MEM vs 3PA avg ≥ 0.004"),
+        ([{**THREE_PA_AVERAGE, "threshold": 0.304}], "MEM vs 3PA avg ≥ 0.304"),
+        ([CORNER_THREE, WING_BIG], "MEM vs Wing/Big, Corner 3 ≥ 40%"),
+        (
+            [CORNER_THREE, THREE_PA_AVERAGE, {"base": "position", "groups": ["Big"]}],
+            "MEM vs Big, Corner 3 ≥ 40%, 3PA avg ≥ 0.3",
+        ),
+        ([TRANSITION, CORNER_THREE], "MEM vs Transition ≥ 20%, Corner 3 ≥ 40%"),
+    ],
+)
+def test_the_title_reads_the_position_first_then_the_qualifiers_in_entry_order(targets, qualifiers, title):
+    assert targets.create_target(OWNER, opponent="MEM", qualifiers=qualifiers, note=None)["title"] == title
+    assert targets.validate_target_draft(opponent="MEM", qualifiers=qualifiers)["title"] == title
+
+
+def test_an_average_threshold_of_zero_is_accepted(targets):
+    created = targets.create_target(
+        OWNER, opponent="MEM", qualifiers=[{**THREE_PA_AVERAGE, "threshold": 0}], note=None
+    )
+
+    assert created["qualifiers"][0]["threshold"] == 0.0
+    assert created["title"] == "MEM vs 3PA avg ≥ 0"
+
+
+def test_the_same_groups_in_another_order_are_a_duplicate(targets):
+    targets.create_target(OWNER, opponent="MEM", qualifiers=[WING_BIG], note=None)
+
+    with pytest.raises(ConflictError):
+        targets.create_target(
+            OWNER, opponent="MEM", qualifiers=[{"base": "position", "groups": ["Big", "Wing"]}], note=None
+        )
+    # Other groups, or another opponent, are other Targets.
+    targets.create_target(
+        OWNER, opponent="MEM", qualifiers=[{"base": "position", "groups": ["Big"]}], note=None
+    )
+    targets.create_target(OWNER, opponent="POR", qualifiers=[WING_BIG], note=None)
+
+
+def test_average_thresholds_are_compared_to_two_decimals(targets):
+    targets.create_target(OWNER, opponent="MEM", qualifiers=[THREE_PA_AVERAGE], note=None)
+
+    with pytest.raises(ConflictError):
+        targets.create_target(
+            OWNER, opponent="MEM", qualifiers=[{**THREE_PA_AVERAGE, "threshold": 0.304}], note=None
+        )
+    targets.create_target(
+        OWNER, opponent="MEM", qualifiers=[{**THREE_PA_AVERAGE, "threshold": 0.31}], note=None
+    )
+    targets.create_target(
+        OWNER, opponent="MEM", qualifiers=[{**THREE_PA_AVERAGE, "comparator": "at_or_below"}], note=None
+    )
+    targets.create_target(
+        OWNER, opponent="MEM", qualifiers=[{**THREE_PA_AVERAGE, "stat": "3PA/36"}], note=None
+    )
+
+
+def test_the_same_average_twice_in_one_request_is_refused(targets):
+    with pytest.raises(InvalidInputError) as refused:
+        targets.validate_target_draft(
+            opponent="MEM", qualifiers=[THREE_PA_AVERAGE, {**THREE_PA_AVERAGE, "threshold": 0.299}]
+        )
+
+    assert refused.value.public_message == "A target cannot repeat the same qualifier."
+
+
+def test_editing_to_a_position_changes_the_title_and_the_stored_rows(targets):
+    created = targets.create_target(OWNER, opponent="MEM", qualifiers=[CORNER_THREE], note=None)
+
+    updated = targets.update_target(OWNER, created["id"], changes={"qualifiers": [CORNER_THREE, WING_BIG]})
+
+    assert updated["title"] == "MEM vs Wing/Big, Corner 3 ≥ 40%"
+    assert targets.get_target(OWNER, created["id"])["qualifiers"] == [CORNER_THREE, WING_BIG]
+
+
+_POSITION_REFUSAL = "A position qualifier needs a non-empty list of distinct groups from Guard, Wing and Big."
+_AVERAGE_REFUSAL = (
+    "An average qualifier needs a known stat, a comparator of at_or_above or "
+    "at_or_below, and a finite threshold from 0 to 1000."
+)
+
+
+@pytest.mark.parametrize(
+    ("qualifiers", "message"),
+    [
+        ([{"base": "role", "groups": ["Big"]}], None),
+        ([{"base": "position"}], _POSITION_REFUSAL),
+        ([{"base": "position", "groups": []}], _POSITION_REFUSAL),
+        ([{"base": "position", "groups": "Big"}], _POSITION_REFUSAL),
+        ([{"base": "position", "groups": ["Center"]}], _POSITION_REFUSAL),
+        ([{"base": "position", "groups": ["big"]}], _POSITION_REFUSAL),
+        ([{"base": "position", "groups": ["Big", "Big"]}], _POSITION_REFUSAL),
+        ([{"base": "position", "groups": [None]}], _POSITION_REFUSAL),
+        (
+            [WING_BIG, {"base": "position", "groups": ["Guard"]}],
+            "A target may hold at most one position qualifier.",
+        ),
+        ([{**THREE_PA_AVERAGE, "stat": "3pa"}], _AVERAGE_REFUSAL),
+        ([{**THREE_PA_AVERAGE, "stat": "NOPE"}], _AVERAGE_REFUSAL),
+        ([{**THREE_PA_AVERAGE, "stat": None}], _AVERAGE_REFUSAL),
+        ([{**THREE_PA_AVERAGE, "comparator": "equals"}], _AVERAGE_REFUSAL),
+        ([{**THREE_PA_AVERAGE, "threshold": -0.1}], _AVERAGE_REFUSAL),
+        ([{**THREE_PA_AVERAGE, "threshold": float("nan")}], _AVERAGE_REFUSAL),
+        ([{**THREE_PA_AVERAGE, "threshold": float("inf")}], _AVERAGE_REFUSAL),
+        ([{**THREE_PA_AVERAGE, "threshold": 1000.01}], _AVERAGE_REFUSAL),
+        ([{**THREE_PA_AVERAGE, "threshold": 1001}], _AVERAGE_REFUSAL),
+        ([{**THREE_PA_AVERAGE, "threshold": 1e308}], _AVERAGE_REFUSAL),
+        ([{**THREE_PA_AVERAGE, "threshold": 10**400}], _AVERAGE_REFUSAL),
+        ([{**THREE_PA_AVERAGE, "threshold": -(10**400)}], _AVERAGE_REFUSAL),
+        ([{**THREE_PA_AVERAGE, "threshold": "0.3"}], _AVERAGE_REFUSAL),
+        ([{**THREE_PA_AVERAGE, "threshold": True}], _AVERAGE_REFUSAL),
+        ([{**THREE_PA_AVERAGE, "threshold": None}], _AVERAGE_REFUSAL),
+    ],
+)
+def test_an_unusable_position_or_average_is_the_invalid_qualifier_refusal(targets, qualifiers, message):
+    with pytest.raises(InvalidInputError) as refused:
+        targets.create_target(OWNER, opponent="MEM", qualifiers=qualifiers, note=None)
+
+    assert refused.value.public_message == message or (
+        message is None and refused.value.public_message.startswith("A qualifier needs a known diet base")
+    )
+    assert targets.list_targets(OWNER) == []
+
+
+def test_an_average_threshold_above_one_is_not_a_share(targets):
+    created = targets.create_target(
+        OWNER, opponent="MEM", qualifiers=[{**THREE_PA_AVERAGE, "stat": "PTS", "threshold": 24.5}], note=None
+    )
+
+    assert created["qualifiers"][0]["threshold"] == 24.5
+
+
+def test_the_qualifier_limit_counts_every_kind(targets):
+    nine_diet = [{**CORNER_THREE, "threshold": round(0.1 + index * 0.01, 2)} for index in range(8)]
+    ten = [*nine_diet, WING_BIG, THREE_PA_AVERAGE]
+    assert len(ten) == TARGET_QUALIFIER_LIMIT
+
+    assert len(targets.create_target(OWNER, opponent="MEM", qualifiers=ten, note=None)["qualifiers"]) == 10
+    with pytest.raises(InvalidInputError):
+        targets.create_target(
+            OWNER,
+            opponent="POR",
+            qualifiers=[*ten, {**THREE_PA_AVERAGE, "stat": "REB"}],
+            note=None,
+        )
+
+
+def test_position_and_average_targets_walk_end_to_end_over_http(
+    tmp_path, make_client, authenticate, make_db_user
+):
+    from app.utils.db import get_engine
+
+    database_url = f"sqlite:///{tmp_path / 'targets-player-rules.sqlite3'}"
+    get_engine.cache_clear()
+    engine = create_engine(database_url)
+    run_migrations(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            User.__table__.insert(),
+            {
+                "firebase_uid": OWNER,
+                "email": f"{OWNER}@example.com",
+                "display_name": OWNER,
+                "photo_url": None,
+                "created_at": datetime(2026, 8, 1, tzinfo=UTC),
+                "last_login": datetime(2026, 8, 1, tzinfo=UTC),
+                "is_active": True,
+            },
+        )
+    engine.dispose()
+    client = make_client(database_url)
+    headers = authenticate(claims={"uid": OWNER}, db_user=make_db_user(firebase_uid=OWNER))
+
+    created = client.post(
+        "/api/user/targets",
+        headers=headers,
+        json={"opponent": "MEM", "qualifiers": [THREE_PA_AVERAGE, {"base": "position", "groups": ["Big"]}]},
+    )
+    assert created.status_code == 201
+    target = created.get_json()["target"]
+    assert target["title"] == "MEM vs Big, 3PA avg ≥ 0.3"
+    assert target["qualifiers"] == [THREE_PA_AVERAGE, {"base": "position", "groups": ["Big"]}]
+
+    reordered = client.post(
+        "/api/user/targets",
+        headers=headers,
+        json={"opponent": "MEM", "qualifiers": [{"base": "position", "groups": ["Big"]}, THREE_PA_AVERAGE]},
+    )
+    assert reordered.status_code == 409
+
+    for qualifiers in (
+        [{"base": "position", "groups": []}],
+        [{"base": "position", "groups": ["Big"]}, {"base": "position", "groups": ["Wing"]}],
+        [{**THREE_PA_AVERAGE, "stat": "NOPE"}],
+        [{**THREE_PA_AVERAGE, "threshold": -1}],
+        [{"base": "archetype", "groups": ["Big"]}],
+    ):
+        refused = client.post(
+            "/api/user/targets", headers=headers, json={"opponent": "POR", "qualifiers": qualifiers}
+        )
+        assert refused.status_code == 400
+        assert refused.get_json()["error"]["code"] == "invalid_input"
+
+    edited = client.patch(
+        f"/api/user/targets/{target['id']}",
+        headers=headers,
+        json={"qualifiers": [{"base": "position", "groups": ["Guard", "Wing"]}]},
+    )
+    assert edited.status_code == 200
+    assert edited.get_json()["target"]["title"] == "MEM vs Guard/Wing"
+    listed = client.get("/api/user/targets", headers=headers).get_json()["targets"]
+    assert [entry["qualifiers"] for entry in listed] == [[{"base": "position", "groups": ["Guard", "Wing"]}]]
+    get_engine.cache_clear()
+
+
+def test_an_average_threshold_of_exactly_one_thousand_is_accepted(targets):
+    created = targets.create_target(
+        OWNER, opponent="MEM", qualifiers=[{**THREE_PA_AVERAGE, "threshold": 1000}], note=None
+    )
+
+    assert created["qualifiers"][0]["threshold"] == 1000.0
+
+
+def test_ten_average_qualifiers_at_the_threshold_limit_still_fit_the_stored_signature(targets):
+    stats = ["PTS", "REB", "AST", "3PM", "FG2A", "3PA", "FGM", "FGA", "FTM", "FTA"]
+    qualifiers = [{**THREE_PA_AVERAGE, "stat": stat, "threshold": 1000} for stat in stats]
+
+    created = targets.create_target(OWNER, opponent="MEM", qualifiers=qualifiers, note=None)
+
+    assert len(created["qualifiers"]) == TARGET_QUALIFIER_LIMIT
+
+
+def test_an_oversized_or_unbounded_threshold_is_a_400_over_http(
+    tmp_path, make_client, authenticate, make_db_user
+):
+    from app.utils.db import get_engine
+
+    database_url = f"sqlite:///{tmp_path / 'targets-bounds.sqlite3'}"
+    get_engine.cache_clear()
+    engine = create_engine(database_url)
+    run_migrations(engine)
+    engine.dispose()
+    client = make_client(database_url)
+    headers = authenticate(claims={"uid": OWNER}, db_user=make_db_user(firebase_uid=OWNER))
+    # ``json=`` would reject nothing here; the literal body is what a client sends.
+    for literal in ("1" + "0" * 400, "-" + "1" + "0" * 400, "1e999", "-1e999", "1000.5"):
+        body = (
+            '{"opponent": "MEM", "qualifiers": [{"base": "season_average", "stat": "3PA", '
+            f'"comparator": "at_or_above", "threshold": {literal}}}]}}'
+        )
+        for path in ("/api/user/targets", "/api/user/targets/preview"):
+            response = client.post(path, headers=headers, data=body, content_type="application/json")
+            assert response.status_code == 400, (path, literal, response.get_json())
+            assert response.get_json()["error"]["code"] == "invalid_input"
+        diet = (
+            '{"opponent": "MEM", "qualifiers": [{"base": "shot_zones", "slice_key": "Corner 3", '
+            f'"comparator": "at_or_above", "threshold": {literal}}}]}}'
+        )
+        response = client.post(
+            "/api/user/targets", headers=headers, data=diet, content_type="application/json"
+        )
+        assert response.status_code == 400, ("diet", literal, response.get_json())
+    get_engine.cache_clear()
+
+
+def test_small_and_long_average_thresholds_keep_their_precision_in_the_title_over_http(
+    tmp_path, make_client, authenticate, make_db_user
+):
+    from app.utils.db import get_engine
+
+    database_url = f"sqlite:///{tmp_path / 'targets-title-precision.sqlite3'}"
+    get_engine.cache_clear()
+    engine = create_engine(database_url)
+    run_migrations(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            User.__table__.insert(),
+            {
+                "firebase_uid": OWNER,
+                "email": f"{OWNER}@example.com",
+                "display_name": OWNER,
+                "photo_url": None,
+                "created_at": datetime(2026, 8, 1, tzinfo=UTC),
+                "last_login": datetime(2026, 8, 1, tzinfo=UTC),
+                "is_active": True,
+            },
+        )
+    engine.dispose()
+    client = make_client(database_url)
+    headers = authenticate(claims={"uid": OWNER}, db_user=make_db_user(firebase_uid=OWNER))
+
+    for opponent, threshold, title in (
+        ("MEM", 1e-11, "MEM vs 3PA avg ≥ 0.00000000001"),
+        ("POR", 0.123456789012, "POR vs 3PA avg ≥ 0.123456789012"),
+        ("DEN", 2, "DEN vs 3PA avg ≥ 2"),
+    ):
+        body = {"opponent": opponent, "qualifiers": [{**THREE_PA_AVERAGE, "threshold": threshold}]}
+        created = client.post("/api/user/targets", headers=headers, json=body)
+        assert created.status_code == 201
+        assert created.get_json()["target"]["title"] == title
+    get_engine.cache_clear()

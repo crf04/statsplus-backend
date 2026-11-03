@@ -844,7 +844,7 @@ def test_missing_auth_header_uses_nested_error_contract(client, monkeypatch) -> 
 
     monkeypatch.setattr(auth, "get_firebase_app", lambda: object())
 
-    response = client.get("/api/games/game_logs")
+    response = client.get("/api/games/seasons")
 
     assert response.status_code == 401
     assert response.get_json() == {
@@ -895,7 +895,7 @@ def test_invalid_token_details_are_not_exposed(client, monkeypatch) -> None:
     monkeypatch.setattr(auth, "verify_firebase_token", reject_token)
 
     response = client.get(
-        "/api/games/game_logs",
+        "/api/games/seasons",
         headers={"Authorization": "Bearer invalid-token"},
     )
 

@@ -40,6 +40,7 @@ from app.services.request_reads import request_read_scope
 from app.services.research_season import (
     event_season,
     focal_game_rows,
+    game_capture,
     published_capture,
     refuse_evidence_after_game,
     season_context,
@@ -149,6 +150,12 @@ class MatchupSelectionService:
         # The game's schedule facts are its own season's; evidence is published.
         schedule_season = event_season(self.settings, game_id, season)
         event = self._event(schedule_season, game_id, connection=connection)
+        publication_snapshot = game_capture(
+            self.publication_reader,
+            publication_snapshot,
+            event.get("scheduled_at"),
+            session=session,
+        )
         pool = (
             None
             if self.player_pool is None
@@ -175,12 +182,13 @@ class MatchupSelectionService:
         historical = is_historical_matchup(event, pool_players)
         focal_record = None
         if historical:
+            # A game read as of its tip finds its own box score only in the newest capture.
             focal_record = self._focal_record(
                 schedule_season,
                 game_id,
                 player_id,
                 evidence_season=season,
-                publication_snapshot=publication_snapshot,
+                publication_snapshot=getattr(publication_snapshot, "latest", None) or publication_snapshot,
                 connection=connection,
             )
             opponent_team_id = int(focal_record.opponent_team_id)

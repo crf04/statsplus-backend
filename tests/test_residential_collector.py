@@ -1073,7 +1073,16 @@ def _grouped_shot_type_control_plane(
         for team_id in sorted(int(value) for value in NBA_TEAM_IDS)
     ]
 
-    def deliver(rows_for, *, suffix="", window="season", scope_override=None, only=None, observations=None):
+    def deliver(
+        rows_for,
+        *,
+        suffix="",
+        window="season",
+        scope_override=None,
+        only=None,
+        observations=None,
+        tracking=True,
+    ):
         def complete_window(category):
             rows = rows_for(category)
             return normalize_grouped_shot_response(
@@ -1095,6 +1104,9 @@ def _grouped_shot_type_control_plane(
                     {"PLAYER_ID": row["PLAYER_ID"], "GP": row["GP"], "FGA": row["FGA"]} for row in rows
                 ],
                 team_games_response=team_games,
+                tracking_response=(
+                    [{"PLAYER_ID": row["PLAYER_ID"], "GP": row["GP"]} for row in rows] if tracking else None
+                ),
             )
 
         if observations is None:
@@ -1408,20 +1420,25 @@ class _NBAOnTheMorningOf1025:
     tracking still answered as of 10/22 whatever DateTo it was sent.
     """
 
-    def __init__(self, *, tracking="10/22/2026", box="10/24/2026", untracked=(), one_game_short=()):
+    def __init__(
+        self, *, tracking="10/22/2026", box="10/24/2026", untracked=(), one_game_short=(), outside_types=()
+    ):
         self.tracking = tracking
         self.box = box
         self.untracked = set(untracked)
         self.one_game_short = set(one_game_short)
+        # Players whose shots are none of the three types: in Overall only.
+        self.outside_types = set(outside_types)
         self.requests = []
 
     def fetch_player_shot_type(self, general_range, **parameters):
         self.requests.append(("tracking", parameters.get("date_to")))
         (result,) = _SHOT_TYPE_FRESHNESS["tracking"][self.tracking][general_range]["resultSets"]
+        absent = self.untracked | (self.outside_types if general_range != "Overall" else set())
         rows = [
             [*row[:2], row[2] - 1, row[3] - 1, *row[4:]] if row[0] in self.one_game_short else row
             for row in result["rowSet"]
-            if row[0] not in self.untracked
+            if row[0] not in absent
         ]
         return {"resultSets": [{**result, "rowSet": rows}]}
 
@@ -1543,8 +1560,8 @@ def test_player_shot_types_short_of_a_players_box_score_games_are_not_published(
 
 def test_player_shot_types_missing_a_box_score_shooter_are_not_published(tmp_path):
     # Tracking through 10/24 with Jokic (2 games, 42 box-score attempts) absent
-    # from all three categories: every row present agrees with the box score,
-    # but 905 of the 908 rows would publish him as having no shot types.
+    # from all of it, Overall included: every row present agrees with the box
+    # score, but 905 of the 908 rows would publish him as having no shot types.
     composed, job, versions = _collect_player_shot_types_on_1025(
         tmp_path, _NBAOnTheMorningOf1025(tracking="10/24/2026", untracked={203999})
     )
@@ -1552,6 +1569,47 @@ def test_player_shot_types_missing_a_box_score_shooter_are_not_published(tmp_pat
     assert composed == 0
     assert job == ("failed", "provider_window_lagging")
     assert versions == []
+
+
+def test_player_shot_types_with_a_shooter_outside_the_three_types_are_published(tmp_path):
+    # The 2026-10-28 collection refused Chaz Lanier: one game, one attempt,
+    # in tracking's Overall range and in none of the three types.  Here
+    # 202696's one attempt in 2 games is that shot: the player is fully
+    # tracked, so the Diet publishes without that player.
+    composed, job, versions = _collect_player_shot_types_on_1025(
+        tmp_path, _NBAOnTheMorningOf1025(tracking="10/24/2026", outside_types={202696})
+    )
+
+    assert (composed, job) == (1, ("succeeded", None))
+    (version,) = versions
+    rows = json.loads(version["payload"])["rows"]
+    assert (len(rows), len({row["player_id"] for row in rows})) == (907, 370)
+    assert [row for row in rows if row["player_id"] == 202696] == []
+
+
+def test_player_shot_types_with_a_shooter_outside_the_three_types_a_game_behind_are_not_published(tmp_path):
+    composed, job, versions = _collect_player_shot_types_on_1025(
+        tmp_path,
+        _NBAOnTheMorningOf1025(tracking="10/24/2026", outside_types={202696}, one_game_short={202696}),
+    )
+
+    assert (composed, job, versions) == (0, ("failed", "provider_window_lagging"), [])
+
+
+def test_player_shot_types_without_tracking_overall_games_are_unverified(tmp_path):
+    # A collector released before tracking's Overall range was read.
+    engine, _manifest, _publications, deliver = _grouped_shot_type_control_plane(
+        tmp_path, "shots-no-overall.sqlite3"
+    )
+    deliver(
+        lambda category: _player_shot_type_rows(2544, category, share=0.25, fga=100, fgm=46), tracking=False
+    )
+
+    assert _compose_queued_slice(engine) == 0
+    assert _composition_job(engine, "grouped_shot_types") == (
+        ("failed", "provider_window_unverified", 0, 1),
+        None,
+    )
 
 
 def test_player_shot_types_bounded_to_another_slate_are_not_published(tmp_path):
@@ -4776,3 +4834,130 @@ def test_l15_nba_release_transition_publishes_after_the_last_team_reaches_15(
         observation.unavailable_reason != "insufficient_governed_games"
         for observation in season_window.observations
     )
+
+
+#: The listed-position codes a CommonAllPlayers row can carry once the
+#: collector joins each team's CommonTeamRoster POSITION onto it.
+_LISTED_POSITION_GROUPS = {
+    "G": "Guard",
+    "G-F": "Wing",
+    "F-G": "Wing",
+    "F": "Wing",
+    "F-C": "Big",
+    "C-F": "Big",
+    "C": "Big",
+    "": None,
+    "PG": None,
+    None: None,
+}
+
+
+def test_roster_normalizer_stores_the_group_for_each_listed_position():
+    rows = [
+        {
+            "PERSON_ID": index,
+            "DISPLAY_FIRST_LAST": f"Player {index}",
+            "ROSTERSTATUS": 1,
+            "FROM_YEAR": "2020",
+            "TO_YEAR": "2025",
+            "TEAM_ID": 1610612737,
+            "POSITION": code,
+        }
+        for index, code in enumerate(_LISTED_POSITION_GROUPS, start=1)
+    ]
+
+    records = normalize_roster_response(rows, season="2025-26", cutoff=NOW).payload["records"]
+
+    assert {record["player_id"]: record["position"] for record in records} == dict(
+        enumerate(_LISTED_POSITION_GROUPS.values(), start=1)
+    )
+
+
+def test_the_collector_and_backend_map_listed_positions_identically():
+    from app.collector import normalizers
+    from app.domain import player_position
+
+    for code, group in _LISTED_POSITION_GROUPS.items():
+        assert player_position.position_group(0, code) == group
+    assert {
+        code: player_position.position_group(0, code) for code in normalizers.LISTED_POSITION_GROUPS
+    } == normalizers.LISTED_POSITION_GROUPS
+    assert normalizers.POSITION_OVERRIDES == player_position.POSITION_OVERRIDES
+
+
+def test_roster_normalizer_stores_an_overridden_players_chosen_group():
+    listed = {
+        1630194: ("Paul Reed", "F", "Big"),
+        203944: ("Julius Randle", "F-C", "Wing"),
+        1642277: ("Johnny Furphy", "G", "Wing"),
+        1629029: ("Luka Doncic", "F-G", "Guard"),
+        1628983: ("Shai Gilgeous-Alexander", "G", "Guard"),
+    }
+    rows = [
+        {
+            "PERSON_ID": player_id,
+            "DISPLAY_FIRST_LAST": name,
+            "ROSTERSTATUS": 1,
+            "FROM_YEAR": "2020",
+            "TO_YEAR": "2026",
+            "TEAM_ID": 1610612737,
+            "POSITION": code,
+        }
+        for player_id, (name, code, _group) in listed.items()
+    ]
+
+    records = normalize_roster_response(rows, season="2025-26", cutoff=NOW).payload["records"]
+
+    assert {record["player_id"]: record["position"] for record in records} == {
+        1630194: "Big",
+        203944: "Wing",
+        1642277: "Wing",
+        1629029: "Guard",
+        1628983: "Guard",
+    }
+
+
+def test_the_standalone_provider_joins_each_teams_listed_position_onto_the_roster(monkeypatch):
+    from nba_api.stats import endpoints
+
+    team_calls = []
+
+    class AllPlayers:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_data_frames(self):
+            return [
+                pd.DataFrame(
+                    {
+                        "PERSON_ID": [1, 2, 3],
+                        "DISPLAY_FIRST_LAST": ["A", "B", "C"],
+                        "TEAM_ID": [1610612737, 1610612738, 0],
+                    }
+                )
+            ]
+
+    class TeamRoster:
+        def __init__(self, *, team_id, season, **_kwargs):
+            team_calls.append((team_id, season))
+            self.team_id = team_id
+
+        def get_data_frames(self):
+            listed = {1610612737: [(1, "C")], 1610612738: [(2, "G-F")]}.get(self.team_id, [])
+            return [
+                pd.DataFrame(
+                    {
+                        "PLAYER_ID": [player for player, _position in listed],
+                        "POSITION": [position for _player, position in listed],
+                    }
+                )
+            ]
+
+    monkeypatch.setattr(endpoints.commonallplayers, "CommonAllPlayers", AllPlayers)
+    monkeypatch.setattr(endpoints.commonteamroster, "CommonTeamRoster", TeamRoster)
+
+    roster = _StandaloneNBAProvider().get_player_roster(season="2025-26")
+
+    assert roster["POSITION"].tolist() == ["C", "G-F", None]
+    assert len(team_calls) == 30
+    assert {season for _team, season in team_calls} == {"2025-26"}

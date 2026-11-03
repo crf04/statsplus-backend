@@ -146,6 +146,11 @@ class AthleteResolution:
     #: read that lands after a later decision can still be recognized as older
     #: than it.  ``None`` when the caller observed no provider read.
     observed_at: datetime | str | None = None
+    #: The teams of the game the observed market was posted for.  A name the
+    #: catalog does not spell exactly is read against these rosters when the
+    #: provider named no team for the athlete, so they travel with the result
+    #: for the board to resolve one identity's markets together.
+    event_teams: tuple[TeamEvidence, ...] = ()
 
     def __post_init__(self) -> None:
         provider = self.provider.strip().casefold() if isinstance(self.provider, str) else ""
@@ -173,6 +178,7 @@ class AthleteResolution:
         object.__setattr__(self, "candidates", candidates)
         object.__setattr__(self, "contradictory_evidence", contradictory)
         object.__setattr__(self, "observed_at", normalize_timestamp(self.observed_at))
+        object.__setattr__(self, "event_teams", tuple(self.event_teams))
 
     @property
     def provider_athlete_id(self) -> str | None:
@@ -253,6 +259,54 @@ def split_name_suffix(value: str | None) -> tuple[str, str]:
     return "".join(tokens), ""
 
 
+#: Names of one player (suffix aside) that providers and the NBA catalog spell
+#: differently and no rule can join, each group read in both directions because
+#: either side may hold the short form.  A group is a full name, so it only ever
+#: joins that one player's spellings, and it widens a posted name to a player of
+#: the roster it was posted for only.  The first pairs are the ones seen in the
+#: 2025-26 Odds API closing-line backfill (#437); ``python
+#: scripts/backfill_closing_lines.py --re-resolve --dry-run`` lists the Odds API
+#: names that still miss.  A name a provider posts differently for another
+#: player is added here, with a test from the real pair.
+NAME_VARIANTS: tuple[tuple[str, ...], ...] = (
+    ("Nic Claxton", "Nicolas Claxton"),
+    ("Herb Jones", "Herbert Jones"),
+    ("Ron Holland", "Ronald Holland"),
+    ("Vince Williams", "Vincent Williams"),
+    ("Bub Carrington", "Carlton Carrington"),
+    ("Moe Wagner", "Moritz Wagner"),
+    ("Alex Sarr", "Alexandre Sarr"),
+    ("Miles McBride", "Deuce McBride"),
+    ("Luguentz Dort", "Lu Dort"),
+)
+
+_VARIANT_BASE = {
+    split_name_suffix(spelling)[0]: split_name_suffix(group[0])[0]
+    for group in NAME_VARIANTS
+    for spelling in group
+}
+
+
+def _identity_key(name: str | None) -> tuple[str, str]:
+    """``(name without its suffix, suffix)``, nicknames folded to one spelling."""
+
+    base, suffix = split_name_suffix(name)
+    return _VARIANT_BASE.get(base, base), suffix
+
+
+def _spelling_fits(posted: tuple[str, str], catalog_name: str | None) -> bool:
+    """Whether a catalog name can be the player a posted name stands for.
+
+    The names are the same once nicknames are folded and suffixes are set
+    aside, and the suffixes do not name two different men (``Jr.`` and
+    ``Sr.``).
+    """
+
+    base, suffix = posted
+    catalog_base, catalog_suffix = _identity_key(catalog_name)
+    return catalog_base == base and (not suffix or not catalog_suffix or suffix == catalog_suffix)
+
+
 def catalog_athlete_matches(
     rows: Iterable[Mapping[str, Any]], name: str | None
 ) -> tuple[CanonicalAthlete, ...]:
@@ -322,6 +376,13 @@ def _market_evidence(market: PlayerProjectionMarket) -> AthleteEvidence:
             team=market.team,
         )
     return evidence
+
+
+def _market_event_teams(market: PlayerProjectionMarket) -> tuple[TeamEvidence, ...]:
+    event = market.event
+    if event is None:
+        return ()
+    return tuple(team for team in (event.home_team, event.away_team) if team is not None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -423,8 +484,16 @@ class BoardAthleteResolver:
         season: str,
         *,
         observed_at: datetime | str | None = None,
+        event_teams: Sequence[TeamEvidence] = (),
     ) -> AthleteResolution:
-        return self.resolver.resolve(provider, evidence, season, observed_at=observed_at, reads=self.reads)
+        return self.resolver.resolve(
+            provider,
+            evidence,
+            season,
+            observed_at=observed_at,
+            event_teams=event_teams,
+            reads=self.reads,
+        )
 
     def resolve_market(
         self,
@@ -434,21 +503,29 @@ class BoardAthleteResolver:
         observed_at: datetime | str | None = None,
     ) -> AthleteResolution:
         evidence = _market_evidence(market)
-        return self.resolve(market.provider, evidence, season, observed_at=observed_at)
+        return self.resolve(
+            market.provider,
+            evidence,
+            season,
+            observed_at=observed_at,
+            event_teams=_market_event_teams(market),
+        )
 
 
 class AthleteResolver:
     """Resolve provider athlete evidence against one requested catalog season.
 
-    ``catalog_names`` is for a caller that has already scoped a spelling variant
-    to the rostered players it can stand for (``{normalized provider name: the
-    normalized catalog names it fits}``, see ``odds_identity.RosterNameResolver``).
-    A provider name in it is looked up under those catalog names instead of its
-    own; the evidence, and so every governance comparison and the recorded provider
-    name, keeps what the provider posted.  Two or more catalog players behind one
-    such name are ambiguous whatever their status: the variant is a guess, and a
-    guess is never taken between two players.  Nothing else in this resolver
-    applies aliases.
+    A posted name the catalog has no exact row for is read against one roster:
+    the athlete's team when the provider names it, otherwise the teams of the
+    event the market was posted for.  A roster player fits when the names are
+    the same once a generational suffix is set aside and ``NAME_VARIANTS`` are
+    folded (``Robert Williams`` for ``Robert Williams III``, ``Alexandre Sarr``
+    for ``Alex Sarr``).  The one player that fits is the candidate; two or more
+    are ambiguous whatever their status, because the spelling is a guess and a
+    guess is never taken between two players.  With no team and no event teams
+    the name stays unmatched.  The evidence, and so every governance comparison
+    and the recorded provider name, keeps what the provider posted.  Nothing
+    else in this resolver applies aliases.
     """
 
     def __init__(
@@ -456,13 +533,11 @@ class AthleteResolver:
         catalog: Any,
         *,
         mapping_repository: Any | None = None,
-        catalog_names: Mapping[str, tuple[str, ...]] | None = None,
     ) -> None:
         if not callable(getattr(catalog, "get_catalog", None)):
             raise TypeError("athlete catalog must expose get_catalog")
         self.catalog = catalog
         self.mapping_repository = mapping_repository
-        self._catalog_names = dict(catalog_names or {})
 
     def resolve(
         self,
@@ -471,6 +546,7 @@ class AthleteResolver:
         season: str,
         *,
         observed_at: datetime | str | None = None,
+        event_teams: Sequence[TeamEvidence] = (),
         reads: _BoardReads | None = None,
     ) -> AthleteResolution:
         """Resolve one provider's typed athlete evidence for one season.
@@ -478,10 +554,14 @@ class AthleteResolver:
         ``observed_at`` is when the provider was read.  Resolution itself is a
         pure function of the evidence and the catalog, so the instant is only
         carried onto the result for the persistence seam to order it against
-        decisions taken while the read was in flight.
+        decisions taken while the read was in flight.  ``event_teams`` are the
+        teams of the market's game, the roster a name is read against when the
+        evidence names no team; they are carried onto the result too.
         """
 
-        resolution = self._resolve(provider, evidence, season, reads or _BoardReads(self))
+        event_teams = tuple(event_teams)
+        resolution = self._resolve(provider, evidence, season, event_teams, reads or _BoardReads(self))
+        resolution = replace(resolution, event_teams=event_teams)
         if observed_at is None:
             return resolution
         return replace(resolution, observed_at=observed_at)
@@ -491,6 +571,7 @@ class AthleteResolver:
         provider: str,
         evidence: AthleteEvidence,
         season: str,
+        event_teams: tuple[TeamEvidence, ...],
         reads: _BoardReads,
     ) -> AthleteResolution:
         if not isinstance(evidence, AthleteEvidence):
@@ -566,12 +647,9 @@ class AthleteResolver:
             )
 
         catalog = reads.catalog(canonical_season)
-        provider_name = normalize_athlete_name(evidence.name)
-        widened = self._catalog_names.get(provider_name)
-        if widened is None:
-            all_matches = catalog.by_name.get(provider_name, ())
-        else:
-            all_matches = tuple(athlete for name in widened for athlete in catalog.by_name.get(name, ()))
+        all_matches = catalog.by_name.get(normalize_athlete_name(evidence.name), ())
+        if not all_matches:
+            all_matches = self._roster_fits(catalog, evidence, event_teams)
             if len(all_matches) > 1:
                 return self._result(
                     normalized_provider,
@@ -724,7 +802,13 @@ class AthleteResolver:
         """Resolve the athlete evidence carried by one normalized market."""
 
         evidence = _market_evidence(market)
-        return self.resolve(market.provider, evidence, season, observed_at=observed_at)
+        return self.resolve(
+            market.provider,
+            evidence,
+            season,
+            observed_at=observed_at,
+            event_teams=_market_event_teams(market),
+        )
 
     def for_board(self, season: str, identities: Iterable[tuple[str, str]]) -> BoardAthleteResolver:
         """Return this resolver's view of one board read.
@@ -759,18 +843,44 @@ class AthleteResolver:
         record = self.mapping_repository.get_rejection(provider, provider_id)
         return None if record is None else record.to_dict()
 
+    @classmethod
+    def _roster_fits(
+        cls,
+        catalog: _CatalogIndex,
+        evidence: AthleteEvidence,
+        event_teams: tuple[TeamEvidence, ...],
+    ) -> tuple[CanonicalAthlete, ...]:
+        """The catalog players a posted name can stand for on its own roster."""
+
+        roster = (evidence.team,) if evidence.team is not None else event_teams
+        if not roster:
+            return ()
+        posted = _identity_key(evidence.name)
+        return tuple(
+            athlete
+            for athletes in catalog.by_name.values()
+            for athlete in athletes
+            if any(cls._team_agrees(team, athlete) for team in roster)
+            and _spelling_fits(posted, athlete.display_name)
+        )
+
     @staticmethod
-    def _team_conflicts(
+    def _team_agrees(
         provider_team: TeamEvidence | None,
         canonical: CanonicalAthlete,
-    ) -> bool:
+    ) -> bool | None:
+        """Whether provider team evidence names the canonical row's team.
+
+        ``None`` when the two share no comparable fact.
+        """
+
         if provider_team is None:
-            return False
+            return None
         # An agreed canonical ID is the strongest typed team evidence.  Text
         # labels may differ by provider, so only compare them when no IDs are
         # available to establish identity.
         if provider_team.canonical_id is not None and canonical.team_id is not None:
-            return provider_team.canonical_id != canonical.team_id
+            return provider_team.canonical_id == canonical.team_id
         # When both sides state a tricode, the tricodes alone decide: a provider
         # may spell the full name ("Detroit Pistons") where the catalog stores
         # the nickname ("Pistons").  A full NBA team name counts as its tricode.
@@ -778,12 +888,20 @@ class AthleteResolver:
             provider_team.name or ""
         )
         if provider_tricode and canonical.team_abbreviation:
-            return normalize_team_abbreviation(provider_tricode) != normalize_team_abbreviation(
+            return normalize_team_abbreviation(provider_tricode) == normalize_team_abbreviation(
                 canonical.team_abbreviation
             )
         if provider_team.name and canonical.team_name:
-            return normalize_athlete_name(provider_team.name) != normalize_athlete_name(canonical.team_name)
-        return False
+            return normalize_athlete_name(provider_team.name) == normalize_athlete_name(canonical.team_name)
+        return None
+
+    @classmethod
+    def _team_conflicts(
+        cls,
+        provider_team: TeamEvidence | None,
+        canonical: CanonicalAthlete,
+    ) -> bool:
+        return cls._team_agrees(provider_team, canonical) is False
 
     @staticmethod
     def _asserts_automatic_claim(existing: Mapping[str, Any] | None) -> bool:
@@ -1019,6 +1137,7 @@ class AthleteResolver:
 
 __all__ = [
     "CLAIMING_MAPPING_STATES",
+    "NAME_VARIANTS",
     "WITHDRAWN_CLAIM_STATES",
     "AthleteResolution",
     "AthleteResolver",

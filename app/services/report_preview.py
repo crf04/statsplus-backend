@@ -3,7 +3,10 @@
 Chat apps unfurl a shared ``/reports/<id>`` link by fetching its ``og:image``
 signed out.  The card is drawn on the shared 1200x630 preview canvas: the
 brand row with the report's date, its title, and up to three tagged items (the
-first three in document order), each a grade chip and the item's title.
+first three in document order), each a grade chip and the item's title.  A
+block document draws its spot blocks (tagged or not; an untagged one has no
+chip) and the tagged items of its ``items`` blocks; with none it draws its
+description (the opening or lede paragraph) under the title instead.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ from typing import Any
 
 from PIL import ImageDraw
 
+from app.domain.report_document import tagged, walk_blocks
 from app.services.preview_card import (
     CARD_CACHE_CONTROL,
     DIM,
@@ -32,6 +36,7 @@ from app.services.preview_card import (
     header,
     png,
 )
+from app.services.reports import describe
 
 MAX_PREVIEW_ITEMS = 3
 FOOTER = "A spot is a place to look, not a pick."
@@ -42,6 +47,8 @@ _ROWS_TOP = 300
 _ROW_HEIGHT = 74
 _ROW_GAP = 14
 _FOOTER_Y = 590
+_LEDE_SIZE = 34
+_LEDE_LINES = 5
 
 
 def _date_label(value: str | None) -> str:
@@ -52,12 +59,52 @@ def _date_label(value: str | None) -> str:
 
 
 def tagged_items(document: dict[str, Any]) -> list[tuple[str, str]]:
-    """The ``(tag, title)`` of the first three tagged items, in document order."""
+    """The ``(tag, title)`` of the first three tagged items or spot blocks, in document order."""
 
-    tagged = [
-        (item["tag"], item["title"]) for tab in document["tabs"] for item in tab["items"] if "tag" in item
-    ]
-    return tagged[:MAX_PREVIEW_ITEMS]
+    return tagged(document)[:MAX_PREVIEW_ITEMS]
+
+
+def preview_rows(document: dict[str, Any]) -> list[tuple[str | None, str]]:
+    """The ``(tag, title)`` rows the preview draws: the first three in document order.
+
+    A tab document's are its tagged items; a block document's are its spot
+    blocks, an untagged one with ``None``, and the tagged items of its
+    ``items`` blocks.
+    """
+
+    if "blocks" not in document:
+        return list(tagged_items(document))
+    rows: list[tuple[str | None, str]] = []
+    for block in walk_blocks(document):
+        if block["type"] == "spot":
+            rows.append((block.get("tag"), block["title"]))
+        elif block["type"] == "items":
+            rows.extend((item["tag"], item["title"]) for item in block["items"] if "tag" in item)
+    return rows[:MAX_PREVIEW_ITEMS]
+
+
+def _wrapped(draw: ImageDraw.ImageDraw, text: str, size: Any, width: float, lines: int) -> list[str]:
+    """``text`` wrapped to ``width`` on at most ``lines`` lines, the last cut with ``…`` if it runs over."""
+
+    out: list[str] = []
+    words = text.split()
+    while words and len(out) < lines:
+        line = words.pop(0)
+        if draw.textlength(line, font=size) > width:
+            # A word wider than the line is cut, and nothing after it is drawn.
+            while line and draw.textlength(f"{line}…", font=size) > width:
+                line = line[:-1]
+            out.append(f"{line}…")
+            return out
+        while words and draw.textlength(f"{line} {words[0]}", font=size) <= width:
+            line = f"{line} {words.pop(0)}"
+        out.append(line)
+    if words and out:
+        last = out[-1]
+        while last and draw.textlength(f"{last}…", font=size) > width:
+            last = last.rsplit(" ", 1)[0] if " " in last else last[:-1]
+        out[-1] = f"{last}…"
+    return out
 
 
 def _title_lines(draw: ImageDraw.ImageDraw, title: str) -> tuple[list[str], Any]:
@@ -77,12 +124,14 @@ def _title_lines(draw: ImageDraw.ImageDraw, title: str) -> tuple[list[str], Any]
     return [first, rest] if rest else [first], size
 
 
-def _chip(draw: ImageDraw.ImageDraw, tag: str, left: float, middle: float) -> float:
+def _chip(draw: ImageDraw.ImageDraw, tag: str | None, left: float, middle: float) -> float:
     label_font = font("Bold", 28)
+    # One width for every chip, so the item titles line up; an untagged row leaves it blank.
+    width = max(draw.textlength(name.upper(), font=label_font) for name in _CHIP_COLORS) + 32
+    if tag is None:
+        return left + width
     label = tag.upper()
     color = _CHIP_COLORS[tag]
-    # One width for every chip, so the item titles line up.
-    width = max(draw.textlength(name.upper(), font=label_font) for name in _CHIP_COLORS) + 32
     draw.rounded_rectangle((left, middle - 22, left + width, middle + 22), radius=22, outline=color, width=3)
     draw.text((left + width / 2, middle), label, font=label_font, fill=color, anchor="mm")
     return left + width
@@ -100,7 +149,15 @@ def draw_report(document: dict[str, Any]) -> bytes:
             fill=TEXT,
             anchor="lt",
         )
-    items = tagged_items(document)
+    items = preview_rows(document)
+    if not items and "blocks" in document:
+        description = describe(document)
+        lede_font = font("SemiBold", _LEDE_SIZE)
+        top = _TITLE_TOP + len(lines) * (title_font.size + 8) + 40
+        for index, line in enumerate(
+            _wrapped(draw, description or "", lede_font, WIDTH - 2 * MARGIN, _LEDE_LINES)
+        ):
+            draw.text((MARGIN, top + index * (_LEDE_SIZE + 12)), line, font=lede_font, fill=DIM, anchor="lt")
     for index, (tag, title) in enumerate(items):
         top = _ROWS_TOP + index * (_ROW_HEIGHT + _ROW_GAP)
         draw.rounded_rectangle(

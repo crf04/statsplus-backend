@@ -95,7 +95,7 @@ def get_research_activity():
 def put_public_handle(uid):
     body = request.get_json(silent=True)
     if not isinstance(body, dict) or "public_handle" not in body:
-        raise InvalidInputError('Body must be {"public_handle": "@handle" | null}.')
+        raise InvalidInputError('Body must be {"public_handle": "handle" | null}.')
     return jsonify(
         {"uid": uid, "public_handle": report_service.set_public_handle(uid, body["public_handle"])}
     )
@@ -106,3 +106,13 @@ def put_public_handle(uid):
 @route_error_boundary("Failed to take the report down.")
 def take_down_report(report_id):
     return jsonify({"success": True, "report": report_service.take_down(report_id)})
+
+
+@admin_bp.route("/reports/<report_id>/featured", methods=["PUT"])
+@require_admin
+@route_error_boundary("Failed to update the Featured report.")
+def put_report_featured(report_id):
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or not isinstance(body.get("featured"), bool):
+        raise InvalidInputError('Body must be {"featured": true|false}.')
+    return jsonify({"success": True, "report": report_service.set_featured(report_id, body["featured"])})

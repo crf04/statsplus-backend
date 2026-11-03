@@ -99,6 +99,22 @@ def _shift(value: float | None, baseline: float | None) -> float | None:
     return value / baseline - 1
 
 
+def _on_off_provenance(*floors: _Floor) -> dict[str, Any]:
+    """Where a row's on/off splits came from: ``on_off_sources`` (sorted,
+    distinct) and ``on_off_games_missing`` (their union, oldest first)."""
+
+    missing: dict[str, Mapping[str, Any]] = {}
+    for floor in floors:
+        missing.update(floor.games_missing)
+    return {
+        "on_off_sources": sorted(set().union(*(floor.sources for floor in floors))),
+        "on_off_games_missing": sorted(
+            (dict(game) for game in missing.values()),
+            key=lambda game: (game.get("game_date") or "", game["game_id"]),
+        ),
+    }
+
+
 def _agree(first: float | None, second: float | None) -> bool:
     if first is None or second is None:
         return False
@@ -655,6 +671,9 @@ class _Floor:
         self.contributed: list[str] = []
         self.issues: set[str] = set()
         self.stale = False
+        #: The ``source`` of every response summed, and their ``games_missing``.
+        self.sources: set[str] = set()
+        self.games_missing: dict[str, Mapping[str, Any]] = {}
         self._usage_weight = 0.0
         self._usage_possessions = 0
 
@@ -679,6 +698,9 @@ class _Floor:
             return
         self.covered.append(season)
         self.stale = self.stale or bool(response["stale"])
+        self.sources.add(response["source"])
+        for game in response.get("games_missing", ()):
+            self.games_missing[game["game_id"]] = game
         entry = next((p for p in response["players"] if p["player_id"] == teammate_id), None)
         if entry is None:
             return
@@ -824,9 +846,11 @@ class _Teammate:
             "baseline": self._baseline(column, keys, with_games, with_spans, on_floor),
             "flagged": False,
             "limits": [],
+            **_on_off_provenance(on_floor),
         }
         if branch == "plays":
             return row
+        row.update(_on_off_provenance(on_floor, off_floor))
         values = without_games[column].tolist() if column in without_games else []
         without_avg = _raw_mean(values)
         with_avg = _raw_mean(with_games[column].tolist()) if column in with_games else None
@@ -905,6 +929,7 @@ class _Teammate:
             "baseline": baseline,
             "flagged": False,
             "limits": [],
+            **_on_off_provenance(on_floor),
         }
         if branch == "plays":
             return row
@@ -924,6 +949,7 @@ class _Teammate:
         if row["off_floor"] is not None:
             row["off_floor"].update({"minutes": off_floor.minutes, "season_span": off_floor.span})
             row["limits"], _ = self._on_off_limits(on_floor, off_floor)
+            row.update(_on_off_provenance(on_floor, off_floor))
         return row
 
 

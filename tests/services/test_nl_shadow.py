@@ -111,6 +111,15 @@ def test_an_opposite_rank_sign_is_a_disagreement_on_the_opponent_filters():
     assert diff == {"opponent_filters": {"nlp": [("OPP_PTS", "-5")], "llm": [("OPP_PTS", "5")]}}
 
 
+def test_a_different_opponent_team_is_a_disagreement():
+    diff = nl_shadow.differences(
+        nl_shadow.comparable_view(nl_result(opponent_tricode="POR")),
+        nl_shadow.comparable_view(nl_result(opponent_tricode=None)),
+    )
+
+    assert diff == {"opponent_tricode": {"nlp": "POR", "llm": None}}
+
+
 def test_confidence_and_intent_are_not_compared():
     diff = nl_shadow.differences(
         nl_shadow.comparable_view(nl_result(confidence=0.95, intent="game_logs")),

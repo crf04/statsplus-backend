@@ -84,6 +84,30 @@ def serialize_line_prices(
     }
 
 
+#: A ``book_lines`` book's price keys; the best-price flags rank prices, so they go too.
+BOOK_PRICE_KEYS = frozenset({"over", "under", "best_over", "best_under"})
+
+
+def without_prices(posted: Mapping[str, Any]) -> dict[str, Any]:
+    """``posted_line`` for a caller who may not see prices (crf04/statsplus#381).
+
+    Lines and their sources stay; ``line_prices`` and each book's prices go.
+    """
+
+    kept = {key: value for key, value in posted.items() if key != "line_prices"}
+    kept["book_lines"] = {
+        market: {
+            **entry,
+            "books": [
+                {key: value for key, value in book.items() if key not in BOOK_PRICE_KEYS}
+                for book in entry["books"]
+            ],
+        }
+        for market, entry in posted["book_lines"].items()
+    }
+    return kept
+
+
 class StoredSchedule:
     """Read-only schedule access for the line day's games.
 

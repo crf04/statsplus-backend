@@ -41,7 +41,7 @@ def _settings(**overrides):
         "fast_interval": timedelta(minutes=5),
         "pregame_horizon": timedelta(hours=24),
         "fast_window": timedelta(hours=2),
-        "lease_duration": timedelta(minutes=1),
+        "lease_duration": timedelta(minutes=3),
         "backoff_base": timedelta(minutes=1),
         "backoff_max": timedelta(hours=1),
     }

@@ -2,6 +2,8 @@
 
 Writes replace one whole game inside a single transaction, so collecting the
 same game twice leaves identical rows and a crash never leaves half a game.
+The game's lineup segments (crf04/statsplus#410) are written in that same
+transaction.
 Reads return plain dictionaries; every statistic is computed by the caller.
 """
 
@@ -15,6 +17,8 @@ from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.engine import Connection, Engine
 
 from app.models.rotation import RotationAttempt, RotationGame, RotationPlayerGame, RotationStint
+from app.services import lineup_segment_repository as segment_writes
+from app.services.lineup_segments import GameSegments
 from app.services.request_reads import read_connection
 from app.services.rotation_derivation import GameRotation
 
@@ -32,11 +36,22 @@ class RotationRepository:
 
     # -- writes ---------------------------------------------------------
 
-    def replace_game(self, season: str, rotation: GameRotation, collected_at: datetime) -> None:
-        """Store ``rotation``, replacing any rows already stored for the game."""
+    def replace_game(
+        self,
+        season: str,
+        rotation: GameRotation,
+        collected_at: datetime,
+        segments: GameSegments | None = None,
+    ) -> None:
+        """Store ``rotation`` and its ``segments``, replacing the game's rows.
+
+        Without ``segments`` the game's stored segments are removed, so they
+        never outlive the rotation they were derived with.
+        """
 
         with self.engine.begin() as connection:
             self._delete_game(connection, rotation.game_id)
+            segment_writes.delete_game(connection, rotation.game_id)
             connection.execute(delete(_ATTEMPTS).where(_ATTEMPTS.c.game_id == rotation.game_id))
             connection.execute(
                 insert(_GAMES).values(
@@ -85,15 +100,29 @@ class RotationRepository:
             ]
             if stints:
                 connection.execute(insert(_STINTS), stints)
+            if segments is not None:
+                segment_writes.write_game(connection, season, segments, collected_at)
 
-    def record_attempt(self, season: str, game_id: str, outcome: str, reason: str, at: datetime) -> None:
+    def record_attempt(
+        self,
+        season: str,
+        game_id: str,
+        outcome: str,
+        reason: str,
+        at: datetime,
+        team_ids: tuple[int, int] | None = None,
+    ) -> None:
         """Remember an attempt that stored nothing.
 
         ``outcome`` is ``"rejected"`` (adds to the game's rejection count) or
-        ``"failed"`` (a fetch failure: refreshes the attempt time only).
+        ``"failed"`` (a fetch failure: refreshes the attempt time only).  A
+        rejection with the box score's ``team_ids`` (home, away) also marks
+        the game done for the lineup segment backfill.
         """
 
         with self.engine.begin() as connection:
+            if outcome == "rejected" and team_ids is not None:
+                segment_writes.record_rejected(connection, season, game_id, team_ids, reason, at)
             row = connection.execute(
                 select(_ATTEMPTS.c.rejections).where(_ATTEMPTS.c.game_id == game_id)
             ).first()

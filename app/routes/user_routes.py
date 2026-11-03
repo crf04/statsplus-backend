@@ -8,6 +8,7 @@ and basic user statistics.
 from flask import Blueprint, g, jsonify, request
 
 from app.config.settings import get_runtime_settings
+from app.domain.report_document import ReportOrigin
 from app.errors import (
     AuthenticationRequiredError,
     InvalidInputError,
@@ -15,9 +16,11 @@ from app.errors import (
     ResourceNotFoundError,
     route_error_boundary,
 )
+from app.models.usage_event import EVENT_REPORT_PUBLISHED
 from app.services import feedback_service
 from app.services.target_backtest import BACKTEST_FAILED_MESSAGE
 from app.utils.auth import (
+    _refuse_waitlisted,
     get_current_user,
     require_admin,
     require_auth,
@@ -577,16 +580,100 @@ def create_report():
             "report": {...},
             "calls": [{"id", "tool", "args", "structured", "meta", "card"}],
             "cards": {"<card>": "<html>"},
-            "show_author": false
+            "show_author": false,
+            "listed": false,
+            "origin": "assistant"
         }
 
+    ``origin`` (crf04/statsplus#382) is ``assistant`` (the default) or
+    ``builder``; publishing a ``builder`` report records the
+    ``report_published`` web action.  ``listed: true`` also lists it in Research (crf04/statsplus#372): without a
+    handle that is ``409 handle_required`` and past the listing cap ``429
+    listed_limit``, and nothing is stored.
+
     Returns:
-        201 with the report's id, public URL and creation time
+        201 with the report's id, public URL, creation time and origin
     """
     firebase_uid = _authenticated_uid()
     request.max_content_length = REPORT_MAX_REQUEST_BYTES
     published = report_service.publish(firebase_uid, request.get_json(silent=True))
+    if published["origin"] is ReportOrigin.BUILDER:
+        g.usage_web_action = EVENT_REPORT_PUBLISHED
     return jsonify({"success": True, "report": published}), 201
+
+
+@user_bp.route("/reports/<report_id>", methods=["PATCH"])
+@require_auth_allow_waitlisted
+@route_error_boundary("Failed to update the report.")
+def update_report(report_id):
+    """
+    List or unlist one of the caller's reports in Research (crf04/statsplus#372).
+
+    Expected JSON body: ``{"listed": true | false}``.  Listing needs a public
+    handle (``409 handle_required``) and counts toward the listing cap
+    (``429 listed_limit``) and an active account (``403 waitlisted``);
+    unlisting is always allowed, a waitlisted author included.
+
+    Returns:
+        JSON response with the report's id, ``listed`` and ``listed_at``
+    """
+    firebase_uid = _authenticated_uid()
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or set(body) != {"listed"} or not isinstance(body["listed"], bool):
+        raise InvalidInputError('Body must be {"listed": true|false}.')
+    if body["listed"]:
+        _refuse_waitlisted(get_current_user())
+    return jsonify(
+        {"success": True, "report": report_service.set_listed(firebase_uid, report_id, body["listed"])}
+    )
+
+
+@user_bp.route("/reports/<report_id>/edits", methods=["PUT"])
+@require_auth_allow_waitlisted
+@route_error_boundary("Failed to save the report's edits.")
+def put_report_edits(report_id):
+    """
+    Save the caller's edits of one of their reports (crf04/statsplus#377).
+
+    Expected JSON body, replacing every earlier edit:
+        {
+            "title": "...",
+            "notes": "..." | null,
+            "items": [{"tab": 0, "item": 2, "hidden": false, "cards": ["call-id"]}]
+        }
+
+    Someone else's report, or a deleted or taken-down one, is ``404``; bad
+    notes are ``400 notes_links`` or ``400 notes_too_long`` and items or cards
+    the report was not published with ``400 invalid_edits``.  A waitlisted
+    author may edit; editing lists nothing.
+
+    Returns:
+        The report exactly as ``GET /api/reports/<id>`` returns it to its author
+    """
+    firebase_uid = _authenticated_uid()
+    return jsonify(
+        {"report": report_service.save_edits(firebase_uid, report_id, request.get_json(silent=True))}
+    )
+
+
+@user_bp.route("/public-handle", methods=["PUT"])
+@require_auth
+@route_error_boundary("Failed to set the public handle.")
+def put_public_handle():
+    """
+    Choose the caller's public handle, once (crf04/statsplus#372).
+
+    Expected JSON body: ``{"handle": "bighatprops"}`` (a leading ``@`` and
+    capitals are accepted and dropped).  ``400 invalid_handle``, ``409
+    handle_taken``, or ``409 handle_already_set`` once one is set.
+
+    Returns:
+        JSON response with the stored handle
+    """
+    firebase_uid = _authenticated_uid()
+    body = request.get_json(silent=True)
+    handle = body.get("handle") if isinstance(body, dict) else None
+    return jsonify({"handle": report_service.claim_public_handle(firebase_uid, handle)})
 
 
 @user_bp.route("/reports/<report_id>", methods=["DELETE"])

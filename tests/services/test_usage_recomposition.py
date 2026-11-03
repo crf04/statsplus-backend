@@ -9,11 +9,12 @@ publication service on a one-game season.
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import replace
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import event, func, select
+from sqlalchemy import create_engine, event, func, select
 
 from app.models.collection_control import (
     CatalogPublication,
@@ -82,23 +83,6 @@ def build_season(engine):
     cutoff = max(item.retrieved_at for item in games)
     clock = lambda: cutoff  # noqa: E731
     manifest_id = "usage-manifest"
-    expected = frozenset(item.game_id for item in games)
-    expected_l15 = {
-        team: frozenset(item.game_id for item in games if team in {item.home_team_id, item.away_team_id})
-        for team in TEAM_IDS
-    }
-
-    class Governance:
-        def read_for_composition(self, season, governed_cutoff, manifest_id=None):
-            return LedgerGovernance(
-                season,
-                governed_cutoff,
-                expected,
-                TEAM_IDS,
-                expected_l15,
-                manifest_id=manifest_id,
-            )
-
     publications = PublicationService(engine, clock=clock)
     publications.register_default_streams()
     with engine.begin() as connection:
@@ -131,10 +115,8 @@ def build_season(engine):
             .where(PublicationStream.stream_key == STREAM)
             .values(enabled=True)
         )
-    repository = CanonicalGameLedgerRepository(
-        engine,
-        correction_sink=LedgerCorrectionQueue(clock=clock),
-    )
+    world = _season_world(engine, games)
+    repository, runtime = world[1], world[2]
     repository.replace_games_atomic(
         games,
         accepted_observations={
@@ -147,6 +129,37 @@ def build_season(engine):
         },
     )
     _null_usage(engine)  # stored before the usage_pct backfill existed
+    assert runtime.compose_queued(game.season) >= 1
+    return world
+
+
+def _season_world(engine, games):
+    """The services a test drives over a database holding ``games``."""
+
+    cutoff = max(item.retrieved_at for item in games)
+    clock = lambda: cutoff  # noqa: E731
+    expected = frozenset(item.game_id for item in games)
+    expected_l15 = {
+        team: frozenset(item.game_id for item in games if team in {item.home_team_id, item.away_team_id})
+        for team in TEAM_IDS
+    }
+
+    class Governance:
+        def read_for_composition(self, season, governed_cutoff, manifest_id=None):
+            return LedgerGovernance(
+                season,
+                governed_cutoff,
+                expected,
+                TEAM_IDS,
+                expected_l15,
+                manifest_id=manifest_id,
+            )
+
+    publications = PublicationService(engine, clock=clock)
+    repository = CanonicalGameLedgerRepository(
+        engine,
+        correction_sink=LedgerCorrectionQueue(clock=clock),
+    )
     runtime = LedgerRuntime(
         backfill=None,
         repository=repository,
@@ -160,14 +173,26 @@ def build_season(engine):
         publication_service=publications,
         clock=clock,
     )
-    assert runtime.compose_queued(game.season) >= 1
-    return engine, repository, runtime, game, clock, len(games)
+    return engine, repository, runtime, games[0], clock, len(games)
+
+
+@pytest.fixture(scope="module")
+def season_database(tmp_path_factory):
+    """One built season per module; composing it takes seconds."""
+
+    directory = tmp_path_factory.mktemp("usage-season")
+    engine, _repository_ = _repository(directory)
+    build_season(engine)
+    engine.dispose()
+    return directory / "usage.sqlite3"
 
 
 @pytest.fixture
-def season(tmp_path):
-    engine, _repository_ = _repository(tmp_path)
-    yield build_season(engine)
+def season(tmp_path, season_database):
+    copy = tmp_path / "usage.sqlite3"
+    shutil.copyfile(season_database, copy)
+    engine = create_engine(f"sqlite:///{copy}")
+    yield _season_world(engine, _league_with_usage())
     engine.dispose()
 
 

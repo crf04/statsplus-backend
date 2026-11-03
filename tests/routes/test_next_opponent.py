@@ -168,7 +168,7 @@ def test_next_game_and_all_categories(setup):
 
 
 @pytest.mark.parametrize("direction", ["most", "fewest", "tie"])
-def test_returned_tiers_include_opponent_through_game_log(setup, direction):
+def test_returned_tiers_include_opponent_through_game_log(setup, authenticate, direction):
     client, reads, _ = setup
     distinct_metrics(reads)
     if direction in ("fewest", "tie"):
@@ -205,6 +205,7 @@ def test_returned_tiers_include_opponent_through_game_log(setup, direction):
                 "teams_against[]": row["team_filter"],
                 "rank_filter[]": f"{low},{high}",
             },
+            headers=authenticate(),
         )
         assert response.status_code == 200, response.get_json()
         assert [game["MATCHUP"] for game in response.get_json()["game_logs"]] == ["BOS vs. LAL"]

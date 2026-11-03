@@ -32,6 +32,7 @@ from app.services.injury_listing import StoredInjuryListing
 from app.services.injury_refresh import InjuryReportRefreshService
 from app.services.injury_scenarios import InjuryScenarioService
 from app.services.injury_snapshot_repository import InjurySnapshotRepository
+from app.services.lineup_segment_repository import SegmentSplit
 from app.services.matchup_injuries import MatchupInjuryService
 from app.services.on_off import OnOffService, build_request, injury_warm_requests
 from app.services.pbp_stats_adapter import WowyPlayerRow
@@ -1629,3 +1630,115 @@ def test_the_authenticated_users_id_reaches_the_upstream_budget(world, client, a
 
     assert len(world.wowy.asked) == 4
     assert _row(_scenario(fresh, LEBRON), "sits", REAVES, "PTS")["limits"] == []
+
+
+# -- on/off provenance (crf04/statsplus#410) -----------------------------------
+
+
+class SegmentSplits:
+    """``LineupSegmentRepository``'s split read over the world's recorded splits,
+    for the seasons it covers, with each season's missing games."""
+
+    def __init__(self, wowy, missing):
+        self.wowy = wowy
+        self.missing = missing
+
+    def covered(self, season):
+        return season in self.missing
+
+    def read_split(self, season, team_id, on, off):
+        if season not in self.missing:
+            return None
+        rows = self.wowy.responses.get((team_id, season, tuple(on), tuple(off)), [])
+        return SegmentSplit(
+            rows=tuple(
+                {
+                    "player_id": row.player_id,
+                    "name": row.name,
+                    "duration_cs": row.minutes * 6000,
+                    "off_poss": row.possessions,
+                    "pts": row.points,
+                    "reb": row.rebounds,
+                    "ast": row.assists,
+                    "fg3m": row.fg3m,
+                    "fga": row.fga,
+                    "fg3a": row.fg3a,
+                    "tov": row.tov,
+                    "fta": row.fta,
+                    "team_fga": 400,
+                    "team_fta": 0,
+                    "team_tov": 0,
+                    "team_heaves": 0,
+                }
+                for row in rows
+            ),
+            written_at=AFTERNOON,
+            games_missing=tuple(self.missing[season]),
+        )
+
+
+MISSED_CURRENT = {"game_id": "0022600050", "game_date": "2026-11-02", "matchup": "LAL @ DEN"}
+MISSED_PRIOR = {"game_id": "0022500093", "game_date": "2025-11-14", "matchup": "DET @ LAL"}
+
+
+def _serve_from_segments(world, missing):
+    world.on_off._segments = SegmentSplits(world.wowy, missing)
+
+
+def _provenance(row):
+    return row["on_off_sources"], row["on_off_games_missing"]
+
+
+def test_a_pbp_stats_row_names_its_source_and_no_missing_games(client, authenticate, world):
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    assert _provenance(_row(scenario, "sits", REAVES, "PTS")) == (["pbpstats"], [])
+    assert _provenance(_row(scenario, "plays", REAVES, "PTS")) == (["pbpstats"], [])
+    assert _provenance(_row(scenario, "sits", REAVES, "USG")) == (["pbpstats"], [])
+
+
+def test_a_segment_row_names_statsplus_and_every_season_s_missing_games_once(client, authenticate, world):
+    _serve_from_segments(world, {CURRENT: [MISSED_CURRENT], PRIOR: [MISSED_PRIOR, MISSED_CURRENT]})
+    world.wowy.asked.clear()  # the setup warm's calls
+
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    assert world.wowy.asked == []
+    assert _provenance(_row(scenario, "sits", REAVES, "PTS")) == (
+        ["statsplus"],
+        [MISSED_PRIOR, MISSED_CURRENT],
+    )
+    assert _provenance(_row(scenario, "sits", REAVES, "MIN")) == (
+        ["statsplus"],
+        [MISSED_PRIOR, MISSED_CURRENT],
+    )
+
+
+def test_a_window_spanning_both_sources_names_both(client, authenticate, world):
+    _serve_from_segments(world, {CURRENT: [MISSED_CURRENT]})
+
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    assert _provenance(_row(scenario, "sits", REAVES, "PTS")) == (["pbpstats", "statsplus"], [MISSED_CURRENT])
+    # Hachimura played for LAL this season only, so his window is segments alone.
+    assert _provenance(_row(scenario, "sits", HACHIMURA, "PTS")) == (["statsplus"], [MISSED_CURRENT])
+
+
+def test_a_split_with_no_copy_adds_no_source(client, authenticate, world):
+    # Tatum's off split could not be warmed; Brown's row sums only the on split.
+    brown = _row(_scenario(_scenarios(client, authenticate), TATUM), "sits", BROWN, "PTS")
+
+    assert "on_off_not_warmed" in brown["limits"]
+    assert _provenance(brown) == (["pbpstats"], [])
+
+
+def test_a_sits_row_names_the_sources_of_both_floors(client, authenticate, world):
+    _serve_from_segments(world, {CURRENT: [MISSED_CURRENT]})
+    # Last season's on split (PBP Stats) is gone from the cache; its off split stays.
+    del world.redis.data[build_request("LAL", PRIOR, on=[LEBRON]).cache_key]
+
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    assert _provenance(_row(scenario, "plays", REAVES, "PTS")) == (["statsplus"], [MISSED_CURRENT])
+    assert _provenance(_row(scenario, "sits", REAVES, "PTS")) == (["pbpstats", "statsplus"], [MISSED_CURRENT])
+    assert _provenance(_row(scenario, "sits", REAVES, "FGA")) == (["pbpstats", "statsplus"], [MISSED_CURRENT])

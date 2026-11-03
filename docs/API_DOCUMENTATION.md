@@ -21,11 +21,12 @@ the service returns `503 Service Unavailable`. Missing or invalid tokens return
 
 Authentication levels:
 
-- Anonymous (crf04/statsplus#211): `GET /api/games/slate`, `GET /api/games/slate/edges`, `GET /api/games/ladder`, `GET /api/games/game_logs/preview.png` (crf04/statsplus#285), `GET /api/games/slate/preview.png` and `GET /api/games/matchup/preview.png` (crf04/statsplus#320), and `GET /api/reports/<id>/meta` and `GET /api/reports/<id>/preview.png` (crf04/statsplus#342). They carry no auth check, so any `Authorization` header (a waitlisted user's token included) is ignored, never refused, and the [rate limiter](#rate-limits) counts the caller by client IP in the unauthenticated bucket.
-- Required: `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/rotation`, `GET /api/games/seasons`, `GET /api/players/season_stats`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `POST /api/usage/mcp-tool-calls`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
-- Admin-only: `GET`/`PUT /api/admin/signups`, `GET /api/admin/users`, `POST /api/admin/users/<uid>/admit`, `PUT /api/admin/users/<uid>/cohort`, `GET /api/admin/research-activity`, `PUT /api/admin/users/<uid>/public-handle`, `POST /api/admin/reports/<id>/takedown`, `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
+- Anonymous (crf04/statsplus#211): `GET /api/games/slate`, `GET /api/games/slate/edges`, `GET /api/games/ladder`, `GET /api/games/game_logs/preview.png` (crf04/statsplus#285), `GET /api/games/slate/preview.png` and `GET /api/games/matchup/preview.png` (crf04/statsplus#320), `GET /api/reports/<id>/meta` and `GET /api/reports/<id>/preview.png` (crf04/statsplus#342), and `GET /api/research` and `GET /api/research/authors/<handle>` (crf04/statsplus#372). They carry no auth check, so any `Authorization` header (a waitlisted user's token included) is ignored, never refused, and the [rate limiter](#rate-limits) counts the caller by client IP in the unauthenticated bucket.
+- Required: `GET /api/games/matchup`, `GET /api/games/board`, `GET /api/injuries`, `GET /api/injury_scenarios`, `GET /api/games/rotation`, `GET /api/games/seasons`, `GET /api/players/season_stats`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `POST /api/usage/mcp-tool-calls`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
+- Admin-only: `GET`/`PUT /api/admin/signups`, `GET /api/admin/users`, `POST /api/admin/users/<uid>/admit`, `PUT /api/admin/users/<uid>/cohort`, `GET /api/admin/research-activity`, `PUT /api/admin/users/<uid>/public-handle`, `POST /api/admin/reports/<id>/takedown`, `PUT /api/admin/reports/<id>/featured`, `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
 - Optional, waitlisted accepted: `GET /api/reports/<id>` (crf04/statsplus#342). A valid token only adds `is_author`; a waitlisted account's token is attached, never refused.
+- Optional, waitlisted accepted: `GET /api/games/game_logs` (crf04/statsplus#381), so a shared Log Workspace link loads for anyone. Only a signed-in, non-waitlisted caller gets prices in `posted_line` (see [Get Game Logs](#get-game-logs)). An invalid token reads as anonymous, and without Firebase Admin (the local bypass) every call is anonymous.
 - Admin claims: an authenticated token must contain `admin=true`, `role=admin`,
   or `roles` containing `admin` for admin-only routes. Missing claims return
   `403 Forbidden`.
@@ -83,7 +84,8 @@ actions and serves a report from it.
 **Research action.** A successful (`2xx`) authenticated read on one of the routes
 below. Anonymous reads (the optional-auth routes accept them), local-bypass
 requests, and every request that fails or is refused (including `403
-waitlisted` and `429`) are not counted. Connector (MCP) tool calls arrive on
+waitlisted` and `429`) are not counted, nor is a waitlisted account's game-log
+read (crf04/statsplus#381). Connector (MCP) tool calls arrive on
 the same routes with the user's own token, so they count like the web app's
 reads.
 
@@ -101,7 +103,7 @@ reads.
 | Link previews | `GET /api/games/game_logs/preview.png`, `GET /api/games/slate/preview.png`, `GET /api/games/matchup/preview.png` | Chat apps fetch them signed out to unfurl a shared link; there is no account to count. |
 | Target resolve | `GET /api/user/targets/resolve` | The Slate page reads it on every load to show live Targets, so counting it would count Slate loads. This also means the connector's `get_targets` call is not counted. |
 | Reference lists | `GET /api/players`, `GET /api/teams`, `GET /api/games/seasons`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, `GET /api/players/next-opponent` | Pickers and reference data. |
-| Other research reads | `GET /api/games/rotation`, `GET /api/players/season_stats`, `GET /api/on_off`, `GET /api/injuries`, `GET /api/injury_scenarios` | Not among the surfaces #213 names, so not counted. To count one, add its endpoint to `RESEARCH_ENDPOINTS`. |
+| Other research reads | `GET /api/games/board`, `GET /api/games/rotation`, `GET /api/players/season_stats`, `GET /api/on_off`, `GET /api/injuries`, `GET /api/injury_scenarios` | Not among the surfaces #213 names, so not counted. To count one, add its endpoint to `RESEARCH_ENDPOINTS`. |
 | Account | every other `/api/user/*` route, `POST /api/user/attribution` | Account management, not research. |
 
 `RESEARCH_ENDPOINTS` in `app/services/research_activity.py` is the single list
@@ -282,6 +284,7 @@ reopens), and this body:
 | `GET /api/dfs/board` | 30/min per user |
 | `POST /api/user/feedback` | 10/hour per user |
 | `POST /api/user/reports` | 10/hour and 30/day per user |
+| `GET /api/games/game_logs` without a signed-in user | 30/min per IP, also counted in the 60/min unauthenticated bucket; signed-in callers keep the shared 300/min bucket |
 | every other authenticated `/api` route | 300/min per user, one shared bucket |
 | unauthenticated routes, except `/health` | 60/min per IP |
 
@@ -476,6 +479,9 @@ when a dependency is degraded.
 POST /api/nl-query
 ```
 
+`season` is the season the query names (for example `2024-25`), or `null`
+when it names none, so the reader applies its own default season.
+
 The default research season (including “this year”) follows the active,
 available player-game-log publication, so an October rollover does not select
 an unpublished season. Every read that serves published data uses the same
@@ -532,6 +538,7 @@ Response shape:
   "players_off": [],
   "player_choices": [],
   "teams_against": ["OPP_PTS"],
+  "opponent_tricode": null,
   "minutes_filter": null,
   "date_filter": null,
   "date_to": null,
@@ -543,7 +550,7 @@ Response shape:
     }
   ],
   "rank_filter": ["5"],
-  "season": "2025-26",
+  "season": null,
   "confidence": 0.95,
   "intent": "game_logs",
   "time_period": null,
@@ -553,6 +560,16 @@ Response shape:
 ```
 
 `parsed_by` can be `nlp`, `llm`, or `hybrid`.
+
+`opponent_tricode` (crf04/statsplus#401) is always present: the tricode of one
+team the query names after `vs`, `vs.`, `v`, `versus` or `against` (an
+optional `the` allowed), or `null`. The team may be written as its full name,
+nickname, city or region, tricode or a common short form ("jokic against the
+blazers" is `"POR"`, "Tatum vs MIA" is `"MIA"`, "Sixers", "Cavs", "Mavs",
+"Wolves" and "Pels" are understood). A city two teams share ("LA", "Los
+Angeles") is `null`, as is a ranked group ("against top 10 defenses"), which
+stays in `teams_against`/`rank_filter`. It maps directly onto the game-log
+`opponent_tricode` filter.
 
 `player_choices` (crf04/statsplus#264) is always present and is `[]` when every
 player name resolved. A name that matches more than one current-season player
@@ -649,8 +666,10 @@ block: an empty `generation` and the `schedule`, `pool` and `injuries` sources.
 
 `trailing` lists the input families the Slate's game Matchups read from their
 previous season, in the [Matchup `trailing`](#trailing-inputs) shape and order.
-It is read from the same Publication capture those Matchups share, so the two
-cannot disagree; `[]` when nothing trails or the Slate has no game.
+It is read from the same Publication capture those Matchups read, each game's
+as of its tip when a past game of an Unpublished Season reads an earlier
+version, so the two cannot disagree; `[]` when nothing trails or the Slate has
+no game.
 
 ```json
 {
@@ -758,7 +777,7 @@ Each team count is the number of canonical players in the live Player Pool for
 that slate game. The pool is the union of usable PrizePicks, Underdog, Dabble,
 Kalshi, Polymarket, and Novig observations. A market qualifies only when it is available, standard,
 full-game, and explicitly mapped to PTS, REB, AST, 3PM, TOV, STL, BLK, PRA, PA,
-PR, RA, STKS, FGA, FG3A, or FG2A. Suspended, alternate, promotional,
+PR, RA, STKS, FGA, FG3A, FG2A, FTA, FTM, FGM, or FG2M. Suspended, alternate, promotional,
 period-specific, fantasy-points, DD2/TD3, unknown-stat, unjoined-player, and
 other-slate markets do not affect counts.
 When a prior Matchup read has stored a still-fresh or permitted-stale injury
@@ -786,8 +805,11 @@ and retains each provider's actual `retrieved_at`. This is an inclusive reuse ma
 the provider cache's exclusive fresh window. Partial coverage marks absent
 providers `missing`. On total failure, the last confirmed evidence is served
 through six hours with aggregate and contributing-provider status
-`stale-served`; beyond six hours the pool is empty and `unavailable`. No
-synthetic pool is produced.
+`stale-served`; beyond six hours the pool is empty and `unavailable`. A
+required provider whose latest successful poll is itself past its live window,
+with no newer poll recorded, is overdue and is treated as failed: what that
+poll confirmed is `stale-served` through the same six hours. No synthetic pool
+is produced.
 Aggregate `retrieved_at` is the oldest usable contributor snapshot, so its age
 never understates any provider observation included in the union, with one
 declared exception: a provider that the provider registry gives its own, longer
@@ -825,10 +847,14 @@ game whose collector has not created a set yet, or whose set has no members,
 reports `missing` and zero targetable players. Reads use only the requested
 game IDs and never create or freeze a set.
 After a failed provider poll, prior confirmed offerings may be served as
-`stale-served` only through the inclusive six-hour fallback. Partial polls
+`stale-served` only through the inclusive six-hour fallback. An overdue
+required provider gets the same fallback for the offerings, or the
+Complete-empty evidence, its latest successful poll confirmed. Partial polls
 update and confirm only included references; omissions retain their prior
-evidence and confirmation. Complete empty snapshots retire only the same
-provider/query scope and remain fresh successful provider evidence. When every
+evidence and confirmation, and an omitted offering still expires at the live
+window even when the poll that omitted it is overdue. Complete empty snapshots
+retire only the same provider/query scope and remain fresh successful provider
+evidence. When every
 required provider is current and Complete-empty, the database-first pool is
 `live`/`fresh` with zero players rather than unavailable, and each requested
 Slate game's `projection_state` is `live` with that accepted evidence time and
@@ -1043,6 +1069,12 @@ that are never flagged.
   the `season_span` each was computed over. `baseline.on_floor_season_span` and
   `off_floor.season_span` name only the seasons that supplied on/off minutes.
 - `flagged`: both shifts at least +10%, or both at most -10%.
+- `on_off_sources` and `on_off_games_missing` (crf04/statsplus#410): the
+  sorted, distinct `source` values (`pbpstats`, `statsplus`) of the on/off
+  splits the row's numbers summed (the on-floor split, plus the off-floor one
+  in `sits` where the row has `off_floor`), and the union of their
+  `games_missing` entries (`{game_id, game_date, matchup}`, oldest first;
+  `[]` when none). A split with no copy adds nothing to either.
 - `limits`: `insufficient` (under 3 games without or under 150 off-floor
   minutes; never flagged), `no_line`, `stale_report`, `no_baseline`, and the
   on/off limits `on_off_not_warmed` (no cached split; a request without
@@ -1198,10 +1230,12 @@ DFS provider and writes nothing.
   each provider's own status and `retrieved_at`, so one provider's new poll
   misses though the oldest stamp holds); each snapshot stream's freshness
   label (a fresh and a stale capture of one generation compose different
-  `freshness` sections); and every Matchup score, Diet baseline, schedule-age
+  `freshness` sections); the `freshness.stats` block (stats completion and its
+  stale or fresh status), read on the same repeatable-read snapshot as the
+  compose stored under it, so a hit reports its own document's stats
+  freshness; and every Matchup score, Diet baseline, schedule-age
   and pinned-season setting. A retained Publication that composition reads
-  but the key did not name (activated in between) is returned uncached. `freshness.stats` is recomputed on every read (two
-  small reads per request). Four stored inputs are not keyed and can lag a cached Matchup by
+  but the key did not name (activated in between) is returned uncached. Four stored inputs are not keyed and can lag a cached Matchup by
   `MATCHUP_CACHE_TTL_SECONDS` (accepted on crf04/statsplus#217, each being rare
   and without a cheap identity): stored injuries and Outs that do not move the
   Slate's targetable counts; durable Last-15 governance observations; projection
@@ -1221,6 +1255,119 @@ DFS provider and writes nothing.
   generation (one payload-free statement) is unchanged, for at most
   `SNAPSHOT_REUSE_MAX_AGE_SECONDS` (default 60; `0` captures every request),
   because a capture stamps each stream's `age_seconds`.
+
+### Get Board
+
+```http
+GET /api/games/board?date=YYYY-MM-DD[&season=YYYY-YY][&market=CODE][&game=<nba_game_id>][&team=ABBR][&sources=a,b,...]
+Authorization: Bearer <firebase-id-token>
+```
+
+Authenticated and read-only (crf04/statsplus#373). Every posted line on one US
+Eastern date, for the connector's `get_board`. It reads stored data only: the
+date's games, one Player Pool read covering all of them, the stored injury
+report in one statement, every game's latest sportsbook rows in one statement,
+and the athlete catalog rows of players outside the pool in one statement, all
+on one repeatable-read snapshot. It composes no Matchup and calls no provider.
+
+- `date` is required, `YYYY-MM-DD`.
+- `season` (optional, canonical) names the schedule that holds the date; omitted,
+  it is the date's own season, as on the Slate.
+- `market` is one Statistic Catalog market category (`PTS`, `FG3A`, `FTA`, ...),
+  exact case. Without it the response is the market index.
+- `game` (a 10-digit NBA game ID) and `team` (an NBA tricode, any case) keep only
+  that game, or that team's game and its players.
+- `sources` is a comma-separated list of providers (`dabble`, `prizepicks`,
+  `underdog`, `novig`, `kalshi`, `polymarket`) and books (`draftkings`,
+  `fanduel`, `betmgm`, `williamhill_us`, `betrivers`, `fanatics`). It narrows the
+  rows, each row's `lines`, `line_prices` and `book_lines.books`, the index's
+  counts, and the top-level `sources` list.
+- An unknown market, a malformed value, a repeated parameter (other than
+  `sources`) or any other parameter is `400 invalid_input` with
+  `details.parameters` naming it. A date with no games is `200` with
+  `"games": []`.
+
+Index (no `market`):
+
+```json
+{
+  "date": "2026-01-15",
+  "season": "2025-26",
+  "games": [
+    {"game_id": "0022500601", "label": "GSW @ LAL", "tip": "2026-01-15T23:30:00Z", "status": "live"}
+  ],
+  "sources": [
+    {"source": "dabble", "kind": "provider", "status": "fresh", "retrieved_at": "2026-01-15T23:58:00Z"},
+    {"source": "prizepicks", "kind": "provider", "status": "stale-served", "retrieved_at": "2026-01-15T23:40:00Z"},
+    {"source": "draftkings", "kind": "sportsbook", "status": "fresh", "retrieved_at": "2026-01-15T23:57:00Z"}
+  ],
+  "markets": [
+    {"market": "PTS", "players": 4, "book_only_unnamed": 1, "sources": ["dabble", "prizepicks", "draftkings"]},
+    {"market": "FG3A", "players": 2, "book_only_unnamed": 0, "sources": ["dabble"]}
+  ]
+}
+```
+
+Market mode (`market=PTS`) drops `markets`, adds `players_total` (rows after
+filters) and `"omitted": {"book_only_unnamed": 1}`, and gives each game its
+`players`:
+
+```json
+{
+  "player_id": 1628369,
+  "name": "Jayson Tatum",
+  "team": "BOS",
+  "injury_status": "Questionable",
+  "lines": {"dabble": 27.5, "prizepicks": 28.5},
+  "line_prices": {"dabble": {"over": -122, "under": -104}},
+  "book_lines": {
+    "as_of": "2026-01-15T23:57:00Z",
+    "closing": false,
+    "books": [
+      {"book": "draftkings", "line": 27.5, "over": -128, "under": 100, "updated_at": "2026-01-15T23:57:00Z"}
+    ]
+  }
+}
+```
+
+- Games are ordered by tip, then label. `status` is `final` once the game is
+  final, `live` once it has started (its tip has passed or the catalog says it
+  is in progress), else `scheduled`.
+- Players are ordered within a game by team tricode, then name, then player
+  ID. Paging relies on this order being stable. A player appears only when at
+  least one source posts the market. A player ruled Out stays in, with
+  `injury_status` `"Out"`; `injury_status` is the stored report's `Out`,
+  `Doubtful`, `Questionable` or `Probable`, else `null` (not listed,
+  `Available`, or no usable report).
+- Players come from the Player Pool for the date's games, plus every player a
+  book quotes for the market in a game whose pool has no row for him (a late
+  call-up or a rookie the DFS providers do not post). Such a row has
+  `"lines": {}` and `"line_prices": {}`, and its `name` and `team` are the
+  athlete catalog's for the season. `team`, `game` and `sources` apply to these
+  rows as to any: a player quoted only by books `sources` drops is not listed.
+  The index's `players` counts include them.
+- A quoted player outside the pool whom the athlete catalog lacks, or lists
+  without a team, is not a row, since without a team it can be neither filtered
+  by `team` nor ordered. Market mode counts these players in
+  `omitted.book_only_unnamed` and the index in each market's
+  `book_only_unnamed`, after `game` and `sources`. A `team` filter keeps them in
+  the count, because they are quoted in that team's game. A market quoted only
+  for such players is still listed in the index, with `"players": 0`.
+- `lines` and `line_prices` are the Matchup row's, for this market only.
+  `line_prices` holds American prices as posted, `null` for a missing side; a
+  provider with no per-pick price (PrizePicks) is absent from it.
+- `book_lines` is the Matchup's `book_lines` entry for this market without the
+  best-price flags, or `null` when no book quotes it. `as_of` is the newest
+  book's update and `closing` is `true` when every listed book's quote is a
+  closing quote.
+- A started game reads its closing set, as every pool read does, so a line
+  posted after the tip is not shown.
+- `sources` lists each provider the pool reports (the
+  `freshness.pool.providers` vocabulary: `fresh`, `stale-served`, `missing`,
+  and `closing` when every game read has started), then each book quoting a
+  game read, `fresh` with its newest update. Times are UTC with a `Z` suffix.
+
+The board is not a research action and records no usage event.
 
 ### Get Matchup
 
@@ -1522,6 +1669,16 @@ Each stored pool player has this shape:
     "underdog": { "PTS": { "over": -112, "under": -112 } }
   },
   "season_scoring": 25.4,
+  "last_five_games": [
+    {
+      "game_id": "0022500570",
+      "game_date": "2026-01-12",
+      "matchup": "LAL vs. MIA",
+      "minutes": 36.0,
+      "stats": { "FGA": 19.0, "PTS": 28.0 }
+    }
+  ],
+  "season_averages": { "FGA": 18.6, "PTS": 25.4 },
   "last_10_minutes": [35.0, 36.0],
   "diet_shares": {
     "play_types": [
@@ -1636,6 +1793,21 @@ exactly the key set of `scores`; in current mode it equals `posted_markets`,
 and in historical mode it is the governed Statistic Catalog crossed with the
 score-input contract rather than any DFS archive. `focal_game_line` is `null`
 in current mode.
+
+`last_five_games` and `season_averages` (crf04/statsplus#395) are additive and
+always present. Both read the rows behind `season_scoring`: the player's
+Evidence-season Regular Season game logs (preseason is never stored).
+`last_five_games` is the last five of those rows by `game_date`, then
+`game_id`, oldest first, so it holds fewer than five entries when the season
+has fewer games. Each entry has the `focal_game_line` shape
+`{ game_id, game_date, matchup, minutes, stats }`, with one `stats` key per
+`stat_categories` entry the governed Statistic Catalog defines.
+`season_averages` is the season per-game rate for each `stat_categories`
+entry, rounded as `season_scoring` is, so `season_averages.PTS` equals
+`season_scoring` whenever `PTS` is a category. With no season rate (no logs,
+or no minutes) they are `[]` and `{}`. A Historical Matchup serves `[]` and
+`{}`: its evidence includes the focal game and the games after it. Older
+backends omit both fields.
 
 `book_lines` (#377, crf04/statsplus#185) is additive and always present: sportsbook
 player-prop lines from The Odds API, keyed by category (a subset of `PTS`,
@@ -1782,6 +1954,13 @@ For every blendable offensive window, `components: {}` and `blend: null`
 truthfully mean that zero components were computable. Whenever at least one
 offensive component is present, `blend` is a score cell with `value` and
 `thin`; the backend never fabricates a numeric Blend merely to avoid `null`.
+
+FTA, FTM, FGM and FG2M (Dabble lines, crf04/statsplus#370) have no Matchup
+Score. A pool player who has one posted carries it in `stat_categories`,
+`posted_markets`, `lines` and `line_prices` like any other category, and its
+`scores` row has both windows as
+`{"components": {}, "blend": null, "missing_inputs": []}`. A Historical
+Matchup never lists them, because its categories are the scored ones.
 
 The stored Diet/sheet intersection supports PTS through play types, shot zones,
 and shot types; FGA through shot zones and shot types; AST through assist
@@ -2046,6 +2225,8 @@ the same shape as a stored pool player, with these differences:
   Display and score inputs now read the participant's completed-season
   summary once, together: `season_scoring`, `last_10_minutes`, and Matchup
   Score inputs all come from the same read and all include the focal game.
+  `last_five_games` is `[]` and `season_averages` is `{}`: recent games read
+  from that summary would include the focal game and later games.
   Hindsight is disclosed by the `completed_season` label, not by excluding the
   focal game from an input. The selection route's comparison samples and delta
   baseline are unaffected by #47 and keep dropping the focal row, so a
@@ -2290,8 +2471,9 @@ current-season Athlete Catalog team (`null` when the catalog names none).
 Catalog, as in a Historical Matchup, because there is no Player Pool to name
 posted markets.
 
-`scores`, `diet_shares`, `diet_thin`, `season_scoring`, and `last_10_minutes`
-are computed by the same code the game Matchup uses, with the opponent named
+`scores`, `diet_shares`, `diet_thin`, `season_scoring`, `last_10_minutes`,
+`last_five_games`, and `season_averages` are computed by the same code the
+game Matchup uses (the last two over every `stat_categories` entry), with the opponent named
 by the request rather than by a game. For a game whose Defense Sheet as-of is
 the latest window, a player's Unscheduled `scores` equal that game's `scores`
 for the player, market by market and window by window. The Blend follows the
@@ -2420,7 +2602,8 @@ rows attributable. Average-row player identity is null because it is an
 aggregate across the delivered sample.
 
 Each row's `stats` and `deltas` maps contain every Market Category posted for
-the selected player, including PRA/PA/PR/RA/STKS and FGA/FG3A/FG2A. A delta is
+the selected player, including PRA/PA/PR/RA/STKS, FGA/FG3A/FG2A and
+FTA/FTM/FGM/FG2M. A delta is
 `game stat / game minutes - sample player's Regular Season stat / Regular
 Season minutes`; it is a ±STAT/MIN difference, not a percentage. H2H and
 archetype game chronology may include stored Regular Season and Playoffs rows,
@@ -2514,7 +2697,9 @@ whose `player_game_logs` can be read through a published Publication
   read of that season serves: `serving` its own season, `trailing` its
   previous season, or `unavailable` (`served_season` `null`). `reason` is one
   of `window_not_ready`, `season_not_composed`, `readiness_not_met` and
-  `upstream_missing`, when one applies. A family is reported as its
+  `upstream_missing`, when one applies; an `unpublished` choice never reports
+  `readiness_not_met`, because a selected season serves each family's
+  candidate whatever its sample (crf04/statsplus#386). A family is reported as its
   furthest-behind stream: one `unavailable` stream makes the family
   `unavailable`, otherwise one `trailing` stream makes it `trailing`, and the
   reason is that stream's. A family whose streams are all disabled is left
@@ -2534,19 +2719,33 @@ whose `player_game_logs` can be read through a published Publication
 
 `GET /api/games/matchup`, `/api/games/matchup/selection`,
 `/api/matchups/unscheduled`, `/api/games/slate`, `/api/games/slate/edges`,
-`/api/players/profile` and `/api/diet/baselines` take an optional `season` (canonical `YYYY-YY`), the Evidence season
-(crf04/statsplus#330). Game logs keep `season_filter`, which follows the same
+`/api/players/profile`, `/api/teams/stats` and `/api/diet/baselines` take an optional `season` (canonical `YYYY-YY`), the Evidence season
+(crf04/statsplus#330, #369). Game logs keep `season_filter`, which follows the same
 rules. Without `season` every response is byte for byte what it was.
 
 - A selected season reads as game logs' `season_filter` does: the Published
   Season reads live, an earlier one its retained Publications, and the season
   after the Published Season, while [`/seasons`](#get-seasons) offers it, reads
-  its held candidates as if its Season Cutover had run. A family that is not
-  ready serves its previous season labelled `prior_season` and is listed in
-  `trailing` with its `team_games` sample.
+  its held candidates as if its Season Cutover had run, except that no
+  Readiness Rule applies: each family serves its candidate however few games
+  each team has played, and the choice's `team_games` in `/seasons` is that
+  sample (crf04/statsplus#386). A family with no candidate that passes the
+  cutover's per-publication checks serves its previous season labelled
+  `prior_season` and is listed in `trailing` with its `team_games` sample.
+- A Matchup or selection of a game on an earlier slate day reads every
+  stream of that held season (game logs, Diets, Defense Sheet windows) as of
+  the game: the newest version cut before it tipped that passes the same
+  checks, never one cut after the tip and never one a reverted cutover
+  withdrew (crf04/statsplus-backend#626). With none, a stream reads as with no
+  composition of the season: a trailing family serves its previous season,
+  and game logs read `window_not_ready`. `provenance`, `coverage` and
+  `trailing` describe those reads. Superseded versions older than 14 days are
+  kept only as the newest of each week, so such a game reads the newest kept
+  version cut before its tip. A past game with no Player Pool still
+  lists who played from the newest game logs, which `provenance` lists too.
 - The response adds `season_context: {selected_season, published_season}`.
-  `/api/players/profile`, whose body can be an array, instead answers
-  `{data: <today's body>, season_context, trailing}`, `trailing` naming each
+  `/api/players/profile` and `/api/teams/stats`, whose bodies can be arrays,
+  instead answer `{data: <today's body>, season_context, trailing}`, `trailing` naming each
   family the body's facts were read from that serves an earlier season (empty
   when none does). Game logs, both Matchups and the Slate also list
   `trailing`; slate edges list the trailing families of the Matchups they
@@ -2582,8 +2781,10 @@ rules. Without `season` every response is byte for byte what it was.
 - A malformed `season` is `400 invalid_input` (`details.parameters:
   ["season"]`). A season not offered is `503 season_unavailable` with
   `details: {selected_season, published_season}`.
-- The Slate, slate edges and profile also answer anonymous callers. One
-  without a valid token may name the Published Season or an earlier one; a
+- The Slate and slate edges select any offered season (see
+  [`/seasons`](#get-seasons)) for every caller, anonymous included, so the home page shows the
+  Matchup's numbers. Profile and team stats also answer anonymous callers; one
+  without a valid token may name the Published Season or an earlier one, and a
   later season is `503 season_unavailable` before anything is read or cached,
   as for a [game-log preview](#get-game-log-preview-image).
 - Matchup, Unscheduled Matchup, selection, selected profile and selected
@@ -2594,9 +2795,10 @@ rules. Without `season` every response is byte for byte what it was.
   candidate once.
 - Caches: the slate-edges response cache keys on the selected season, and the
   per-process snapshot reuse never serves a selected request, which captures
-  its own. A Backtest reads exactly the season it names and never a held
-  candidate: 2026-27 stays `season_unavailable` until its Diets serve 2026-27
-  after the cutover.
+  its own. A Backtest reads exactly the season it names: a requested 2026-27
+  reads its held candidates once every Backtest stream's candidate serves in
+  this read, and is `season_unavailable` while any of them has none (see
+  [Backtest one Target](#backtest-one-target-over-the-season-to-date)).
 
 ### Get Ladder
 
@@ -2725,6 +2927,40 @@ means 28.57%), unrounded, or `null`:
   the way a `NaN` comparison does. It is not a Game Logs table column, an
   average, or an opponent-defense category.
 
+Player tracking (crf04/statsplus#349): every `game_logs` row carries four NBA.com
+player-tracking counts, each an integer or `null`:
+
+```json
+{ "GAME_DATE": "2026-04-12", "REB": 0, "REB_CHANCES": 2, "OREB_CHANCES": 0, "DREB_CHANCES": 2, "POTENTIAL_AST": 2 }
+```
+
+* `REB_CHANCES`, `OREB_CHANCES` and `DREB_CHANCES` are `boxscoreplayertrackv3`'s
+  `reboundChancesTotal`, `reboundChancesOffensive` and `reboundChancesDefensive`
+  (one call per game); `POTENTIAL_AST` is `leaguedashptstats` Passing
+  `POTENTIAL_AST` for the game's date. A player who played with 0 rebounds
+  still has his tracked chances.
+* The values are stored in `player_game_tracking` (migration 078), apart from the
+  ledger, and joined onto rows at read time; they never change a publication or
+  a ledger checksum. A game not yet collected, or a player absent from a feed,
+  serves `null`, never `0`. Regular-season games of 2025-26 and 2026-27 only.
+* Two derived per-game conversion rates on a 0-1 scale, like `FG_PCT`:
+  `REB_CONV_PCT` = `REB` / `REB_CHANCES` and `AST_CONV_PCT` = `AST` /
+  `POTENTIAL_AST`. Each is `null` when its denominator is `null` or 0.
+* `self_filters[REB_CHANCES]`, `[POTENTIAL_AST]`, `[REB_CONV_PCT]` and
+  `[AST_CONV_PCT]` (`=min,max`) filter on them, with the conversion ranges on
+  the 0-1 scale; a `null` value fails any range. The offensive and defensive
+  counts are served but not filterable, and none is an opponent-defense category.
+* Both `averages` and `season_averages` gain `REB_CHANCES` and `POTENTIAL_AST`
+  (mean over games where the stat is not `null`, 2 decimals) and `REB_CONV_PCT`
+  and `AST_CONV_PCT` (a ratio of sums over games whose chances are not `null`,
+  3 decimals, not the mean of per-game ratios). Chances `[10, 20, null]` with
+  `REB` `[5, 15, 9]` average `REB_CHANCES` 15.0 and `REB_CONV_PCT` 0.667. Each
+  is `null` when no game qualifies.
+* `python scripts/tracking_refresh.py --season <season> [--season ...]
+  --database-url "$DATABASE_URL" [--max-games N] [--throttle SECONDS]
+  [--game-id ID]` collects every completed regular-season game without stored
+  tracking (see "Player tracking" in [ARCHITECTURE.md](ARCHITECTURE.md)).
+
 Closing line (crf04/statsplus#216): every `game_logs` row carries
 `closing_line`, the player's closing **points** line for that game, or `null`:
 
@@ -2792,6 +3028,13 @@ changes no average.
   store is off, has no quotes, or fails to read (logged; the logs and
   `posted_line` are unaffected). On the closing-line fallback `provider_lines`
   and `line_prices` are `{}` and `book_lines` is still read for that game.
+* Anonymous and waitlisted callers (crf04/statsplus#381) get `posted_line`
+  without prices: `line_prices` is absent, and each `book_lines[<market>].books`
+  entry keeps `book`, `line` and `updated_at` but has no `over`, `under`,
+  `best_over` or `best_under`. `lines`, `provider_lines`, `as_of` and `closing`
+  are unchanged. Any offered `season_filter` reads for them as for a signed-in
+  caller, including the season after the Published Season while
+  [`/seasons`](#get-seasons) offers it.
 * `matchup` reads from the player's side: `LAL vs GSW` at home, `LAL @ GSW` away.
 * `lines` has one entry per market the stored player pool holds for that game
   (`PTS`, `REB`, `AST`, `PRA`, `3PM`, ...), one value each: the majority line
@@ -2941,10 +3184,10 @@ Query parameters:
 | `opponent_tricode` | No | One NBA team tricode (for example `OKC`; surrounding whitespace and letter case are normalized) that keeps only games played against that opponent. Unlike `teams_against[]` it names a team rather than ranking one, and the two compose as a conjunction: a game must be against the named opponent *and* against a ranked opponent. A value that is not an NBA tricode is rejected with `400` `invalid_input` |
 | `location_filter` | No | `Home`, `Away`, or `Both`. Default `Both` |
 | `game_filter` | No | Last N games |
-| `season_filter` | No | Canonical NBA season in `YYYY-YY` form, with `YY` equal to the following calendar year's final two digits (for example, `2024-25`). Whitespace is trimmed. Default is the current season. A season before the active Publication's season is read from that season's latest retained, unrevoked, unretired Publication (the seasons [`GET /api/games/seasons`](#get-seasons) lists): the logs, averages, `season_game_count`, Diets, rankings and `provenance` all come from that one retained generation. A revoked, retired, pruned or projection-less season, or a disabled stream, reads no games with an unavailable `provenance` entry. The active season and an omitted `season_filter` are unchanged. An explicit `season_filter` is a Selected Season (crf04/statsplus#330): the response adds `season_context: {selected_season, published_season}`, and the season after the Published Season reads its held candidates as if the Season Cutover had run (game logs from its candidate, a family not ready, Last 15 included until a window of the selected season serves, from its previous season labelled `prior_season`; `provenance.generation[].status` may be `candidate`). A selected season that is not offered (the next season before `GET /api/games/seasons` lists it, or any later one) is `503 season_unavailable` with `details: {selected_season, published_season}`, never another season's answer |
+| `season_filter` | No | Canonical NBA season in `YYYY-YY` form, with `YY` equal to the following calendar year's final two digits (for example, `2024-25`). Whitespace is trimmed. Default is the current season. A season before the active Publication's season is read from that season's latest retained, unrevoked, unretired Publication (the seasons [`GET /api/games/seasons`](#get-seasons) lists): the logs, averages, `season_game_count`, Diets, rankings and `provenance` all come from that one retained generation. A revoked, retired, pruned or projection-less season, or a disabled stream, reads no games with an unavailable `provenance` entry. The active season and an omitted `season_filter` are unchanged. An explicit `season_filter` is a Selected Season (crf04/statsplus#330): the response adds `season_context: {selected_season, published_season}`, and the season after the Published Season reads its held candidates as if the Season Cutover had run, with no Readiness Rule (game logs and every family from its candidate however few games each team has played, crf04/statsplus#386; a family with no servable candidate, Last 15 included until a window of the selected season serves, from its previous season labelled `prior_season`; `provenance.generation[].status` may be `candidate`). A selected season that is not offered (the next season before `GET /api/games/seasons` lists it, or any later one) is `503 season_unavailable` with `details: {selected_season, published_season}`, never another season's answer |
 | `playstyle_RTG_min` | No | Finite numeric lower bound on `PLAYTYPE_RTG`. Default `0` |
 | `playstyle_RTG_max` | No | Finite numeric upper bound on `PLAYTYPE_RTG`. Default `200` |
-| `self_filters[STAT]` | No | Ordered inclusive stat range as `min,max` (normalized to a typed `between` filter); repeat the parameter to combine multiple constraints for one stat. Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FG2M`, `FG2A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, `FD_PTS`, and `USG_PCT` (0-100). `PLUS_MINUS` is not supported per the #66 contract amendment |
+| `self_filters[STAT]` | No | Ordered inclusive stat range as `min,max` (normalized to a typed `between` filter); repeat the parameter to combine multiple constraints for one stat. Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FG2M`, `FG2A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, `FD_PTS`, `USG_PCT` (0-100), `REB_CHANCES`, `POTENTIAL_AST`, `REB_CONV_PCT` and `AST_CONV_PCT` (both 0-1). `PLUS_MINUS` is not supported per the #66 contract amendment |
 
 Example:
 
@@ -3125,6 +3368,34 @@ warms the cache for the stored injury report's Out, Doubtful and Questionable
 players; run it after every scheduled injury refresh (`railway.on_off_warm.json`,
 five minutes past each refresh). It fetches only splits not already cached and
 exits 1 if it cannot write to Redis.
+
+**Seasons served from StatsPlus segments** (crf04/statsplus#410). A season
+whose lineup segments are recorded as complete is answered from them instead
+of PBPStats: one SQL aggregate over the stored LiveData play-by-play, with no
+cache, throttle, per-user budget or deadline. The response has the same
+shape, except `"source": "statsplus"`, `"stale": false` always, `cached_at`
+when the newest game with a row in the split had its segments written (`null`
+when the split includes no game), and
+`games_missing`, the team-season's completed regular-season games with no
+segments (a game the rotation derivation rejected, whose LiveData fetch
+failed, or that the nightly job has not collected yet), oldest first, `[]`
+when none:
+
+```json
+"games_missing": [{"game_id": "0022500093", "game_date": "2025-11-14", "matchup": "DET @ HOU"}]
+```
+
+`game_date` is the Eastern date and `matchup` is `AWAY @ HOME`, both from the
+Event Catalog. `minutes` round half up from the segments' seconds, as
+PBPStats rounds. `usage` is StatsPlus usage: 100 · (FGA + 0.44·FTA + TOV) /
+(team on-floor FGA + player-less heaves + 0.44·FTA + TOV). Free throws count
+for the lineup on the floor at the foul; from 2026-27 a heave counts as its
+shooter's missed FGA and 3PA. Every other season, and every season before
+2025-26, keeps the PBPStats path above unchanged, and the warm skips covered
+seasons. The nightly rotation job writes a game's segments with its stints;
+`python scripts/lineup_segment_backfill.py YYYY-YY --database-url ...` fills a
+season (resumable, about one LiveData request a second) and records its
+coverage once every completed game is stored or rejected.
 
 ### Get Rotation
 
@@ -3602,6 +3873,11 @@ Query parameters:
 - `team`: full team name, such as `Los Angeles Lakers`.
 - `category`: `Traditional`, `Playtypes`, `Playtype Points`, `Assists`, `Zone Shooting`, or `Shooting Type`.
 - `date`: accepted and ignored.  Rankings are always whole-season.
+- `season`: optional Evidence season; see [Evidence season](#evidence-season).
+  With it the body is `{data, season_context, trailing}`, read from one
+  capture of the category's Season stream. Opponent streams are the
+  `team_defense` family, so `trailing` is empty once every team has played a
+  game. An empty `data` is `200`, not `404`.
 
 Example:
 
@@ -4090,9 +4366,11 @@ fact.
 
 Provider athlete mappings are an internal, persisted read-side seam rather
 than new HTTP mutation routes. `AthleteResolver` accepts typed provider
-evidence plus an explicit season and only auto-qualifies one exact normalized
-official-name match among active season rows with non-conflicting team
-evidence. Use the offline operator CLI for list/dry-run/history and audited
+evidence plus an explicit season and only auto-qualifies one official-name
+match among active season rows with non-conflicting team evidence: an exact
+normalized match, or, when there is none, the one player on the athlete's team
+(or the event's two teams) whose name agrees once a generational suffix is set
+aside and a listed nickname is folded. Use the offline operator CLI for list/dry-run/history and audited
 approve, override, reject, and clear actions:
 
 ```bash
@@ -4867,18 +5145,31 @@ assistant published through the CourtAI connector's `publish_report` tool: a
 document of tabs and items with grades, the tool calls behind its cards with
 their results, and each card's HTML as it was when published, so an old report
 keeps rendering after a card's design changes. Anyone with the link reads it,
-signed in or not. There is no listing of reports. A report is kept until its
-author deletes it or an admin takes it down.
+signed in or not, listed or not. A report is unlisted unless its author lists
+it in the public [Research feed](#research-feed) (crf04/statsplus#372). A
+report is kept until its author deletes it or an admin takes it down.
 
 ```http
 POST   /api/user/reports                       require_auth (waitlisted refused)
+PATCH  /api/user/reports/<id>                  require_auth; the author only (waitlisted may only unlist)
+PUT    /api/user/reports/<id>/edits            require_auth; the author only (waitlisted accepted)
 DELETE /api/user/reports/<id>                  require_auth; the author only
+PUT    /api/user/public-handle                 require_auth (waitlisted refused)
 GET    /api/reports/<id>                       anonymous; a token adds is_author
 GET    /api/reports/<id>/meta                  anonymous
 GET    /api/reports/<id>/preview.png           anonymous
+GET    /api/research                           anonymous
+GET    /api/research/authors/<handle>          anonymous
 POST   /api/admin/reports/<id>/takedown        require_admin
+PUT    /api/admin/reports/<id>/featured        require_admin
 PUT    /api/admin/users/<uid>/public-handle    require_admin
 ```
+
+The Research and edit refusals below (`handle_required`, `listed_limit`,
+`invalid_handle`, `handle_taken`, `handle_already_set`, `410 removed`,
+`notes_links`, `notes_too_long` and `invalid_edits`) use
+the flat body the crf04/statsplus#372 contract names, not the standard `error`
+object: `{"error": "<code>", "message": "<text>"}` plus their own fields.
 
 #### Publish a report
 
@@ -4906,7 +5197,10 @@ PUT    /api/admin/users/<uid>/public-handle    require_admin
      "structured": {}, "meta": {}, "card": "game-logs"}
   ],
   "cards": {"game-logs": "<!doctype html>..."},
-  "show_author": false
+  "show_author": false,
+  "listed": false,
+  "notes": "My own take, in my words.",
+  "origin": "assistant"
 }
 ```
 
@@ -4932,6 +5226,9 @@ The server checks the body against the same schema and limits as the MCP tool
 | `calls` | at most 48 of `{id, tool, args, structured, meta?, card}`; `id` matches `[a-z0-9-]{1,40}` and is unique; `tool` is `query_game_logs`, `get_on_off`, `get_matchup`, `get_rotation` or `get_injuries`; `args` and `structured` are objects, `meta` an object or absent; `card` matches `[a-z0-9_-]{1,60}` and is a key of `cards` |
 | `cards` | an object of card name to non-empty HTML string, holding only cards some call names |
 | `show_author` | optional boolean, default `false` |
+| `listed` | optional boolean, default `false`; `true` also lists the report in Research |
+| `origin` | optional, `assistant` (the default: an AI assistant wrote it) or `builder` (its author wrote it in the Report Builder); any other value, `null` included, is `400 invalid_input` with `details.field: "origin"` (crf04/statsplus#382). Publishing a `builder` report records the `report_published` web action |
+| `notes` | optional, top-level (not in `report`): the author's own words as plain text, at most 2,000 characters, with no link (`http://`, `https://` or `www.`, any case); missing, `null` or blank is no notes. Over-length is `400 {"error": "notes_too_long", ...}`, a link `400 {"error": "notes_links", ...}` (crf04/statsplus#377) |
 
 Text is stored as given and the web app renders it escaped, so HTML in a text
 field is shown, never run. Control characters other than tab and newline are
@@ -4940,16 +5237,43 @@ omitted or `null` optional field is left out of the stored document. A refusal
 is `400 invalid_input` whose `details.field` names the field, e.g.
 `{"field": "report.tabs[1].items[0].sources[0][1]"}`.
 
+**Block documents** (crf04/statsplus#380). `report` has exactly one of
+`tabs` (above) or `blocks`; both or neither is `400 invalid_input` with
+`details.field: "report"`. `blocks` is 1-120 blocks, counting those inside a
+`tabs` group. Every block has an `id` matching `[a-z0-9-]{1,40}`, unique
+across the whole document, and a `type`:
+
+| `type` | Fields |
+| --- | --- |
+| `heading` | `text` 1-120 |
+| `paragraph` | `text` 1-1500, `lede?` boolean |
+| `list` | `items`: 1-12 strings of 1-300, `ordered?` boolean |
+| `callout` | `title?` 1-40, `text` 1-1000, `tone?` `warn` or `plain` |
+| `card` | `card`: a call id |
+| `cards` | `cards`: 2-3 call ids (a row of cards) |
+| `spot` | `tag?`, `title` 1-120, `subtitle?` and `key?` 1-240, `cards`: at most 8 call ids |
+| `table` | `columns`: 1-6 strings of 1-40; `rows`: 1-20 rows of exactly one 1-200 cell per column |
+| `items` | `layout` `tiles`, `rows` or `list`; `items`: at most 60 items as in a tab |
+| `sources` | `sources`: 1-12 `[fact, url]` pairs as in an item |
+| `tabs` | `tabs`: 2-5 of `{title: 1-30, blocks: 1-60 blocks}`; top level only, so a `tabs` block inside a tab is refused |
+
+An unknown type or key is refused, and every call id must name a call in
+`calls`. Paragraph and callout text may use `**bold**`, `*italic*` and lines
+starting `- `; the web app renders that light formatting and nothing else.
+
 `201`:
 
 ```json
-{"success": true, "report": {"id": "k3x9q2mtzr", "url": "https://courtai.app/reports/k3x9q2mtzr", "created_at": "2026-10-25T18:04:11.204391+00:00"}}
+{"success": true, "report": {"id": "k3x9q2mtzr", "url": "https://courtai.app/reports/k3x9q2mtzr", "created_at": "2026-10-25T18:04:11.204391+00:00", "origin": "assistant"}}
 ```
 
 The id is 10 random base62 characters. An account may hold 1,000 reports that
 it has not deleted (`409 operation_conflict` beyond); the limit is 10 an hour
 and 30 a day per account (`429 rate_limited`). A waitlisted account gets
-`403 waitlisted`.
+`403 waitlisted`. With `listed: true`, an account without a public handle gets
+`409 {"error": "handle_required", ...}` and one past the [listing
+cap](#list-or-unlist-a-report) `429 {"error": "listed_limit", ...}`; either
+way nothing is stored.
 
 #### Read a report
 
@@ -4960,21 +5284,41 @@ and 30 a day per account (`429 rate_limited`). A waitlisted account gets
   "report": {
     "id": "k3x9q2mtzr",
     "created_at": "2026-10-25T18:04:11.204391+00:00",
-    "author": {"label": "@bighatprops"},
+    "author": {"label": "@bighatprops", "handle": "bighatprops"},
     "is_author": false,
+    "listed": true,
+    "featured": false,
     "document": {"title": "...", "opening": [], "tabs": []},
     "calls": [{"id": "brunson-logs", "tool": "query_game_logs", "card": "game-logs", "structured": {}, "meta": null}],
-    "cards": {"game-logs": "<!doctype html>..."}
+    "cards": {"game-logs": "<!doctype html>..."},
+    "notes": "My own take, in my words.",
+    "edited_at": "2026-10-29T09:00:01+00:00",
+    "origin": "assistant"
   }
 }
 ```
 
-`document` is the stored Report. `calls` omit the `args`. `author` is
-`{"label": <public handle>}` only when the report was published with
-`show_author: true` and the author's account has a public handle, else `null`
-(the web app then says "Built by a CourtAI user"); the Google display name is
-never shown. `is_author` is `true` only when the request carries the author's
-own valid token. A waitlisted token is accepted.
+`document` is the stored Report with the author's [edits](#edit-a-report)
+applied: the edited title, hidden items left out and each overridden item's
+`cards` filtered and ordered. `calls` holds only the calls some shown card
+names, in published order, without their `args`; `cards` holds only the HTML
+those calls draw. `notes` and `edited_at` are `null` until set. For the
+author (`is_author: true`) the report also carries `original`, `{document,
+calls}` exactly as published (its calls with their `args`), and `edits`, the stored edit body or `null`,
+and `cards` holds every published card's HTML. A listed report's
+`author` is `{"label": "@<handle>", "handle": "<handle>"}` whatever its
+`show_author`. An unlisted one's is `{"label": "@<handle>"}` only when it was
+published with `show_author: true` and the author's account has a public
+handle, else `null` (the web app then says "Built by a CourtAI user"); the
+Google display name is never shown. `listed` and `featured` say whether it is
+in Research and pinned there. `origin` is who wrote it: `assistant` or
+`builder` (crf04/statsplus#382). `is_author` is `true` only when the request
+carries the author's own valid token. A waitlisted token is accepted.
+
+A report its author deleted is `410` with `{"error": "removed", "by":
+"author", "message": "This report was removed by its author."}`, and one an
+admin took down `410` with `{"error": "removed", "by": "takedown", "message":
+"This report was taken down."}` (a takedown wins when both apply).
 
 #### Report meta
 
@@ -4982,22 +5326,27 @@ own valid token. A waitlisted token is accepted.
 
 ```json
 {"id": "k3x9q2mtzr", "title": "Injury brief: Friday, Oct 24", "date": "2026-10-24",
- "description": "Three games carry a real absence.", "tags": {"lean": 2, "pass": 1, "strong": 1}}
+ "description": "Three games carry a real absence.", "tags": {"lean": 2, "pass": 1, "strong": 1},
+ "origin": "assistant"}
 ```
 
 `date` is `null` when the report has none. `description` is the first
 `opening` paragraph with whitespace collapsed, cut on a word boundary to at most
-200 characters ending in `…`, or `null` without one. `tags` counts the items
-carrying each tag over every tab; a tag no item carries is left out.
+200 characters ending in `…`, or `null` without one; a block document without
+an opening uses its first `lede` paragraph, else its first paragraph, with the
+light formatting removed. `tags` counts the items carrying each tag over every
+tab (in a block document, the `spot` blocks and the items of `items` blocks);
+a tag nothing carries is left out.
 
 #### Report preview image
 
 `GET /api/reports/<id>/preview.png` is a 1200×630 `image/png` on the same
 canvas as the other [preview images](#get-slate-and-matchup-preview-images):
 the CourtAI brand row with the report's date (or `Report`), its title (one
-line, or two cut short), and the first three tagged items in document order,
-each a grade chip and the item's title, above the footer "A spot is a place to
-look, not a pick." It is served with `Cache-Control: no-cache`, so a cached copy
+line, or two cut short), and the first three tagged items (or `spot` blocks)
+in document order, each a grade chip and the item's title, above the footer "A spot is a place to
+look, not a pick." A block document with nothing tagged draws its
+`description` under the title instead. It is served with `Cache-Control: no-cache`, so a cached copy
 is revalidated on every use and a deleted or taken-down report stops showing at
 once; a refusal carries `no-store`.
 
@@ -5011,8 +5360,10 @@ one already deleted, is `404 resource_not_found`.
 `{"success": true, "report": {"id": "k3x9q2mtzr", "taken_down_at": "..."}}`.
 It is idempotent and keeps the first time.
 
-A report that does not exist, was deleted or was taken down is the same
-`404` on all three reads, to everyone, the author included:
+A report that does not exist is `404` on all three reads, to everyone, the
+author included. One that was deleted or taken down is `410 removed` on
+`GET /api/reports/<id>` (see [Read a report](#read-a-report)) and the same
+`404` on the meta and preview image:
 
 ```json
 {"error": {"code": "resource_not_found", "message": "This report isn't available."}}
@@ -5021,17 +5372,160 @@ A report that does not exist, was deleted or was taken down is the same
 Both are soft: the row stays, with `deleted_at` or `taken_down_at` set.
 Deleting the account deletes its reports.
 
-`PUT /api/admin/users/<uid>/public-handle` with `{"public_handle": "@bighatprops"}`
-sets the account's author label (trimmed, 1-40 printable characters) and
-answers `{"uid": "<uid>", "public_handle": "@bighatprops"}`; `null` clears it.
-An unknown uid is `404`.
+#### Public handles
+
+A public handle is 3-20 characters of `a-z`, `0-9` and `_`, stored lowercase
+without the `@` it is shown with, and unique case-insensitively. Surrounding
+space, one leading `@` and capitals are accepted and dropped, so `@BigHat` is
+stored as `bighat`.
+
+`PUT /api/user/public-handle` with `{"handle": "bighatprops"}` sets the
+caller's handle once and answers `{"handle": "bighatprops"}`. Anything that is
+not a handle is `400 {"error": "invalid_handle", ...}`, another account's
+handle `409 {"error": "handle_taken", ...}`, and a second call once a handle is
+set `409 {"error": "handle_already_set", ...}`. A waitlisted account gets
+`403 waitlisted`.
+
+`PUT /api/admin/users/<uid>/public-handle` with `{"public_handle": "bighatprops"}`
+sets or changes the account's handle with the same format (`400
+invalid_handle`) and uniqueness (`409 handle_taken`) and answers `{"uid":
+"<uid>", "public_handle": "bighatprops"}`; `null` clears it and also unlists
+and unfeatures the account's reports, since a listed report always names its
+author. It is how a handle changes. An unknown uid is `404`. A first claim
+racing another is decided by one conditional update, so only one wins.
+
+#### List or unlist a report
+
+`PATCH /api/user/reports/<id>` with `{"listed": true}` or `{"listed": false}`
+answers `{"success": true, "report": {"id": "k3x9q2mtzr", "listed": true,
+"listed_at": "2026-10-28T12:00:02+00:00"}}`. Any other body is `400
+invalid_input`; someone else's report, or a deleted or taken-down one, is `404
+resource_not_found`.
+
+Listing needs a public handle (`409 {"error": "handle_required", ...}`). An
+account may move at most 5 reports to listed per rolling 24 hours, counting
+`POST /api/user/reports` with `listed: true` and this endpoint together
+(`429 {"error": "listed_limit", ...}`), and a waitlisted account gets `403
+waitlisted`. Listing a report that is already listed changes nothing and
+spends nothing. Unlisting is always allowed, a waitlisted author included; it
+clears `listed_at` and Featured and does not give the listing back.
+
+#### Edit a report
+
+`PUT /api/user/reports/<id>/edits` (crf04/statsplus#377) saves the author's
+edits, replacing every earlier edit (it is not a patch):
+
+```json
+{"title": "Brunson without Randle", "notes": "My own take.",
+ "items": [{"tab": 0, "item": 2, "hidden": false, "cards": ["call-id-b", "call-id-a"]}]}
+```
+
+`title` is required, 1-120 characters (`400 invalid_input` with
+`details.field: "title"`); `notes` is checked as on publish. `items` (omitted
+is `[]`) overrides only the items it names, by tab and item index: `hidden`
+hides the whole item and `cards` lists the cards it shows, in display order,
+a subset of the cards it was published with and without duplicates. An item
+named twice, an index out of range, or a card the item was not published with
+is `400 {"error": "invalid_edits", ...}`. An item left out shows as
+published. The published document and calls are never changed, so a removed
+card or hidden item is restored by saving again without it; cards are never
+added, moved between items or rerun.
+
+A block document's edit body has `blocks` instead of `items` (the other key
+is refused as unknown):
+
+```json
+{"title": "Reaves only", "notes": null,
+ "blocks": [{"id": "spot-pts", "hidden": true}, {"id": "row", "hidden": false, "cards": ["c2", "c1"]}]}
+```
+
+Each entry names a published block by `id` (inside a `tabs` group too) at most
+once. `hidden` hides the block; a hidden `tabs` block hides its whole group.
+`cards`, optional and only on a `cards`, `spot` or `items` block, lists the
+cards the block shows, in display order, a subset of its published cards
+without duplicates; in an `items` block each item keeps only its own listed
+cards, in that order. Anything else is `400 {"error": "invalid_edits", ...}`.
+
+The answer is `{"report": ...}` exactly as `GET /api/reports/<id>` returns
+it to the author. Saving sets `edited_at`; it never changes `listed` or
+`listed_at`, so an edit does not move a report in Research, but a listed
+report's feed `title` and `covers` follow the edited report, as do the meta
+and the preview image. Someone else's report, or a deleted or taken-down one,
+is `404 resource_not_found`. A waitlisted author may edit; editing lists
+nothing.
+
+#### Research feed
+
+`GET /api/research?cursor=<opaque>` (anonymous: 60/min per IP) is the public
+feed of listed reports:
+
+```json
+{
+  "featured": [Entry],
+  "reports": [Entry],
+  "next_cursor": "MjAyNi0xMC0yOFQxMjowMDowMiswMDowMHxrM3g5cTJtdHpy"
+}
+```
+
+`reports` holds 20 entries per page, newest `listed_at` first; pass
+`next_cursor` back as `cursor` for the next page, and it is `null` on the last.
+The first page's `featured` holds every Featured report, newest pin first;
+later pages' is `[]`, and a Featured report is never repeated in `reports`. A
+cursor the server did not issue is `400 invalid_input`.
+
+```json
+{
+  "id": "k3x9q2mtzr",
+  "title": "Injury brief: Friday, Oct 24",
+  "listed_at": "2026-10-28T12:00:02+00:00",
+  "created_at": "2026-10-28T11:58:40+00:00",
+  "date": "2026-10-24",
+  "author": {"handle": "bighatprops"},
+  "covers": {"games": ["DET @ CHA"], "players": ["Cade Cunningham"]},
+  "preview_url": "/api/reports/k3x9q2mtzr/preview.png",
+  "origin": "assistant"
+}
+```
+
+`date` is the report's own date or `null`. `title` is the report's title as
+edited. `covers` comes from the `game` and `player` arguments of the calls its
+shown cards name, after any edits, in call order and once each: a game as
+its teams' tricodes (`DET @ CHA`, from a tricode, full name or nickname written
+with `@` or `at`), a player without a `(TEAM)` suffix. A call with neither, or
+a game naming no two known teams, adds nothing. `preview_url` is the report's
+[preview image](#report-preview-image), relative to the site. `origin` is
+`assistant` or `builder`, as on the report read.
+
+`GET /api/research/authors/<handle>` is one author's listed reports in the
+same shape and order, Featured ones included in `reports`, with `featured`
+always `[]`. The handle is matched like a stored one (`@BigHat` finds
+`bighat`). An unknown handle is `404 resource_not_found`; an author with no
+listed reports is `200` with an empty `reports`.
+
+Deleted and taken-down reports never appear in the feed or on author pages.
+The feed and author pages also serve the crawler meta for `/research` and
+`/research/@handle`: its image is the newest listed entry's `preview_url`.
+
+`PUT /api/admin/reports/<id>/featured` with `{"featured": true}` pins a listed
+report as Featured and answers `{"success": true, "report": {"id": "...",
+"featured": true, "featured_at": "..."}}`; pinning again keeps the first time.
+`{"featured": false}` unpins it. An unlisted report is `409
+operation_conflict`; a missing, deleted or taken-down one `404`.
 
 Storage: the `reports` table (migration 076): `id` (`VARCHAR(12)`), `firebase_uid`
 (foreign key to `users`, `ON DELETE CASCADE`), `created_at`, `title`
 (`VARCHAR(120)`), `document`, `calls` and `cards` (`JSONB` on PostgreSQL),
 `show_author`, `deleted_at` and `taken_down_at`, indexed on
 `(firebase_uid, created_at)`. Migration 077 adds the nullable
-`users.public_handle` (`VARCHAR(40)`).
+`users.public_handle` (`VARCHAR(40)`). Migration 080 adds the nullable
+`reports.listed_at`, `featured_at` and `covers` (set when listed), a partial
+index on `(listed_at, id)` over listed, visible reports, the
+`report_listings` table the listing cap counts (one row per move to listed),
+and a unique index on `lower(users.public_handle)`. It first normalises
+existing handles (`@bighatprops` becomes `bighatprops`) and stops, changing
+nothing, on a handle it cannot normalise or two that collide. Migration 082
+adds `reports.origin` (`VARCHAR(16)`, `NOT NULL DEFAULT 'assistant'`, checked
+to `assistant` or `builder`), so every earlier report is `assistant`.
 
 ### Targets
 
@@ -5096,7 +5590,36 @@ item with either key or both and returns `200` with the same single-item
 envelope. `DELETE` returns
 `{"success": true, "message": "Target deleted"}`.
 
-A Qualifier is `{"base", "slice_key", "comparator", "threshold"}`:
+A Qualifier is any rule a player must meet to fit the Target: a Diet share, a
+Position, or a season average. `base` says which, and the object is one of
+three shapes:
+
+```jsonc
+// Diet
+{"base": "shot_zones|play_types|shot_types|assist_locations", "slice_key": "Corner 3", "comparator": "at_or_above|at_or_below", "threshold": 0.4}
+// Position
+{"base": "position", "groups": ["Wing", "Big"]}
+// Average
+{"base": "season_average", "stat": "3PA", "comparator": "at_or_above", "threshold": 0.3}
+```
+
+- A **Position** names a non-empty set of distinct groups from `Guard`, `Wing`
+  and `Big`. A Target holds at most one. Groups are stored and returned in
+  `Guard`, `Wing`, `Big` order whatever order was sent. A player's group is
+  NBA.com's listed position for the season, mapped by a fixed rule: `G` is
+  Guard; `G-F`, `F-G` and `F` are Wing; `F-C`, `C-F` and `C` are Big; any other
+  or empty value is no Position. A player with no Position never fits a
+  Position Qualifier.
+- An **Average** reads the player's Regular Season average of one Target stat
+  column (`stat` is any key of the stat catalogue, raw or `/36`, for example
+  `3PA` or `3PA/36`), with the same two comparators, both inclusive. Its
+  `threshold` is a number from 0 to 1000; it is not a share, so the 0-1
+  limit does not apply. Counting stats are per game, `/36` stats are rates over
+  total minutes, and efficiency stats (`FG%`, `3P%`, `TS%`, `PTS/FGA`) are
+  ratios of season totals, percentages scaled to 0-100. It is read from the same
+  season as the Diet shares.
+
+The rest of this list describes a Diet Qualifier:
 
 - `base` is one of the player diet bases: `assist_locations`, `play_types`,
   `shot_types`, `shot_zones`.
@@ -5116,8 +5639,11 @@ The `title` is always derived and is never submitted or stored: the opponent
 tricode, `vs`, then each Qualifier as its slice label, the comparator symbol
 (`≥` or `≤`), and the threshold as a percentage, comma-separated in the order
 the author entered them. Percentages drop a trailing `.0`, so `0.4` reads as
-`40%` and `0.405` reads as `40.5%`. Editing the Qualifiers changes the title;
-editing the note never does.
+`40%` and `0.405` reads as `40.5%`. A Position reads first as its groups joined
+by `/` (`Wing/Big`), and an Average as `<stat> avg <symbol> <threshold>` at the
+threshold's own precision, trailing zeros trimmed (`3PA avg ≥ 0.3`, `0.004`), so `MEM vs Wing/Big, Corner 3 ≥ 40%, 3PA
+avg ≥ 0.3`. Editing the Qualifiers changes the title; editing the note never
+does.
 
 `slice_key` is provider vocabulary and is what gets stored; the title renders
 its label instead. The backend holds one source for this mapping
@@ -5160,15 +5686,18 @@ Validation and conflicts:
 - `400 invalid_input` for an opponent that is not an NBA team, an empty or
   missing `qualifiers` list, more than 10 Qualifiers, a repeated Qualifier, an
   unknown base or slice, a comparator outside the two accepted values, a
-  threshold outside 0-1, a note over 280 characters, and a `PATCH` body that
+  Diet threshold outside 0-1, empty, repeated or unknown Position `groups`, a
+  second Position Qualifier, an unknown Average `stat`, a negative, non-finite,
+  above-1000 or non-numeric Average threshold, a note over 280 characters, and a `PATCH` body that
   changes none of Qualifiers, note, Conditions, or stat preferences. Invalid
   Conditions and stat preferences also return `400 invalid_input`; their
   schemas and validation are documented below.
 - `404 resource_not_found` for an id that does not exist or belongs to another
   account. Foreign ids are never reported as `403`.
 - `409 operation_conflict` when the account already aims the same Qualifier set
-  at the same opponent -- the set is compared order-insensitively, so
-  reordering does not create a second Target -- and when the account already
+  at the same opponent -- the set is compared order-insensitively (and Position
+  groups as a set, Average thresholds to two decimals), so reordering does not
+  create a second Target -- and when the account already
   holds its cap of 50 Targets.
 
 #### Resolve every Target against one Slate Date
@@ -5359,7 +5888,8 @@ side the Target aims at. Exactly one of `away`/`home` equals `opponent` and the
 other equals `opposing_team`; which way round depends on where the opponent is
 playing, so neither pair can be derived from the other.
 
-`context` is one entry per Qualifier, in the Target's own Qualifier order, and
+`context` is one entry per Qualifier of every kind, in the Target's own Qualifier order
+(a Position or Average entry has `slice_key`, `label` and `availability` null and `metrics` empty), and
 is empty for an idle Target -- a Defense Sheet window is read for a game, and
 an idle opponent has none. Each entry carries every Defense Sheet row for that
 Base and slice, with the opponent's window values, the league's, and the
@@ -5395,9 +5925,16 @@ Matchup's own order (Season scoring descending, canonical id breaking ties).
   `share <= threshold`.
 - A player with no stored fact for a Qualifier's slice does not fit: an absent
   share is unjudged, not a share of zero.
-- `shares` is one entry per Qualifier, in the Target's Qualifier order, holding
-  the player's Season `share` for that slice and its `league_average_share`.
-  Both are the unthresholded Matchup values.
+- A Position Qualifier fits a player whose Position is one of its groups; a
+  player with no Position never fits. An Average Qualifier is judged on the
+  player's Regular Season log; a player with none does not fit. A player whose
+  season is under the Matchup's minimum number of games is flagged `thin`, as a
+  thin Diet is, and kept.
+- `position` on every player is `"Guard"`, `"Wing"`, `"Big"` or `null`.
+- `shares` is one entry per Qualifier of every kind, in the Target's Qualifier
+  order, holding the player's Season `share` for that slice and its
+  `league_average_share` (unthresholded Matchup values). A Position or Average
+  entry is `{base, slice_key: null, share: null, league_average_share: null}`.
 - `thin` is the Matchup's own `diet_thin` verdict for the Bases this Target's
   Qualifiers name, so the flag here and the flag there are one value. It is
   `true` when **any** named Base is thin, since a fit resting on one unusable
@@ -5468,7 +6005,40 @@ that season; seasons are never mixed, and nothing about today's players is
 implied. The **published season** reads each stream's live pointer when it
 names that season, and that stream's retained Publication otherwise -- a pin
 set behind the live pointer, or one stream activating a new season before the
-others. If any Backtest stream has no readable Publication for the season in
+others.
+
+A requested season **after** the published one, before its game logs activate
+(`2026-27` while `2025-26` is published), reads as an Unpublished Season
+(crf04/statsplus-backend#625): every Backtest stream's held candidate, judged
+by the Season Cutover's own per-publication checks, with its ledger lineage
+re-judged on every read. No Readiness Rule applies, so a Backtest reads the
+Diets however few games each team has played, and a player with one game can
+fit a Diet or Average Qualifier (crf04/statsplus#386). It is
+served only when every
+Backtest stream's candidate serves that season; a stream that trails (still on
+`2025-26`), has no candidate, or whose candidate fails its checks is
+`503 season_unavailable` naming it, so 2026-27 logs are never read with
+2025-26 Diets. Each candidate serves at its own cutoff, so a Diet can trail
+the game logs it is read with; the body (and the Draft Target preview's) adds
+`lagging_inputs`, present only on this read, listing each such Diet in stream
+order, `[]` when none trails (crf04/statsplus#386):
+
+```json
+"lagging_inputs": [
+  {
+    "stream_key": "grouped_shot_types",
+    "coverage_cutoff": "2026-10-26T04:00:00+00:00",
+    "game_log_cutoff": "2026-10-29T04:00:00+00:00"
+  }
+]
+```
+
+The result cache keys this read on the candidates it read and on its one-game
+floor, so a newer candidate is a new entry, a withdrawn one is refused before
+any entry is read, and no entry computed at another floor is served. The
+default season is unchanged by held candidates.
+
+If any Backtest stream has no readable Publication for the season in
 either place -- none exists, or the one that exists cannot be read (corrupt,
 unauthorised, or missing its projection) -- the request fails with
 `503 season_unavailable` naming the stream, never an empty `players` list:
@@ -5490,8 +6060,8 @@ unauthorised, or missing its projection) -- the request fails with
 `details.season` is the season the request resolved (requested or default),
 `details.published_season` the published season it was resolved against, and
 `details.stream` the first unavailable stream. A requested `2026-27` with no
-readable Publication -- before its first activation, for example -- is this
-`503`, never an empty Backtest.
+readable Publication or serving candidate -- before its first composition, for
+example -- is this `503`, never an empty Backtest.
 
 Every successful Backtest body also carries `published_season`, the season
 `season` was resolved against, so a client can tell a read of the published
@@ -5577,7 +6147,10 @@ box-score markets. Read `"PTS": 30` as thirty points, never as thirty corner
 threes.
 
 `stat_columns` is the union of the approved default columns for each
-Qualifier, deduplicated and in the Target's own Qualifier order.
+Qualifier, deduplicated and in the Target's own Qualifier order. An Average
+Qualifier adds its own stat when the Backtest can read it per game (the box
+score markets and their `/36` rates); a Target with no column that way
+(a Position-only Target, or an Average on `FG%`) shows `PTS` and `PTS/36`.
 `season_averages` and every game's `stats` carry exactly these columns, in this
 order.
 
@@ -5586,8 +6159,8 @@ player's all-season totals divided by total minutes, multiplied by 36. A
 game's `/36` values use that game's minutes; zero or missing minutes yield a
 `null` game per-36 value, and zero or missing season minutes yield a `null`
 season per-36 value. `FG2A` is the governed two-point-attempt component,
-derived from `FGA - 3PA`, and `3PA` is the Target display spelling for governed
-`FG3A`:
+derived from `FGA - 3PA`, `FG2M` the two-point makes, derived from
+`FGM - 3PM`, and `3PA` is the Target display spelling for governed `FG3A`:
 
 | Qualifier base | Default columns | Example |
 | --- | --- | --- |
@@ -5595,6 +6168,8 @@ derived from `FGA - 3PA`, and `3PA` is the Target display spelling for governed
 | `play_types` | the play's box score | `Transition` -> `PTS`, `FGA`, `PTS/36`, `FGA/36` |
 | `shot_types` | the shot type's attempts | `Catch and Shoot` -> `PTS`, `PTS/36`, `FGA`, `FGA/36` |
 | `assist_locations` | the slice's assists | `Corner3Assists` -> `AST`, `AST/36` |
+| `season_average` | the averaged stat itself, where readable per game | `3PA` -> `3PA`; `3PA/36` -> `3PA/36` |
+| `position` | none | `PTS`, `PTS/36` when no other Qualifier names columns |
 
 `summary` reduces every game listed below to one line per stat column, so the
 number that moves when a threshold moves is one glance away and the saved
@@ -5631,9 +6206,24 @@ scoring descending, canonical id breaking ties.
   list agrees with the Matchup about who is in tonight's game, while the
   backtest drops them, because a season-long production claim resting on an
   unusable Diet is worse than no claim. See `diet_thin` under
-  [Get Matchup](#get-matchup) for what makes a Base thin.
-- `shares` is one entry per Qualifier, in Qualifier order, with the player's
-  Season `share` for the slice and its `league_average_share`.
+  [Get Matchup](#get-matchup) for what makes a Base thin. An Unpublished
+  Season read (below) applies the rule with a one-game minimum instead of
+  `MATCHUP_SCORE_MIN_GAMES`: a reader who chose that season judges each
+  player's sample from `season_games` (crf04/statsplus#386). The volume
+  floors still apply.
+- A Position Qualifier lists only players whose Position is one of its
+  groups. A player with no Position never fits, and `summary.players_without_position`
+  (present only when the Target holds a Position Qualifier) counts the players
+  who met every other Qualifier but were left out for that reason. Positions
+  are read from the athlete catalog for the Backtest's own season.
+- An Average Qualifier is judged on the player's whole Regular Season (not only
+  the games against this opponent), and a player whose season is under the
+  Matchup's minimum number of games is left out under the same thin rule as a
+  Diet share, one game on an Unpublished Season read. A Target with no Diet Qualifier reads no Diet at all.
+- `shares` is one entry per Qualifier of every kind, in Qualifier order, with
+  the player's Season `share` and `league_average_share` for a Diet slice and
+  nulls for a Position or Average entry.
+- `position` on every player is `"Guard"`, `"Wing"`, `"Big"` or `null`.
 - Identity (`name`, `team_id`, `tricode`) is the player's identity **as of the
   most recent game against this opponent**, not necessarily their current team:
   a trade after that meeting is not reflected here. `season_scoring` is their
@@ -6160,7 +6750,7 @@ self_filters[STAT]=min,max
 self_filters[STAT]=min,max
 ```
 
-Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FG2M`, `FG2A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, `FD_PTS`, and `USG_PCT` (0-100). `PLUS_MINUS` is not supported per the #66 contract amendment.
+Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FG2M`, `FG2A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, `FD_PTS`, `USG_PCT` (0-100), `REB_CHANCES`, `POTENTIAL_AST`, `REB_CONV_PCT` and `AST_CONV_PCT` (both 0-1). `PLUS_MINUS` is not supported per the #66 contract amendment.
 
 The query-string form is retained for compatibility and means an inclusive
 `between` comparison. Natural-language and typed executor inputs use an

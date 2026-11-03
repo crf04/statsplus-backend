@@ -72,7 +72,8 @@ the most important variables:
 | `PORT` | No | `5000` |
 | `FLASK_DEBUG` | No | `1` in `run.py` |
 | `LOG_LEVEL` | No | `INFO` |
-| `SENTRY_DSN` | No | Unset, error reporting is off and `sentry-sdk` is never imported. When set, each Gunicorn worker starts the SDK after fork; unhandled exceptions and ERROR logs become events tagged `request_id`, with no bodies, cookies, `Authorization` headers or PII, and tracing off |
+| `SENTRY_DSN` | No | Unset, error reporting is off and `sentry-sdk` is never imported. When set, each Gunicorn worker starts the SDK after fork; unhandled exceptions and ERROR logs become events tagged `request_id`, with no bodies, cookies, `Authorization` headers or PII, and tracing sampled by `SENTRY_TRACES_SAMPLE_RATE` |
+| `SENTRY_TRACES_SAMPLE_RATE` | No | Fraction of user requests traced, 0 to 1; default `0.05`. A value that is not a number in that range falls back to the default. Collector, health and internal routes are never traced |
 | `SENTRY_ENVIRONMENT` | No | Event environment; falls back to `RAILWAY_ENVIRONMENT_NAME`, then `FLASK_ENV`. The release is `RAILWAY_GIT_COMMIT_SHA` |
 | `OPENAI_API_KEY` | No | If absent, NL queries stay in NLP-only mode |
 | `LLM_MODEL` | No | `gpt-4o-mini` |
@@ -103,7 +104,8 @@ the most important variables:
 | `NBA_API_TIMEOUT_CONNECT` / `NBA_API_TIMEOUT_READ` | No | `10` / `30`; PBP Stats connect/read timeouts |
 | `NBA_API_MAX_RETRIES` | No | `3`; retries for safe PBP Stats requests |
 | `DFS_ENABLED_PROVIDERS` | Empty by default in local/test; production requires the variable explicitly | Comma-separated internal DFS provider registry (`dabble`, `prizepicks`, `underdog`, `kalshi`, `polymarket`, `novig`); an explicit empty value disables all providers |
-| `DFS_BOARD_DEADLINE_SECONDS` | No | `15`; one absolute internal collector deadline |
+| `DFS_BOARD_DEADLINE_SECONDS` | No | `15`, at most `15`; one absolute deadline for a request-time DFS board read |
+| `PROJECTION_COLLECTION_BOARD_DEADLINE_SECONDS` | No | `45`; the projection collector's own board deadline. `PROJECTION_COLLECTION_LEASE_SECONDS` (`180`) must be at least this plus `90` |
 | `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS` / `DFS_PROVIDER_READ_TIMEOUT_SECONDS` | No | `3` / `8`; DFS GET caps, reduced to remaining deadline |
 | `DFS_COMPARISON_MAX_MARKETS` | No | `10000`; post-filter Comparison Board ceiling |
 | `PROJECTION_ARCHIVE_MAX_MARKETS` | No | `10000`; independent pre-persistence ceiling for one normalized provider snapshot |
@@ -122,7 +124,8 @@ Never commit `.env`, Firebase service-account JSON, OpenAI keys, database dumps 
 The internal DFS board loads the reviewed statistic definitions from
 `app/config/statistic_catalog.yaml` during dependency assembly. The immutable
 catalog supports full-game points, rebounds, assists, three-pointers made,
-steals, blocks, turnovers, PRA, PA, PR, and RA. Unknown, period-specific, and
+steals, blocks, turnovers, PRA, PA, PR, RA, STKS, FGA, FG3A, FG2A, FTA, FTM,
+FGM, and FG2M. Unknown, period-specific, and
 provider fantasy labels remain visible as unmapped evidence; they are not
 silently compared. Invalid catalog schema or conflicting mappings fail startup.
 
