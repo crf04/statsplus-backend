@@ -125,7 +125,9 @@ def _defer_lagging_tracking(raw: Any, observation: NormalizedObservation) -> Nor
     is returned as is, so the runner refuses it exactly as on equal games.
     """
 
-    if observation.complete and any(row["TRACKING_GP"] < row["GP"] for row in _records(raw) if "TRACKING_GP" in row):
+    if observation.complete and any(
+        row["TRACKING_GP"] < row["GP"] for row in _records(raw) if "TRACKING_GP" in row
+    ):
         raise ProviderContractError("provider_window_unverified")
     return observation
 
