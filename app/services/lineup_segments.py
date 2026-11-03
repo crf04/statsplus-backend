@@ -9,7 +9,10 @@ match PBP Stats WOWY (the prototype in the parent issue measured them):
 * Every action counts in the segment current at its place in the feed,
   except free throws, which count in the lineup on the floor at the foul
   that caused them (substitutions often come between the foul and the
-  shots).
+  shots).  A technical foul's free throw is the first 1-of-1 the other team
+  shoots at the technical's game clock; every other free throw answers the
+  latest foul that is not a technical, so a technical called during a trip
+  leaves the trip's lineup alone.
 * An offensive possession is credited to the offense's segment at the event
   that ends it: a made field goal that is not an and-one, a defensive
   rebound, a turnover, the last free throw of a trip made, or the end of the
@@ -153,10 +156,12 @@ def derive_segments(box: Mapping[str, Any], play_by_play: Mapping[str, Any], sea
         open_segment(team_id, 0)
     changed_at = {team_id: 0 for team_id in sides}
     period = 1
-    #: The segments current at each action, and at the latest foul before it.
+    #: The segments current at each action, and for a free throw at its foul.
     at_action: list[dict[int, _Open]] = []
     at_foul: list[dict[int, _Open] | None] = []
     foul_lineups: dict[int, _Open] | None = None
+    #: Technical fouls at the current game clock whose free throw is not shot yet.
+    technicals: list[tuple[Mapping[str, Any], dict[int, _Open]]] = []
     for action in actions:
         action_type = action["actionType"]
         action_period = int(action["period"])
@@ -172,7 +177,7 @@ def derive_segments(box: Mapping[str, Any], play_by_play: Mapping[str, Any], sea
                 on[team_id].add(player_id)
             changed_at[team_id] = moment
             at_action.append(dict(current))
-            at_foul.append(foul_lineups)
+            at_foul.append(None)
             continue
         if action_type == "period" and action.get("subType") == "start" and action_period != period:
             for team_id in sides:
@@ -184,18 +189,24 @@ def derive_segments(box: Mapping[str, Any], play_by_play: Mapping[str, Any], sea
                 current[team_id].end_cs = changed_at[team_id]
                 open_segment(team_id, changed_at[team_id])
         lineups = dict(current)
-        if action_type == "foul":
+        technicals = [(foul, at) for foul, at in technicals if _same_moment(foul, action)]
+        trip_lineups = None
+        if action_type == "foul" and action.get("subType") == "technical":
+            technicals.append((action, lineups))
+        elif action_type == "foul":
             foul_lineups = lineups
+        elif action_type == "freethrow":
+            trip_lineups = _technical_answered(action, technicals) or foul_lineups
         at_action.append(lineups)
-        at_foul.append(foul_lineups)
-        _count(action, lineups, foul_lineups, heave_shooters_count)
+        at_foul.append(trip_lineups)
+        _count(action, lineups, trip_lineups, heave_shooters_count)
     end = period_start_cs(period) + period_length_cs(period)
     for team_id in sides:
         current[team_id].end_cs = end
 
     for index, offense in _counted_possessions(actions, other):
         lineups = at_action[index]
-        if actions[index]["actionType"] == "freethrow" and at_foul[index] is not None:
+        if at_foul[index] is not None:
             lineups = at_foul[index]
         lineups[offense].off_poss += 1
 
@@ -233,20 +244,35 @@ def derive_segments(box: Mapping[str, Any], play_by_play: Mapping[str, Any], sea
     )
 
 
+def _same_moment(first: Mapping[str, Any], second: Mapping[str, Any]) -> bool:
+    return first["period"] == second["period"] and first["clock"] == second["clock"]
+
+
+def _technical_answered(
+    free_throw: Mapping[str, Any], technicals: list[tuple[Mapping[str, Any], dict[int, _Open]]]
+) -> dict[int, _Open] | None:
+    """The lineups at the technical foul ``free_throw`` answers, which it consumes."""
+
+    if free_throw.get("subType") != "1 of 1":
+        return None
+    for position, (foul, lineups) in enumerate(technicals):
+        if foul.get("teamId") != free_throw.get("teamId"):
+            del technicals[position]
+            return lineups
+    return None
+
+
 def _count(
     action: Mapping[str, Any],
     lineups: Mapping[int, _Open],
-    foul_lineups: Mapping[int, _Open] | None,
+    trip_lineups: Mapping[int, _Open] | None,
     heave_shooters_count: bool,
 ) -> None:
     action_type = action["actionType"]
     team_id = action.get("teamId")
     if not team_id:
         return
-    if action_type == "freethrow" and foul_lineups is not None:
-        segment = foul_lineups.get(int(team_id))
-    else:
-        segment = lineups.get(int(team_id))
+    segment = (lineups if trip_lineups is None else trip_lineups).get(int(team_id))
     if segment is None:
         return
     player_id = int(action.get("personId") or 0)

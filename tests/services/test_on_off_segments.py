@@ -111,6 +111,121 @@ def test_free_throws_after_a_substitution_count_for_the_lineup_at_the_foul():
     assert (at_foul.off_poss, after_sub.off_poss) == (1, 0)
 
 
+def test_a_technical_during_a_trip_leaves_the_trips_free_throws_with_the_lineup_at_the_shooting_foul():
+    play_by_play = _game(
+        ("foul", "PT05M00.00S", {"teamId": DEN, "personId": 11, "subType": "personal"}),
+        ("substitution", "PT05M00.00S", {"teamId": BOS, "personId": 2, "subType": "out"}),
+        ("substitution", "PT05M00.00S", {"teamId": BOS, "personId": 6, "subType": "in"}),
+        ("foul", "PT05M00.00S", {"teamId": DEN, "personId": 11, "subType": "technical"}),
+        (
+            "freethrow",
+            "PT05M00.00S",
+            {
+                "teamId": BOS,
+                "personId": 1,
+                "subType": "1 of 1",
+                "shotResult": "Made",
+                "description": "BOS 1 technical Free Throw 1 of 1 (1 PTS)",
+            },
+        ),
+        (
+            "freethrow",
+            "PT05M00.00S",
+            {"teamId": BOS, "personId": 1, "subType": "1 of 2", "shotResult": "Made"},
+        ),
+        (
+            "freethrow",
+            "PT05M00.00S",
+            {"teamId": BOS, "personId": 1, "subType": "2 of 2", "shotResult": "Made"},
+        ),
+    )
+
+    segments = derive_segments(_box(), play_by_play, "2025-26")
+
+    [at_foul] = _bos(segments, holding=2)
+    [after_sub] = _bos(segments, holding=6)
+    assert (at_foul.counts[1]["fta"], at_foul.team_fta, at_foul.off_poss) == (2, 2, 1)
+    assert (after_sub.counts[1]["fta"], after_sub.team_fta, after_sub.off_poss) == (1, 1, 0)
+
+
+def test_a_technical_free_throw_without_the_word_technical_counts_for_the_lineup_at_the_technical():
+    """2026-27 descriptions no longer name the technical; its free throw still
+    belongs to the technical foul, not to an earlier personal foul."""
+
+    play_by_play = _game(
+        ("foul", "PT09M00.00S", {"teamId": DEN, "personId": 11, "subType": "personal"}),
+        ("substitution", "PT07M00.00S", {"teamId": BOS, "personId": 2, "subType": "out"}),
+        ("substitution", "PT07M00.00S", {"teamId": BOS, "personId": 6, "subType": "in"}),
+        ("foul", "PT06M00.00S", {"teamId": DEN, "personId": 11, "subType": "technical"}),
+        (
+            "freethrow",
+            "PT06M00.00S",
+            {
+                "teamId": BOS,
+                "personId": 1,
+                "subType": "1 of 1",
+                "shotResult": "Made",
+                "description": "x 1 of 1",
+            },
+        ),
+    )
+
+    segments = derive_segments(_box(), play_by_play, "2026-27")
+
+    [before_sub] = _bos(segments, holding=2)
+    [after_sub] = _bos(segments, holding=6)
+    assert (before_sub.team_fta, after_sub.team_fta, after_sub.counts[1]["pts"]) == (0, 1, 1)
+
+
+def test_a_technical_free_throw_answers_the_other_teams_technical():
+    play_by_play = _game(
+        ("foul", "PT06M00.00S", {"teamId": BOS, "personId": 2, "subType": "technical"}),
+        ("substitution", "PT06M00.00S", {"teamId": BOS, "personId": 2, "subType": "out"}),
+        ("substitution", "PT06M00.00S", {"teamId": BOS, "personId": 6, "subType": "in"}),
+        ("foul", "PT06M00.00S", {"teamId": DEN, "personId": 11, "subType": "technical"}),
+        (
+            "freethrow",
+            "PT06M00.00S",
+            {"teamId": BOS, "personId": 1, "subType": "1 of 1", "shotResult": "Made"},
+        ),
+    )
+
+    segments = derive_segments(_box(), play_by_play, "2026-27")
+
+    assert [(segment.players, segment.team_fta) for segment in _bos(segments)] == [
+        ((1, 2, 3, 4, 5), 0),
+        ((1, 3, 4, 5, 6), 1),
+    ]
+
+
+def test_a_technical_whose_free_throw_was_never_shot_claims_no_later_free_throw():
+    """A double technical awards no free throw; a 1-of-1 at a later clock
+    answers the personal foul before it."""
+
+    play_by_play = _game(
+        ("foul", "PT08M00.00S", {"teamId": DEN, "personId": 11, "subType": "technical"}),
+        ("foul", "PT08M00.00S", {"teamId": BOS, "personId": 1, "subType": "technical"}),
+        ("substitution", "PT07M00.00S", {"teamId": BOS, "personId": 2, "subType": "out"}),
+        ("substitution", "PT07M00.00S", {"teamId": BOS, "personId": 6, "subType": "in"}),
+        ("foul", "PT06M00.00S", {"teamId": DEN, "personId": 11, "subType": "personal"}),
+        ("substitution", "PT06M00.00S", {"teamId": BOS, "personId": 3, "subType": "out"}),
+        ("substitution", "PT06M00.00S", {"teamId": BOS, "personId": 2, "subType": "in"}),
+        (
+            "freethrow",
+            "PT06M00.00S",
+            {"teamId": BOS, "personId": 1, "subType": "1 of 1", "shotResult": "Made"},
+        ),
+    )
+
+    segments = derive_segments(_box(), play_by_play, "2026-27")
+
+    assert [(segment.players, segment.team_fta) for segment in _bos(segments)] == [
+        ((1, 2, 3, 4, 5), 0),
+        ((1, 3, 4, 5, 6), 1),
+        ((1, 2, 4, 5, 6), 0),
+    ]
+
+
 def test_an_and_one_keeps_the_possession_until_its_free_throw():
     play_by_play = _game(
         ("2pt", "PT06M00.00S", {"teamId": BOS, "personId": 1, "shotResult": "Made"}),
