@@ -345,6 +345,7 @@ class TeamMatchupQueryService:
                 strict_as_of=strict_as_of,
                 publication_snapshot=publication_snapshot,
                 bases=bases,
+                connection=connection,
             )
         observation_scope = self.repository.get_latest_scope(
             season,
@@ -360,6 +361,7 @@ class TeamMatchupQueryService:
                 legacy=None,
                 strict_as_of=strict_as_of,
                 publication_snapshot=publication_snapshot,
+                connection=connection,
             )
         observations = self.repository.get_observations(observation_scope, connection=connection)
         fact_scopes = self.repository.get_latest_fact_scopes(
@@ -381,6 +383,7 @@ class TeamMatchupQueryService:
             legacy=legacy_window,
             strict_as_of=strict_as_of,
             publication_snapshot=publication_snapshot,
+            connection=connection,
         )
 
     def get_window(self, scope: TeamMatchupSnapshotScope, *, publication_snapshot=None) -> TeamMatchupWindow:
@@ -409,11 +412,13 @@ class TeamMatchupQueryService:
         strict_as_of: bool = False,
         publication_snapshot=None,
         bases: Collection[str] | None = None,
+        connection: Connection | None = None,
     ) -> TeamMatchupWindow | None:
         """Overlay only activated windows; inactive bases remain legacy-backed."""
 
         if self._publication_reader is None:
             return legacy
+        governance = self._governance_for(connection)
         window = "l15" if window_games is not None else "season"
         stream_by_base = dict(TEAM_MATCHUP_PUBLICATION_STREAMS[window])
         optional_by_base = TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAMS[window]
@@ -512,7 +517,7 @@ class TeamMatchupQueryService:
                         base=base,
                         window=window,
                         season_is_complete=self._publication_season_is_complete(
-                            read, requested_season=season
+                            read, requested_season=season, governance=governance
                         ),
                     )
                 )
@@ -544,6 +549,7 @@ class TeamMatchupQueryService:
                     read,
                     requested_season=season,
                     window=window,
+                    governance=governance,
                 )
                 if publication_game_ids is None:
                     base_windows[base] = None
@@ -750,7 +756,7 @@ class TeamMatchupQueryService:
             observations=(observation,),
         )
 
-    def _publication_game_ids(self, read, *, requested_season: str, window: str):
+    def _publication_game_ids(self, read, *, requested_season: str, window: str, governance):
         """Resolve governance at this immutable publication's own boundary.
 
         A trailing family's previous-season read is governed by its own season.
@@ -768,7 +774,7 @@ class TeamMatchupQueryService:
             return None
         try:
             return resolve_governed_team_game_ids(
-                self._governance_source,
+                governance,
                 read.season,
                 cutoff,
                 window=window,
@@ -778,6 +784,13 @@ class TeamMatchupQueryService:
             )
         except PublicationGovernanceUnavailable:
             return None
+
+    def _governance_for(self, connection: Connection | None):
+        """The governance source, reading on the request's connection when it can."""
+
+        source = self._governance_source
+        for_request = getattr(source, "for_request", None)
+        return for_request(connection) if connection is not None and callable(for_request) else source
 
     @property
     def _governance_source(self):
@@ -807,7 +820,7 @@ class TeamMatchupQueryService:
             )
         )
 
-    def _publication_season_is_complete(self, read, *, requested_season: str) -> bool:
+    def _publication_season_is_complete(self, read, *, requested_season: str, governance=None) -> bool:
         """Ask this publication's own governance whether its season is over."""
 
         if read.season != requested_season or read.cutoff is None:
@@ -821,7 +834,7 @@ class TeamMatchupQueryService:
         except (TypeError, ValueError):
             return False
         return resolve_governed_season_is_complete(
-            self._governance_source,
+            self._governance_source if governance is None else governance,
             read.season,
             cutoff,
             manifest_id=getattr(read, "manifest_id", None),

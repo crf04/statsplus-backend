@@ -6,6 +6,7 @@ import json
 import logging
 from collections import OrderedDict
 from collections.abc import Mapping
+from copy import copy
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from threading import Lock
@@ -45,6 +46,7 @@ from app.services.ledger_materialization import (
     LedgerMaterializationService,
     LedgerMaterializationUnavailable,
 )
+from app.services.request_reads import read_connection
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
     PublicationGovernanceUnavailable,
@@ -149,12 +151,22 @@ class ActiveManifestLedgerGovernanceReader:
     def __init__(self, engine, *, clock=None) -> None:
         self.engine = engine
         self.clock = clock or (lambda: datetime.now(UTC))
+        self._connection = None
         # Parsed Event Catalog payloads by (publication, checksum, season,
         # cutoff): a payload that matched its checksum is not fetched again.
         self._catalog_events: OrderedDict[tuple, tuple[tuple[Mapping[str, object], ...], bool]] = (
             OrderedDict()
         )
         self._catalog_events_lock = Lock()
+
+    def for_request(self, connection) -> ActiveManifestLedgerGovernanceReader:
+        """This reader on one request's connection, so its reads take no checkout of their own."""
+
+        if connection is None:
+            return self
+        bound = copy(self)
+        bound._connection = connection
+        return bound
 
     def read(self, season: str, cutoff: datetime) -> LedgerGovernance:
         return self._read(
@@ -284,7 +296,7 @@ class ActiveManifestLedgerGovernanceReader:
             governed_cutoff = cutoff
         elif isinstance(cutoff, date):
             start, end = slate_day_bounds_utc(cutoff)
-            with self.engine.connect() as connection:
+            with read_connection(self.engine, self._connection) as connection:
                 statement = select(CollectionManifest.cutoff).where(
                     CollectionManifest.season == season,
                     CollectionManifest.cutoff >= start,
@@ -319,7 +331,7 @@ class ActiveManifestLedgerGovernanceReader:
         require_collection_authorization: bool,
         manifest_id: str | None = None,
     ) -> LedgerGovernance:
-        with self.engine.connect() as connection:
+        with read_connection(self.engine, self._connection) as connection:
             active = (
                 connection.execute(
                     select(ActiveSeason).where(
