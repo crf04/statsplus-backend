@@ -20,6 +20,7 @@ from app.models.game_logs import GameLogQuery
 from app.services.database_first_activation import ReadSeason, SeasonMode, SeasonUnavailable
 from app.services.research_season import season_scoped
 from app.services.serving_season import trailing
+from tests.services.test_serving_season_matchup import _log_payload
 from tests.support.season_cutover import (
     L15_STREAM,
     NEW,
@@ -33,6 +34,7 @@ from tests.support.season_cutover import (
     THIN_GAMES,
     THIN_PROVENANCE,
     accept_ledger,
+    provenance,
     team_defense_waits_for_ten_games,
 )
 from tests.support.selected_season import PLAY_TYPE_DEFENSE, PLAYER_NAME, PLAYER_SYNERGY, SelectedWorld
@@ -294,6 +296,53 @@ def test_a_ledger_correction_withdraws_a_candidate_already_served(world):
 
     with pytest.raises(SeasonUnavailable):
         _logs(world, NEW, selected=True)
+
+
+def test_a_candidate_on_games_the_ledger_since_corrected_trails_beside_one_on_its_current_games(world):
+    world.hold_opening_week(defense=False)
+    accept_ledger(world.engine, NEW_GAMES[len(THIN_GAMES) :], "pbp")
+    world.compose_new_defense(
+        NEW_GAMES,
+        cutoff=NEW_CUTOFF,
+        provenance={**THIN_PROVENANCE, **provenance(NEW_GAMES[len(THIN_GAMES) :])},
+    )
+    # The ledger then accepts newer observations of the opening week's games,
+    # and the game logs are composed from them that same night.
+    accept_ledger(world.engine, THIN_GAMES, "pbp")
+    logs = world.publications.recompose_ledger(
+        PLAYER_LOGS,
+        season=NEW,
+        cutoff=NEW_CUTOFF,
+        payload=_log_payload(NEW, NEW_GAMES),
+        provenance=NEW_PROVENANCE,
+        reason="2026-27 ledger composition",
+    )
+
+    reads = _reads(world.reader.for_season(NEW).snapshot(KEYS, season=ReadSeason(OLD)))
+
+    # One night, one manifest: only the games each candidate rests on differ.
+    assert reads[PLAYER_LOGS] == ("candidate", NEW, None, logs.publication_id)
+    assert reads[SEASON_STREAM] == ("prior_season", OLD, None, _live(world, SEASON_STREAM))
+
+
+@pytest.mark.parametrize(
+    "unaccept",
+    [
+        # The ledger no longer records the observation as its game's evidence.
+        "DELETE FROM canonical_game_ledger_observation_evidence WHERE game_id = :game AND observation_id = :observation",
+        # No manifest accepted the observation.
+        "UPDATE collection_observations SET manifest_id = NULL WHERE observation_id = :observation",
+    ],
+    ids=["evidence_dropped", "no_manifest"],
+)
+def test_game_logs_on_a_game_the_ledger_never_accepted_make_the_season_unavailable(world, unaccept):
+    world.hold_ten_games()
+    game_id = NEW_GAMES[0][0]
+    with world.engine.begin() as connection:
+        connection.execute(text(unaccept), {"game": game_id, "observation": f"pbp:{game_id}"})
+
+    with pytest.raises(SeasonUnavailable):
+        world.reader.for_season(NEW).snapshot(KEYS, season=ReadSeason(OLD))
 
 
 def test_an_unscoped_reader_never_serves_a_candidate(world):
