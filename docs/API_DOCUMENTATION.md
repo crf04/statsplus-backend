@@ -1612,8 +1612,13 @@ governed franchise fact set makes otherwise available Base/windows
 `missing/team_not_in_governed_roster`, while the known game header and other
 stored response sections still return.
 
-There is exactly one row-level exception while a Base/window remains
-`available`: a legacy traditional Season or Last-15 snapshot may omit any
+There are exactly two row-level exceptions while a Base/window remains
+`available`. A `play_types` window may omit every `<PlayType>:TOV` and
+`<PlayType>:FTT` row (crf04/statsplus#416): a Synergy Publication composed
+before them carries only `PTS` and `POSS`, its new rows are absent (or `null`
+in a window when the other window supplies them), and the TOV, FTA and FTM
+scores reading them have no `play_types` component and name no gap. The other
+is that a legacy traditional Season or Last-15 snapshot may omit any
 traditional row other than `OPP_TOV`, `OPP_STL` and `OPP_BLK`. That covers a
 pre-OPP_REB snapshot and every stored legacy snapshot's missing
 `OPP_PTS`, `OPP_AST`, `OPP_FGM`, `OPP_FGA`, `OPP_FG3M`, `OPP_FG3A`, `OPP_FTM`
@@ -2017,7 +2022,7 @@ response from before it existed.
 Legacy traditional windows without `OPP_REB` keep their valid
 OPP_TOV/OPP_STL/OPP_BLK surface and defensive scores; only REB and
 rebound-containing combos degrade locally (REB then has `components: {}`). This
-is the sole available-Base row-level null exception described above. The
+is the traditional row-level null exception described above. The
 `traditional` cell consumes no Player Diet or player Season sample evidence, so
 it is not thin merely because the player has fewer than
 `MATCHUP_SCORE_MIN_GAMES`; the `rebound_types` cell is thin by the same diet
@@ -2034,8 +2039,18 @@ some parts remain computable, the truthful partial numeric result is retained
 and every delivered combo component and Blend is thin. `blend` remains null
 when no part contributes. Each combo's `traditional` component is built the
 same way from its parts' `traditional` cells (`OPP_PTS`, `OPP_REB`, `OPP_AST`).
-TOV, STL, and BLK have only a `traditional` component against their matching
-`OPP_*` column. STKS Season-volume-weights the stored OPP_STL and OPP_BLK
+STL and BLK have only a `traditional` component against their matching
+`OPP_*` column. TOV, FTA and FTM (crf04/statsplus#416) also blend an optional
+`play_types` component: the sum over play types of the player's own turnovers
+(TOV) or free-throw trips (FTA and FTM; Synergy has no makes by play type) in
+that play type over his observed total, times the opponent's `<PlayType>:TOV`
+or `<PlayType>:FTT` allowed per 48 over the league average, minus one. A play
+type he never turns it over in (or never reaches the line from) weighs
+nothing. It is thin by the same rule as the PTS `play_types` cell (possession
+coverage, games, possessions per game). Like `rebound_types`, it is never a
+required input: a Season Publication or player Diet composed before #416, or a
+player with no turnovers (or trips) on record, leaves the Blend Traditional
+alone and adds nothing to `missing_inputs`. STKS Season-volume-weights the stored OPP_STL and OPP_BLK
 comparisons into one `traditional` component, thin when the player's Season
 sample is below `MATCHUP_SCORE_MIN_GAMES`. Each defensive window's `blend`
 equals its one component, `thin` included, and is `null` when the component is
@@ -6717,7 +6732,7 @@ on exactly the metric the Matchup showed:
 
 | `<base>` | Row keys (examples) |
 | --- | --- |
-| `play_types` | `PRBallHandler:PTS`, `Isolation:POSS` (each play type with `PTS` and `POSS`) |
+| `play_types` | `PRBallHandler:PTS`, `Isolation:POSS`, `PRBallHandler:TOV`, `Isolation:FTT` (each play type with `PTS`, `POSS`, `TOV` and `FTT`; a Season Publication composed before #416 has no `TOV` or `FTT` rows, and a filter on one then ranks no opponent) |
 | `shot_zones` | `Restricted Area:FGM`, `Mid-Range:FGA`, `Corner 3:FGM` (each governed zone with `FGM` and `FGA`) |
 | `shot_types` | `Catch and Shoot:FG3M`, `Pullups:FG2A`, `Less Than 10 ft:FG2M` (each shot type with `FG2M`, `FG2A`, `FG3M`, `FG3A`, plus the derived `PTS`, e.g. `Catch and Shoot:PTS`, which ranks `2 x FG2M + 3 x FG3M`, the same order as the Sheet row and as the `C&S PTS` filter) |
 | `assist_locations` | `Assists`, `Arc3Assists`, `Corner3Assists`, `AtRimAssists`, `ShortMidRangeAssists`, `LongMidRangeAssists` |
