@@ -135,8 +135,8 @@ def derive_segments(box: Mapping[str, Any], play_by_play: Mapping[str, Any], sea
 
     game = box["game"]
     periods = int(game["period"])
-    # The game's start and end markers are no play; LiveData has tagged a
-    # regulation game's end with period 5.
+    # The Game End marker is no play; LiveData has tagged a regulation game's
+    # with period 5.
     actions: Sequence[Mapping[str, Any]] = [
         action for action in play_by_play["game"]["actions"] if action["actionType"] != "game"
     ]
