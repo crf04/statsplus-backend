@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, inspect, select, update
+from sqlalchemy import create_engine, event, inspect, select, update
 from sqlalchemy.orm import sessionmaker
 
 from app.collector.normalizers import normalize_schedule_response
@@ -503,6 +503,128 @@ def test_numeric_final_collector_shape_enters_immutable_governed_set(tmp_path):
     )
     assert governance.events[0]["home_team_tricode"] == "ATL"
     assert governance.events[0]["away_team_tricode"] == "BOS"
+
+
+GOVERNED_CUTOFF = datetime(2025, 11, 3, 4, 30, tzinfo=UTC)
+
+
+def seed_governed_manifest(connection, manifest_id, game_id, *, created_at, cutoff=GOVERNED_CUTOFF):
+    """Insert one manifest bound to its own Event Catalog of one final game."""
+
+    normalized = normalize_schedule_response(
+        [
+            {
+                "gameId": game_id,
+                "homeTeam_teamId": 1610612737,
+                "awayTeam_teamId": 1610612738,
+                "gameDateTimeUTC": (cutoff - timedelta(days=1)).isoformat(),
+                "gameStatus": 3,
+            }
+        ],
+        season="2025-26",
+        cutoff=cutoff,
+    )
+    encoded = json.dumps(normalized.payload, separators=(",", ":"), sort_keys=True)
+    checksum = hashlib.sha256(encoded.encode()).hexdigest()
+    connection.execute(
+        CatalogPublication.__table__.insert().values(
+            publication_id=f"{manifest_id}-catalog",
+            season="2025-26",
+            catalog_type="event",
+            cutoff=cutoff,
+            version="event-v1",
+            checksum=checksum,
+            payload=encoded,
+            complete=True,
+            published_at=cutoff,
+            expires_at=None,
+        )
+    )
+    connection.execute(
+        CollectionManifest.__table__.insert().values(
+            manifest_id=manifest_id,
+            season="2025-26",
+            cutoff=cutoff,
+            collect_before=cutoff + timedelta(hours=1),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum=manifest_id,
+            event_catalog_publication_id=f"{manifest_id}-catalog",
+            event_catalog_checksum=checksum,
+            status="active",
+            created_at=created_at,
+        )
+    )
+
+
+def record_manifest_reads(engine) -> list[str]:
+    """Record every statement that reads a collection manifest."""
+
+    statements: list[str] = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _record(_connection, _cursor, statement, *_args):
+        if "FROM collection_manifests" in statement:
+            statements.append(statement)
+
+    return statements
+
+
+def _governed_games(governance) -> set[str]:
+    return {str(event["nba_game_id"]) for event in governance.events}
+
+
+def test_a_request_reader_reads_its_requests_transaction_and_leaves_the_shared_reader_unbound(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'request-bound.sqlite3'}")
+    run_migrations(engine)
+    with engine.begin() as connection:
+        seed_governed_manifest(connection, "manifest-a", "0022500001", created_at=GOVERNED_CUTOFF)
+    shared = ActiveManifestLedgerGovernanceReader(engine)
+
+    with engine.connect() as request:
+        # A newer manifest only the request's own transaction can see yet.
+        seed_governed_manifest(
+            request, "manifest-b", "0022500002", created_at=GOVERNED_CUTOFF + timedelta(minutes=1)
+        )
+        bound = shared.for_request(request)
+
+        assert _governed_games(bound.read_for_composition("2025-26", GOVERNED_CUTOFF)) == {"0022500002"}
+        assert _governed_games(shared.read_for_composition("2025-26", GOVERNED_CUTOFF)) == {"0022500001"}
+
+
+def test_a_request_reader_reads_each_manifest_once_and_only_for_its_own_request(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'request-memo.sqlite3'}")
+    run_migrations(engine)
+    with engine.begin() as connection:
+        seed_governed_manifest(connection, "manifest-a", "0022500001", created_at=GOVERNED_CUTOFF)
+        seed_governed_manifest(
+            connection, "manifest-b", "0022500002", created_at=GOVERNED_CUTOFF + timedelta(minutes=1)
+        )
+    shared = ActiveManifestLedgerGovernanceReader(engine)
+    manifest_reads = record_manifest_reads(engine)
+
+    with engine.connect() as request:
+        bound = shared.for_request(request)
+        newest = bound.read_for_composition("2025-26", GOVERNED_CUTOFF)
+        newest_again = bound.read_for_composition("2025-26", GOVERNED_CUTOFF)
+        first = bound.read_for_composition("2025-26", GOVERNED_CUTOFF, "manifest-a")
+        second = bound.read_for_composition("2025-26", GOVERNED_CUTOFF, "manifest-b")
+
+    assert _governed_games(newest) == _governed_games(newest_again) == {"0022500002"}
+    # Two manifests at one cutoff are two answers, each read once.
+    assert _governed_games(first) == {"0022500001"}
+    assert _governed_games(second) == {"0022500002"}
+    assert len(manifest_reads) == 3
+
+    with engine.begin() as connection:
+        seed_governed_manifest(
+            connection, "manifest-c", "0022500003", created_at=GOVERNED_CUTOFF + timedelta(minutes=2)
+        )
+    with engine.connect() as request:
+        later = shared.for_request(request).read_for_composition("2025-26", GOVERNED_CUTOFF)
+
+    assert _governed_games(later) == {"0022500003"}
+    assert len(manifest_reads) == 4
 
 
 def test_runtime_governance_owns_exact_games_teams_cutoff_and_l15(tmp_path):
