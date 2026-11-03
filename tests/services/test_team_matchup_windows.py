@@ -1128,6 +1128,8 @@ def test_refresh_collects_exact_supported_windows_and_marks_synergy_unsupported(
                         "GP": 82,
                         "PTS": 400 + index,
                         "POSS": 200 + index,
+                        "TOV_POSS_PCT": 0.1,
+                        "FT_POSS_PCT": 0.05,
                     }
                     for index, team_id in enumerate(team_ids)
                 ]
@@ -1232,13 +1234,19 @@ def test_refresh_collects_exact_supported_windows_and_marks_synergy_unsupported(
         for fact in season.facts
         if fact.team_id == BOS and fact.base == "play_types" and fact.slice_key == "Transition"
     }
-    assert bos_transition == {"POSS": 201, "PTS": 401}
+    # Turnovers and free-throw trips are each rate times the possessions.
+    assert {key: round(value, 9) for key, value in bos_transition.items()} == {
+        "POSS": 201,
+        "PTS": 401,
+        "TOV": 20.1,
+        "FTT": 10.05,
+    }
     season_window = TeamMatchupQueryService(repository).get_window(season.scope)
     assert {
         metric.stat_key
         for metric in season_window.league_metrics
         if metric.base == "play_types" and metric.slice_key == "Transition"
-    } == {"POSS", "PTS"}
+    } == {"POSS", "PTS", "TOV", "FTT"}
     assert all(fact.denominator_unit == "minutes" for fact in last_15.facts if fact.provider == "nba_stats")
     assert not any(
         fact.base == "shot_zones" and "Backcourt" in fact.slice_key

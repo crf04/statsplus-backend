@@ -447,6 +447,55 @@ def test_traded_player_play_type_stints_combine_into_one_fact(tmp_path):
     )
 
 
+def _with_event_rates(nba, turnover_rate, trip_rate):
+    fetch = nba.fetch_synergy_play_types
+
+    def with_rates(play_type, **kwargs):
+        return fetch(play_type, **kwargs).assign(TOV_POSS_PCT=turnover_rate, FT_POSS_PCT=trip_rate)
+
+    nba.fetch_synergy_play_types = with_rates
+
+
+def test_play_type_turnovers_and_trips_are_stored_and_read_back_summed_over_stints(tmp_path):
+    """#416: the legacy Diet table keeps each play type's counts beside its fact."""
+
+    service, nba, _ = _service(tmp_path, player_ids=(2544, 201935))
+    nba.stint_player_id = 201935
+    nba.stints = ((41, 419, 0.421), (26, 181, 0.365))
+    _with_event_rates(nba, 0.1, 0.05)
+
+    service.refresh("2025-26")
+    result = service.get_for_players("2025-26", [2544, 201935])
+
+    isolation = {
+        player_id: next(
+            fact for fact in facts if fact.base == "play_types" and fact.slice_key == "Isolation"
+        ).play_type_events
+        for player_id, facts in result.players.items()
+    }
+    # 600 possessions over his two stints; 120 for LeBron.
+    assert {
+        player_id: (round(events.turnovers, 9), round(events.free_throw_trips, 9))
+        for player_id, events in isolation.items()
+    } == {2544: (12.0, 6.0), 201935: (60.0, 30.0)}
+    assert all(fact.play_type_events is None for fact in result.players[2544] if fact.base != "play_types")
+
+
+def test_changed_play_type_counts_alone_republish_the_base(tmp_path):
+    service, nba, _ = _service(tmp_path, player_ids=(2544,))
+    _with_event_rates(nba, 0.1, 0.05)
+    service.refresh("2025-26")
+    _with_event_rates(nba, 0.2, 0.05)
+
+    service.refresh("2025-26")
+
+    facts = service.get_for_players("2025-26", [2544]).players[2544]
+    # 120 possessions at the new 0.2 rate; the first refresh stored 12.
+    assert {round(fact.play_type_events.turnovers, 9) for fact in facts if fact.base == "play_types"} == {
+        24.0
+    }
+
+
 def test_play_type_stint_without_a_share_degrades_its_base(tmp_path):
     service, nba, _ = _service(tmp_path, player_ids=(2544, 201935))
     nba.stint_player_id = 201935

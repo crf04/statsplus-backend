@@ -53,10 +53,11 @@ def _distinct(tricode, position):
     """A value per team that differs across all thirty teams for one metric.
 
     Thirty-one is prime, so multiplying the team index 1..30 by any factor
-    1..30 permutes 1..30: every metric orders the league differently.
+    1..30 permutes 1..30: every metric orders the league differently, up to
+    the thirtieth metric of a base.
     """
 
-    return float((TEAM_INDEX[tricode] * (position + 1)) % 31)
+    return float((TEAM_INDEX[tricode] * (position % 30 + 1)) % 31)
 
 
 def _per48_builder(base):

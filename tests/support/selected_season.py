@@ -23,7 +23,7 @@ from app.config.settings import (
     RuntimeSettings,
 )
 from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
-from app.domain.team_matchup_taxonomy import NBA_PUBLICATION_TAXONOMY
+from app.domain.team_matchup_taxonomy import NBA_PUBLICATION_OPTIONAL_METRIC_KEYS, NBA_PUBLICATION_TAXONOMY
 from app.services.diet_baselines import DietBaselinesService
 from app.services.game_logs_source import StoredGameLogsSource
 from app.services.game_service import GameService
@@ -133,7 +133,11 @@ def _play_type_defense_payload(games):
     for game_id, home, away in games:
         by_team.setdefault(int(home), []).append(game_id)
         by_team.setdefault(int(away), []).append(game_id)
-    metrics = dict.fromkeys(sorted(NBA_PUBLICATION_TAXONOMY["play_types"]), 1.0)
+    # The pre-#416 taxonomy, as the recorded goldens' Publications carried.
+    metrics = dict.fromkeys(
+        sorted(NBA_PUBLICATION_TAXONOMY["play_types"] - NBA_PUBLICATION_OPTIONAL_METRIC_KEYS["play_types"]),
+        1.0,
+    )
     return {
         "rows": [
             {

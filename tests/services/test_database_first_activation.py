@@ -1962,3 +1962,39 @@ def test_a_cached_team_window_follows_its_pointer_forward_and_back(tmp_path):
 
     publications.rollback_publication_family((family.SEASON_STREAM,), reason="restore")
     assert points() == 110.0
+
+
+@pytest.mark.parametrize(
+    ("counts", "expected"),
+    (
+        ({"turnovers": 6.0, "free_throw_trips": 2.5}, (6.0, 2.5)),
+        ({}, None),
+        ({"turnovers": 6.0}, None),
+        ({"turnovers": -1.0, "free_throw_trips": 2.5}, None),
+    ),
+)
+def test_play_type_publication_carries_turnovers_and_trips_only_as_a_usable_pair(counts, expected):
+    """#416: a Publication from before the counts, or a broken pair, is no evidence."""
+
+    decoded = decode_player_diet(
+        {
+            "rows": [
+                {
+                    "player_id": 2544,
+                    "slice_key": "Isolation",
+                    "share": 0.2,
+                    "volume": 120.0,
+                    "games_played": 40,
+                    "volume_unit": "possessions",
+                    "provider": "nba_synergy",
+                    **counts,
+                }
+            ]
+        },
+        base="play_types",
+        retrieved_at=datetime(2026, 1, 6, tzinfo=UTC),
+    )
+
+    events = decoded[0].play_type_events
+    assert (None if events is None else (events.turnovers, events.free_throw_trips)) == expected
+    assert decoded[0].share == 0.2

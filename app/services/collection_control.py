@@ -62,9 +62,11 @@ from app.domain.publication_integrity import (
 from app.domain.slate_time import slate_date_for_instant
 from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_TAXONOMY,
+    PLAY_TYPE_STATS,
     PLAY_TYPES,
     SHOT_TYPE_DISPLAY_TO_STORED,
     SHOT_ZONE_SLICES,
+    nba_publication_taxonomies,
 )
 from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
 from app.models.canonical_game_ledger import (
@@ -1073,7 +1075,7 @@ def _compose_nba_observation_payload(
     minutes_by_team: dict[int, float] = {}
     sources: list[dict[str, str]] = []
     stat_keys = {
-        "play_types": ("PTS", "POSS"),
+        "play_types": PLAY_TYPE_STATS,
         "shot_types": ("FG2M", "FG2A", "FG3M", "FG3A"),
         "shot_zones": ("FGM", "FGA"),
     }[base]
@@ -1194,7 +1196,18 @@ def _compose_nba_observation_payload(
                 if not math.isfinite(numeric) or numeric < 0:
                     raise ValueError("publication observation value invalid")
                 values[team_id][metric_key] = numeric
-    if any(set(team_values) != expected_metrics for team_values in values.values()):
+    # Observations accepted before the optional stats existed carry none of
+    # them, and a retry can mix them with newer ones; the league publishes the
+    # newest taxonomy it can prove for every team.
+    published_metrics = next(
+        (
+            keys
+            for keys in nba_publication_taxonomies(base)
+            if all(keys <= set(team_values) for team_values in values.values())
+        ),
+        None,
+    )
+    if published_metrics is None:
         raise ValueError("publication observation league incomplete")
     rows = []
     for team_id in sorted(expected_teams):
@@ -1209,7 +1222,7 @@ def _compose_nba_observation_payload(
                 "game_count": len(game_ids),
                 "per48": {
                     metric: (values[team_id][metric] * 48.0 / minutes_by_team[team_id])
-                    for metric in sorted(expected_metrics)
+                    for metric in sorted(published_metrics)
                 },
             }
         )

@@ -43,7 +43,12 @@ SHOT_ZONE_SLICES: tuple[str, ...] = (
 TWO_POINT_SHOT_ZONES = frozenset({"Restricted Area", "Paint", "In The Paint (Non-RA)", "Mid-Range"})
 THREE_POINT_SHOT_ZONES = frozenset({"Corner 3", "Above the Break 3"})
 
-PLAY_TYPE_STATS: tuple[str, ...] = ("PTS", "POSS")
+PLAY_TYPE_STATS: tuple[str, ...] = ("PTS", "POSS", "TOV", "FTT")
+#: Play-type stats added after the play-type Publications existed
+#: (crf04/statsplus#416): turnovers (``TOV_POSS_PCT x POSS``) and free-throw
+#: trips (``FT_POSS_PCT x POSS``).  A Publication composed before them carries
+#: neither, and its Sheet cells and the scores reading them are simply empty.
+PLAY_TYPE_OPTIONAL_STATS: tuple[str, ...] = ("TOV", "FTT")
 SHOT_TYPE_STATS: tuple[str, ...] = ("FG2M", "FG2A", "FG3M", "FG3A")
 SHOT_ZONE_STATS: tuple[str, ...] = ("FGM", "FGA")
 
@@ -83,6 +88,20 @@ def shot_type_points_terms(slice_key: str) -> tuple[tuple[str, float], ...]:
 
 
 NBA_PUBLICATION_TAXONOMY = {base: frozenset(keys) for base, keys in NBA_PUBLICATION_METRIC_KEYS.items()}
+NBA_PUBLICATION_OPTIONAL_METRIC_KEYS: dict[str, frozenset[str]] = {
+    "play_types": frozenset(
+        f"{slice_key}_{stat_key}" for slice_key in PLAY_TYPES for stat_key in PLAY_TYPE_OPTIONAL_STATS
+    ),
+}
+
+
+def nba_publication_taxonomies(base: str) -> tuple[frozenset[str], ...]:
+    """The metric key sets a Publication of ``base`` may carry, newest first."""
+
+    keys = NBA_PUBLICATION_TAXONOMY[base]
+    optional = NBA_PUBLICATION_OPTIONAL_METRIC_KEYS.get(base)
+    return (keys,) if optional is None else (keys, keys - optional)
+
 
 #: The ledger-owned non-shot matchup surfaces.  NBA-owned shot zones, grouped
 #: shot types, and Synergy play types are composed from governed publications
@@ -267,11 +286,13 @@ __all__ = [
     "LEDGER_PARITY_MATCHUP_SURFACES",
     "NBA_PUBLICATION_BASES",
     "NBA_PUBLICATION_METRIC_KEYS",
+    "NBA_PUBLICATION_OPTIONAL_METRIC_KEYS",
     "NBA_PUBLICATION_STREAMS",
     "NBA_PUBLICATION_STREAM_KEYS",
     "NBA_PUBLICATION_TAXONOMY",
     "NBA_PUBLICATION_WINDOWS",
     "PLAY_TYPES",
+    "PLAY_TYPE_OPTIONAL_STATS",
     "PLAY_TYPE_STATS",
     "SHOT_TYPE_DISPLAY_TO_STORED",
     "SHOT_TYPE_POINTS_STAT",
@@ -289,6 +310,7 @@ __all__ = [
     "defense_sheet_row_key",
     "derived_metric_terms",
     "matchup_stream_key",
+    "nba_publication_taxonomies",
     "publication_metric_identity",
     "shot_type_points_terms",
 ]

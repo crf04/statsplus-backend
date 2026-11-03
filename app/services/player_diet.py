@@ -113,6 +113,7 @@ class _PlayTypeStint:
     share: float
     possessions: float
     games_played: int
+    events: PlayTypeEvents | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +149,46 @@ class ShotTypeShooting:
 
 
 SHOT_TYPE_SHOOTING_FIELDS: tuple[str, ...] = tuple(ShotTypeShooting.__dataclass_fields__)
+
+
+@dataclass(frozen=True, slots=True)
+class PlayTypeEvents:
+    """One play type's turnovers and free-throw trips, as Synergy counts them.
+
+    Read server-side only, as the player's own mix for the TOV, FTA and FTM
+    Play types components (crf04/statsplus#416); the Diet wire is unchanged.
+    """
+
+    turnovers: float
+    free_throw_trips: float
+
+    def as_payload(self) -> dict[str, float]:
+        return {"turnovers": self.turnovers, "free_throw_trips": self.free_throw_trips}
+
+
+_PLAY_TYPE_EVENT_FIELDS: tuple[str, ...] = tuple(PlayTypeEvents.__dataclass_fields__)
+
+
+def decode_play_type_events(payload: Any) -> PlayTypeEvents | None:
+    """Read one stored/published event count pair, or ``None`` when absent.
+
+    Like a shooting split, a partial or invalid pair is no evidence at all.
+    """
+
+    if isinstance(payload, (str, bytes, bytearray)):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(payload, Mapping):
+        return None
+    values = [payload.get(field_name) for field_name in _PLAY_TYPE_EVENT_FIELDS]
+    if any(
+        isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value) or value < 0
+        for value in values
+    ):
+        return None
+    return PlayTypeEvents(*(float(value) for value in values))
 
 
 def shot_type_shooting_violation(values: Mapping[str, Any]) -> str | None:
@@ -197,17 +238,32 @@ def decode_shot_type_shooting(payload: Any) -> ShotTypeShooting | None:
     return ShotTypeShooting(**{field_name: float(value) for field_name, value in values.items()})
 
 
-def _shooting_identity(shooting: ShotTypeShooting | None) -> str:
-    """The comparable form of a shooting split, for change detection.
+def _detail_json(shooting: ShotTypeShooting | None, play_type_events: PlayTypeEvents | None) -> str | None:
+    """A fact's per-slice detail as the ``shooting_detail`` column stores it."""
+
+    detail = shooting or play_type_events
+    return None if detail is None else json.dumps(detail.as_payload(), sort_keys=True)
+
+
+def _stored_detail(row: Mapping[str, Any]) -> dict[str, Any]:
+    """The detail fields of one stored fact row, read for its own Base."""
+
+    raw = row["shooting_detail"]
+    return {
+        "shooting": decode_shot_type_shooting(raw) if row["base"] == "shot_types" else None,
+        "play_type_events": decode_play_type_events(raw) if row["base"] == "play_types" else None,
+    }
+
+
+def _detail_identity(fact: PlayerDietFact) -> str:
+    """The comparable form of a fact's detail, for change detection.
 
     A string rather than a tuple so a Base whose facts mix present and
-    absent splits still sorts, which is how the stored and incoming
+    absent details still sorts, which is how the stored and incoming
     generations are compared.
     """
 
-    if shooting is None:
-        return ""
-    return json.dumps(shooting.as_payload(), sort_keys=True)
+    return _detail_json(fact.shooting, fact.play_type_events) or ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +279,7 @@ class PlayerDietFact:
     #: Keyword-only and defaulted so the existing subclass field ordering and
     #: every existing construction site stay valid.
     shooting: ShotTypeShooting | None = field(default=None, kw_only=True)
+    play_type_events: PlayTypeEvents | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -407,7 +464,7 @@ class PlayerDietRepository:
                             row["games_played"],
                             row["volume_unit"],
                             row["provider"],
-                            _shooting_identity(decode_shot_type_shooting(row["shooting_detail"])),
+                            _detail_json(**_stored_detail(row)) or "",
                             assume_utc(row["retrieved_at"]),
                         )
                         for row in connection.execute(
@@ -467,14 +524,7 @@ class PlayerDietRepository:
                                 "games_played": fact.games_played,
                                 "volume_unit": fact.volume_unit,
                                 "provider": fact.provider,
-                                "shooting_detail": (
-                                    None
-                                    if fact.shooting is None
-                                    else json.dumps(
-                                        fact.shooting.as_payload(),
-                                        sort_keys=True,
-                                    )
-                                ),
+                                "shooting_detail": _detail_json(fact.shooting, fact.play_type_events),
                                 "retrieved_at": observed_at,
                             }
                             for fact in facts_by_base[observation.base]
@@ -525,7 +575,7 @@ class PlayerDietRepository:
                     fact.games_played,
                     fact.volume_unit,
                     fact.provider,
-                    _shooting_identity(fact.shooting),
+                    _detail_identity(fact),
                     observed_at,
                 )
                 for fact in facts
@@ -603,6 +653,11 @@ class PlayerDietRepository:
             if fact.base != "shot_types":
                 raise ValueError("only shot-type facts carry a shooting split")
             PlayerDietRepository._validate_shooting(fact.shooting)
+        if fact.play_type_events is not None:
+            if fact.base != "play_types":
+                raise ValueError("only play-type facts carry turnovers and free-throw trips")
+            if decode_play_type_events(fact.play_type_events.as_payload()) is None:
+                raise ValueError("player Diet play-type events are invalid")
 
     @staticmethod
     def _validate_shooting(shooting: ShotTypeShooting) -> None:
@@ -684,7 +739,7 @@ class PlayerDietRepository:
                     games_played=row["games_played"],
                     volume_unit=row["volume_unit"],
                     provider=row["provider"],
-                    shooting=decode_shot_type_shooting(row["shooting_detail"]),
+                    **_stored_detail(row),
                     retrieved_at=assume_utc(row["retrieved_at"]),
                 )
             )
@@ -699,7 +754,7 @@ class PlayerDietRepository:
                     games_played=row["games_played"],
                     volume_unit=row["volume_unit"],
                     provider=row["provider"],
-                    shooting=decode_shot_type_shooting(row["shooting_detail"]),
+                    **_stored_detail(row),
                 )
                 for row in baseline_rows
             ),
@@ -853,6 +908,7 @@ class PlayerDietRepository:
                             volume_unit=fact.volume_unit,
                             provider=fact.provider,
                             shooting=fact.shooting,
+                            play_type_events=fact.play_type_events,
                             retrieved_at=retrieved_at,
                         )
                     )
@@ -913,7 +969,7 @@ class PlayerDietRepository:
                         games_played=row["games_played"],
                         volume_unit=row["volume_unit"],
                         provider=row["provider"],
-                        shooting=decode_shot_type_shooting(row["shooting_detail"]),
+                        **_stored_detail(row),
                         retrieved_at=assume_utc(row["retrieved_at"]),
                     )
                 )
@@ -929,7 +985,7 @@ class PlayerDietRepository:
                             games_played=row["games_played"],
                             volume_unit=row["volume_unit"],
                             provider=row["provider"],
-                            shooting=decode_shot_type_shooting(row["shooting_detail"]),
+                            **_stored_detail(row),
                         )
                     )
             observations.extend(
@@ -1172,11 +1228,20 @@ class PlayerDietService:
                 self._require_fields(row, "PLAYER_ID", "PLAY_TYPE", "TYPE_GROUPING", "GP", "POSS_PCT", "POSS")
                 if row["PLAY_TYPE"] != play_type or row["TYPE_GROUPING"] != "Offensive":
                     raise ValueError("Synergy player play-type identity is inconsistent")
+                possessions = self._number(row["POSS"])
                 stints[self._joined_player_id(row["PLAYER_ID"], canonical_ids)].append(
                     _PlayTypeStint(
                         share=self._number(row["POSS_PCT"]),
-                        possessions=self._number(row["POSS"]),
+                        possessions=possessions,
                         games_played=self._positive_int(row["GP"]),
+                        events=(
+                            PlayTypeEvents(
+                                turnovers=self._number(row["TOV_POSS_PCT"]) * possessions,
+                                free_throw_trips=self._number(row["FT_POSS_PCT"]) * possessions,
+                            )
+                            if {"TOV_POSS_PCT", "FT_POSS_PCT"} <= row.keys()
+                            else None
+                        ),
                     )
                 )
             for player_id, player_stints in stints.items():
@@ -1191,6 +1256,16 @@ class PlayerDietService:
                         games_played=games_played,
                         volume_unit=_VOLUME_UNITS["play_types"],
                         provider=_PROVIDERS["play_types"],
+                        play_type_events=(
+                            PlayTypeEvents(
+                                turnovers=sum(stint.events.turnovers for stint in player_stints),
+                                free_throw_trips=sum(
+                                    stint.events.free_throw_trips for stint in player_stints
+                                ),
+                            )
+                            if all(stint.events is not None for stint in player_stints)
+                            else None
+                        ),
                     )
                 )
         facts_by_player: dict[int, list[PlayerDietFact]] = defaultdict(list)
@@ -1470,6 +1545,7 @@ __all__ = [
     "PLAYER_DIET_SLICE_LABELS",
     "SHOT_TYPE_SHOOTING_FIELDS",
     "SHOT_VALUES",
+    "PlayTypeEvents",
     "PlayerDietBaseline",
     "PlayerDietFact",
     "PlayerDietObservation",
@@ -1479,6 +1555,7 @@ __all__ = [
     "StoredPlayerDietFact",
     "StoredPlayerDietObservation",
     "compute_player_diet_baselines",
+    "decode_play_type_events",
     "decode_shot_type_shooting",
     "shot_type_shooting_violation",
     "shot_value_baseline_key",

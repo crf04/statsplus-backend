@@ -1921,10 +1921,14 @@ def test_player_shot_type_composition_prefers_the_latest_retry(tmp_path):
     assert len(payload["source_observations"]) == 3
 
 
-def test_compose_prefers_the_latest_accepted_observation_per_identity(tmp_path):
-    # A retried collection appends a second accepted observation for the same
-    # (team, category); the composed payload must come from the newer one
-    # rather than refusing the manifest as a taxonomy duplicate.
+def _composed_synergy_rows(tmp_path, deliveries):
+    """Compose the Season play-type Publication from successive deliveries.
+
+    Each delivery maps a play type to the row fields every team reports for
+    it beside its games, minutes and 100 possessions; later deliveries are
+    retries accepted after the earlier ones.
+    """
+
     control_db = create_engine(f"sqlite:///{tmp_path / 'latest.sqlite3'}")
     run_migrations(control_db)
     team_ids = sorted(NBA_TEAM_IDS)
@@ -2011,7 +2015,7 @@ def test_compose_prefers_the_latest_accepted_observation_per_identity(tmp_path):
     from app.collector.normalizers import normalize_opponent_synergy_response
     from app.models.catalogs import PLAY_TYPES
 
-    def deliver(points):
+    for index, extra in enumerate(deliveries):
         for play_type in PLAY_TYPES:
             observation = normalize_opponent_synergy_response(
                 [
@@ -2022,7 +2026,7 @@ def test_compose_prefers_the_latest_accepted_observation_per_identity(tmp_path):
                         "GP": 15,
                         "MIN": 725.0,
                         "POSS": 100,
-                        "PTS": points,
+                        **extra(play_type),
                     }
                     for team_id in team_ids
                 ],
@@ -2037,7 +2041,7 @@ def test_compose_prefers_the_latest_accepted_observation_per_identity(tmp_path):
                 },
             )
             envelope = {
-                "client_observation_id": f"obs-{play_type}-{points}",
+                "client_observation_id": f"obs-{play_type}-{index}",
                 "observation_type": "synergy_opponent",
                 "provider": "nba",
                 "season": "2025-26",
@@ -2052,24 +2056,54 @@ def test_compose_prefers_the_latest_accepted_observation_per_identity(tmp_path):
             envelope["checksum"] = hashlib.sha256(raw).hexdigest()
             ingestion.ingest(claims, envelope, gzip.compress(raw), compressed=True)
 
-    deliver(points=110)
-    deliver(points=120)
     version = publications.compose_from_observations(
         "synergy_play_types_opponent_season",
         season="2025-26",
         cutoff=NOW,
         manifest_id=manifest.manifest_id,
     )
+    assert version.status in {"candidate", "active"}
     payload = json.loads(version.payload) if isinstance(version.payload, str) else version.payload
-    rows = payload if isinstance(payload, list) else payload.get("rows", payload.get("records"))
+    return payload["rows"]
+
+
+def test_compose_prefers_the_latest_accepted_observation_per_identity(tmp_path):
+    # A retried collection appends a second accepted observation for the same
+    # (team, category); the composed payload must come from the newer one
+    # rather than refusing the manifest as a taxonomy duplicate.
+    rows = _composed_synergy_rows(
+        tmp_path, [lambda _play_type: {"PTS": 110}, lambda _play_type: {"PTS": 120}]
+    )
     text = json.dumps(rows)
     # 120 points over 725 minutes per 48 — the newer observation's value.
     assert f"{120 * 48 / 725.0:.9f}"[:8] in text or str(120 * 48 / 725.0)[:8] in text
     assert str(110 * 48 / 725.0)[:8] not in text
-    transition = 120 * 48 / 725.0
-    # 120 points over 725 minutes per 48 — the newer observation's value.
-    assert abs(transition - 120 * 48 / 725.0) < 1e-9
-    assert version.status in {"candidate", "active"}
+
+
+def test_compose_publishes_play_type_turnovers_and_trips_from_their_possession_rates(tmp_path):
+    """#416: TOV = TOV_POSS_PCT x POSS and FTT = FT_POSS_PCT x POSS, per 48."""
+
+    rows = _composed_synergy_rows(
+        tmp_path, [lambda _play_type: {"PTS": 110, "TOV_POSS_PCT": 0.145, "FT_POSS_PCT": 0.06}]
+    )
+
+    per48 = rows[0]["per48"]
+    assert len(per48) == 44
+    assert round(per48["Isolation_TOV"], 9) == round(14.5 * 48 / 725.0, 9) == 0.96
+    assert round(per48["Isolation_FTT"], 9) == round(6.0 * 48 / 725.0, 9) == 0.397241379
+    assert round(per48["Isolation_PTS"], 9) == 7.282758621
+
+
+def test_compose_publishes_the_older_taxonomy_while_any_play_type_lacks_the_rates(tmp_path):
+    """A retry can mix observations from before the rates were read with newer ones."""
+
+    def rates_except_misc(play_type):
+        return {"PTS": 110} if play_type == "Misc" else {"PTS": 110, "TOV_POSS_PCT": 0.1, "FT_POSS_PCT": 0.1}
+
+    rows = _composed_synergy_rows(tmp_path, [rates_except_misc])
+
+    assert {key.rsplit("_", 1)[1] for row in rows for key in row["per48"]} == {"PTS", "POSS"}
+    assert len(rows) == 30
 
 
 def test_exact_window_opponent_breakdown_collapses_to_one_team_row():
