@@ -27,6 +27,7 @@ from typing import Any
 import redis
 
 from app.config.settings import RuntimeSettings
+from app.services.publication_snapshot_calls import accepts_keyword
 from app.services.research_season import published_capture, season_is_pinned, selected_season
 from app.utils.redis_breaker import RedisCircuitBreaker
 
@@ -155,7 +156,9 @@ class PublicationSnapshotReuse:
     that advances mid-capture only costs a later recapture), the stream set and
     the season rule.  A capture also stamps each stream's age and freshness
     label, so an entry is never reused past
-    ``cache.snapshot_reuse_max_age_seconds``.  At most two entries are held and
+    ``cache.snapshot_reuse_max_age_seconds``.  A capture on a caller's
+    ``session`` checks the generation on it too, so the key names the
+    generation that session's snapshot holds, not a newer one.  At most two entries are held and
     one lock covers lookup and capture, so concurrent requests on a process
     share a single capture.
     """
@@ -171,6 +174,8 @@ class PublicationSnapshotReuse:
         publication_reader: Any,
         stream_keys: Collection[str],
         capture: Callable[[Any], Any],
+        *,
+        session: Any = None,
     ) -> tuple[str, Any]:
         """``published_capture`` that reuses a snapshot of the same generation.
 
@@ -182,7 +187,9 @@ class PublicationSnapshotReuse:
         max_age = settings.cache.snapshot_reuse_max_age_seconds
         if selected_season(publication_reader) is not None:
             max_age = 0
-        generation = self._generation(settings, publication_reader, stream_keys) if max_age > 0 else None
+        generation = (
+            self._generation(settings, publication_reader, stream_keys, session) if max_age > 0 else None
+        )
         if generation is None:
             return published_capture(settings, publication_reader, capture)
         key = (
@@ -206,7 +213,7 @@ class PublicationSnapshotReuse:
 
     @staticmethod
     def _generation(
-        settings: RuntimeSettings, publication_reader: Any, stream_keys: Collection[str]
+        settings: RuntimeSettings, publication_reader: Any, stream_keys: Collection[str], session: Any = None
     ) -> tuple[Any, ...] | None:
         """The live generation, or ``None`` when it cannot be read cheaply."""
 
@@ -216,8 +223,11 @@ class PublicationSnapshotReuse:
             or getattr(publication_reader, "captures_published_season", False) is True
         ):
             return None
+        keyword = (
+            {} if session is None or not accepts_keyword(generation, "session") else {"session": session}
+        )
         try:
-            return tuple(generation({*map(str, stream_keys), "player_game_logs"}))
+            return tuple(generation({*map(str, stream_keys), "player_game_logs"}, **keyword))
         except Exception:
             return None
 
