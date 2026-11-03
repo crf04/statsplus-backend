@@ -107,6 +107,7 @@ def test_collects_only_completed_regular_season_games_not_yet_stored(tmp_path):
         "stored": 2,
         "stored_game_ids": [OVERTIME_ID, BETWEEN_ID],
         "rejected": [],
+        "segments_rejected": [],
         "failed": [],
         "given_up": [],
         "remaining": 0,

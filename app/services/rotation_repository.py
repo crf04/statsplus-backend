@@ -18,7 +18,7 @@ from sqlalchemy.engine import Connection, Engine
 
 from app.models.rotation import RotationAttempt, RotationGame, RotationPlayerGame, RotationStint
 from app.services import lineup_segment_repository as segment_writes
-from app.services.lineup_segments import GameSegments
+from app.services.lineup_segments import GameSegments, RejectedSegments
 from app.services.request_reads import read_connection
 from app.services.rotation_derivation import GameRotation
 
@@ -41,10 +41,11 @@ class RotationRepository:
         season: str,
         rotation: GameRotation,
         collected_at: datetime,
-        segments: GameSegments | None = None,
+        segments: GameSegments | RejectedSegments | None = None,
     ) -> None:
         """Store ``rotation`` and its ``segments``, replacing the game's rows.
 
+        Rejected segments mark the game done for the lineup segment backfill.
         Without ``segments`` the game's stored segments are removed, so they
         never outlive the rotation they were derived with.
         """
@@ -100,7 +101,16 @@ class RotationRepository:
             ]
             if stints:
                 connection.execute(insert(_STINTS), stints)
-            if segments is not None:
+            if isinstance(segments, RejectedSegments):
+                segment_writes.record_rejected(
+                    connection,
+                    season,
+                    rotation.game_id,
+                    (segments.home_team_id, segments.away_team_id),
+                    segments.reason,
+                    collected_at,
+                )
+            elif segments is not None:
                 segment_writes.write_game(connection, season, segments, collected_at)
 
     def record_attempt(

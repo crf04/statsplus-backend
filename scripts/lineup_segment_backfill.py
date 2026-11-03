@@ -55,7 +55,7 @@ def backfill(
     collected = (
         collection.collect(season, game_ids=batch, throttle_seconds=throttle_seconds)
         if batch
-        else {"stored": 0, "rejected": [], "failed": []}
+        else {"stored": 0, "rejected": [], "segments_rejected": [], "failed": []}
     )
     written = segments.written_game_ids(season)
     remaining = [game_id for game_id in completed if game_id not in written]
@@ -65,8 +65,8 @@ def backfill(
         "season": season,
         "completed_games": len(completed),
         "attempted": len(batch),
-        "stored": collected["stored"],
-        "rejected": collected["rejected"],
+        "stored": collected["stored"] - len(collected["segments_rejected"]),
+        "rejected": collected["rejected"] + collected["segments_rejected"],
         "failed": collected["failed"],
         "remaining": len(remaining),
         "covered": not remaining,

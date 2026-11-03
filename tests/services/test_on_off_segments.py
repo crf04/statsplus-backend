@@ -566,18 +566,66 @@ def test_a_lineup_short_a_player_for_any_time_rejects_the_game():
         derive_segments(_box(), play_by_play, "2025-26")
 
 
-def test_an_action_past_the_box_scores_last_period_rejects_the_game(tmp_path, bos_games):
-    game = copy.deepcopy(bos_games["0022500017"])
-    actions = game["pbp"]["game"]["actions"]
-    actions.append({**actions[-1], "actionNumber": actions[-1]["actionNumber"] + 1, "period": 5})
-    engine = _engine(tmp_path)
+def _past_last_period(game, action_type, **fields):
+    """A copy of ``game`` with one more ``action_type`` action, in period 5 of its 4."""
 
-    result = _collection(engine, {"0022500017": game}).collect("2025-26", game_ids=["0022500017"])
+    moved = copy.deepcopy(game)
+    actions = moved["pbp"]["game"]["actions"]
+    actions.append(
+        {"actionNumber": actions[-1]["actionNumber"] + 1, "actionType": action_type, "period": 5, **fields}
+    )
+    return moved
 
-    assert result["rejected"] == [
+
+def test_a_play_past_the_box_scores_last_period_rejects_the_segments_but_keeps_the_rotation(
+    tmp_path, bos_games
+):
+    game = _past_last_period(
+        bos_games["0022500017"],
+        "2pt",
+        clock="PT04M00.00S",
+        teamId=BOS,
+        personId=bos_games["0022500017"]["box"]["game"]["homeTeam"]["players"][0]["personId"],
+        shotResult="Missed",
+    )
+    (tmp_path / "moved").mkdir()
+    (tmp_path / "recorded").mkdir()
+    moved, recorded = _engine(tmp_path / "moved"), _engine(tmp_path / "recorded")
+
+    result = _collection(moved, {"0022500017": game}).collect("2025-26", game_ids=["0022500017"])
+    _collection(recorded, bos_games).collect("2025-26", game_ids=["0022500017"])
+
+    assert (result["stored_game_ids"], result["rejected"]) == (["0022500017"], [])
+    assert result["segments_rejected"] == [
         {"game_id": "0022500017", "reason": "action in period 5 of a 4-period game"}
     ]
-    assert _dump(engine)["lineup_segment_players"] == []
+    dump = _dump(moved)
+    assert dump["lineup_segment_players"] == []
+    assert [(row[0], row[5]) for row in dump["lineup_segment_games"]] == [
+        ("0022500017", "action in period 5 of a 4-period game")
+    ]
+    assert len(_rotation_dump(recorded)["rotation_stints"]) == 68
+    assert _rotation_dump(moved) == _rotation_dump(recorded)
+
+
+def test_the_feeds_game_end_marker_in_a_period_past_the_last_changes_no_segment(tmp_path, bos_games):
+    """LiveData tagged GSW @ PHX, 2026-10-24 (0022600111), a regulation game,
+    with a Game End action in period 5."""
+
+    game = copy.deepcopy(bos_games["0022500017"])
+    marker = game["pbp"]["game"]["actions"][-1]
+    assert (marker["actionType"], marker["subType"], marker["period"]) == ("game", "end", 4)
+    marker["period"] = 5
+    (tmp_path / "moved").mkdir()
+    (tmp_path / "recorded").mkdir()
+    moved, recorded = _engine(tmp_path / "moved"), _engine(tmp_path / "recorded")
+
+    result = _collection(moved, {"0022500017": game}).collect("2025-26", game_ids=["0022500017"])
+    _collection(recorded, bos_games).collect("2025-26", game_ids=["0022500017"])
+
+    assert (result["stored"], result["rejected"], result["segments_rejected"]) == (1, [], [])
+    assert len(_dump(recorded)["lineup_segment_players"]) == 5 * 49
+    assert _dump(moved) == _dump(recorded)
 
 
 def test_a_substitution_batch_across_a_period_boundary_is_stored_like_one_at_the_period_start(
@@ -616,6 +664,14 @@ def _dump(engine):
         return {
             table: sorted(tuple(row) for row in connection.execute(text(f"SELECT * FROM {table}")))
             for table in ("lineup_roster_slots", "lineup_segment_games", "lineup_segment_players")
+        }
+
+
+def _rotation_dump(engine):
+    with engine.connect() as connection:
+        return {
+            table: sorted(tuple(row) for row in connection.execute(text(f"SELECT * FROM {table}")))
+            for table in ("rotation_games", "rotation_player_games", "rotation_stints", "rotation_attempts")
         }
 
 
@@ -822,6 +878,26 @@ def test_a_game_whose_fetch_failed_stays_pending_and_the_season_uncovered(tmp_pa
     assert not segments.covered("2025-26")
     second = backfill(_collection(engine, bos_games, events), segments, "2025-26", throttle_seconds=0)
     assert (second["attempted"], second["remaining"], second["covered"]) == (1, 0, True)
+
+
+def test_a_game_whose_segments_are_rejected_is_reported_missing_and_the_season_covered(tmp_path, bos_games):
+    engine = _engine(tmp_path)
+    game_ids = sorted(bos_games)[:2]
+    games = {
+        **bos_games,
+        game_ids[1]: _past_last_period(bos_games[game_ids[1]], "turnover", clock="PT04M00.00S"),
+    }
+    events = [
+        _event(game_id, datetime(2025, 11, 1 + n, 23, 0, tzinfo=UTC)) for n, game_id in enumerate(game_ids)
+    ]
+
+    result = backfill(
+        _collection(engine, games, events), LineupSegmentRepository(engine), "2025-26", throttle_seconds=0
+    )
+
+    assert (result["attempted"], result["stored"], result["remaining"], result["covered"]) == (2, 1, 0, True)
+    assert result["rejected"] == [{"game_id": game_ids[1], "reason": "action in period 5 of a 4-period game"}]
+    assert RotationRepository(engine).stored_game_ids("2025-26") == set(game_ids)
 
 
 def test_the_backfill_refuses_seasons_before_2025_26(tmp_path):
