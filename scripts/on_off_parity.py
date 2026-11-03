@@ -100,6 +100,8 @@ def trim_play_by_play(play_by_play: Mapping[str, Any]) -> dict[str, Any]:
         trimmed = {key: action[key] for key in _ACTION_FIELDS if action.get(key) not in (None, "")}
         if action["actionType"] == "freethrow":
             trimmed["description"] = action.get("description") or ""
+        elif action["actionType"] == "foul" and action.get("descriptor"):
+            trimmed["descriptor"] = action["descriptor"]
         actions.append(trimmed)
     return {"game": {"gameId": play_by_play["game"]["gameId"], "actions": actions}}
 
@@ -187,6 +189,7 @@ def compare_split(
     ref_by_id = {player["player_id"]: player for player in reference}
     zero = {"minutes": 0, "possessions": 0, "usage": None, "totals": dict.fromkeys(COUNT_FIELDS, 0)}
     count_mismatches = []
+    possession_mismatches = []
     usage_pct = []
     sums = {"minutes": [0, 0], "possessions": [0, 0]}
     for player_id in sorted(set(ours_by_id) | set(ref_by_id)):
@@ -198,11 +201,14 @@ def compare_split(
         for key in sums:
             sums[key][0] += mine[key]
             sums[key][1] += theirs[key]
+        if mine["possessions"] != theirs["possessions"]:
+            possession_mismatches.append((player_id, mine["possessions"], theirs["possessions"]))
         if theirs["minutes"] >= USAGE_MIN_MINUTES and theirs["usage"]:
             usage_pct.append(abs(100 * ((mine["usage"] or 0) - theirs["usage"]) / theirs["usage"]))
     return {
         "count_events": sum(abs(mine - theirs) for _, _, mine, theirs in count_mismatches),
         "count_mismatches": count_mismatches,
+        "possession_mismatches": possession_mismatches,
         "minutes_pct": _pct(*sums["minutes"]),
         "possessions_pct": _pct(*sums["possessions"]),
         "usage_pct_worst": max(usage_pct, default=0.0),

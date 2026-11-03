@@ -16,9 +16,11 @@ match PBP Stats WOWY (the prototype in the parent issue measured them):
 * An offensive possession is credited to the offense's segment at the event
   that ends it: a made field goal that is not an and-one, a defensive
   rebound, a turnover, the last free throw of a trip made, or the end of the
-  period.  Free throws that let the shooting team keep the ball (technical,
-  flagrant, away-from-play, clear-path, inbound) end nothing, and neither does
-  the dead-ball rebound after one of them missed.  A possession that starts
+  period.  Free throws that let the shooting team keep the ball end nothing,
+  and neither does the dead-ball rebound after one of them missed.  The foul a
+  free throw answers decides that (a technical, or a flagrant, away-from-play,
+  clear-path or inbound foul), not its description: 2026-27 descriptions read
+  ``Free Throw 1 of 1`` whatever the foul.  A possession that starts
   and ends in the last two seconds of a period counts only when something
   scored in it (PBP Stats's two-second rule).
 * Heaves: before :data:`HEAVES_EXCLUDED_SEASON` the feed's ``heave`` actions
@@ -53,9 +55,8 @@ from app.services.rotation_derivation import (
 
 #: The per-player counts each segment row carries, in column order.
 COUNTS = ("pts", "reb", "ast", "fg3m", "fga", "fg3a", "tov", "fta")
-#: Free-throw description words for trips after which the shooter's team keeps the ball.
+#: Foul descriptor words for trips after which the shooter's team keeps the ball.
 _KEEPS_BALL = (
-    "technical",
     "flagrant",
     "away-from-play",
     "away from play",
@@ -117,13 +118,6 @@ class _Open:
         self.team[key] = self.team.get(key, 0) + 1
 
 
-def keeps_ball(free_throw: Mapping[str, Any]) -> bool:
-    """Whether the shooting team keeps the ball after this free throw."""
-
-    description = str(free_throw.get("description") or "").lower()
-    return any(word in description for word in _KEEPS_BALL)
-
-
 def derive_segments(box: Mapping[str, Any], play_by_play: Mapping[str, Any], season: str) -> GameSegments:
     """Both teams' segments for a game ``derive_rotation`` accepted."""
 
@@ -166,6 +160,9 @@ def derive_segments(box: Mapping[str, Any], play_by_play: Mapping[str, Any], sea
     #: The segments current at each action, and for a free throw at its foul.
     at_action: list[dict[int, _Open]] = []
     at_foul: list[dict[int, _Open] | None] = []
+    #: The foul each free throw answers; ``None`` for every other action.
+    answered: list[Mapping[str, Any] | None] = []
+    trip_foul: Mapping[str, Any] | None = None
     foul_lineups: dict[int, _Open] | None = None
     #: Technical fouls at the current game clock whose free throw is not shot yet.
     technicals: list[tuple[Mapping[str, Any], dict[int, _Open]]] = []
@@ -192,6 +189,7 @@ def derive_segments(box: Mapping[str, Any], play_by_play: Mapping[str, Any], sea
             changed_at[team_id] = moment
             at_action.append(dict(current))
             at_foul.append(None)
+            answered.append(None)
             continue
         for team_id in sides:
             if frozenset(on[team_id]) != current[team_id].players:
@@ -199,22 +197,23 @@ def derive_segments(box: Mapping[str, Any], play_by_play: Mapping[str, Any], sea
                 open_segment(team_id, changed_at[team_id])
         lineups = dict(current)
         technicals = [(foul, at) for foul, at in technicals if _same_moment(foul, action)]
-        trip_lineups = None
+        foul, trip_lineups = None, None
         if action_type == "foul" and action.get("subType") == "technical":
             technicals.append((action, lineups))
         elif action_type == "foul":
-            foul_lineups = lineups
+            trip_foul, foul_lineups = action, lineups
         elif action_type == "freethrow":
-            trip_lineups = _technical_answered(action, technicals) or foul_lineups
+            foul, trip_lineups = _technical_answered(action, technicals) or (trip_foul, foul_lineups)
         at_action.append(lineups)
         at_foul.append(trip_lineups)
+        answered.append(foul)
         _count(action, lineups, trip_lineups, heave_shooters_count)
     end = period_start_cs(periods) + period_length_cs(periods)
     for team_id in sides:
         current[team_id].end_cs = end
         _require_forward(team_id, segments[team_id])
 
-    for index, offense in _counted_possessions(actions, other):
+    for index, offense in _counted_possessions(actions, other, answered):
         lineups = at_action[index]
         if at_foul[index] is not None:
             lineups = at_foul[index]
@@ -272,16 +271,28 @@ def _same_moment(first: Mapping[str, Any], second: Mapping[str, Any]) -> bool:
 
 def _technical_answered(
     free_throw: Mapping[str, Any], technicals: list[tuple[Mapping[str, Any], dict[int, _Open]]]
-) -> dict[int, _Open] | None:
-    """The lineups at the technical foul ``free_throw`` answers, which it consumes."""
+) -> tuple[Mapping[str, Any], dict[int, _Open]] | None:
+    """The technical foul ``free_throw`` answers and the lineups at it, which it consumes."""
 
     if free_throw.get("subType") != "1 of 1":
         return None
     for position, (foul, lineups) in enumerate(technicals):
         if foul.get("teamId") != free_throw.get("teamId"):
             del technicals[position]
-            return lineups
+            return foul, lineups
     return None
+
+
+def _keeps_ball(foul: Mapping[str, Any] | None) -> bool:
+    """Whether the shooting team keeps the ball after free throws answering ``foul``."""
+
+    if foul is None:
+        return False
+    return foul.get("subType") == "technical" or any(word in _kind(foul) for word in _KEEPS_BALL)
+
+
+def _kind(foul: Mapping[str, Any] | None) -> str:
+    return "" if foul is None else str(foul.get("descriptor") or "").lower()
 
 
 def _count(
@@ -327,7 +338,9 @@ def _count(
 
 
 def _counted_possessions(
-    actions: Sequence[Mapping[str, Any]], other: Mapping[int, int]
+    actions: Sequence[Mapping[str, Any]],
+    other: Mapping[int, int],
+    answered: Sequence[Mapping[str, Any] | None],
 ) -> list[tuple[int, int]]:
     """``(action index, offense team)`` of each counted possession's ending event."""
 
@@ -350,16 +363,19 @@ def _counted_possessions(
         sub_type = action.get("subType")
         team_id = int(action.get("teamId") or 0)
         if action_type in _SHOTS and action.get("shotResult") == "Made":
-            if not _and_one_follows(actions, plays[position + 1 : position + 1 + _AND_ONE_LOOKAHEAD], action):
+            following = plays[position + 1 : position + 1 + _AND_ONE_LOOKAHEAD]
+            if not _and_one_follows(actions, answered, following, action):
                 ends.append((index, team_id))
         elif action_type == "rebound" and sub_type == "defensive":
-            before = actions[plays[position - 1]] if position else {}
-            if not (before.get("actionType") == "freethrow" and keeps_ball(before)):
+            before = plays[position - 1] if position else None
+            if before is None or not (
+                actions[before]["actionType"] == "freethrow" and _keeps_ball(answered[before])
+            ):
                 ends.append((index, other.get(team_id, 0)))
         elif action_type == "turnover":
             ends.append((index, team_id))
         elif action_type == "freethrow" and action.get("shotResult") == "Made":
-            if _last_of_trip(sub_type) and not keeps_ball(action):
+            if _last_of_trip(sub_type) and not _keeps_ball(answered[index]):
                 ends.append((index, team_id))
         elif action_type == "period" and sub_type == "end":
             # The period's last event ends a possession for the team that got
@@ -387,7 +403,10 @@ def _counted_possessions(
 
 
 def _and_one_follows(
-    actions: Sequence[Mapping[str, Any]], following: Sequence[int], shot: Mapping[str, Any]
+    actions: Sequence[Mapping[str, Any]],
+    answered: Sequence[Mapping[str, Any] | None],
+    following: Sequence[int],
+    shot: Mapping[str, Any],
 ) -> bool:
     """A 1-of-1 free throw by the shooter's team at the same clock: the team keeps
     shooting, so the make does not end the possession.  A flagrant 1-of-1 counts
@@ -400,7 +419,7 @@ def _and_one_follows(
             and action.get("subType") == "1 of 1"
             and action["clock"] == shot["clock"]
             and action.get("teamId") == shot.get("teamId")
-            and (not keeps_ball(action) or "flagrant" in str(action.get("description") or "").lower())
+            and (not _keeps_ball(answered[index]) or "flagrant" in _kind(answered[index]))
         ):
             return True
     return False
@@ -420,4 +439,4 @@ def _scores(action: Mapping[str, Any]) -> bool:
     )
 
 
-__all__ = ["COUNTS", "GameSegments", "Segment", "derive_segments", "keeps_ball"]
+__all__ = ["COUNTS", "GameSegments", "Segment", "derive_segments"]

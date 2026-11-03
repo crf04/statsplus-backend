@@ -270,6 +270,79 @@ def test_a_technical_free_throw_does_not_end_the_possession():
     assert (segment.counts[1]["fta"], segment.counts[1]["pts"], segment.off_poss) == (1, 1, 1)
 
 
+@pytest.mark.parametrize(
+    ("foul", "trip", "bos_possessions"),
+    [
+        ({"subType": "technical"}, 1, 1),
+        ({"subType": "personal", "descriptor": "flagrant-type-1"}, 2, 1),
+        ({"subType": "personal", "descriptor": "away-from-play"}, 1, 1),
+        ({"subType": "personal", "descriptor": "shooting"}, 1, 2),
+    ],
+)
+def test_2026_27_free_throws_keep_the_ball_by_their_foul_not_their_description(foul, trip, bos_possessions):
+    """2026-27 descriptions read ``Free Throw 1 of 1`` whatever the foul, so the
+    foul decides: technical, flagrant and away-from-play trips end nothing and
+    the made shot after them ends BOS's possession; a shooting foul's trip ends it."""
+
+    play_by_play = _game(
+        ("foul", "PT06M00.00S", {"teamId": DEN, "personId": 11, **foul}),
+        *(
+            (
+                "freethrow",
+                "PT06M00.00S",
+                {
+                    "teamId": BOS,
+                    "personId": 1,
+                    "subType": f"{shot} of {trip}",
+                    "shotResult": "Made",
+                    "description": f"BOS 1 Free Throw {shot} of {trip} ({shot} PTS)",
+                },
+            )
+            for shot in range(1, trip + 1)
+        ),
+        ("2pt", "PT05M40.00S", {"teamId": BOS, "personId": 2, "shotResult": "Made"}),
+    )
+
+    segments = derive_segments(_box(), play_by_play, "2026-27").segments
+
+    # DEN's one possession runs from BOS's made shot to the end of the period.
+    assert {segment.team_id: segment.off_poss for segment in segments} == {BOS: bos_possessions, DEN: 1}
+
+
+@pytest.mark.parametrize(
+    ("foul", "bos_possessions"),
+    [
+        ({"subType": "technical"}, 2),
+        ({"subType": "personal", "descriptor": "flagrant-type-1"}, 1),
+        ({"subType": "personal", "descriptor": "shooting"}, 2),
+    ],
+)
+def test_a_1_of_1_at_a_made_shots_clock_is_an_and_one_by_its_foul(foul, bos_possessions):
+    """A technical's 1-of-1 is no and-one, so the shot ends the possession; a
+    flagrant's is, and keeps the ball; a shooting foul's is, and its make ends it."""
+
+    play_by_play = _game(
+        ("2pt", "PT06M00.00S", {"teamId": BOS, "personId": 1, "shotResult": "Made"}),
+        ("foul", "PT06M00.00S", {"teamId": DEN, "personId": 11, **foul}),
+        (
+            "freethrow",
+            "PT06M00.00S",
+            {
+                "teamId": BOS,
+                "personId": 1,
+                "subType": "1 of 1",
+                "shotResult": "Made",
+                "description": "BOS 1 Free Throw 1 of 1 (3 PTS)",
+            },
+        ),
+        ("2pt", "PT05M40.00S", {"teamId": BOS, "personId": 2, "shotResult": "Made"}),
+    )
+
+    segments = derive_segments(_box(), play_by_play, "2026-27").segments
+
+    assert {segment.team_id: segment.off_poss for segment in segments} == {BOS: bos_possessions, DEN: 1}
+
+
 def test_the_dead_ball_rebound_after_a_missed_technical_free_throw_ends_no_possession():
     play_by_play = _game(
         ("foul", "PT06M00.00S", {"teamId": DEN, "personId": 11, "subType": "technical"}),
