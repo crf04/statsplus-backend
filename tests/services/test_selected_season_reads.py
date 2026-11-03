@@ -11,11 +11,19 @@ repositories and services of ``tests/support/selected_season``.
 
 from __future__ import annotations
 
+import hashlib
 import json
+from datetime import timedelta
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 
+from app.models.collection_control import (
+    CatalogPublication,
+    CollectionManifest,
+    CollectionObservation,
+    PublicationVersion,
+)
 from app.models.game_logs import GameLogQuery
 from app.services.database_first_activation import ReadSeason, SeasonMode, SeasonUnavailable
 from app.services.research_season import season_scoped
@@ -343,6 +351,126 @@ def test_game_logs_on_a_game_the_ledger_never_accepted_make_the_season_unavailab
 
     with pytest.raises(SeasonUnavailable):
         world.reader.for_season(NEW).snapshot(KEYS, season=ReadSeason(OLD))
+
+
+#: The observation the ledger accepted as the first game's evidence.
+FIRST_GAME = NEW_GAMES[0][0]
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        pytest.param({"provider": "nba_stats"}, id="provider"),
+        pytest.param({"observation_type": "player_game_logs"}, id="observation_type"),
+        pytest.param({"season": OLD}, id="season"),
+        pytest.param({"cutoff": NEW_CUTOFF - timedelta(days=1)}, id="cutoff"),
+        pytest.param({"schema_version": 2}, id="schema_version"),
+        pytest.param(
+            {"scope": json.dumps({"game_id": FIRST_GAME, "surface": "synergy_play_types"})},
+            id="scope_surface",
+        ),
+        # The candidate records its game apart from the scope, which now names another.
+        pytest.param(
+            {"scope": json.dumps({"game_id": NEW_GAMES[1][0], "surface": "canonical_game_ledger"})},
+            id="scope_game_id",
+        ),
+    ],
+)
+def test_evidence_that_no_longer_matches_its_manifest_withdraws_a_candidate_already_served(world, values):
+    logs, _defense = world.hold_ten_games()
+    selected = world.reader.for_season(NEW)
+    assert _reads(selected.snapshot(KEYS, season=ReadSeason(OLD)))[PLAYER_LOGS] == (
+        "candidate",
+        NEW,
+        None,
+        logs.publication_id,
+    )
+    with world.engine.begin() as connection:
+        connection.execute(
+            CollectionObservation.__table__.update()
+            .where(CollectionObservation.observation_id == f"pbp:{FIRST_GAME}")
+            .values(**values)
+        )
+
+    # The candidate's once-per-publication checks already passed; its lineage
+    # is judged again on this read.
+    with pytest.raises(SeasonUnavailable):
+        selected.snapshot(KEYS, season=ReadSeason(OLD))
+
+
+def test_candidates_on_the_same_games_under_different_manifests_are_judged_apart(world):
+    logs, defense = world.hold_ten_games()
+    # A second manifest of the same night whose Event Catalog, checksummed as
+    # a real one is, swaps the first game's home and away teams.  The defense
+    # candidate is bound to it.
+    with world.engine.begin() as connection:
+        manifest = dict(
+            connection.execute(
+                select(CollectionManifest.__table__).where(CollectionManifest.manifest_id == logs.manifest_id)
+            )
+            .mappings()
+            .one()
+        )
+        catalog = dict(
+            connection.execute(
+                select(CatalogPublication.__table__).where(
+                    CatalogPublication.publication_id == manifest["event_catalog_publication_id"]
+                )
+            )
+            .mappings()
+            .one()
+        )
+        document = json.loads(catalog["payload"])
+        event = next(event for event in document["events"] if event["nba_game_id"] == FIRST_GAME)
+        event["home_team_id"], event["away_team_id"] = event["away_team_id"], event["home_team_id"]
+        catalog["publication_id"] = "catalog-swapped"
+        catalog["payload"] = json.dumps(document, sort_keys=True, separators=(",", ":"))
+        catalog["checksum"] = hashlib.sha256(catalog["payload"].encode()).hexdigest()
+        connection.execute(CatalogPublication.__table__.insert().values(**catalog))
+        manifest.update(
+            manifest_id="manifest-swapped",
+            checksum="manifest-swapped",
+            event_catalog_publication_id=catalog["publication_id"],
+            event_catalog_checksum=catalog["checksum"],
+        )
+        connection.execute(CollectionManifest.__table__.insert().values(**manifest))
+        connection.execute(
+            PublicationVersion.__table__.update()
+            .where(PublicationVersion.publication_id == defense.publication_id)
+            .values(
+                manifest_id=manifest["manifest_id"],
+                event_catalog_publication_id=catalog["publication_id"],
+                event_catalog_checksum=catalog["checksum"],
+            )
+        )
+
+    reads = _reads(world.reader.for_season(NEW).snapshot(KEYS, season=ReadSeason(OLD)))
+
+    # Same season, cutoff and games: only the manifest tells the lineages apart.
+    assert reads[PLAYER_LOGS] == ("candidate", NEW, None, logs.publication_id)
+    assert reads[SEASON_STREAM] == ("prior_season", OLD, None, _live(world, SEASON_STREAM))
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        pytest.param(lambda payload: payload + " ", id="payload_changed"),
+        pytest.param(lambda payload: "{not json", id="payload_malformed"),
+    ],
+)
+def test_an_event_catalog_changed_under_its_checksum_withdraws_a_candidate_already_served(world, edit):
+    logs, _defense = world.hold_ten_games()
+    selected = world.reader.for_season(NEW)
+    assert _reads(selected.snapshot(KEYS, season=ReadSeason(OLD)))[PLAYER_LOGS][3] == logs.publication_id
+    with world.engine.begin() as connection:
+        catalog = CatalogPublication.__table__
+        where = catalog.c.publication_id == logs.event_catalog_publication_id
+        payload = connection.scalar(select(catalog.c.payload).where(where))
+        connection.execute(catalog.update().where(where).values(payload=edit(payload)))
+
+    # The checksum is verified before the payload is parsed.
+    with pytest.raises(SeasonUnavailable):
+        selected.snapshot(KEYS, season=ReadSeason(OLD))
 
 
 def test_an_unscoped_reader_never_serves_a_candidate(world):
