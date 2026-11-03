@@ -5736,9 +5736,11 @@ class PublicationService(_SessionService):
                     self.enqueue(
                         stream_key, season=season, cutoff=cutoff, manifest_id=manifest_id, session=session
                     )
-                elif job.status == "failed":
+                elif job.status in {"failed", "succeeded"}:
+                    # New input is not a retry, so only a failed job counts
+                    # an attempt.
+                    job.attempts = int(job.attempts or 0) + int(job.status == "failed")
                     job.status = "queued"
-                    job.attempts = int(job.attempts or 0) + 1
                     job.last_error = None
                     job.updated_at = self.clock()
                     job.generation = int(job.generation or 1) + 1
