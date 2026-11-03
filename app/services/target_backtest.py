@@ -13,7 +13,11 @@ coverage and ``diet_evidence_thin`` renders the verdict, so a player the
 Matchup marks thin is the player this read excludes.  Unlike resolution, which
 flags a thin player and keeps them, the backtest drops them: the longer view
 is a claim about production, and a claim resting on an unusable Diet is worse
-than no claim.
+than no claim.  Early in a season nearly every Diet is thin, so a Base with no
+share for the slice, or a thin one, is judged on the previous season's Diet
+for that Base instead when a Backtest may read that season
+(crf04/statsplus#417), under that season's own thin rule; each share names the
+season it was read from.
 
 *Outcomes are proxies.*  No per-game shot-zone or play-type evidence exists,
 so a Qualifier's slice is measured through a small, approved set of box-score
@@ -45,6 +49,7 @@ import time
 import zlib
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from logging import getLogger
 from math import isfinite
@@ -187,8 +192,9 @@ PROXY_NOTE = (
 #: body changes (#279; v2 added the opponent, statsplus#123): a different schema must never be served from a cached value the
 #: older code shape wrote, and the constant is part of every key (v3: every
 #: player row carries its Position, and a Target may hold Position and Average
-#: Qualifiers).
-TARGET_BACKTEST_CACHE_SCHEMA = 3
+#: Qualifiers; v4: a thin Diet falls back to the previous season's, and every
+#: share names its ``diet_season``).
+TARGET_BACKTEST_CACHE_SCHEMA = 4
 
 #: Raw threshold precision in the key: the six-decimal ``qualifier_signature``
 #: folds 0.4000001 and 0.4000004 onto one line, but those two Targets are
@@ -245,6 +251,29 @@ def rule_share(base: str) -> dict[str, Any]:
     return {"base": base, "slice_key": None, "share": None, "league_average_share": None}
 
 
+def _backtest_rule_share(base: str) -> dict[str, Any]:
+    """A Position or Average entry of a backtest player's ``shares``: no Diet season either."""
+
+    return {**rule_share(base), "diet_season": None}
+
+
+def _reads_diet(qualifiers: Sequence[Mapping[str, Any]]) -> bool:
+    return any(
+        qualifier["base"] not in (POSITION_QUALIFIER_BASE, SEASON_AVERAGE_QUALIFIER_BASE)
+        for qualifier in qualifiers
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _SeasonDiet:
+    """One season's Diet evidence, judged under that season's own thin rule."""
+
+    season: str
+    diets: PlayerDietResult
+    summaries: Mapping[int, PlayerSeasonLogSummary]
+    thinness: MatchupScoreSettings
+
+
 def _qualifier_key_body(qualifier: Mapping[str, Any]) -> dict[str, Any]:
     """One Qualifier as the cache key reads it, at full threshold precision."""
 
@@ -268,6 +297,7 @@ def backtest_cache_key(
     settings: RuntimeSettings,
     catalog: str | None = None,
     thinness: MatchupScoreSettings | None = None,
+    fallback: Sequence[tuple] | None = None,
 ) -> str:
     """Build ``targets:backtest:v<schema>:<sha256>`` over the canonical key body.
 
@@ -281,7 +311,9 @@ def backtest_cache_key(
     opponent's games: two Targets differing only in opponent are different
     questions (statsplus#123).  ``thinness`` is the Matchup floors the
     season's players were judged under (``BacktestSeason.thinness``), the
-    configured ones when omitted.
+    configured ones when omitted.  ``fallback`` is the identity of the
+    previous season's Publications a thin Diet falls back to, ``None`` when
+    the read has none.
     """
 
     matchup = settings.matchup_scores if thinness is None else thinness
@@ -293,6 +325,7 @@ def backtest_cache_key(
         # carries its Position, which no Publication names.
         "catalog": catalog,
         "generation": [list(entry) for entry in generation],
+        "fallback": None if fallback is None else [list(entry) for entry in fallback],
         "qualifiers": [_qualifier_key_body(qualifier) for qualifier in target["qualifiers"]],
         "conditions": target.get("conditions"),
         "thresholds": {
@@ -509,6 +542,9 @@ class TargetBacktestService:
                 )
                 generation = identity if self._cache_enabled else None
                 catalog = self._catalog_snapshot(choice.season)[1] if generation is not None else None
+                fallback = (
+                    self._fallback_identity(choice, session=session) if generation is not None else None
+                )
             except (InvalidInputError, SeasonUnavailableError):
                 raise
             except Exception:
@@ -534,6 +570,7 @@ class TargetBacktestService:
                 )
                 generation = None
                 catalog = None
+                fallback = None
 
         items = []
         for target in listed:
@@ -542,7 +579,7 @@ class TargetBacktestService:
                 evidence = (
                     None
                     if generation is None
-                    else self._cache_read(self._cache_key(target, choice, generation, catalog))
+                    else self._cache_read(self._cache_key(target, choice, generation, catalog, fallback))
                 )
                 if evidence is None:
                     items.append({"target_id": target_id, "status": "uncached"})
@@ -630,10 +667,17 @@ class TargetBacktestService:
                 continue
             if generation is not None:
                 try:
-                    work.append((choice, generation, self._catalog_snapshot(choice.season)[1]))
+                    work.append(
+                        (
+                            choice,
+                            generation,
+                            self._catalog_snapshot(choice.season)[1],
+                            self._fallback_identity(choice),
+                        )
+                    )
                 except Exception:
                     logger.warning(
-                        "Target backtest precompute skipped season=%s: catalog version unreadable",
+                        "Target backtest precompute skipped season=%s: catalog or fallback unreadable",
                         choice.season,
                         exc_info=True,
                     )
@@ -644,13 +688,13 @@ class TargetBacktestService:
             "failed": 0,
         }
         entries = [
-            (choice, generation, catalog, target)
-            for choice, generation, catalog in work
+            (choice, generation, catalog, fallback, target)
+            for choice, generation, catalog, fallback in work
             for target in targets
         ]
         remaining = 0
-        for index, (choice, generation, catalog, target) in enumerate(entries):
-            cached = self._cache_exists(self._cache_key(target, choice, generation, catalog))
+        for index, (choice, generation, catalog, fallback, target) in enumerate(entries):
+            cached = self._cache_exists(self._cache_key(target, choice, generation, catalog, fallback))
             if cached is None:
                 logger.warning("Target backtest precompute stopped: result cache unavailable")
                 counts["bypassed"] += len(entries) - index
@@ -674,7 +718,7 @@ class TargetBacktestService:
                 remaining = len(entries) - index - 1
                 break
         result = {
-            "seasons": [choice.season for choice, _generation, _catalog in work],
+            "seasons": [choice.season for choice, *_identity in work],
             "eligible": len(entries),
             **counts,
             "remaining": remaining,
@@ -846,6 +890,7 @@ class TargetBacktestService:
                 "played": len({row.game_id for row in rows}),
                 "kept": len({row.game_id for row in kept}),
             }
+            fallback = self._fallback_capture(choice, qualifiers, session)
             players, without_position = self._players(
                 target,
                 qualifiers,
@@ -858,6 +903,7 @@ class TargetBacktestService:
                 thinness=choice.thinness(self.settings.matchup_scores),
                 # The Positions the cache key was derived from, when it was.
                 positions=None if catalog_read is None else catalog_read[0],
+                fallback=fallback,
             )
             summary = self._summary(players, markets)
             if any(qualifier["base"] == POSITION_QUALIFIER_BASE for qualifier in qualifiers):
@@ -870,8 +916,10 @@ class TargetBacktestService:
             readings = getattr(snapshot, "reads", None)
             eligibility = _required_cache_streams(qualifiers)
             identity = self._cache_identity(snapshot)
+            fallback_identity = None if fallback is None else self._cache_identity(fallback[1])
             eligible = (
                 identity is not None
+                and (fallback is None or fallback_identity is not None)
                 and snapshot is not None
                 and isinstance(readings, Mapping)
                 and all(
@@ -888,7 +936,7 @@ class TargetBacktestService:
                     # generation, so the next request's pre-check key finds
                     # it or recomputes it -- never a torn hybrid.
                     self._cache_write(
-                        self._cache_key(target, choice, identity, catalog_read[1]),
+                        self._cache_key(target, choice, identity, catalog_read[1], fallback_identity),
                         {
                             "players": players,
                             "summary": summary,
@@ -1016,6 +1064,11 @@ class TargetBacktestService:
                 session=session,
             )
             catalog = self._catalog_snapshot(choice.season)
+            fallback = (
+                self._fallback_identity(choice, session=session)
+                if _reads_diet(target["qualifiers"])
+                else None
+            )
         except Exception:
             # The pre-check must not turn a Redis-or-reader outage into a
             # failed request: answer as the uncached read answers, which
@@ -1023,7 +1076,7 @@ class TargetBacktestService:
             return None, None, None
         if generation is None:
             return None, None, None
-        return choice, self._cache_key(target, choice, generation, catalog[1]), catalog
+        return choice, self._cache_key(target, choice, generation, catalog[1], fallback), catalog
 
     @staticmethod
     def _cache_identity(snapshot: Any) -> Sequence[tuple] | None:
@@ -1046,7 +1099,10 @@ class TargetBacktestService:
         choice: BacktestSeason,
         generation: Sequence[tuple[str, str | None, int | None, int | None]],
         catalog: str | None,
+        fallback: Sequence[tuple] | None,
     ) -> str:
+        """The result-cache key; ``fallback`` keys only a Target that reads a Diet."""
+
         return backtest_cache_key(
             target,
             generation,
@@ -1054,7 +1110,60 @@ class TargetBacktestService:
             settings=self.settings,
             catalog=catalog,
             thinness=choice.thinness(self.settings.matchup_scores),
+            fallback=fallback if _reads_diet(target["qualifiers"]) else None,
         )
+
+    def _fallback_identity(
+        self, choice: BacktestSeason, *, session: Session | None = None
+    ) -> Sequence[tuple] | None:
+        """The identity of the fallback season's Publications, as ``require_streams`` checks them.
+
+        ``None`` when ``choice`` has no fallback season or that season cannot
+        be read, exactly when ``_fallback_capture`` reads none.
+        """
+
+        fallback = None if self.player_diets is None else self.seasons.fallback(choice, session=session)
+        if fallback is None:
+            return None
+        try:
+            return self.seasons.require_streams(
+                fallback,
+                _PUBLICATION_STREAM_KEYS,
+                projection_keys=_PROJECTION_ONLY_STREAM_KEYS,
+                session=session,
+            )
+        except SeasonUnavailableError:
+            return None
+
+    def _fallback_capture(
+        self,
+        choice: BacktestSeason,
+        qualifiers: Sequence[Mapping[str, Any]],
+        session: Session | None,
+    ) -> tuple[BacktestSeason, Any] | None:
+        """Capture the season a thin Diet falls back to, or ``None`` when there is none to read.
+
+        A fallback season that cannot be read leaves the Backtest judging its
+        own season alone, as before the fallback existed, rather than failing it.
+        """
+
+        if self.player_diets is None or not _reads_diet(qualifiers):
+            return None
+        fallback = self.seasons.fallback(choice, session=session)
+        if fallback is None:
+            return None
+        try:
+            return self.seasons.capture(
+                None,
+                lambda season: self._publication_snapshot(season, session=session),
+                _PUBLICATION_STREAM_KEYS,
+                choice=fallback,
+                projection_only_keys=_PROJECTION_ONLY_STREAM_KEYS,
+                decoded_only_keys=BACKTEST_DECODED_ONLY_STREAM_KEYS,
+                session=session,
+            )
+        except SeasonUnavailableError:
+            return None
 
     def _catalog_snapshot(self, season: str) -> tuple[dict[int, str], str | None]:
         """Read the season's Positions once: the map and the digest naming it.
@@ -1189,11 +1298,13 @@ class TargetBacktestService:
         connection: Connection | None = None,
         thinness: MatchupScoreSettings,
         positions: Mapping[int, str] | None = None,
+        fallback: tuple[BacktestSeason, Any] | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """Return the qualifying players and how many lacked a Position.
 
         The count is the players a Position Qualifier alone left out: those who
-        met every other Qualifier but have no listed Position.
+        met every other Qualifier but have no listed Position.  ``fallback`` is
+        the season, and its capture, a thin Diet is judged on instead.
         """
 
         rows_by_player: dict[int, list[PlayerGameLogRecord]] = {}
@@ -1216,13 +1327,9 @@ class TargetBacktestService:
         # a Target nobody meets returns, which is honest here: the demo
         # database this arises on carries no Diet schema at all, so there is
         # no evidence being withheld.
-        needs_diet = any(
-            qualifier["base"] not in (POSITION_QUALIFIER_BASE, SEASON_AVERAGE_QUALIFIER_BASE)
-            for qualifier in qualifiers
-        )
         diets = (
             PlayerDietResult(season, {}, ())
-            if self.player_diets is None or not needs_diet
+            if self.player_diets is None or not _reads_diet(qualifiers)
             else call_with_read_scope(
                 self.player_diets.get_for_players,
                 season,
@@ -1238,6 +1345,29 @@ class TargetBacktestService:
             publication_snapshot=snapshot,
             connection=connection,
         )
+        sources = [_SeasonDiet(season, diets, summaries, thinness)]
+        if fallback is not None:
+            fallback_choice, fallback_snapshot = fallback
+            sources.append(
+                _SeasonDiet(
+                    fallback_choice.season,
+                    call_with_read_scope(
+                        self.player_diets.get_for_players,
+                        fallback_choice.season,
+                        player_ids,
+                        publication_snapshot=fallback_snapshot,
+                        connection=connection,
+                    ),
+                    call_with_read_scope(
+                        self.player_logs.get_player_summaries,
+                        fallback_choice.season,
+                        player_ids,
+                        publication_snapshot=fallback_snapshot,
+                        connection=connection,
+                    ),
+                    fallback_choice.thinness(self.settings.matchup_scores),
+                )
+            )
 
         if positions is None:
             positions = self._catalog_snapshot(season)[0]
@@ -1248,13 +1378,7 @@ class TargetBacktestService:
         players = []
         without_position = 0
         for player_id in player_ids:
-            shares = self._fit(
-                qualifiers,
-                diets.players.get(player_id, ()),
-                summaries.get(player_id),
-                diets,
-                thinness,
-            )
+            shares = self._fit(qualifiers, player_id, sources)
             if shares is None:
                 continue
             position = positions.get(player_id)
@@ -1288,66 +1412,81 @@ class TargetBacktestService:
     def _fit(
         self,
         qualifiers: Sequence[Mapping[str, Any]],
-        facts: Sequence[Any],
-        summary: PlayerSeasonLogSummary | None,
-        diets: PlayerDietResult,
-        thinness: MatchupScoreSettings,
+        player_id: int,
+        sources: Sequence[_SeasonDiet],
     ) -> list[dict[str, Any]] | None:
         """Return one player's per-Qualifier shares, or ``None`` if unfit.
 
-        Unfit is any of three things: a missing share for a named slice, a
-        share the comparator refuses, or a Base whose evidence is thin.  The
-        thin verdict is ``diet_evidence_thin``, asked of each Base a Qualifier
-        names, so a Base the Matchup would not score is a Base this read will
-        not stake a season claim on either.
+        ``sources`` is the Backtest season's Diet, then the season a thin
+        Diet falls back to, if any.  Position and Average Qualifiers read the
+        Backtest season alone.
         """
 
+        own = sources[0]
         shares = []
         for qualifier in qualifiers:
             base = qualifier["base"]
             if base == POSITION_QUALIFIER_BASE:
                 # Decided by the caller, which owns the Position lookup and
                 # the count of players it leaves out.
-                shares.append(rule_share(base))
+                shares.append(_backtest_rule_share(base))
                 continue
             if base == SEASON_AVERAGE_QUALIFIER_BASE:
-                if not self._average_fits(qualifier, summary, thinness):
+                if not self._average_fits(qualifier, own.summaries.get(player_id), own.thinness):
                     return None
-                shares.append(rule_share(base))
+                shares.append(_backtest_rule_share(base))
                 continue
-            base_facts = tuple(fact for fact in facts if fact.base == base)
+            share = self._diet_share(qualifier, player_id, sources)
+            if share is None:
+                return None
+            shares.append(share)
+        return shares
+
+    def _diet_share(
+        self,
+        qualifier: Mapping[str, Any],
+        player_id: int,
+        sources: Sequence[_SeasonDiet],
+    ) -> dict[str, Any] | None:
+        """Judge one Diet Qualifier on the first season with usable evidence.
+
+        A season is passed over when it has no stored share for the slice (an
+        absent share is unjudged, not zero) or ``diet_evidence_thin`` calls
+        the Base thin, so a Base the Matchup would not score is a Base this
+        read will not stake a season claim on.  The first season left decides:
+        a share it refuses never falls back.
+        """
+
+        base = qualifier["base"]
+        for source in sources:
+            base_facts = tuple(fact for fact in source.diets.players.get(player_id, ()) if fact.base == base)
             fact = next(
                 (item for item in base_facts if item.slice_key == qualifier["slice_key"]),
                 None,
             )
-            if fact is None:
-                # No stored share for the slice is not a share of zero, so the
-                # player is unjudged rather than judged to fit.
-                return None
-            if not TARGET_COMPARATOR_TESTS[qualifier["comparator"]](fact.share, qualifier["threshold"]):
-                return None
-            if diet_evidence_thin(
+            if fact is None or diet_evidence_thin(
                 base=base,
                 observed_share=observed_diet_share(base, base_facts),
                 selected_facts=base_facts,
-                summary=summary,
-                settings=thinness,
+                summary=source.summaries.get(player_id),
+                settings=source.thinness,
             ):
+                continue
+            if not TARGET_COMPARATOR_TESTS[qualifier["comparator"]](fact.share, qualifier["threshold"]):
                 return None
-            baseline = diets.baselines.get((base, qualifier["slice_key"]))
-            shares.append(
-                {
-                    "base": base,
-                    "slice_key": qualifier["slice_key"],
-                    "share": self._number(fact.share),
-                    "league_average_share": (
-                        None
-                        if baseline is None or baseline.league_average_share is None
-                        else self._number(baseline.league_average_share)
-                    ),
-                }
-            )
-        return shares
+            baseline = source.diets.baselines.get((base, qualifier["slice_key"]))
+            return {
+                "base": base,
+                "slice_key": qualifier["slice_key"],
+                "share": self._number(fact.share),
+                "league_average_share": (
+                    None
+                    if baseline is None or baseline.league_average_share is None
+                    else self._number(baseline.league_average_share)
+                ),
+                "diet_season": source.season,
+            }
+        return None
 
     def _average_fits(
         self,

@@ -6159,7 +6159,8 @@ season from a retained one without a second request.
           "base": "shot_zones",
           "slice_key": "Corner 3",
           "share": 0.42,
-          "league_average_share": 0.2
+          "league_average_share": 0.2,
+          "diet_season": "2025-26"
         }
       ],
       "season_averages": {"PTS": 25.0, "PTS/36": 26.470588, "3PA": 6.0, "3PA/36": 6.352941},
@@ -6257,6 +6258,18 @@ scoring descending, canonical id breaking ties.
   `MATCHUP_SCORE_MIN_GAMES`: a reader who chose that season judges each
   player's sample from `season_games` (crf04/statsplus#386). The volume
   floors still apply.
+- **A thin Diet falls back to last season's** (crf04/statsplus#417). On a
+  `2026-27` Backtest, a Diet Qualifier whose Base has no share for the slice
+  this season, or whose Base is thin this season, is judged on the player's
+  `2025-26` Diet for that Base instead: its shares, `league_average_share`,
+  Regular Season log and thin rule, read where a `2025-26` Backtest would read
+  them and never mixed with this season's. The fallback is decided per Base,
+  so one player's Qualifiers can read different seasons. A share that exists,
+  is not thin and fails the comparator never falls back, and a player missing
+  or thin in both seasons is left out. Games, `season_averages`,
+  `season_games`, and Average and Position Qualifiers stay on the Backtest
+  season. A `2025-26` Backtest has no fallback season. If `2025-26` cannot be
+  read, a `2026-27` Backtest judges its own season alone rather than failing.
 - A Position Qualifier lists only players whose Position is one of its
   groups. A player with no Position never fits, and `summary.players_without_position`
   (present only when the Target holds a Position Qualifier) counts the players
@@ -6268,7 +6281,9 @@ scoring descending, canonical id breaking ties.
   Diet share, one game on an Unpublished Season read. A Target with no Diet Qualifier reads no Diet at all.
 - `shares` is one entry per Qualifier of every kind, in Qualifier order, with
   the player's Season `share` and `league_average_share` for a Diet slice and
-  nulls for a Position or Average entry.
+  `diet_season`, the season both were read from: the Backtest season, or
+  `2025-26` for a fallback share. A Position or Average entry has nulls for all
+  four.
 - `position` on every player is `"Guard"`, `"Wing"`, `"Big"` or `null`.
 - Identity (`name`, `team_id`, `tricode`) is the player's identity **as of the
   most recent game against this opponent**, not necessarily their current team:
@@ -6296,7 +6311,9 @@ account -- foreign ids are never reported as `403`. `400 invalid_input` for a
 above.
 
 **Cache.** A season read from live pointers is cached under its pointer
-generation. A season read entirely from retained Publications -- always a
+generation. A `2026-27` entry for a Target with a Diet Qualifier is also keyed
+on the identity of the `2025-26` Publications its fallback reads, so a
+republished or revoked `2025-26` Diet is never served from an older entry. A season read entirely from retained Publications -- always a
 season other than the published one -- is cached under the season and its retained history-row
 ids, so nightly publications of the published season leave its entry valid and
 revoking one of its rows invalidates it. A published season read partly live
@@ -6499,7 +6516,8 @@ shape for the draft plus `today` and one shared
           "base": "shot_zones",
           "slice_key": "Corner 3",
           "share": 0.42,
-          "league_average_share": 0.2
+          "league_average_share": 0.2,
+          "diet_season": "2025-26"
         }
       ],
       "season_averages": {"PTS": 25.0, "PTS/36": 26.470588, "3PA": 6.0, "3PA/36": 6.352941},

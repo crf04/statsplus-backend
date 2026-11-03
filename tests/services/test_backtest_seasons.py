@@ -643,13 +643,18 @@ def test_the_five_game_floor_returns_once_2026_27_is_published(world):
     published, published_state = service.backtest(OWNER, target["id"], season=NEW)
 
     assert (selected_state, _fitting(selected)) == ("miss", [bt.LEBRON])
-    assert (published["published_season"], published_state, _fitting(published)) == (NEW, "miss", [])
+    assert selected["players"][0]["shares"][0]["diet_season"] == NEW
+    # Published, the floor makes 2026-27's Diet thin, so 2025-26's decides
+    # (crf04/statsplus#417).
+    assert (published["published_season"], published_state, _fitting(published)) == (NEW, "miss", [bt.LEBRON])
+    assert published["players"][0]["shares"][0]["diet_season"] == LAST
 
 
 def test_a_five_game_floor_result_is_never_served_to_a_2026_27_backtest(world, monkeypatch):
     # The result the configured floor computed for these held candidates
     # (the build before crf04/statsplus#386, or any season judged at it)
-    # fits nobody; a 2026-27 read at one game must compute its own.
+    # finds every 2026-27 Diet thin and fits on 2025-26's; a 2026-27 read at
+    # one game must compute its own.
     _hold_new_season(world, games=OPENING_WEEK_GAMES)
     target = world.saved_target()
     redis = bt.FakeRedis()
@@ -661,8 +666,8 @@ def test_a_five_game_floor_result_is_never_served_to_a_2026_27_backtest(world, m
 
     selected, selected_state = world.backtests(redis_client=redis).backtest(OWNER, target["id"], season=NEW)
 
-    assert (floor_five_state, _fitting(floor_five)) == ("miss", [])
-    assert (selected_state, _fitting(selected)) == ("miss", [bt.LEBRON])
+    assert (floor_five_state, _shares(floor_five)) == ("miss", [("shot_zones", 0.42, 0.36, LAST)])
+    assert (selected_state, _shares(selected)) == ("miss", [("shot_zones", 0.5, None, NEW)])
 
 
 #: The Diets' last upload, three days behind the game logs' ``NOW`` cutoff.
@@ -1829,3 +1834,140 @@ def test_a_target_create_refuses_a_season_the_preview_refuses(
     assert refused.status_code == 400
     assert refused.get_json()["error"]["code"] == "invalid_input"
     assert client.get("/api/user/targets", headers=authenticate()).get_json()["targets"] == []
+
+
+# --- last season's Diet where this season's is thin (crf04/statsplus#417) ---
+
+
+def _publish_thin_new_season(world, *, thin=DIET_STREAM_KEYS):
+    """Activate 2026-27 with each Diet stream in ``thin`` under the five-game floor.
+
+    LeBron's 2026-27 is five games, one against OKC, and his Corner 3 share
+    is 0.1, which fails ``CORNER_THREE``; last season's 0.42 fits it.
+    """
+
+    world.compose("player_game_logs", NEW, {"rows": _season_logs(NEW, okc_games=1)})
+    for base, (stream, *_rest) in DIET_STREAMS.items():
+        games = OPENING_WEEK_GAMES if stream in thin else 10
+        world.compose(stream, NEW, _diet_rows(base, NEW, 0.1, games=games))
+
+
+def _shares(body):
+    return [
+        (share["base"], share["share"], share["league_average_share"], share["diet_season"])
+        for share in body["players"][0]["shares"]
+    ]
+
+
+def test_a_thin_2026_27_diet_fits_on_last_seasons_share_labelled_2025_26(world):
+    target = world.saved_target()
+    _publish_thin_new_season(world)
+
+    body, _ = world.backtests().backtest(OWNER, target["id"], season=NEW)
+
+    assert (*_season(body), _fitting(body)) == (NEW, "requested", [bt.LEBRON])
+    assert _shares(body) == [("shot_zones", 0.42, 0.36, LAST)]
+    lebron = body["players"][0]
+    assert (lebron["season_games"], lebron["season_averages"]["PTS"]) == (5, 12.0)
+    assert [game["stats"]["PTS"] for game in lebron["games"]] == [12.0]
+    assert body["games_considered"] == {"played": 1, "kept": 1}
+
+
+def test_a_2026_27_share_that_is_not_thin_and_fails_never_falls_back(world):
+    target = world.saved_target()
+    _publish_thin_new_season(world, thin=())
+
+    body, _ = world.backtests().backtest(OWNER, target["id"], season=NEW)
+
+    assert _fitting(body) == []
+
+
+def test_a_player_thin_in_both_seasons_is_left_out(world):
+    for base, (stream, *_rest) in DIET_STREAMS.items():
+        world.compose(stream, LAST, _diet_rows(base, LAST, 0.42, games=OPENING_WEEK_GAMES))
+    target = world.saved_target()
+    _publish_thin_new_season(world)
+
+    body, _ = world.backtests().backtest(OWNER, target["id"], season=NEW)
+
+    assert _fitting(body) == []
+
+
+def test_each_diet_base_falls_back_on_its_own(world, monkeypatch):
+    # 2026-27 Transition 0.6 against Tatum's 0.3: a 0.45 baseline.
+    monkeypatch.setitem(OTHER_BASE_SHARE, NEW, 0.6)
+    target = world.users.create_target(OWNER, opponent="OKC", qualifiers=[CORNER_THREE, bt.TRANSITION])
+    _publish_thin_new_season(world, thin={"exact_shot_zones"})
+
+    body, _ = world.backtests().backtest(OWNER, target["id"], season=NEW)
+
+    assert _fitting(body) == [bt.LEBRON]
+    assert _shares(body) == [("shot_zones", 0.42, 0.36, LAST), ("play_types", 0.6, 0.45, NEW)]
+
+
+def test_a_2025_26_backtest_has_no_fallback_and_labels_every_share_2025_26(world):
+    target = world.users.create_target(OWNER, opponent="OKC", qualifiers=[CORNER_THREE, SCORES_TEN])
+    _publish_thin_new_season(world)
+
+    body, _ = world.backtests().backtest(OWNER, target["id"], season=LAST)
+
+    assert _shares(body) == [("shot_zones", 0.42, 0.36, LAST), ("season_average", None, None, None)]
+
+
+def test_a_2025_26_diet_revocation_is_never_served_from_a_2026_27_entry(world):
+    # Two 2025-26 shot-zone rows: 0.45 (baseline (0.45 + 0.30) / 2) over 0.42.
+    world.compose("exact_shot_zones", LAST, _diet_rows("shot_zones", LAST, 0.45))
+    target = world.saved_target()
+    _publish_thin_new_season(world)
+    service = world.backtests(redis_client=bt.FakeRedis())
+
+    first, first_state = service.backtest(OWNER, target["id"], season=NEW)
+    again, again_state = service.backtest(OWNER, target["id"], season=NEW)
+    world.revoke("exact_shot_zones", LAST)
+    revoked, revoked_state = service.backtest(OWNER, target["id"], season=NEW)
+    batch, _ = service.backtest_all(OWNER, season=NEW)
+
+    assert (first_state, again_state, revoked_state) == ("miss", "hit", "miss")
+    assert again == first
+    assert _shares(first) == [("shot_zones", 0.45, 0.375, LAST)]
+    assert _shares(revoked) == [("shot_zones", 0.42, 0.36, LAST)]
+    assert batch["backtests"] == [{"target_id": target["id"], "status": "ok", "backtest": revoked}]
+
+
+def test_a_2026_27_preview_fits_a_thin_diet_on_last_seasons_share(world):
+    _publish_thin_new_season(world)
+    draft = world.users.validate_target_draft(opponent="OKC", qualifiers=[CORNER_THREE], season=NEW)
+
+    body = TargetPreviewService(
+        backtests=world.backtests(),
+        resolutions=IdleTonight(),
+        matchups=object(),
+        injuries=None,
+        settings=world.settings,
+        publication_reader=world.reader,
+    ).preview(draft, season=NEW)
+
+    assert _fitting(body) == [bt.LEBRON]
+    assert _shares(body) == [("shot_zones", 0.42, 0.36, LAST)]
+
+
+@pytest.mark.parametrize(
+    ("last_games", "fitting"), [(10, [(bt.LEBRON, LAST)]), (OPENING_WEEK_GAMES, [])], ids=("fits", "thin")
+)
+def test_a_held_2026_27_backtest_judges_its_fallback_at_2025_26s_own_floor(world, last_games, fitting):
+    # The held season clears one game; 2025-26 still needs five.
+    for base, (stream, *_rest) in DIET_STREAMS.items():
+        world.compose(stream, LAST, _diet_rows(base, LAST, 0.42, games=last_games))
+    _hold_new_season(world)
+    # LeBron has no 2026-27 shot-zone share at all.
+    zones = _diet_rows("shot_zones", NEW, 0.5)
+    zones["rows"] = [row for row in zones["rows"] if row["player_id"] != bt.LEBRON]
+    world.compose("exact_shot_zones", NEW, zones, hold=True)
+    target = world.saved_target()
+
+    body, _ = world.backtests().backtest(OWNER, target["id"], season=NEW)
+
+    assert body["published_season"] == LAST
+    assert [
+        (player["canonical_id"], player["shares"][0]["diet_season"]) for player in body["players"]
+    ] == fitting
