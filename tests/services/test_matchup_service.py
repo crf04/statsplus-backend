@@ -1254,6 +1254,30 @@ def test_games_composed_for_one_request_read_each_slate_dates_windows_once():
     ]
 
 
+def test_games_composed_for_one_request_read_the_schedule_refresh_once():
+    class CountedEvents(RecordedEvents):
+        freshness_calls = 0
+
+        def get_freshness(self, season, *, now):
+            self.freshness_calls += 1
+            return super().get_freshness(season, now=now)
+
+    later = {**_event(), "nba_game_id": "0022500585", "scheduled_at": "2026-01-16T03:00:00+00:00"}
+    events = CountedEvents(events=[_event(), later])
+    service = _service(events=events)
+    compose_cache = MatchupComposeCache()
+
+    schedules = [
+        service.get_matchup_from_snapshot(
+            game_id=game_id, publication_snapshot=None, injuries=None, compose_cache=compose_cache
+        )["freshness"]["schedule"]
+        for game_id in (GAME_ID, "0022500585")
+    ]
+
+    assert events.freshness_calls == 1
+    assert schedules == [{"status": "fresh", "retrieved_at": "2026-01-15T10:00:00+00:00"}] * 2
+
+
 def test_missing_pool_and_stats_are_degraded_without_provider_fallback():
     payload = _service(
         pool=False,

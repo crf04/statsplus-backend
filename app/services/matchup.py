@@ -304,6 +304,9 @@ class MatchupComposeCache:
         default_factory=dict
     )
     diet_baselines: dict[Any, dict[tuple[str, str], Any]] = field(default_factory=dict)
+    #: The Event Catalog's refresh row per schedule season: every game of a
+    #: season reports the same schedule retrieval.
+    schedule_refreshes: dict[str, Mapping[str, Any]] = field(default_factory=dict)
 
 
 class EventCatalogReader(Protocol):
@@ -1070,7 +1073,10 @@ class MatchupService:
         # A game read as of its tip finds its own box score only in the newest capture.
         latest = getattr(publication_snapshot, "latest", None)
         schedule_freshness = self._schedule_freshness(
-            schedule_season, observed_at=observed_at, connection=connection
+            schedule_season,
+            observed_at=observed_at,
+            connection=connection,
+            cache=None if compose_cache is None else compose_cache.schedule_refreshes,
         )
 
         pool = (
@@ -1605,15 +1611,22 @@ class MatchupService:
         *,
         observed_at: datetime,
         connection: Connection | None = None,
+        cache: dict[str, Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        """``cache`` holds each season's refresh row for a caller composing many games."""
+
         if self.event_catalog is None:
             return {"status": "missing", "retrieved_at": None}
-        observed = call_with_read_scope(
-            self.event_catalog.get_freshness,
-            season,
-            now=observed_at,
-            connection=connection,
-        )
+        observed = None if cache is None else cache.get(season)
+        if observed is None:
+            observed = call_with_read_scope(
+                self.event_catalog.get_freshness,
+                season,
+                now=observed_at,
+                connection=connection,
+            )
+            if cache is not None:
+                cache[season] = observed
         retrieved_at = observed.get("last_success_at")
         if retrieved_at is None:
             return {"status": "missing", "retrieved_at": None}
