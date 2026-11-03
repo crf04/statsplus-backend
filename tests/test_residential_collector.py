@@ -1668,10 +1668,14 @@ def test_player_diet_job_retries_only_when_a_new_observation_is_accepted(tmp_pat
     assert state == ("succeeded", None, 1, 2)
     assert publication_id is not None
 
-    # A later accepted observation leaves a succeeded job and its publication alone.
+    # A later accepted observation recomposes a succeeded job; it is new
+    # input, not a retry, so the attempt count stays.
     deliver(rows(50), suffix="-retry")
-    assert _compose_queued_slice(engine) == 0
-    assert _composition_job(engine, "grouped_shot_types") == (("succeeded", None, 1, 2), publication_id)
+    assert _composition_job(engine, "grouped_shot_types") == (("queued", None, 1, 3), publication_id)
+    assert _compose_queued_slice(engine) == 1
+    (state, recomposed_id) = _composition_job(engine, "grouped_shot_types")
+    assert state == ("succeeded", None, 1, 3)
+    assert recomposed_id not in {None, publication_id}
 
 
 def test_player_shot_type_composer_refuses_a_missing_category_centrally(
