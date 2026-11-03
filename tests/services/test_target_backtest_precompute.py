@@ -781,3 +781,21 @@ def test_a_serving_season_advancing_after_the_position_read_cannot_mix_seasons(w
 
     # The next request serves 2026-27, where LeBron is a Wing and no Big fits.
     assert (later["season"], later_state, later["players"]) == (NEW, "miss", [])
+
+
+def test_a_2026_27_entry_precomputed_on_2025_26_shares_is_the_single_reads_hit(world, monkeypatch):
+    target = world.saved_target()
+    seasons._publish_thin_new_season(world)
+    service = world.backtests(redis_client=CountingRedis())
+
+    service.precompute(now=NOW)
+    with monkeypatch.context() as patched:
+        patched.setattr(service, "_backtest_stateful", lambda *a, **k: pytest.fail("computed"))
+        again = service.precompute(now=NOW)
+    body, state = service.backtest(OWNER, target["id"], season=NEW)
+    batch, _ = service.backtest_all(OWNER, season=NEW)
+
+    assert _without_duration(again) == _counts(seasons=[NEW, LAST], already_cached=2)
+    assert state == "hit"
+    assert seasons._shares(body) == [("shot_zones", 0.42, 0.36, LAST)]
+    assert batch["backtests"] == [{"target_id": target["id"], "status": "ok", "backtest": body}]
