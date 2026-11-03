@@ -1356,7 +1356,7 @@ def normalize_zone_response(
     totals = _player_zone_profile_rows(totals_response, value_mode="Totals")
     games = _player_games_played(games_response)
     if set(profile) != set(totals) or not set(profile) <= set(games):
-        raise ProviderContractError("provider_window_unverified")
+        raise ProviderContractError("value_invariant_failed")
 
     records: list[dict[str, Any]] = []
     for player_id in sorted(totals):
@@ -1487,14 +1487,16 @@ def _require_opponent_contract(
         games_played = record.get("games_played")
         if games_played is None:
             if require_games_played:
-                raise ProviderContractError("provider_window_unverified")
+                raise ProviderContractError("provider_schema_changed")
             continue
         if _number(games_played, integer=True) <= 0:
             raise ProviderContractError("value_invariant_failed")
         if require_minutes:
             minutes = record.get("minutes")
-            if minutes is None or _number(minutes) <= 0:
-                raise ProviderContractError("provider_window_unverified")
+            if minutes is None:
+                raise ProviderContractError("provider_schema_changed")
+            if _number(minutes) <= 0:
+                raise ProviderContractError("value_invariant_failed")
 
 
 # Friendly aliases used by compatibility probes and release tests.
