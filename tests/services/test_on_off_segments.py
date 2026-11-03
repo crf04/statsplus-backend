@@ -29,6 +29,7 @@ from app.services.lineup_segment_repository import (
 from app.services.lineup_segments import GameSegments, Segment, derive_segments
 from app.services.on_off import OnOffService
 from app.services.rotation_collection import RotationCollectionService
+from app.services.rotation_derivation import RotationRejected
 from app.services.rotation_repository import RotationRepository
 from scripts.lineup_segment_backfill import backfill
 from scripts.on_off_parity import load_games
@@ -53,7 +54,12 @@ def _box():
         }
 
     return {
-        "game": {"gameId": "0022500001", "homeTeam": team(BOS, "BOS", 1), "awayTeam": team(DEN, "DEN", 11)}
+        "game": {
+            "gameId": "0022500001",
+            "period": 1,
+            "homeTeam": team(BOS, "BOS", 1),
+            "awayTeam": team(DEN, "DEN", 11),
+        }
     }
 
 
@@ -283,6 +289,77 @@ def test_a_heave_with_no_shooter_is_a_player_less_heave_in_every_season():
     [segment] = _bos(derive_segments(_box(), play_by_play, "2026-27"))
 
     assert (segment.team_fga, segment.team_heaves, segment.counts[1]["fga"]) == (0, 1, 0)
+
+
+def _without_period_start(game, period):
+    broken = copy.deepcopy(game)
+    actions = broken["pbp"]["game"]["actions"]
+    actions.remove(
+        next(
+            a
+            for a in actions
+            if a["actionType"] == "period" and a.get("subType") == "start" and a["period"] == period
+        )
+    )
+    return broken
+
+
+def test_a_missing_period_start_action_still_gives_each_team_the_whole_game(bos_games):
+    game = _without_period_start(bos_games["0022500017"], 4)
+
+    segments = derive_segments(game["box"], game["pbp"], "2025-26").segments
+
+    for team_id in (BOS, 1610612765):
+        durations = [segment.duration_cs for segment in segments if segment.team_id == team_id]
+        assert (sum(durations), min(durations) >= 0) == (4 * 72000, True)
+    original = bos_games["0022500017"]
+    assert segments == derive_segments(original["box"], original["pbp"], "2025-26").segments
+
+
+def test_a_period_without_its_start_action_begins_at_its_first_action():
+    box = _box()
+    box["game"]["period"] = 2
+    play_by_play = _game(("2pt", "PT06M00.00S", {"teamId": BOS, "personId": 1, "shotResult": "Missed"}))
+    actions = play_by_play["game"]["actions"]
+    actions.append({**actions[1], "actionNumber": 4, "period": 2, "shotResult": "Made"})
+    actions.append({**actions[2], "actionNumber": 5, "period": 2})
+
+    segments = _bos(derive_segments(box, play_by_play, "2025-26"))
+
+    assert [
+        (segment.duration_cs, segment.counts[1]["fga"], segment.counts[1]["pts"]) for segment in segments
+    ] == [
+        (72000, 1, 0),
+        (72000, 1, 2),
+    ]
+
+
+def test_a_substitution_listed_after_a_later_one_rejects_the_game_instead_of_a_negative_segment():
+    play_by_play = _game(
+        ("substitution", "PT05M00.00S", {"teamId": BOS, "personId": 2, "subType": "out"}),
+        ("substitution", "PT05M00.00S", {"teamId": BOS, "personId": 6, "subType": "in"}),
+        ("2pt", "PT05M00.00S", {"teamId": BOS, "personId": 1, "shotResult": "Missed"}),
+        ("substitution", "PT06M00.00S", {"teamId": BOS, "personId": 6, "subType": "out"}),
+        ("substitution", "PT06M00.00S", {"teamId": BOS, "personId": 2, "subType": "in"}),
+        ("2pt", "PT04M00.00S", {"teamId": BOS, "personId": 1, "shotResult": "Made"}),
+    )
+
+    with pytest.raises(RotationRejected, match=f"team {BOS} segment from 42000 cs ends earlier, at 36000 cs"):
+        derive_segments(_box(), play_by_play, "2025-26")
+
+
+def test_an_action_past_the_box_scores_last_period_rejects_the_game(tmp_path, bos_games):
+    game = copy.deepcopy(bos_games["0022500017"])
+    actions = game["pbp"]["game"]["actions"]
+    actions.append({**actions[-1], "actionNumber": actions[-1]["actionNumber"] + 1, "period": 5})
+    engine = _engine(tmp_path)
+
+    result = _collection(engine, {"0022500017": game}).collect("2025-26", game_ids=["0022500017"])
+
+    assert result["rejected"] == [
+        {"game_id": "0022500017", "reason": "action in period 5 of a 4-period game"}
+    ]
+    assert _dump(engine)["lineup_segment_players"] == []
 
 
 # -- writes ---------------------------------------------------------------------

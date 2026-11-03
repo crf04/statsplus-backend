@@ -28,6 +28,12 @@ match PBP Stats WOWY (the prototype in the parent issue measured them):
 
 Only the five on-floor players get counts; a count credited to a player not
 in the segment's lineup is dropped, as a WOWY split drops it.
+
+Periods come from the final box score's period count, and a period begins at
+its first action whether or not the feed has its start action.  A game with
+an action past its last period, or a segment that runs backwards (so the
+segments would not last the game exactly), is :class:`RotationRejected`: it
+has no segments rather than wrong ones.
 """
 
 from __future__ import annotations
@@ -122,6 +128,7 @@ def derive_segments(box: Mapping[str, Any], play_by_play: Mapping[str, Any], sea
     """Both teams' segments for a game ``derive_rotation`` accepted."""
 
     game = box["game"]
+    periods = int(game["period"])
     actions: Sequence[Mapping[str, Any]] = play_by_play["game"]["actions"]
     team_of: dict[int, int] = {}
     names: dict[int, str] = {}
@@ -165,6 +172,13 @@ def derive_segments(box: Mapping[str, Any], play_by_play: Mapping[str, Any], sea
     for action in actions:
         action_type = action["actionType"]
         action_period = int(action["period"])
+        if action_period > periods:
+            raise RotationRejected(f"action in period {action_period} of a {periods}-period game")
+        if action_period > period:
+            for team_id in sides:
+                current[team_id].end_cs = period_start_cs(action_period)
+                open_segment(team_id, period_start_cs(action_period))
+            period = action_period
         moment = (
             period_start_cs(action_period) + period_length_cs(action_period) - parse_clock_cs(action["clock"])
         )
@@ -179,11 +193,6 @@ def derive_segments(box: Mapping[str, Any], play_by_play: Mapping[str, Any], sea
             at_action.append(dict(current))
             at_foul.append(None)
             continue
-        if action_type == "period" and action.get("subType") == "start" and action_period != period:
-            for team_id in sides:
-                current[team_id].end_cs = period_start_cs(action_period)
-                open_segment(team_id, period_start_cs(action_period))
-            period = action_period
         for team_id in sides:
             if frozenset(on[team_id]) != current[team_id].players:
                 current[team_id].end_cs = changed_at[team_id]
@@ -200,9 +209,10 @@ def derive_segments(box: Mapping[str, Any], play_by_play: Mapping[str, Any], sea
         at_action.append(lineups)
         at_foul.append(trip_lineups)
         _count(action, lineups, trip_lineups, heave_shooters_count)
-    end = period_start_cs(period) + period_length_cs(period)
+    end = period_start_cs(periods) + period_length_cs(periods)
     for team_id in sides:
         current[team_id].end_cs = end
+        _require_forward(team_id, segments[team_id])
 
     for index, offense in _counted_possessions(actions, other):
         lineups = at_action[index]
@@ -242,6 +252,18 @@ def derive_segments(box: Mapping[str, Any], play_by_play: Mapping[str, Any], sea
         names=names,
         segments=tuple(stored),
     )
+
+
+def _require_forward(team_id: int, segments: Sequence[_Open]) -> None:
+    """Each segment opens where the one before it closed, the first at 0 and
+    the last closing at the game's end, so they last the whole game exactly
+    when none runs backwards."""
+
+    for segment in segments:
+        if segment.end_cs < segment.start_cs:
+            raise RotationRejected(
+                f"team {team_id} segment from {segment.start_cs} cs ends earlier, at {segment.end_cs} cs"
+            )
 
 
 def _same_moment(first: Mapping[str, Any], second: Mapping[str, Any]) -> bool:
