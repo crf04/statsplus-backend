@@ -1651,6 +1651,7 @@ class MatchupService:
         publication_snapshot=None,
         connection: Connection | None = None,
         cache: dict[tuple[Any, str, int | None, date | None], TeamMatchupWindow | None] | None = None,
+        governance=None,
     ) -> TeamMatchupWindow | None:
         """Read one Defense Sheet window.
 
@@ -1682,6 +1683,7 @@ class MatchupService:
             as_of=as_of,
             publication_snapshot=publication_snapshot,
             connection=connection,
+            **({} if governance is None else {"governance": governance}),
         )
         if cache is not None:
             cache[key] = window
@@ -1706,6 +1708,10 @@ class MatchupService:
         """
 
         cache = None if compose_cache is None else compose_cache.windows
+        # Both windows are governed by the same manifests: one request-scoped
+        # governance source reads each manifest once for the two.
+        request_governance = getattr(self.team_matchups, "request_governance", None)
+        governance = request_governance(connection) if callable(request_governance) else None
         windows = {
             name: self._team_window(
                 season,
@@ -1714,6 +1720,7 @@ class MatchupService:
                 publication_snapshot=publication_snapshot,
                 connection=connection,
                 cache=cache,
+                governance=governance,
             )
             for name, window_games in (("season", None), ("last_15", 15))
         }

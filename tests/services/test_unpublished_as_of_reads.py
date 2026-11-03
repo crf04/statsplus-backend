@@ -291,6 +291,26 @@ def test_a_past_game_skips_a_refused_version_for_the_next_older_one(world):
     assert _served(_matchup(world), SEASON_STREAM)[SEASON_STREAM][2] == opening_week.publication_id
 
 
+def test_a_past_game_skips_a_version_whose_ledger_lineage_is_withdrawn_for_the_next_older_one(world):
+    opening_week, ten_games = _hold_a_week_then_ten_games(world)
+    judge = world.publications.season_candidate_lineage_refusals
+
+    def withdrawn(session, candidates):
+        refusals = judge(session, candidates)
+        return {
+            publication_id: "ledger_provenance_not_accepted"
+            if publication_id == ten_games.publication_id
+            else refusal
+            for publication_id, refusal in refusals.items()
+        }
+
+    world.publications.season_candidate_lineage_refusals = withdrawn
+    # Tipped after the ten-game composition was cut.
+    _game_at(world, TIPPED)
+
+    assert _served(_matchup(world), SEASON_STREAM)[SEASON_STREAM][2] == opening_week.publication_id
+
+
 def test_todays_game_never_falls_back_to_an_older_version_when_the_newest_is_refused(world):
     _opening_week, ten_games = _hold_a_week_then_ten_games(world)
     _corrupt(world, ten_games)

@@ -7100,22 +7100,38 @@ class PublicationService(_SessionService):
         """Validate exact accepted canonical-game evidence for a ledger write."""
         if not provenance:
             raise ControlPlaneError("ledger_provenance_required")
-        rows = list(
-            session.scalars(
-                select(CollectionObservation).where(
-                    CollectionObservation.observation_id.in_(tuple(provenance)),
-                )
+        # Only the evidence's identity is judged, never its payload.
+        rows = session.execute(
+            select(
+                CollectionObservation.observation_id,
+                CollectionObservation.manifest_id,
+                CollectionObservation.provider,
+                CollectionObservation.observation_type,
+                CollectionObservation.scope,
+                CollectionObservation.season,
+                CollectionObservation.cutoff,
+                CollectionObservation.schema_version,
+                CollectionObservation.retrieved_at,
+                CollectionObservation.accepted_at,
+            ).where(
+                CollectionObservation.observation_id.in_(tuple(provenance)),
             )
-        )
+        ).all()
         if {row.observation_id for row in rows} != set(provenance):
             raise ControlPlaneError("ledger_provenance_not_accepted")
         # Each game's evidence is judged by the manifest that accepted it:
         # one of this season's ledger manifests, from this cutoff or an
         # earlier night, collected before that manifest's own deadline.
-        manifests = {
-            manifest_key: session.get(CollectionManifest, manifest_key) if manifest_key else None
-            for manifest_key in {row.manifest_id for row in rows}
+        manifest_keys = {row.manifest_id for row in rows}
+        found = {
+            manifest.manifest_id: manifest
+            for manifest in session.scalars(
+                select(CollectionManifest).where(
+                    CollectionManifest.manifest_id.in_(tuple(key for key in manifest_keys if key))
+                )
+            )
         }
+        manifests = {manifest_key: found.get(manifest_key) for manifest_key in manifest_keys}
         for manifest in manifests.values():
             if (
                 manifest is None
@@ -7149,7 +7165,16 @@ class PublicationService(_SessionService):
             (str(game_id), str(observation_id)) for observation_id, game_id in provenance.items()
         }
         game_ids = tuple(sorted({game_id for game_id, _ in expected_pairs}))
-        observation_ids = tuple(sorted({observation_id for _, observation_id in expected_pairs}))
+        # Each game with whether the ledger recorded its current source
+        # observation as evidence of that game.
+        evidenced = (
+            select(LedgerObservationEvidence.game_id)
+            .where(
+                LedgerObservationEvidence.game_id == CanonicalGameLedgerGame.game_id,
+                LedgerObservationEvidence.observation_id == CanonicalGameLedgerGame.source_observation_id,
+            )
+            .exists()
+        )
         games = session.execute(
             select(
                 CanonicalGameLedgerGame.game_id,
@@ -7157,34 +7182,28 @@ class PublicationService(_SessionService):
                 CanonicalGameLedgerGame.game_date,
                 CanonicalGameLedgerGame.home_team_id,
                 CanonicalGameLedgerGame.away_team_id,
+                evidenced.label("evidenced"),
             ).where(CanonicalGameLedgerGame.game_id.in_(game_ids))
         ).all()
         current_pairs = {(str(game.game_id), str(game.source_observation_id)) for game in games}
-        evidence_pairs = {
-            (str(game_id), str(observation_id))
-            for game_id, observation_id in session.execute(
-                select(
-                    LedgerObservationEvidence.game_id,
-                    LedgerObservationEvidence.observation_id,
-                ).where(
-                    LedgerObservationEvidence.game_id.in_(game_ids),
-                    LedgerObservationEvidence.observation_id.in_(observation_ids),
-                )
-            )
-        }
-        if current_pairs != expected_pairs or not expected_pairs <= evidence_pairs:
+        if current_pairs != expected_pairs or not all(game.evidenced for game in games):
             raise ControlPlaneError("ledger_provenance_not_accepted")
         # Every game, whichever night accepted it, must be the game the
-        # composing manifest's Event Catalog lists.
+        # composing manifest's Event Catalog lists.  The catalog is held with
+        # its payload, so the authority check verifies the very payload the
+        # games are read from, downloaded once.
+        catalog = (
+            session.get(CatalogPublication, composing.event_catalog_publication_id)
+            if composing.event_catalog_publication_id
+            else None
+        )
         try:
-            authority = resolve_publication_authority(
+            resolve_publication_authority(
                 session, season=season, cutoff=cutoff, manifest_id=composing.manifest_id
             )
         except PublicationGovernanceUnavailable as error:
             raise ControlPlaneError("event_catalog_required") from error
-        governed = _catalog_game_identities(
-            session.get(CatalogPublication, authority.event_catalog_publication_id).payload, cutoff
-        )
+        governed = _catalog_game_identities(catalog.payload, cutoff)
         for game in games:
             if governed.get(str(game.game_id)) != (game.game_date, game.home_team_id, game.away_team_id):
                 raise ControlPlaneError("ledger_provenance_catalog_mismatch")
@@ -7709,8 +7728,28 @@ class PublicationService(_SessionService):
     def _candidate_ledger_lineage(session: Session, candidate: PublicationVersion) -> dict[str, str]:
         """A ledger candidate's recorded ``{observation_id: game_id}``."""
 
+        provenance = PublicationService._candidate_ledger_lineages(session, [candidate.publication_id])[
+            candidate.publication_id
+        ]
+        if provenance is None:
+            raise ControlPlaneError("ledger_provenance_not_accepted")
+        return provenance
+
+    @staticmethod
+    def _candidate_ledger_lineages(
+        session: Session, publication_ids: Sequence[str]
+    ) -> dict[str, dict[str, str] | None]:
+        """Each ledger candidate's recorded ``{observation_id: game_id}``, by publication ID.
+
+        ``None`` for a candidate that recorded a game without its game ID.
+        """
+
+        lineages: dict[str, dict[str, str] | None] = {
+            publication_id: {} for publication_id in publication_ids
+        }
         lineage_rows = session.execute(
             select(
+                PublicationObservation.publication_id,
                 PublicationObservation.observation_id,
                 PublicationObservation.slice_key,
                 CollectionObservation.scope,
@@ -7720,7 +7759,7 @@ class PublicationService(_SessionService):
                 CollectionObservation.observation_id == PublicationObservation.observation_id,
             )
             .where(
-                PublicationObservation.publication_id == candidate.publication_id,
+                PublicationObservation.publication_id.in_(tuple(lineages)),
                 PublicationObservation.role.in_(
                     (
                         "completeness_evidence",
@@ -7729,14 +7768,17 @@ class PublicationService(_SessionService):
                 ),
             )
         ).all()
-        provenance = {}
-        for observation_id, slice_key, scope_json in lineage_rows:
+        for publication_id, observation_id, slice_key, scope_json in lineage_rows:
+            provenance = lineages[str(publication_id)]
+            if provenance is None:
+                continue
             scope = _safe_json_mapping(scope_json)
             game_id = str(slice_key or scope.get("game_id") or "")
             if not game_id:
-                raise ControlPlaneError("ledger_provenance_not_accepted")
+                lineages[str(publication_id)] = None
+                continue
             provenance[str(observation_id)] = game_id
-        return provenance
+        return lineages
 
     def _cutover_refusal(
         self,
@@ -7805,7 +7847,7 @@ class PublicationService(_SessionService):
         ``player_game_logs`` candidate's manifest and Event Catalog); without
         it the candidate is judged on its own, as an Unpublished Season read
         judges it (crf04/statsplus#330).  Without ``ledger_lineage`` the
-        verdict leaves out ``season_candidate_lineage_refusal``, the one check
+        verdict leaves out ``season_candidate_lineage_refusals``, the one check
         a later ledger correction can change, so it holds for the publication.
         Without ``readiness_rule`` it leaves out the Readiness Rule: a reader
         who selects the season judges its sample (crf04/statsplus#386).
@@ -7826,22 +7868,51 @@ class PublicationService(_SessionService):
             return error.reason
         return None
 
-    def season_candidate_lineage_refusal(
-        self, session: Session, stream: PublicationStream, candidate: PublicationVersion
-    ) -> str | None:
-        """Why a ledger candidate's games are no longer the ledger's accepted evidence, or ``None``.
+    def season_candidate_lineage_refusals(
+        self, session: Session, candidates: Sequence[tuple[PublicationStream, PublicationVersion]]
+    ) -> dict[str, str | None]:
+        """Why each ledger candidate's games are no longer the ledger's accepted evidence, by publication ID.
 
         The ledger replaces a corrected game's source observation in place, so
-        this can refuse a candidate whose other checks passed.
+        this can refuse a candidate whose other checks passed.  Candidates
+        that record the same games under the same manifest and cutoff share
+        one verdict, judged once.
         """
 
-        if stream.provider != "ledger":
-            return None
-        try:
-            self._assert_candidate_ledger_lineage(session, candidate)
-        except ControlPlaneError as error:
-            return error.reason
-        return None
+        refusals: dict[str, str | None] = {
+            candidate.publication_id: None for _stream, candidate in candidates
+        }
+        ledger = [candidate for stream, candidate in candidates if stream.provider == "ledger"]
+        lineages = self._candidate_ledger_lineages(
+            session, [candidate.publication_id for candidate in ledger]
+        )
+        verdicts: dict[tuple[str, datetime, str | None, frozenset[tuple[str, str]]], str | None] = {}
+        for candidate in ledger:
+            provenance = lineages[candidate.publication_id]
+            if provenance is None:
+                refusals[candidate.publication_id] = "ledger_provenance_not_accepted"
+                continue
+            lineage = (
+                candidate.season,
+                _aware(candidate.cutoff),
+                candidate.manifest_id,
+                frozenset(provenance.items()),
+            )
+            if lineage not in verdicts:
+                try:
+                    self._assert_ledger_provenance(
+                        session,
+                        season=candidate.season,
+                        cutoff=_aware(candidate.cutoff),
+                        provenance=provenance,
+                        manifest_id=candidate.manifest_id,
+                    )
+                except ControlPlaneError as error:
+                    verdicts[lineage] = error.reason
+                else:
+                    verdicts[lineage] = None
+            refusals[candidate.publication_id] = verdicts[lineage]
+        return refusals
 
     def _assert_cutover_candidate(
         self,
