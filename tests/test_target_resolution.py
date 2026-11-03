@@ -520,6 +520,8 @@ def test_a_live_target_lists_the_opposing_pool_members_meeting_the_qualifier(tar
         "posted_markets": ["PTS"],
         "injury_badge_ref": None,
         "season_scoring": 20.0,
+        # This resolver has no season-log reader, so no stat has a value.
+        "season_averages": {"PTS": None, "PTS/36": None, "3PA": None, "3PA/36": None},
         "thin": False,
         "shares": [
             {
@@ -856,6 +858,7 @@ def test_an_idle_opponent_has_no_game_and_no_players(targets, resolve):
     assert resolved == {
         "target": created,
         "game": None,
+        "stat_columns": ["PTS", "PTS/36", "3PA", "3PA/36"],
         "context": [],
         "availability": {
             "status": "unavailable",
@@ -2477,6 +2480,12 @@ def test_each_fit_carries_its_position_and_a_diet_only_fit_is_otherwise_unchange
         "posted_markets": ["PTS"],
         "injury_badge_ref": None,
         "season_scoring": 22.0,
+        "season_averages": {
+            "PTS": 30.0,
+            "PTS/36": pytest.approx(31.7647, abs=1e-4),
+            "3PA": 8.0,
+            "3PA/36": pytest.approx(8.4706, abs=1e-4),
+        },
         "thin": False,
         "shares": [
             {"base": "shot_zones", "slice_key": "Corner 3", "share": 0.4, "league_average_share": 0.2}
@@ -2549,3 +2558,46 @@ def test_without_the_readers_no_player_has_a_position_or_a_judged_average(target
     assert [player["position"] for player in resolved[diet["title"]]["players"]] == [None, None]
     assert resolved[big["title"]]["players"] == []
     assert resolved[average["title"]]["players"] == []
+
+
+# --- The Target's own stats on each fit -------------------------------------
+
+
+def test_a_fit_carries_the_targets_default_stat_columns_not_only_points(targets, resolve_rules):
+    created = _create(targets, qualifiers=[CORNER_THREE])
+
+    entry = resolve_rules()[created["title"]]
+
+    assert entry["stat_columns"] == ["PTS", "PTS/36", "3PA", "3PA/36"]
+    assert [(p["name"], p["season_averages"]["3PA"]) for p in entry["players"]] == [
+        ("Corner Sniper", 8.0),
+        ("Unlisted Guy", 9.0),
+    ]
+
+
+def test_a_saved_stat_choice_names_the_columns_each_fit_carries(targets, resolve_rules):
+    created = targets.create_target(
+        OWNER,
+        opponent="OKC",
+        qualifiers=[CORNER_THREE],
+        stat_preferences={"columns": ["AST", "3PA"], "graded_by": "3PA"},
+    )
+
+    entry = resolve_rules()[created["title"]]
+
+    assert entry["stat_columns"] == ["AST", "3PA"]
+    assert [p["season_averages"] for p in entry["players"]] == [
+        {"AST": 9.0, "3PA": 8.0},
+        {"AST": 9.0, "3PA": 9.0},
+    ]
+
+
+def test_a_fit_with_no_season_log_has_null_stats(targets, resolve_rules):
+    created = _create(targets, qualifiers=[CORNER_THREE])
+
+    entry = resolve_rules(with_logs=False)[created["title"]]
+
+    assert [p["season_averages"] for p in entry["players"]] == [
+        {"PTS": None, "PTS/36": None, "3PA": None, "3PA/36": None},
+        {"PTS": None, "PTS/36": None, "3PA": None, "3PA/36": None},
+    ]
