@@ -7724,8 +7724,28 @@ class PublicationService(_SessionService):
     def _candidate_ledger_lineage(session: Session, candidate: PublicationVersion) -> dict[str, str]:
         """A ledger candidate's recorded ``{observation_id: game_id}``."""
 
+        provenance = PublicationService._candidate_ledger_lineages(session, [candidate.publication_id])[
+            candidate.publication_id
+        ]
+        if provenance is None:
+            raise ControlPlaneError("ledger_provenance_not_accepted")
+        return provenance
+
+    @staticmethod
+    def _candidate_ledger_lineages(
+        session: Session, publication_ids: Sequence[str]
+    ) -> dict[str, dict[str, str] | None]:
+        """Each ledger candidate's recorded ``{observation_id: game_id}``, by publication ID.
+
+        ``None`` for a candidate that recorded a game without its game ID.
+        """
+
+        lineages: dict[str, dict[str, str] | None] = {
+            publication_id: {} for publication_id in publication_ids
+        }
         lineage_rows = session.execute(
             select(
+                PublicationObservation.publication_id,
                 PublicationObservation.observation_id,
                 PublicationObservation.slice_key,
                 CollectionObservation.scope,
@@ -7735,7 +7755,7 @@ class PublicationService(_SessionService):
                 CollectionObservation.observation_id == PublicationObservation.observation_id,
             )
             .where(
-                PublicationObservation.publication_id == candidate.publication_id,
+                PublicationObservation.publication_id.in_(tuple(lineages)),
                 PublicationObservation.role.in_(
                     (
                         "completeness_evidence",
@@ -7744,14 +7764,17 @@ class PublicationService(_SessionService):
                 ),
             )
         ).all()
-        provenance = {}
-        for observation_id, slice_key, scope_json in lineage_rows:
+        for publication_id, observation_id, slice_key, scope_json in lineage_rows:
+            provenance = lineages[str(publication_id)]
+            if provenance is None:
+                continue
             scope = _safe_json_mapping(scope_json)
             game_id = str(slice_key or scope.get("game_id") or "")
             if not game_id:
-                raise ControlPlaneError("ledger_provenance_not_accepted")
+                lineages[str(publication_id)] = None
+                continue
             provenance[str(observation_id)] = game_id
-        return provenance
+        return lineages
 
     def _cutover_refusal(
         self,
@@ -7852,16 +7875,18 @@ class PublicationService(_SessionService):
         one verdict, judged once.
         """
 
-        refusals: dict[str, str | None] = {}
+        refusals: dict[str, str | None] = {
+            candidate.publication_id: None for _stream, candidate in candidates
+        }
+        ledger = [candidate for stream, candidate in candidates if stream.provider == "ledger"]
+        lineages = self._candidate_ledger_lineages(
+            session, [candidate.publication_id for candidate in ledger]
+        )
         verdicts: dict[tuple[str, datetime, str | None, frozenset[tuple[str, str]]], str | None] = {}
-        for stream, candidate in candidates:
-            refusals[candidate.publication_id] = None
-            if stream.provider != "ledger":
-                continue
-            try:
-                provenance = self._candidate_ledger_lineage(session, candidate)
-            except ControlPlaneError as error:
-                refusals[candidate.publication_id] = error.reason
+        for candidate in ledger:
+            provenance = lineages[candidate.publication_id]
+            if provenance is None:
+                refusals[candidate.publication_id] = "ledger_provenance_not_accepted"
                 continue
             lineage = (
                 candidate.season,
