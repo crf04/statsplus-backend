@@ -1218,23 +1218,6 @@ class TeamMatchupRepository:
             observations=tuple(_observation_from_row(row) for row in observation_rows),
         )
 
-    def get_observations(
-        self,
-        scope: TeamMatchupSnapshotScope,
-        *,
-        connection: Connection | None = None,
-    ) -> tuple[StoredTeamMatchupObservation, ...]:
-        """Read one scope's surface observations without its facts."""
-
-        table = TeamMatchupSurfaceObservationRow.__table__
-        with read_connection(self.engine, connection) as connection:
-            rows = (
-                connection.execute(select(table).where(*self._scope(table, scope)).order_by(table.c.surface))
-                .mappings()
-                .all()
-            )
-        return tuple(_observation_from_row(row) for row in rows)
-
     def get_metric_facts(
         self,
         fact_scopes: Mapping[str, TeamMatchupSnapshotScope],
@@ -1293,6 +1276,41 @@ class TeamMatchupRepository:
         if latest_as_of is None:
             return None
         return TeamMatchupSnapshotScope(season, latest_as_of, window_games)
+
+    def get_latest_observations(
+        self,
+        season: str,
+        *,
+        window_games: int | None = None,
+        as_of: date,
+        connection: Connection | None = None,
+    ) -> tuple[TeamMatchupSnapshotScope | None, tuple[StoredTeamMatchupObservation, ...]]:
+        """Return the newest observation scope through ``as_of`` with its observations.
+
+        One statement: the scope lookup is a subquery of the observation read.
+        """
+
+        requested = TeamMatchupSnapshotScope(season, as_of, window_games)
+        table = TeamMatchupSurfaceObservationRow.__table__
+        conditions = (
+            table.c.season == season,
+            table.c.window_kind == requested.window_kind,
+            table.c.window_games == requested.stored_window_games,
+        )
+        latest_as_of = (
+            select(func.max(table.c.as_of_date))
+            .where(*conditions, table.c.as_of_date <= as_of)
+            .scalar_subquery()
+        )
+        statement = (
+            select(table).where(*conditions, table.c.as_of_date == latest_as_of).order_by(table.c.surface)
+        )
+        with read_connection(self.engine, connection) as connection:
+            rows = connection.execute(statement).mappings().all()
+        if not rows:
+            return None, ()
+        scope = TeamMatchupSnapshotScope(season, rows[0]["as_of_date"], window_games)
+        return scope, tuple(_observation_from_row(row) for row in rows)
 
     def get_latest_fact_scopes(
         self,
