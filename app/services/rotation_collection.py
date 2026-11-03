@@ -5,7 +5,8 @@ that has no stored rotation, fetch the LiveData box score and play-by-play,
 derive the rotation and store it whole (crf04/statsplus#223).  One game never
 blocks another:
 
-* ``stored``: derived, validated and written (a rerun rewrites identical rows);
+* ``stored``: derived, validated and written with its lineup segments
+  (crf04/statsplus#410; a rerun rewrites identical rows);
 * ``rejected``: the documents were read but do not yield a trustworthy
   rotation, so nothing was stored; reported with the reason and remembered.
   After :data:`MAX_REJECTIONS` rejections a game is ``given_up`` (listed in
@@ -33,6 +34,7 @@ from app.domain.nba_events import (
 )
 from app.errors import sanitize_public_value
 from app.models.rotation import MAX_REJECTIONS
+from app.services.lineup_segments import derive_segments
 from app.services.rotation_derivation import RotationRejected, derive_rotation
 from app.utils.telemetry import ProviderResponseError
 
@@ -71,13 +73,7 @@ class RotationCollectionService:
 
         stored = self.repository.stored_game_ids(season)
         attempts = self.repository.attempts(season)
-        eligible = [
-            str(event["nba_game_id"])
-            for event in sorted(self.events(season), key=lambda event: str(event["scheduled_at"]))
-            if is_completed_non_postponed_event(event)
-            and player_game_log_season_type(event) == REGULAR_SEASON_TYPE
-            and str(event["nba_game_id"]) not in stored
-        ]
+        eligible = [game_id for game_id in self.completed_game_ids(season) if game_id not in stored]
         given_up = [
             {
                 "game_id": game_id,
@@ -94,6 +90,16 @@ class RotationCollectionService:
             key=lambda game_id: (str(attempts[game_id]["last_attempt_at"]) if game_id in attempts else "")
         )
         return pending, given_up
+
+    def completed_game_ids(self, season: str) -> list[str]:
+        """The season's completed, non-postponed regular-season games, oldest first."""
+
+        return [
+            str(event["nba_game_id"])
+            for event in sorted(self.events(season), key=lambda event: str(event["scheduled_at"]))
+            if is_completed_non_postponed_event(event)
+            and player_game_log_season_type(event) == REGULAR_SEASON_TYPE
+        ]
 
     def collect(
         self,
@@ -136,12 +142,15 @@ class RotationCollectionService:
                 continue
             try:
                 rotation = derive_rotation(box, play_by_play)
+                segments = derive_segments(box, play_by_play, season)
             except (RotationRejected, KeyError, TypeError, ValueError) as error:
                 logger.warning("rotation rejected for %s: %s", game_id, error)
                 rejected.append({"game_id": game_id, "reason": str(error)})
-                self.repository.record_attempt(season, game_id, "rejected", str(error), self._clock())
+                self.repository.record_attempt(
+                    season, game_id, "rejected", str(error), self._clock(), team_ids=_team_ids(box)
+                )
                 continue
-            self.repository.replace_game(season, rotation, self._clock())
+            self.repository.replace_game(season, rotation, self._clock(), segments)
             stored.append(game_id)
         return {
             "season": season,
@@ -154,6 +163,16 @@ class RotationCollectionService:
             "given_up": given_up,
             "remaining": len(pending) - len(batch),
         }
+
+
+def _team_ids(box: Any) -> tuple[int, int] | None:
+    """The box score's (home, away) team ids, when it names both."""
+
+    try:
+        game = box["game"]
+        return int(game["homeTeam"]["teamId"]), int(game["awayTeam"]["teamId"])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 __all__ = ["RotationCollectionService"]
