@@ -59,19 +59,30 @@ def plane(tmp_path):
         clock=lambda: NOW + timedelta(seconds=next(ticks)),
     )
 
-    def deliver(*, suffix="", categories=PLAY_TYPES, share=0.01, ambiguous=False):
+    def deliver(*, suffix="", categories=PLAY_TYPES, share=0.01, ambiguous=False, games=20, teammate=False):
         receipts = []
         for category in categories:
             rows = [
                 {
                     "PLAYER_ID": 2544,
                     "TEAM_ID": 1610612737,
-                    "GP": 20,
+                    "GP": games,
                     "POSS": 1,
                     "POSS_PCT": share,
                     "PLAY_TYPE": category,
                 }
             ]
+            if teammate:
+                rows.append(
+                    {
+                        "PLAYER_ID": 201939,
+                        "TEAM_ID": 1610612737,
+                        "GP": 7,
+                        "POSS": 1,
+                        "POSS_PCT": share,
+                        "PLAY_TYPE": category,
+                    }
+                )
             if ambiguous:
                 rows += [
                     {
@@ -194,6 +205,41 @@ def test_synergy_ingestion_queue_publication_profile_and_replay(plane):
 
     with pytest.raises(ResourceNotFoundError):
         service.get_player_profile("Withheld Player", "Playtypes")
+
+
+def _active_synergy_payload(engine):
+    with Session(engine) as session:
+        pointer = session.get(PublicationPointer, "synergy_play_types")
+        return json.loads(session.get(PublicationVersion, pointer.active_publication_id).payload)
+
+
+def test_synergy_recomposes_a_withheld_player_once_the_lagging_play_type_catches_up(plane):
+    # The 2026-11-03 collection read one player's Isolation through 6 games
+    # and every other play type through 7, so the player was withheld.  The
+    # re-collection later that morning read Isolation through 7.
+    engine, _, _, deliver = plane
+    deliver(
+        categories=[category for category in PLAY_TYPES if category != "Isolation"], games=7, teammate=True
+    )
+    deliver(categories=("Isolation",), games=6, teammate=True)
+    assert _compose_queued_slice(engine) == 1
+    payload = _active_synergy_payload(engine)
+    assert payload["withheld_players"] == [{"player_id": 2544, "reason": "inconsistent team games played"}]
+    assert {row["player_id"] for row in payload["rows"]} == {201939}
+
+    deliver(suffix="-recollected", categories=("Isolation",), games=7, teammate=True)
+    assert _compose_queued_slice(engine) == 1
+
+    payload = _active_synergy_payload(engine)
+    assert payload["withheld_players"] == []
+    assert {(row["player_id"], row["slice_key"], row["games_played"]) for row in payload["rows"]} == {
+        (player_id, category, 7) for player_id in (2544, 201939) for category in PLAY_TYPES
+    }
+    with Session(engine) as session:
+        job = session.scalars(
+            select(CompositionJob).where(CompositionJob.stream_key == "synergy_play_types")
+        ).one()
+        assert (job.status, job.attempts, job.generation) == ("succeeded", 0, 2)
 
 
 def test_synergy_latest_per_category_retry_preserves_all_eleven(plane):
