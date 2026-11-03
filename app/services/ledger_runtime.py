@@ -361,9 +361,26 @@ class ActiveManifestLedgerGovernanceReader:
                 if require_collection_authorization
                 else True
             )
-            manifest_query = select(CollectionManifest).where(
-                CollectionManifest.season == season,
-                CollectionManifest.cutoff == cutoff,
+            # The bound Event Catalog's identity rides along, so a catalog whose
+            # parsed events are already held needs no read of its own.
+            catalog_table = CatalogPublication.__table__
+            manifest_query = (
+                select(
+                    CollectionManifest,
+                    *(
+                        column.label(f"catalog_{column.name}")
+                        for column in catalog_table.c
+                        if column is not catalog_table.c.payload
+                    ),
+                )
+                .outerjoin(
+                    catalog_table,
+                    catalog_table.c.publication_id == CollectionManifest.event_catalog_publication_id,
+                )
+                .where(
+                    CollectionManifest.season == season,
+                    CollectionManifest.cutoff == cutoff,
+                )
             )
             if manifest_id is not None:
                 manifest_query = manifest_query.where(
@@ -446,19 +463,31 @@ class ActiveManifestLedgerGovernanceReader:
             if parsed is not None:
                 self._catalog_events.move_to_end(key)
         table = CatalogPublication.__table__
-        catalog = (
-            connection.execute(
-                select(
-                    *(column for column in table.c if parsed is None or column is not table.c.payload)
-                ).where(
-                    CatalogPublication.publication_id == publication_id,
-                )
+        if parsed is not None and "catalog_publication_id" in manifest:
+            # ``_read`` joined the catalog's identity onto the manifest row.
+            catalog = (
+                {
+                    column.name: manifest[f"catalog_{column.name}"]
+                    for column in table.c
+                    if column is not table.c.payload
+                }
+                if manifest["catalog_publication_id"] is not None
+                else None
             )
-            .mappings()
-            .one_or_none()
-            if publication_id
-            else None
-        )
+        else:
+            catalog = (
+                connection.execute(
+                    select(
+                        *(column for column in table.c if parsed is None or column is not table.c.payload)
+                    ).where(
+                        CatalogPublication.publication_id == publication_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+                if publication_id
+                else None
+            )
         if catalog is None:
             raise PublicationGovernanceUnavailable(
                 "active manifest and immutable Event Catalog governance are required"
