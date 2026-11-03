@@ -7122,10 +7122,16 @@ class PublicationService(_SessionService):
         # Each game's evidence is judged by the manifest that accepted it:
         # one of this season's ledger manifests, from this cutoff or an
         # earlier night, collected before that manifest's own deadline.
-        manifests = {
-            manifest_key: session.get(CollectionManifest, manifest_key) if manifest_key else None
-            for manifest_key in {row.manifest_id for row in rows}
+        manifest_keys = {row.manifest_id for row in rows}
+        found = {
+            manifest.manifest_id: manifest
+            for manifest in session.scalars(
+                select(CollectionManifest).where(
+                    CollectionManifest.manifest_id.in_(tuple(key for key in manifest_keys if key))
+                )
+            )
         }
+        manifests = {manifest_key: found.get(manifest_key) for manifest_key in manifest_keys}
         for manifest in manifests.values():
             if (
                 manifest is None
