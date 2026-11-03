@@ -71,6 +71,15 @@ def mask_of(slots: Iterable[int]) -> int:
 def write_game(connection: Connection, season: str, segments: GameSegments, written_at: datetime) -> None:
     """Write one game's segments and mark it stored, after ``delete_game``."""
 
+    if connection.dialect.name == "postgresql":
+        # Two writers (the nightly job and a backfill) must not hand out the
+        # same next slot of one team-season.  Sorted, so writers of a game and
+        # of its return game (home and away swapped) never wait on each other.
+        for team_id in sorted({segments.home_team_id, segments.away_team_id}):
+            connection.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+                {"key": f"lineup_slots:{season}:{team_id}"},
+            )
     rows = []
     for team_id in (segments.home_team_id, segments.away_team_id):
         team_segments = [segment for segment in segments.segments if segment.team_id == team_id]
@@ -159,13 +168,6 @@ def _assign_slots(
     players: Sequence[int],
     names: Mapping[int, str],
 ) -> dict[int, int]:
-    if connection.dialect.name == "postgresql":
-        # Two writers (the nightly job and a backfill) must not hand out the
-        # same next slot of one team-season.
-        connection.execute(
-            text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
-            {"key": f"lineup_slots:{season}:{team_id}"},
-        )
     slots = {
         row.player_id: row.slot
         for row in connection.execute(
