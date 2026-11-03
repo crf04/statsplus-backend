@@ -176,9 +176,9 @@ _TRADITIONAL_SCORE_COLUMNS = {
     "STL": "OPP_STL",
     "BLK": "OPP_BLK",
 }
-#: Traditional rows a window may lack without degrading the Base.  Only the
-#: ledger team-window Publication carries all of them: stored legacy windows
-#: hold the defensive columns and OPP_REB (none before OPP_REB existed), so
+#: Traditional rows a window may lack without degrading the Base.  Stored
+#: legacy-provider windows, and ledger windows materialized before #407, hold
+#: only the defensive columns and OPP_REB (none before OPP_REB existed), so
 #: the missing rows' cells are empty and the scores reading them name the gap.
 _OPTIONAL_TRADITIONAL_IDENTITIES = frozenset(
     (key, key) for key in LEDGER_DEFENSE_SHEET_METRICS["traditional"] if key not in DEFENSIVE_COLUMNS

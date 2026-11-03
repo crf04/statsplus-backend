@@ -94,7 +94,7 @@ PER36_FIELDS = {
     "personal_fouls_per36": "PF",
 }
 #: Ledger ``counts`` key -> LeagueDashTeamStats Opponent Totals column.  The
-#: four contracted keys are ``MATCHUP_TRADITIONAL_KEYS`` (2025-26 parity).
+#: four contracted keys are ``LEGACY_PARITY_TRADITIONAL_KEYS`` (2025-26 parity).
 TEAM_FIELDS = {
     "points": "OPP_PTS",
     "rebounds": "OPP_REB",

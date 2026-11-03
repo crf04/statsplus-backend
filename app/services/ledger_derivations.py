@@ -236,17 +236,29 @@ ASSIST_TOTAL_METRIC = "assists"
 #: residual-inclusive opponent total that carries into per48, league averages,
 #: sigma, and competition ranks.
 ASSIST_DERIVED_METRICS = (*ASSIST_METRICS, ASSIST_TOTAL_METRIC)
-#: The four contracted NBA-traditional opponent surfaces and the ledger
-#: metric that supplies each count.  ``materialize_team_window`` aggregates the
-#: opposing team fact's metric, except that ``OPP_REB`` is player-credited:
-#: LeagueDashTeamStats excludes team-only rebounds, so the opposing players'
-#: rebounds are summed instead.  The Matchups surface stores the same raw
-#: count.
-MATCHUP_TRADITIONAL_KEYS = {
+#: The four NBA-traditional opponent surfaces the legacy LeagueDashTeamStats
+#: refresh also stores, and so the only ones the legacy-vs-ledger parity
+#: comparator can check, with the ledger metric that supplies each count.
+#: ``materialize_team_window`` aggregates the opposing team fact's metric,
+#: except that ``OPP_REB`` is player-credited: LeagueDashTeamStats excludes
+#: team-only rebounds, so the opposing players' rebounds are summed instead.
+LEGACY_PARITY_TRADITIONAL_KEYS = {
     "OPP_REB": "rebounds",
     "OPP_TOV": "turnovers",
     "OPP_STL": "steals",
     "OPP_BLK": "blocks",
+}
+#: Every Traditional row the ledger materializes and the Matchup serves (#407).
+MATCHUP_TRADITIONAL_KEYS = {
+    **LEGACY_PARITY_TRADITIONAL_KEYS,
+    "OPP_PTS": "points",
+    "OPP_AST": "assists",
+    "OPP_FGM": "field_goals_made",
+    "OPP_FGA": "field_goals_attempted",
+    "OPP_FG3M": "three_pointers_made",
+    "OPP_FG3A": "three_pointers_attempted",
+    "OPP_FTM": "free_throws_made",
+    "OPP_FTA": "free_throws_attempted",
 }
 #: LeagueDashTeamStats' rebound surfaces are player-credited: team-only
 #: rebounds are excluded from the total and from each side of the split, so
@@ -1131,6 +1143,7 @@ __all__ = [
     "ASSIST_DERIVED_METRICS",
     "ASSIST_METRICS",
     "ASSIST_TOTAL_METRIC",
+    "LEGACY_PARITY_TRADITIONAL_KEYS",
     "MATCHUP_ASSIST_KEYS",
     "MATCHUP_REBOUND_TYPE_KEYS",
     "MATCHUP_TRADITIONAL_KEYS",

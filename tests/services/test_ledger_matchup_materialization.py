@@ -34,7 +34,7 @@ from app.services.team_matchup_repository import (
     TeamMatchupRepository,
     TeamMatchupSnapshotScope,
 )
-from tests.services.test_ledger_derivations import _league_games
+from tests.services.test_ledger_derivations import _league_games, _raw_rows_for_game
 
 AS_OF = date(2025, 10, 15)
 RETRIEVED_AT = datetime(2025, 10, 16, 10, tzinfo=UTC)
@@ -182,6 +182,14 @@ def test_season_and_every_team_l15_record_exact_game_ids_and_checksum(tmp_path):
                 ("traditional", "OPP_TOV"),
                 ("traditional", "OPP_STL"),
                 ("traditional", "OPP_BLK"),
+                ("traditional", "OPP_PTS"),
+                ("traditional", "OPP_AST"),
+                ("traditional", "OPP_FGM"),
+                ("traditional", "OPP_FGA"),
+                ("traditional", "OPP_FG3M"),
+                ("traditional", "OPP_FG3A"),
+                ("traditional", "OPP_FTM"),
+                ("traditional", "OPP_FTA"),
                 ("assist_locations", "Assists"),
                 ("assist_locations", "Arc3Assists"),
                 ("assist_locations", "Corner3Assists"),
@@ -200,13 +208,44 @@ def test_season_and_every_team_l15_record_exact_game_ids_and_checksum(tmp_path):
         assert team_facts[("traditional", "OPP_REB", "OPP_REB")].ledger_checksum == l15_checksum
 
 
+def _with_raw_rows(game):
+    return replace(game, raw_rows=_raw_rows_for_game(game)).with_checksum()
+
+
 def test_opponent_facts_are_aggregated_from_typed_ledger_counts(tmp_path):
     engine = _engine(tmp_path, "ledger-counts.sqlite3")
-    games = _league_games()
+    # Free throws made and attempted differ so a swapped row cannot pass.
+    games = tuple(
+        _with_raw_rows(
+            replace(
+                game,
+                team_facts=tuple(
+                    replace(fact, free_throws_made=2, free_throws_attempted=3) for fact in game.team_facts
+                ),
+            )
+        )
+        for game in _league_games()
+    )
     service, matchup_repository, _result = _materialize(engine, games)
 
     team_id = 1
-    expected = {"rebounds": 0.0, "turnovers": 0.0, "steals": 0.0, "blocks": 0.0}
+    expected = dict.fromkeys(
+        (
+            "rebounds",
+            "turnovers",
+            "steals",
+            "blocks",
+            "points",
+            "assists",
+            "field_goals_made",
+            "field_goals_attempted",
+            "three_pointers_made",
+            "three_pointers_attempted",
+            "free_throws_made",
+            "free_throws_attempted",
+        ),
+        0.0,
+    )
     expected_minutes = 0.0
     expected_assists = 0
     for game in games:
@@ -228,6 +267,14 @@ def test_opponent_facts_are_aggregated_from_typed_ledger_counts(tmp_path):
         ("OPP_TOV", "turnovers"),
         ("OPP_STL", "steals"),
         ("OPP_BLK", "blocks"),
+        ("OPP_PTS", "points"),
+        ("OPP_AST", "assists"),
+        ("OPP_FGM", "field_goals_made"),
+        ("OPP_FGA", "field_goals_attempted"),
+        ("OPP_FG3M", "three_pointers_made"),
+        ("OPP_FG3A", "three_pointers_attempted"),
+        ("OPP_FTM", "free_throws_made"),
+        ("OPP_FTA", "free_throws_attempted"),
     ):
         fact = facts[("traditional", stat_key)]
         assert fact.raw_value == expected[metric]
@@ -448,10 +495,21 @@ def test_league_complete_ranking_is_deterministic_and_30_team_gated(tmp_path):
         if metric.base == "traditional"
     }
     assert traditional_keys == {
-        ("OPP_REB", "OPP_REB"),
-        ("OPP_TOV", "OPP_TOV"),
-        ("OPP_STL", "OPP_STL"),
-        ("OPP_BLK", "OPP_BLK"),
+        (key, key)
+        for key in (
+            "OPP_REB",
+            "OPP_TOV",
+            "OPP_STL",
+            "OPP_BLK",
+            "OPP_PTS",
+            "OPP_AST",
+            "OPP_FGM",
+            "OPP_FGA",
+            "OPP_FG3M",
+            "OPP_FG3A",
+            "OPP_FTM",
+            "OPP_FTA",
+        )
     }
     for metric in l15_window.league_metrics:
         assert metric.team_count == 30
