@@ -835,6 +835,67 @@ def test_a_superseded_manifest_can_no_longer_promote_its_group(repair):
     assert read_statuses(engine) == statuses
 
 
+def requeue_the_displaced_cutoff(env):
+    """Requeue the displaced cutoff's succeeded jobs on a fresh observation.
+
+    The acceptance lands before the repair is promoted, and the worker drains
+    the jobs only after it.
+    """
+
+    engine, publications = env["engine"], env["publications"]
+    manifest_id = env["displaced"][SEASON_ZONES].manifest_id
+    for stream_key in (SEASON_ZONES, L15_ZONES):
+        job = publications.enqueue(stream_key, season=SEASON, cutoff=BROKEN_CUTOFF, manifest_id=manifest_id)
+        with engine.begin() as connection:
+            connection.execute(
+                CompositionJob.__table__.update()
+                .where(CompositionJob.job_id == job.job_id)
+                .values(status="succeeded")
+            )
+    _insert_zone_evidence(engine, manifest_id=manifest_id, cutoff=BROKEN_CUTOFF, marker="late")
+    publications.enqueue_for_observation(
+        "shot_zones_opponent", season=SEASON, cutoff=BROKEN_CUTOFF, manifest_id=manifest_id
+    )
+
+
+def read_jobs(engine, cutoff):
+    with engine.connect() as connection:
+        return {
+            row.stream_key: (row.status, row.last_error)
+            for row in connection.execute(select(CompositionJob).where(CompositionJob.cutoff == cutoff))
+        }
+
+
+def read_cutoff_statuses(engine, cutoff):
+    with engine.connect() as connection:
+        return set(
+            connection.scalars(select(PublicationVersion.status).where(PublicationVersion.cutoff == cutoff))
+        )
+
+
+def test_a_late_recomposition_of_an_earlier_cutoff_keeps_the_promoted_repair(repair):
+    from tests.test_residential_collector import _compose_queued_slice
+
+    engine = repair["engine"]
+    requeue_the_displaced_cutoff(repair)
+    repair["operations"].promote_repair_group(
+        repair["manifest"].manifest_id,
+        actor="operator",
+        reason="repair the pair",
+    )
+    promoted = read_pointers(engine)
+
+    repair["per48"]["value"] = 1.0
+    assert _compose_queued_slice(engine) == 2
+
+    assert read_pointers(engine) == promoted
+    assert read_jobs(engine, BROKEN_CUTOFF) == {
+        SEASON_ZONES: ("succeeded", None),
+        L15_ZONES: ("succeeded", None),
+    }
+    assert read_cutoff_statuses(engine, BROKEN_CUTOFF) == {"superseded"}
+
+
 def _boston_scale_zone_records(team_id, *, restricted_fga):
     """Boston-scale opponent Totals for one team, as accepted evidence."""
 

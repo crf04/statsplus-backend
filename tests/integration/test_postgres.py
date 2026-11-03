@@ -1883,6 +1883,38 @@ def test_grouped_promotion_commits_as_one_transaction_on_postgres(promotion):
     assert group.promoted_at is not None
 
 
+def test_a_late_recomposition_of_an_earlier_cutoff_keeps_the_promoted_repair_on_postgres(promotion):
+    from tests.services.test_publication_repair_promotion import (
+        BROKEN_CUTOFF,
+        L15_ZONES,
+        SEASON_ZONES,
+        read_cutoff_statuses,
+        read_jobs,
+        read_pointers,
+        requeue_the_displaced_cutoff,
+    )
+    from tests.test_residential_collector import _compose_queued_slice
+
+    engine = promotion["engine"]
+    requeue_the_displaced_cutoff(promotion)
+    promotion["operations"].promote_repair_group(
+        promotion["manifest"].manifest_id,
+        actor="operator",
+        reason="repair the pair",
+    )
+    promoted = read_pointers(engine)
+
+    promotion["per48"]["value"] = 1.0
+    assert _compose_queued_slice(engine) == 2
+
+    assert read_pointers(engine) == promoted
+    assert read_jobs(engine, BROKEN_CUTOFF) == {
+        SEASON_ZONES: ("succeeded", None),
+        L15_ZONES: ("succeeded", None),
+    }
+    assert read_cutoff_statuses(engine, BROKEN_CUTOFF) == {"superseded"}
+
+
 def test_an_advance_after_the_declaration_fences_the_group_on_postgres(promotion):
     """The declared guard fences a member that moved since it was declared.
 
