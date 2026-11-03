@@ -195,8 +195,13 @@ class CutoverChecks:
             return "serving_season_not_ready"
         return self.refused.get(candidate.stream_key)
 
-    def season_candidate_lineage_refusal(self, session, stream, candidate):
-        return "ledger_lineage_withdrawn" if candidate.stream_key in self.withdrawn else None
+    def season_candidate_lineage_refusals(self, session, candidates):
+        return {
+            candidate.publication_id: "ledger_lineage_withdrawn"
+            if candidate.stream_key in self.withdrawn
+            else None
+            for _stream, candidate in candidates
+        }
 
 
 class World:
