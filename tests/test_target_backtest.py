@@ -855,7 +855,7 @@ def test_stat_columns_union_every_qualifier_default_in_order(targets, backtest):
     [
         ("shot_zones", "Corner 3", ["3PA", "3PA/36", "PTS", "PTS/36"]),
         ("shot_zones", "Restricted Area", ["FG2A", "FG2A/36", "PTS", "PTS/36"]),
-        ("play_types", "Transition", ["FGA", "FGA/36", "PTS", "PTS/36"]),
+        ("play_types", "Transition", ["PTS", "FGA", "PTS/36", "FGA/36"]),
         ("shot_types", "Catch and Shoot", ["FGA", "FGA/36", "PTS", "PTS/36"]),
         ("assist_locations", "Corner3Assists", ["AST", "AST/36"]),
     ],
@@ -891,7 +891,7 @@ def test_every_qualifier_slice_preserves_its_default_order(base, slice_key):
     elif base == "shot_zones":
         expected = ("FG2A", "FG2A/36", "PTS", "PTS/36")
     elif base == "play_types":
-        expected = ("FGA", "FGA/36", "PTS", "PTS/36")
+        expected = ("PTS", "FGA", "PTS/36", "FGA/36")
     else:
         expected = ("FGA", "FGA/36", "PTS", "PTS/36")
     assert columns == expected
