@@ -3363,6 +3363,31 @@ players; run it after every scheduled injury refresh (`railway.on_off_warm.json`
 five minutes past each refresh). It fetches only splits not already cached and
 exits 1 if it cannot write to Redis.
 
+**Seasons served from StatsPlus segments** (crf04/statsplus#410). A season
+whose lineup segments are recorded as complete is answered from them instead
+of PBPStats: one SQL aggregate over the stored LiveData play-by-play, with no
+cache, throttle, per-user budget or deadline. The response has the same
+shape, except `"source": "statsplus"`, `"stale": false` always, `cached_at`
+when the newest included game's segments were written, and
+`games_missing`, the team-season's games with no segments (a game the
+rotation derivation rejected), oldest first, `[]` when none:
+
+```json
+"games_missing": [{"game_id": "0022500093", "game_date": "2025-11-14", "matchup": "DET @ HOU"}]
+```
+
+`game_date` is the Eastern date and `matchup` is `AWAY @ HOME`, both from the
+Event Catalog. `minutes` round half up from the segments' seconds, as
+PBPStats rounds. `usage` is StatsPlus usage: 100 · (FGA + 0.44·FTA + TOV) /
+(team on-floor FGA + player-less heaves + 0.44·FTA + TOV). Free throws count
+for the lineup on the floor at the foul; from 2026-27 a heave counts as its
+shooter's missed FGA and 3PA. Every other season, and every season before
+2025-26, keeps the PBPStats path above unchanged, and the warm skips covered
+seasons. The nightly rotation job writes a game's segments with its stints;
+`python scripts/lineup_segment_backfill.py YYYY-YY --database-url ...` fills a
+season (resumable, about one LiveData request a second) and records its
+coverage once every completed game is stored or rejected.
+
 ### Get Rotation
 
 ```http
