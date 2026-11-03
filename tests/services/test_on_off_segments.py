@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
+import requests
 from sqlalchemy import create_engine, insert, text
 
 from app.config.settings import CacheSettings, RuntimeSettings
@@ -448,6 +449,46 @@ def test_games_missing_names_each_rejected_game_by_its_eastern_date_and_teams(co
 
     assert body["games_missing"] == [
         {"game_id": covered.rejected, "game_date": "2025-11-14", "matchup": "DET @ BOS"}
+    ]
+
+
+class FailingLiveData:
+    """LiveData that cannot be reached."""
+
+    def fetch_game_stats(self, game_id, season):
+        raise requests.ConnectionError("LiveData unreachable")
+
+    def fetch_play_by_play(self, game_id):
+        raise requests.ConnectionError("LiveData unreachable")
+
+
+def test_games_missing_lists_every_completed_regular_season_game_with_no_stored_segments(covered, provider):
+    def at(day):
+        return datetime(2025, 11, day, 23, 0, tzinfo=UTC)
+
+    bos_home = {"home": ("BOS", BOS), "away": ("DET", 1610612765)}
+    events = [
+        _event(covered.stored[0], at(1), **bos_home),  # stored
+        _event("0022500900", at(20), **bos_home),  # its fetch fails below
+        _event("0022500901", at(18), home=("MIA", 1610612748), away=("BOS", BOS)),  # never collected
+        {**_event("0022500902", at(28), **bos_home), "status_text": "7:30 pm ET", "status_code": 1},
+        {**_event("0012500001", at(2), **bos_home), "classification": "Preseason"},
+        {**_event("0022500904", at(21), **bos_home), "postponed_status": "Postponed"},
+        _event("0022500903", at(19)),  # HOU and DET
+    ]
+    with covered.engine.begin() as connection:
+        connection.execute(insert(EventCatalogEntry.__table__), events)
+    failed = RotationCollectionService(
+        FailingLiveData(), RotationRepository(covered.engine), lambda season: [], clock=lambda: WRITTEN_AT
+    ).collect("2025-26", game_ids=["0022500900"])
+    assert [game["game_id"] for game in failed["failed"]] == ["0022500900"]
+
+    body = _service(provider, covered.engine).get("BOS", "2025-26", on=[TATUM])
+
+    assert body["games_missing"] == [
+        {"game_id": covered.rejected, "game_date": "2025-11-14", "matchup": "DET @ BOS"},
+        {"game_id": "0022500901", "game_date": "2025-11-18", "matchup": "BOS @ MIA"},
+        {"game_id": "0022500900", "game_date": "2025-11-20", "matchup": "DET @ BOS"},
     ]
 
 

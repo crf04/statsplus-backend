@@ -54,7 +54,7 @@ class LineupSegmentGame(Base):
     """One game the rotation job wrote segments for, or rejected.
 
     ``rejected_reason`` is null for a stored game; a rejected game has no
-    segment rows and is listed in its teams' ``games_missing``.
+    segment rows, and its row tells the backfill not to collect it again.
     """
 
     __tablename__ = "lineup_segment_games"

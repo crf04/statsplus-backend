@@ -3375,8 +3375,10 @@ of PBPStats: one SQL aggregate over the stored LiveData play-by-play, with no
 cache, throttle, per-user budget or deadline. The response has the same
 shape, except `"source": "statsplus"`, `"stale": false` always, `cached_at`
 when the newest included game's segments were written, and
-`games_missing`, the team-season's games with no segments (a game the
-rotation derivation rejected), oldest first, `[]` when none:
+`games_missing`, the team-season's completed regular-season games with no
+segments (a game the rotation derivation rejected, whose LiveData fetch
+failed, or that the nightly job has not collected yet), oldest first, `[]`
+when none:
 
 ```json
 "games_missing": [{"game_id": "0022500093", "game_date": "2025-11-14", "matchup": "DET @ HOU"}]

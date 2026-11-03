@@ -17,10 +17,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, delete, func, insert, literal, or_, select, text, update
+from sqlalchemy import BigInteger, and_, delete, func, insert, literal, or_, select, text, update
 from sqlalchemy.engine import Connection, Engine
 
-from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
+from app.domain.nba_events import (
+    REGULAR_SEASON_TYPE,
+    is_completed_non_postponed_event,
+    player_game_log_season_type,
+)
 from app.domain.slate_time import EASTERN
 from app.models.event_catalog import EventCatalogEntry
 from app.models.lineup_segments import (
@@ -54,8 +58,10 @@ class SegmentSplit:
     rows: tuple[Mapping[str, Any], ...]
     #: When the newest stored game of the team-season was written.
     written_at: datetime | None
-    #: The team-season's rejected games, which have no segments, oldest first:
-    #: ``{game_id, game_date, matchup}`` with the Eastern date and ``"AWAY @ HOME"``.
+    #: The team-season's completed regular-season games in the Event Catalog
+    #: with no stored segments (rejected, failed or not yet collected), oldest
+    #: first: ``{game_id, game_date, matchup}`` with the Eastern date and
+    #: ``"AWAY @ HOME"``.
     games_missing: tuple[Mapping[str, Any], ...]
 
 
@@ -132,7 +138,8 @@ def record_rejected(
     reason: str,
     at: datetime,
 ) -> None:
-    """Mark a game with no segments as missing, unless segments are stored for it.
+    """Record a rejected game, so the backfill does not retry it, unless
+    segments are stored for it.
 
     A forced retry of a stored game that is rejected this time leaves the
     stored rotation alone, so its stored segments stay too.
@@ -254,23 +261,41 @@ class LineupSegmentRepository:
                     )
                 )
             }
-            games = connection.execute(
+            unstored = connection.execute(
                 select(
-                    _GAMES.c.game_id,
-                    _GAMES.c.home_team_id,
-                    _GAMES.c.away_team_id,
-                    _GAMES.c.written_at,
-                    _GAMES.c.rejected_reason,
+                    _EVENTS.c.nba_game_id,
                     _EVENTS.c.scheduled_at,
                     _EVENTS.c.home_team_tricode,
                     _EVENTS.c.away_team_tricode,
+                    _EVENTS.c.status_text,
+                    _EVENTS.c.status_code,
+                    _EVENTS.c.postponed_status,
+                    _EVENTS.c.postponement_evidence,
+                    _EVENTS.c.classification,
                 )
-                .select_from(_GAMES.outerjoin(_EVENTS, _EVENTS.c.nba_game_id == _GAMES.c.game_id))
+                .select_from(
+                    _EVENTS.outerjoin(
+                        _GAMES,
+                        and_(_GAMES.c.game_id == _EVENTS.c.nba_game_id, _GAMES.c.rejected_reason.is_(None)),
+                    )
+                )
                 .where(
+                    _EVENTS.c.season == season,
+                    or_(_EVENTS.c.home_team_id == team_id, _EVENTS.c.away_team_id == team_id),
+                    _GAMES.c.game_id.is_(None),
+                )
+            ).mappings()
+            games_missing = sorted(
+                (_missing_game(event) for event in unstored if _completed_regular_season(event)),
+                key=lambda game: (game["game_date"], game["game_id"]),
+            )
+            written = connection.execute(
+                select(func.max(_GAMES.c.written_at)).where(
                     _GAMES.c.season == season,
+                    _GAMES.c.rejected_reason.is_(None),
                     or_(_GAMES.c.home_team_id == team_id, _GAMES.c.away_team_id == team_id),
                 )
-            ).all()
+            ).scalar()
             rows: tuple[Mapping[str, Any], ...] = ()
             if all(player_id in roster for player_id in on):
                 rows = self._sums(
@@ -281,16 +306,10 @@ class LineupSegmentRepository:
                     mask_of(roster[player_id][0] for player_id in off if player_id in roster),
                     {player_id: name for player_id, (_slot, name) in roster.items()},
                 )
-        written = [game.written_at for game in games if game.rejected_reason is None]
         return SegmentSplit(
             rows=rows,
-            written_at=_utc(max(written)) if written else None,
-            games_missing=tuple(
-                sorted(
-                    (_missing_game(game) for game in games if game.rejected_reason is not None),
-                    key=lambda game: (game["game_date"] or "", game["game_id"]),
-                )
-            ),
+            written_at=_utc(written) if written is not None else None,
+            games_missing=tuple(games_missing),
         )
 
     @staticmethod
@@ -323,21 +342,25 @@ class LineupSegmentRepository:
         )
 
 
-def _missing_game(game: Any) -> dict[str, Any]:
-    """A rejected game named by its Event Catalog date and teams.
+def _completed_regular_season(event: Mapping[str, Any]) -> bool:
+    """The rotation job's eligibility (``completed_game_ids``) on a stored
+    catalog row, where an empty evidence container is no evidence."""
 
-    A game missing from the catalog (only a forced ``--game-id`` collects one)
-    keeps its teams from the box score and has no date.
-    """
+    evidence = event["postponement_evidence"]
+    decoded = {**event, "postponement_evidence": None if (evidence or "") in ("", "{}", "[]") else evidence}
+    return (
+        is_completed_non_postponed_event(decoded)
+        and player_game_log_season_type(decoded) == REGULAR_SEASON_TYPE
+    )
 
-    home = game.home_team_tricode or NBA_TEAM_ID_TO_TRICODE.get(game.home_team_id, str(game.home_team_id))
-    away = game.away_team_tricode or NBA_TEAM_ID_TO_TRICODE.get(game.away_team_id, str(game.away_team_id))
+
+def _missing_game(event: Mapping[str, Any]) -> dict[str, Any]:
+    """A game named by its Event Catalog Eastern date and teams."""
+
     return {
-        "game_id": game.game_id,
-        "game_date": None
-        if game.scheduled_at is None
-        else _utc(game.scheduled_at).astimezone(EASTERN).date().isoformat(),
-        "matchup": f"{away} @ {home}",
+        "game_id": event["nba_game_id"],
+        "game_date": _utc(event["scheduled_at"]).astimezone(EASTERN).date().isoformat(),
+        "matchup": f"{event['away_team_tricode']} @ {event['home_team_tricode']}",
     }
 
 

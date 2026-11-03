@@ -116,8 +116,8 @@ class RotationRepository:
 
         ``outcome`` is ``"rejected"`` (adds to the game's rejection count) or
         ``"failed"`` (a fetch failure: refreshes the attempt time only).  A
-        rejection with the box score's ``team_ids`` (home, away) also lists
-        the game in those teams' on/off ``games_missing``.
+        rejection with the box score's ``team_ids`` (home, away) also marks
+        the game done for the lineup segment backfill.
         """
 
         with self.engine.begin() as connection:
