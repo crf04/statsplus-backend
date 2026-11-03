@@ -551,6 +551,33 @@ def test_an_invalid_date_is_the_slates_invalid_input():
         service.get_edges("04-10-2026")
 
 
+def test_a_malformed_request_is_refused_while_the_database_is_unavailable():
+    import sqlite3
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.exc import OperationalError
+
+    def unavailable():
+        raise sqlite3.OperationalError("the database is unavailable")
+
+    service = SlateEdgesService(
+        slates=FakeSlate([_game("G1")]),
+        matchups=FakeMatchups({"G1": _matchup([])}),
+        engine=create_engine("sqlite://", creator=unavailable),
+    )
+
+    for requested_date, fallback, refusal in (
+        (None, "bogus", "fallback"),
+        ("2026-04-10", "next_game_day", "fallback"),
+        ("04-10-2026", None, "YYYY-MM-DD"),
+    ):
+        with pytest.raises(InvalidInputError, match=refusal):
+            service.get_edges(requested_date, fallback=fallback)
+    # A well-formed request does reach the unavailable database.
+    with pytest.raises(OperationalError):
+        service.get_edges("2026-04-10")
+
+
 # --- the result cache and the serial compose ------------------------------
 
 import threading  # noqa: E402
@@ -647,7 +674,14 @@ def test_a_cached_response_is_returned_without_composing_any_matchup():
 
 
 def _assert_misses(
-    games, payloads, *, second_games=None, publications=None, settings=None, first_date="d", second_date="d"
+    games,
+    payloads,
+    *,
+    second_games=None,
+    publications=None,
+    settings=None,
+    first_date="2026-04-10",
+    second_date="2026-04-10",
 ):
     """Prime the cache, change one input, and require a recomposed body."""
 
@@ -753,8 +787,8 @@ def test_a_disabled_flag_or_missing_client_never_caches():
             cache={"slate_edges_enabled": False},
         ),
     )
-    bodies = [off.get_edges("d"), off.get_edges("d")]
-    no_client = _cached_service(SnapshotComposer(payloads), None, games).get_edges("d")
+    bodies = [off.get_edges("2026-04-10"), off.get_edges("2026-04-10")]
+    no_client = _cached_service(SnapshotComposer(payloads), None, games).get_edges("2026-04-10")
 
     assert redis_client.values == {}
     assert off.matchups.calls == ["G1", "G2", "G1", "G2"]
@@ -774,7 +808,7 @@ def test_a_redis_failure_is_a_miss_not_an_error():
 
     games, payloads = _two_games()
 
-    edges = _cached_service(SnapshotComposer(payloads), Down(), games).get_edges("d")
+    edges = _cached_service(SnapshotComposer(payloads), Down(), games).get_edges("2026-04-10")
 
     assert [game["game_id"] for game in edges["games"]] == ["G1", "G2"]
 
@@ -784,7 +818,7 @@ def test_matchups_compose_one_at_a_time_in_slate_order():
     payloads = {f"G{i}": _matchup([_blend_player(i, f"P{i}", 0.01 * i)]) for i in range(6)}
     composer = SnapshotComposer(payloads, delay=0.01)
 
-    edges = _cached_service(composer, None, games).get_edges("d")
+    edges = _cached_service(composer, None, games).get_edges("2026-04-10")
 
     assert composer.peak == 1
     assert composer.calls == [f"G{i}" for i in range(6)]

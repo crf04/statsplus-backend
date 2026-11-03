@@ -50,7 +50,7 @@ from app.services.publication_snapshot_calls import accepts_keyword
 from app.services.request_reads import read_savepoint, request_read_scope
 from app.services.research_season import refuse_evidence_after_game, season_context, selected_season
 from app.services.serving_season import merge_trailing
-from app.services.slate_fallback import read_slate
+from app.services.slate_fallback import check_slate_request, read_slate
 from app.services.target_resolution import MatchupReader, SlateReader
 from app.utils.redis_breaker import RedisCircuitBreaker
 
@@ -115,6 +115,8 @@ class SlateEdgesService:
         a malformed one is its ``invalid_input`` refusal; ``fallback`` is the
         Slate's ``previous_game_day``/``next_game_day`` rule (``slate_fallback.read_slate``)."""
 
+        # Refused before a connection is checked out, as the Slate refuses it.
+        check_slate_request(requested_date, fallback)
         # The Slate, the capture and every game's reads share one REPEATABLE
         # READ snapshot, as a selected Matchup's do, so a prune that commits in
         # between cannot empty a later game's projection reads.  None of them

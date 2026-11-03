@@ -29,7 +29,6 @@ from app.domain.nba_events import (
 )
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import (
-    InvalidInputError,
     ProviderUnavailableError,
     ResourceNotFoundError,
 )
@@ -49,7 +48,7 @@ from app.services.response_provenance import (
     provenance_block,
 )
 from app.services.serving_season import merge_trailing, snapshot_trailing
-from app.services.slate_fallback import read_slate
+from app.services.slate_fallback import parse_slate_date, read_slate
 from app.services.slate_neighbors import neighbouring_game_dates
 
 EASTERN = ZoneInfo("America/New_York")
@@ -312,16 +311,8 @@ class SlateService:
 
     def _parse_slate_date(self, value: str | None) -> date:
         if value is None:
-            parsed = assume_utc(self._clock()).astimezone(EASTERN).date()
-        else:
-            try:
-                parsed = datetime.strptime(value, "%Y-%m-%d").date()
-            except (TypeError, ValueError) as error:
-                raise InvalidInputError("The slate date must use YYYY-MM-DD.", detail=error) from error
-            if parsed.isoformat() != value:
-                raise InvalidInputError("The slate date must use YYYY-MM-DD.")
-
-        return parsed
+            return assume_utc(self._clock()).astimezone(EASTERN).date()
+        return parse_slate_date(value)
 
     @staticmethod
     def _scheduled_at(event: Mapping[str, Any]) -> datetime:
