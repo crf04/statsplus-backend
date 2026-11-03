@@ -6312,8 +6312,9 @@ above.
 
 **Cache.** A season read from live pointers is cached under its pointer
 generation. A `2026-27` entry for a Target with a Diet Qualifier is also keyed
-on the identity of the `2025-26` Publications its fallback reads, so a
-republished or revoked `2025-26` Diet is never served from an older entry. A season read entirely from retained Publications -- always a
+on the identity of the `2025-26` Publications its fallback reads and the thin
+floors `2025-26` is judged under, so a republished or revoked `2025-26` Diet,
+or a changed floor, is never served from an older entry. A season read entirely from retained Publications -- always a
 season other than the published one -- is cached under the season and its retained history-row
 ids, so nightly publications of the published season leave its entry valid and
 revoking one of its rows invalidates it. A published season read partly live

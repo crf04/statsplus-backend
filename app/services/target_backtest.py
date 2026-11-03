@@ -274,6 +274,15 @@ class _SeasonDiet:
     thinness: MatchupScoreSettings
 
 
+def _matchup_floors(thinness: MatchupScoreSettings) -> dict[str, Any]:
+    """The thin-rule floors one season's players were judged under, as the cache key reads them."""
+
+    return {
+        "min_games": thinness.min_games,
+        "volume_per_game": {base: thinness.minimum_volume_per_game(base) for base in QUALIFIER_DIET_BASES},
+    }
+
+
 def _qualifier_key_body(qualifier: Mapping[str, Any]) -> dict[str, Any]:
     """One Qualifier as the cache key reads it, at full threshold precision."""
 
@@ -297,7 +306,7 @@ def backtest_cache_key(
     settings: RuntimeSettings,
     catalog: str | None = None,
     thinness: MatchupScoreSettings | None = None,
-    fallback: Sequence[tuple] | None = None,
+    fallback: tuple[Sequence[tuple], MatchupScoreSettings] | None = None,
 ) -> str:
     """Build ``targets:backtest:v<schema>:<sha256>`` over the canonical key body.
 
@@ -312,8 +321,8 @@ def backtest_cache_key(
     questions (statsplus#123).  ``thinness`` is the Matchup floors the
     season's players were judged under (``BacktestSeason.thinness``), the
     configured ones when omitted.  ``fallback`` is the identity of the
-    previous season's Publications a thin Diet falls back to, ``None`` when
-    the read has none.
+    previous season's Publications a thin Diet falls back to and the floors
+    that season is judged under, ``None`` when the read has none.
     """
 
     matchup = settings.matchup_scores if thinness is None else thinness
@@ -325,16 +334,18 @@ def backtest_cache_key(
         # carries its Position, which no Publication names.
         "catalog": catalog,
         "generation": [list(entry) for entry in generation],
-        "fallback": None if fallback is None else [list(entry) for entry in fallback],
+        "fallback": (
+            None
+            if fallback is None
+            else {
+                "generation": [list(entry) for entry in fallback[0]],
+                "matchup": _matchup_floors(fallback[1]),
+            }
+        ),
         "qualifiers": [_qualifier_key_body(qualifier) for qualifier in target["qualifiers"]],
         "conditions": target.get("conditions"),
         "thresholds": {
-            "matchup": {
-                "min_games": matchup.min_games,
-                "volume_per_game": {
-                    base: matchup.minimum_volume_per_game(base) for base in QUALIFIER_DIET_BASES
-                },
-            },
+            "matchup": _matchup_floors(matchup),
             "diet_baseline": {
                 "min_games": settings.player_diet_baseline.min_games,
                 "volume_per_game": {
@@ -936,7 +947,13 @@ class TargetBacktestService:
                     # generation, so the next request's pre-check key finds
                     # it or recomputes it -- never a torn hybrid.
                     self._cache_write(
-                        self._cache_key(target, choice, identity, catalog_read[1], fallback_identity),
+                        self._cache_key(
+                            target,
+                            choice,
+                            identity,
+                            catalog_read[1],
+                            None if fallback is None else (fallback[0], fallback_identity),
+                        ),
                         {
                             "players": players,
                             "summary": summary,
@@ -1099,7 +1116,7 @@ class TargetBacktestService:
         choice: BacktestSeason,
         generation: Sequence[tuple[str, str | None, int | None, int | None]],
         catalog: str | None,
-        fallback: Sequence[tuple] | None,
+        fallback: tuple[BacktestSeason, Sequence[tuple]] | None,
     ) -> str:
         """The result-cache key; ``fallback`` keys only a Target that reads a Diet."""
 
@@ -1110,13 +1127,17 @@ class TargetBacktestService:
             settings=self.settings,
             catalog=catalog,
             thinness=choice.thinness(self.settings.matchup_scores),
-            fallback=fallback if _reads_diet(target["qualifiers"]) else None,
+            fallback=(
+                (fallback[1], fallback[0].thinness(self.settings.matchup_scores))
+                if fallback is not None and _reads_diet(target["qualifiers"])
+                else None
+            ),
         )
 
     def _fallback_identity(
         self, choice: BacktestSeason, *, session: Session | None = None
-    ) -> Sequence[tuple] | None:
-        """The identity of the fallback season's Publications, as ``require_streams`` checks them.
+    ) -> tuple[BacktestSeason, Sequence[tuple]] | None:
+        """The fallback season and its Publications' identity, as ``require_streams`` checks them.
 
         ``None`` when ``choice`` has no fallback season or that season cannot
         be read, exactly when ``_fallback_capture`` reads none.
@@ -1126,7 +1147,7 @@ class TargetBacktestService:
         if fallback is None:
             return None
         try:
-            return self.seasons.require_streams(
+            identity = self.seasons.require_streams(
                 fallback,
                 _PUBLICATION_STREAM_KEYS,
                 projection_keys=_PROJECTION_ONLY_STREAM_KEYS,
@@ -1134,6 +1155,7 @@ class TargetBacktestService:
             )
         except SeasonUnavailableError:
             return None
+        return None if identity is None else (fallback, identity)
 
     def _fallback_capture(
         self,

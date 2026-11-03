@@ -1971,3 +1971,38 @@ def test_a_held_2026_27_backtest_judges_its_fallback_at_2025_26s_own_floor(world
     assert [
         (player["canonical_id"], player["shares"][0]["diet_season"]) for player in body["players"]
     ] == fitting
+
+
+@pytest.mark.parametrize(
+    ("points", "shares"),
+    [(10, [("shot_zones", 0.42, 0.36, LAST), ("season_average", None, None, None)]), (20, None)],
+    ids=("2026-27-average-fits", "only-2025-26-average-fits"),
+)
+def test_an_average_qualifier_beside_a_fallback_share_reads_2026_27(world, points, shares):
+    # LeBron averages 12 points in 2026-27 and 30 in 2025-26.
+    scores = {**SCORES_TEN, "threshold": points}
+    target = world.users.create_target(OWNER, opponent="OKC", qualifiers=[CORNER_THREE, scores])
+    _publish_thin_new_season(world)
+
+    body, _ = world.backtests().backtest(OWNER, target["id"], season=NEW)
+
+    assert (_shares(body) if body["players"] else None) == shares
+
+
+def test_a_held_2026_27_entry_is_never_served_after_2025_26s_floor_changes(world):
+    for base, (stream, *_rest) in DIET_STREAMS.items():
+        world.compose(stream, LAST, _diet_rows(base, LAST, 0.42, games=5))
+    _hold_new_season(world)
+    zones = _diet_rows("shot_zones", NEW, 0.5)
+    zones["rows"] = [row for row in zones["rows"] if row["player_id"] != bt.LEBRON]
+    world.compose("exact_shot_zones", NEW, zones, hold=True)
+    target = world.saved_target()
+    redis = bt.FakeRedis()
+
+    five, five_state = world.backtests(redis_client=redis).backtest(OWNER, target["id"], season=NEW)
+    # The held season is judged at one game either way; only 2025-26's floor moves.
+    world.settings = world.settings.model_copy(update={"matchup_scores": MatchupScoreSettings(min_games=6)})
+    six, six_state = world.backtests(redis_client=redis).backtest(OWNER, target["id"], season=NEW)
+
+    assert (five_state, _fitting(five)) == ("miss", [bt.LEBRON])
+    assert (six_state, _fitting(six)) == ("miss", [])
