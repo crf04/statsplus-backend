@@ -6381,15 +6381,20 @@ class PublicationService(_SessionService):
             # until an operator cutover moves the cohort together.  With no
             # published season yet, it may advance only within its own.
             published_season = _published_season(session)
-            active_season = session.scalar(
-                select(PublicationVersion.season).where(
-                    PublicationVersion.publication_id == pointer.active_publication_id
-                )
-            )
+            active = session.get(PublicationVersion, pointer.active_publication_id)
+            active_season = active.season if active is not None else None
             allowed_season = published_season if published_season is not None else active_season
             hold_reason = None
             if season != allowed_season:
                 hold_reason = "season_held"
+            elif (
+                stream_key in NBA_PUBLICATION_STREAM_KEYS | PLAYER_DIET_OBSERVATION_STREAM_KEYS
+                and active_season == season
+                and _aware(active.cutoff) > _aware(cutoff)
+            ):
+                # A job requeued for an earlier cutoff can drain after a later
+                # one, a promoted repair included, has taken the pointer.
+                hold_reason = "earlier_cutoff"
             elif active_season != season and not self._readiness_rule_holds(
                 stream_key, season=season, cutoff=cutoff, authority=authority
             ):
@@ -6397,7 +6402,7 @@ class PublicationService(_SessionService):
                 # Readiness Rule holds; until then it keeps serving its last.
                 hold_reason = NOT_READY_REASON
             if hold_reason is not None:
-                return self._hold_candidate_in_session(
+                held = self._hold_candidate_in_session(
                     session,
                     stream=stream,
                     season=season,
@@ -6415,6 +6420,10 @@ class PublicationService(_SessionService):
                     hold_reason=hold_reason,
                     now=now,
                 )
+                if hold_reason == "earlier_cutoff":
+                    # Only the season's newest cutoff is promotable.
+                    held.status = "superseded"
+                return held
         old = pointer.active_publication_id
         next_version = (
             session.scalar(
@@ -6509,8 +6518,10 @@ class PublicationService(_SessionService):
 
         That is a composition for another season, or (``hold_reason``
         ``serving_season_not_ready``) one for the Published Season of a
-        trailing family whose Readiness Rule does not hold yet.  The pointer
-        does not move.  Only the newest governed cutoff of a
+        trailing family whose Readiness Rule does not hold yet, or
+        (``earlier_cutoff``) one older than the cutoff the pointer serves in
+        its own season, which the caller supersedes.  The pointer does not
+        move.  Only the newest governed cutoff of a
         season is promotable, so of the stream's candidates for that season
         the latest ``(cutoff, version)`` stays a candidate and every other is
         superseded -- a delayed composition of an earlier cutoff never
