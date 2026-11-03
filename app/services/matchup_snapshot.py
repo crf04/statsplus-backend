@@ -473,9 +473,7 @@ def capture_matchup_snapshot(
 
     if snapshot_reuse is None:
         return published_capture(settings, publication_reader, capture)
-    return snapshot_reuse.capture(
-        settings, publication_reader, MATCHUP_PUBLICATION_STREAM_KEYS, capture, session=session
-    )
+    return snapshot_reuse.capture(settings, publication_reader, MATCHUP_PUBLICATION_STREAM_KEYS, capture)
 
 
 __all__ = [

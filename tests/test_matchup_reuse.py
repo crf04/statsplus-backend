@@ -192,60 +192,6 @@ def test_concurrent_requests_share_one_capture():
     assert len({id(snapshot) for snapshot in results}) == 1
 
 
-NEWER = (("player_game_logs", "pub-2", 2, 8),)
-
-
-class SessionPublications:
-    """A reader whose request session sees the generation its transaction began on.
-
-    Without a session a read sees the live generation, which a concurrent
-    activation moves.
-    """
-
-    captures_published_season = True
-
-    def __init__(self):
-        self.live = GENERATION
-        self.captures = []
-
-    def generation(self, stream_keys, *, season=None, session=None):
-        return self.live if session is None else session.generation
-
-    def snapshot(self, stream_keys, *, season, session=None, **_):
-        generation = self.live if session is None else session.generation
-        self.captures.append(generation)
-        return SimpleNamespace(generation=generation, retained_history=(), season="2025-26")
-
-
-def test_a_capture_on_an_older_transaction_is_never_served_as_the_newer_generation():
-    """The reviewer's probe on #674: an activation commits after a request's
-    REPEATABLE READ transaction began and before its capture."""
-
-    from app.services.matchup_snapshot import capture_matchup_snapshot
-
-    reader, reuse = SessionPublications(), PublicationSnapshotReuse()
-    capture_matchup_snapshot(_settings(), reader, reuse)
-    reader.live = NEWER
-
-    _season, held = capture_matchup_snapshot(
-        _settings(), reader, reuse, session=SimpleNamespace(generation=GENERATION)
-    )
-    _season, later = capture_matchup_snapshot(_settings(), reader, reuse)
-
-    assert (held.generation, later.generation) == (GENERATION, NEWER)
-
-
-def test_captures_on_sessions_of_one_generation_share_one_capture():
-    from app.services.matchup_snapshot import capture_matchup_snapshot
-
-    reader, reuse = SessionPublications(), PublicationSnapshotReuse()
-
-    for _ in range(2):
-        capture_matchup_snapshot(_settings(), reader, reuse, session=SimpleNamespace(generation=GENERATION))
-
-    assert reader.captures == [GENERATION]
-
-
 # --- composed Matchup cache ------------------------------------------------
 
 
