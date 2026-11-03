@@ -826,6 +826,30 @@ def test_a_selected_published_season_next_opponent_matches_the_omitted_read_plus
     assert selected == omitted
 
 
+def test_a_selected_season_keeps_the_next_game_of_a_player_missing_from_its_roster(
+    isolation_seasons, client, authenticate, monkeypatch
+):
+    catalog = isolation_seasons.games.athlete_catalog
+    published = catalog.get_catalog
+
+    def without_new_roster(season, **kwargs):
+        return [] if season == NEW else published(season, **kwargs)
+
+    monkeypatch.setattr(catalog, "get_catalog", without_new_roster)
+
+    body = client.get(f"{NEXT_OPPONENT}&season={NEW}", headers=authenticate()).get_json()
+
+    assert body["next_game"] == NEXT_GAME
+    assert _isolation_rank(body)["value"] == 0.5
+
+
+def test_a_repeated_next_opponent_season_names_the_season_parameter(served, client, authenticate):
+    response = client.get(f"{NEXT_OPPONENT}&season={OLD}&season=garbage", headers=authenticate())
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["details"] == {"parameters": ["season"]}
+
+
 def test_a_malformed_next_opponent_season_names_the_season_parameter(served, client, authenticate):
     response = client.get(f"{NEXT_OPPONENT}&season=2026-28", headers=authenticate())
 

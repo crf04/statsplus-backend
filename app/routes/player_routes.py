@@ -70,6 +70,8 @@ def get_next_opponent():
     names = request.args.getlist("player_name")
     if set(request.args) - {"season"} != {"player_name"} or len(names) != 1 or not names[0].strip():
         raise InvalidInputError("player_name is required.")
+    if len(request.args.getlist("season")) > 1:
+        raise InvalidInputError("season may be given once.", public_details={"parameters": ["season"]})
     service = selected(CurrentAppService("next_opponent"), "next_opponent", season_argument())
     with season_refusals():
         return jsonify(service.get_next_opponent(names[0]))

@@ -122,10 +122,11 @@ class NextOpponentService:
     def get_next_opponent(self, player_name):
         """The next game and its opponent's ranks, with ``season_context`` for a selection.
 
-        Who the player is and how opponents rank come from the published
-        season, or the selected one (crf04/statsplus#415); the next game comes
-        from the schedule covering today.  A selection is captured first, so
-        one that is not offered is refused whatever the schedule holds.
+        Who the player is comes from the published season and the next game
+        from the schedule covering today, whatever the selection; only the
+        opponent's ranks read the selected season (crf04/statsplus#415).  A
+        selection is captured first, so one that is not offered is refused
+        whatever the schedule holds.
         """
 
         reader = self.publication_reader
@@ -136,7 +137,7 @@ class NextOpponentService:
             season=ReadSeason(self.game.settings.nba.current_season),
         )
         return {
-            **self._next_opponent(player_name, capture.season, capture),
+            **self._next_opponent(player_name, self.game.default_season(), capture),
             "season_context": season_context(reader, capture, self.game.default_season),
         }
 
@@ -199,7 +200,7 @@ class NextOpponentService:
                     "shot_zones",
                     "shot_types",
                 ),
-                season,
+                season if capture is None else capture.season,
                 publication_snapshot=snapshot,
             )
             # Every team ties on a column that cannot vary (no 3s inside
