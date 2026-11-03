@@ -561,6 +561,12 @@ OLDER_GAME = f"pbp:{NEW_GAMES[0][0]}"
             "ledger_provenance_manifest_mismatch",
             id="manifest-without-the-ledger-scope",
         ),
+        pytest.param(
+            {"accepted_versions": "[2]"},
+            {},
+            "ledger_provenance_manifest_mismatch",
+            id="manifest-that-never-accepted-the-ledger-schema",
+        ),
     ],
 )
 def test_a_composition_refuses_evidence_its_own_manifest_did_not_authorize(
