@@ -1222,6 +1222,90 @@ def test_new_traditional_rows_list_their_markets_and_a_window_without_them_stays
     assert scores["PTS"]["last_15"]["missing_inputs"][-1] == "team_defense:traditional"
 
 
+def test_a_raw_traditional_publication_projects_each_row_into_the_sheet_and_scores():
+    """The ledger team-window Publication carries counts by ledger metric; each
+    Defense Sheet row and Traditional score reads its own metric. BOS differs
+    from the other 29 teams on every metric by a different ratio, so a row that
+    read a neighbouring metric would show another number."""
+
+    from sqlalchemy import create_engine
+
+    from app.migrations import run_migrations
+    from app.services.team_matchup_query import TeamMatchupQueryService
+    from app.services.team_matchup_repository import TeamMatchupRepository
+    from tests.support import publication_stubs
+
+    others = {
+        "points": 110.0,
+        "assists": 25.0,
+        "field_goals_made": 40.0,
+        "field_goals_attempted": 80.0,
+        "three_pointers_made": 12.0,
+        "three_pointers_attempted": 32.0,
+        "free_throws_made": 16.0,
+        "free_throws_attempted": 20.0,
+    }
+    boston = {
+        "points": 116.0,
+        "assists": 22.0,
+        "field_goals_made": 43.0,
+        "field_goals_attempted": 84.0,
+        "three_pointers_made": 15.0,
+        "three_pointers_attempted": 35.0,
+        "free_throws_made": 13.0,
+        "free_throws_attempted": 17.0,
+    }
+    stream = "traditional_opponent_season"
+    publication = publication_stubs.read(
+        stream,
+        publication_stubs.league(
+            lambda tricode: publication_stubs.traditional_per48(**(boston if tricode == "BOS" else others))
+        ),
+    )
+    engine = create_engine("sqlite://")
+    run_migrations(engine)
+    season_window = TeamMatchupQueryService(
+        TeamMatchupRepository(engine),
+        clock=lambda: publication_stubs.RETRIEVED_AT,
+        publication_reader=publication_stubs.StubReader({stream: publication}),
+    ).get_latest_window(publication_stubs.SEASON, as_of=publication_stubs.RETRIEVED_AT.date())
+    markets = ("PTS", "AST", "FGM", "FGA", "3PM", "FG3A", "FTM", "FTA")
+    pool = PlayerPool(
+        players=(PoolPlayer(2544, "LeBron James", LAL, markets, {"prizepicks": markets}),),
+        team_counts={LAL: 1},
+        freshness={"status": "fresh", "retrieved_at": RETRIEVED_AT.isoformat(), "providers": {}},
+    )
+
+    payload = _service(pool=pool, season_window=season_window).get_matchup(game_id=GAME_ID)
+
+    boston_sheet = next(team for team in payload["teams"] if team["team_id"] == BOS)["defense_sheet"]
+    rows = {row["key"]: row["season"]["allowed_per_48"] for row in boston_sheet["traditional"]}
+    assert {key: rows[key] for key in ("OPP_PTS", "OPP_AST", "OPP_FGM", "OPP_FGA")} == {
+        "OPP_PTS": 116.0,
+        "OPP_AST": 22.0,
+        "OPP_FGM": 43.0,
+        "OPP_FGA": 84.0,
+    }
+    assert {key: rows[key] for key in ("OPP_FG3M", "OPP_FG3A", "OPP_FTM", "OPP_FTA")} == {
+        "OPP_FG3M": 15.0,
+        "OPP_FG3A": 35.0,
+        "OPP_FTM": 13.0,
+        "OPP_FTA": 17.0,
+    }
+    # Each is BOS / the 30-team mean - 1, e.g. FGM 43 / 40.1 - 1.
+    scores = payload["players"][0]["scores"]
+    assert {market: scores[market]["season"]["components"]["traditional"]["value"] for market in markets} == {
+        "PTS": 0.052632,
+        "AST": -0.116466,
+        "FGM": 0.072319,
+        "FGA": 0.048253,
+        "3PM": 0.239669,
+        "FG3A": 0.090343,
+        "FTM": -0.18239,
+        "FTA": -0.145729,
+    }
+
+
 def test_matchup_carries_strict_source_freshness_and_unavailable_injuries():
     payload = _service().get_matchup(game_id=GAME_ID)
 
