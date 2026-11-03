@@ -520,7 +520,7 @@ class NeighbourSlate:
         self.next_day = next_day
         self.calls = []
 
-    def get_slate(self, requested_date=None, *, neighbours=True, connection=None):
+    def get_slate(self, requested_date=None, *, neighbours=True):
         day = requested_date or self.today
         self.calls.append((day, neighbours))
         return {
@@ -563,33 +563,6 @@ def test_an_invalid_date_is_the_slates_invalid_input():
 
     with pytest.raises(InvalidInputError, match="YYYY-MM-DD"):
         service.get_edges("04-10-2026")
-
-
-def test_a_malformed_request_is_refused_while_the_database_is_unavailable():
-    import sqlite3
-
-    from sqlalchemy import create_engine
-    from sqlalchemy.exc import OperationalError
-
-    def unavailable():
-        raise sqlite3.OperationalError("the database is unavailable")
-
-    service = SlateEdgesService(
-        slates=FakeSlate([_game("G1")]),
-        matchups=FakeMatchups({"G1": _matchup([])}),
-        engine=create_engine("sqlite://", creator=unavailable),
-    )
-
-    for requested_date, fallback, refusal in (
-        (None, "bogus", "fallback"),
-        ("2026-04-10", "next_game_day", "fallback"),
-        ("04-10-2026", None, "YYYY-MM-DD"),
-    ):
-        with pytest.raises(InvalidInputError, match=refusal):
-            service.get_edges(requested_date, fallback=fallback)
-    # A well-formed request does reach the unavailable database.
-    with pytest.raises(OperationalError):
-        service.get_edges("2026-04-10")
 
 
 # --- the result cache and the serial compose ------------------------------
@@ -842,30 +815,21 @@ def test_matchups_compose_one_at_a_time_in_slate_order():
 @pytest.mark.parametrize("selected", [None, "2025-26"], ids=["omitted", "selected"])
 def test_only_a_selected_season_composes_every_game_on_one_snapshot(selected):
     """As 3a1a7bb9: an omitted season composes each game on a scope of its own,
-    and a selection's capture and games share one REPEATABLE READ scope.  The
-    Slate reads on a connection of its own, returned before any game composes."""
+    and a selection's capture and games share one REPEATABLE READ scope."""
 
     from sqlalchemy import create_engine
 
     class ScopedComposer(SnapshotComposer):
         def get_matchup_from_snapshot(self, *, read_scope=None, **kwargs):
             self.scopes.append(read_scope)
-            self.slate_closed.append([connection.closed for connection in service.slates.connections])
             return super().get_matchup_from_snapshot(**kwargs)
-
-    class ConnectedSlate(FakeSlate):
-        def get_slate(self, requested_date=None, *, neighbours=True, connection=None):
-            self.connections.append(connection)
-            return super().get_slate(requested_date)
 
     games, payloads = _two_games()
     composer = ScopedComposer(payloads)
-    composer.scopes, composer.slate_closed = [], []
+    composer.scopes = []
     publications = Publications()
     publications.selected_season = selected
     service = _cached_service(composer, None, games, publications=publications)
-    service.slates = ConnectedSlate(games)
-    service.slates.connections = []
     service._engine = create_engine("sqlite://")
 
     service.get_edges("2026-04-10")
@@ -876,10 +840,6 @@ def test_only_a_selected_season_composes_every_game_on_one_snapshot(selected):
     else:
         assert first is not None
         assert second is first
-        assert first[0] not in service.slates.connections
-    assert len(service.slates.connections) == 1
-    assert service.slates.connections[0] is not None
-    assert composer.slate_closed == [[True], [True]]
 
 
 def test_an_edges_miss_composes_fresh_and_never_stacks_a_cached_matchup():

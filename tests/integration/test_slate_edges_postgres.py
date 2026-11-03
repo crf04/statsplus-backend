@@ -189,20 +189,16 @@ class GenerationComposer:
 
 
 class ReadingSlate(FakeSlate):
-    """Reads the table on the connection the edges give it, then runs ``then``."""
+    """Reads the table on a connection of its own, then runs ``then``."""
 
     def __init__(self, games, publications, then):
         super().__init__(games)
         self.publications = publications
         self.then = then
 
-    def get_slate(self, requested_date=None, *, neighbours=True, connection=None):
-        query = text(f"SELECT value FROM {self.publications.table}")
-        if connection is None:
-            with self.publications.engine.connect() as owned:
-                owned.execute(query)
-        else:
-            connection.execute(query)
+    def get_slate(self, requested_date=None, *, neighbours=True):
+        with self.publications.engine.connect() as connection:
+            connection.execute(text(f"SELECT value FROM {self.publications.table}"))
         self.then()
         return super().get_slate(requested_date)
 
@@ -271,3 +267,116 @@ def test_a_generation_check_that_times_out_falls_back_to_a_full_capture(engine, 
 
     assert reads == [("G1", "G1"), ("G1", "G1")]
     assert [game["game_id"] for game in body["games"] if game["scores"]] == ["G1", "G2"]
+
+
+# --- the real Slate on a one-connection pool --------------------------------
+
+
+class PooledCatalog:
+    """One scheduled game; each read checks out a connection, as the Event Catalog's does."""
+
+    def __init__(self, engine, event):
+        self.engine = engine
+        self.event = event
+
+    def _read(self):
+        with self.engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+
+    def count_events(self, season):
+        self._read()
+        return 1
+
+    def get_freshness(self, season, *, now):
+        self._read()
+        return {"last_success_at": now.isoformat()}
+
+    def get_events_between(self, season, start, end):
+        self._read()
+        return [self.event]
+
+    def get_events_before(self, *_args, **_kwargs):
+        self._read()
+        return []
+
+    def get_events_after(self, *_args, **_kwargs):
+        self._read()
+        return []
+
+
+class PooledPublications:
+    """Publications whose generation check and snapshot each check out a connection."""
+
+    captures_published_season = True
+
+    def __init__(self, engine):
+        self.engine = engine
+
+    def _read(self):
+        with self.engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+
+    def generation(self, stream_keys, **_):
+        self._read()
+        return GENERATION
+
+    def snapshot(self, stream_keys, *, season, **_):
+        self._read()
+        return SimpleNamespace(generation=GENERATION, retained_history=(), season=season)
+
+
+class SnapshotComposer:
+    def get_matchup_from_snapshot(self, **_):
+        return _matchup([_blend_player(2, "B", 0.05)])
+
+
+def test_edges_answer_on_a_one_connection_pool():
+    """Round 3 on #674: the Slate captures its Publications through the reuse,
+    so the edges hold no connection of their own while it reads.  As at
+    3a1a7bb9, a one-connection pool answers the scored document rather than
+    timing out on the connection the request already holds."""
+
+    from datetime import UTC, datetime
+
+    from sqlalchemy.pool import QueuePool
+
+    from app.services.slate_service import SlateService
+
+    url = os.getenv("TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("TEST_DATABASE_URL is not set; skipping Postgres integration tests")
+    engine = create_engine(url, poolclass=QueuePool, pool_size=1, max_overflow=0, pool_timeout=0.5)
+    now = datetime(2026, 4, 10, 12, tzinfo=UTC)
+    event = {
+        "nba_game_id": "0022500584",
+        "season": "2025-26",
+        "scheduled_at": "2026-04-10T23:00:00+00:00",
+        "status_code": 1,
+        "status_text": "Scheduled",
+        "away_team": {"id": 100, "tricode": "AWY", "name": "Away"},
+        "home_team": {"id": 200, "tricode": "HOM", "name": "Home"},
+    }
+    publications = PooledPublications(engine)
+    reuse = PublicationSnapshotReuse()
+    try:
+        body = SlateEdgesService(
+            slates=SlateService(
+                PooledCatalog(engine, event),
+                settings=SETTINGS,
+                clock=lambda: now,
+                publication_reader=publications,
+                matchup_snapshot=lambda reader: capture_matchup_snapshot(SETTINGS, reader, reuse),
+            ),
+            matchups=SnapshotComposer(),
+            publication_reader=publications,
+            injuries=object(),
+            settings=SETTINGS,
+            snapshot_reuse=reuse,
+            engine=engine,
+        ).get_edges("2026-04-10")
+    finally:
+        engine.dispose()
+
+    assert [(game["game_id"], game["scores"]) for game in body["games"]] == [
+        ("0022500584", [{"canonical_id": 2, "value": 0.05}])
+    ]

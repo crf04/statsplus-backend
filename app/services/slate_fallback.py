@@ -8,7 +8,6 @@ through ``read_slate`` so they cannot disagree about which day that is.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from datetime import date, datetime
 from typing import Any
 
 from app.errors import InvalidInputError
@@ -38,7 +37,11 @@ def read_slate(
 
     if fallback is None:
         return {**get_slate(requested_date), "fallback": None}
-    _check_fallback(requested_date, fallback)
+    if fallback not in (PREVIOUS_GAME_DAY, NEXT_GAME_DAY) or requested_date is not None:
+        raise InvalidInputError(
+            "The fallback parameter must be previous_game_day or next_game_day and cannot be combined with date.",
+            public_details={"parameters": ["fallback"]},
+        )
     current = get_slate(None)
     if current["games"]:
         return {**current, "fallback": None}
@@ -50,33 +53,4 @@ def read_slate(
     return {**get_slate(previous), "fallback": PREVIOUS_GAME_DAY}
 
 
-def parse_slate_date(value: str) -> date:
-    """``value`` as a Slate Date; one not written ``YYYY-MM-DD`` is ``invalid_input``."""
-
-    try:
-        parsed = datetime.strptime(value, "%Y-%m-%d").date()
-    except (TypeError, ValueError) as error:
-        raise InvalidInputError("The slate date must use YYYY-MM-DD.", detail=error) from error
-    if parsed.isoformat() != value:
-        raise InvalidInputError("The slate date must use YYYY-MM-DD.")
-    return parsed
-
-
-def check_slate_request(requested_date: str | None, fallback: str | None) -> None:
-    """Refuse the request ``read_slate`` and the Slate would refuse, before anything is read."""
-
-    if fallback is not None:
-        _check_fallback(requested_date, fallback)
-    if requested_date is not None:
-        parse_slate_date(requested_date)
-
-
-def _check_fallback(requested_date: str | None, fallback: str) -> None:
-    if fallback not in (PREVIOUS_GAME_DAY, NEXT_GAME_DAY) or requested_date is not None:
-        raise InvalidInputError(
-            "The fallback parameter must be previous_game_day or next_game_day and cannot be combined with date.",
-            public_details={"parameters": ["fallback"]},
-        )
-
-
-__all__ = ["NEXT_GAME_DAY", "PREVIOUS_GAME_DAY", "check_slate_request", "parse_slate_date", "read_slate"]
+__all__ = ["NEXT_GAME_DAY", "PREVIOUS_GAME_DAY", "read_slate"]
