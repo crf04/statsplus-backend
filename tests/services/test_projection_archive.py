@@ -1461,6 +1461,68 @@ def test_mixed_live_closing_and_missing_games_keep_state_specific_freshness(tmp_
     assert pool.players
 
 
+def test_a_closed_games_pool_serves_only_its_own_closing_set(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-two-closed.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    query = NBAMarketQuery(season=SEASON)
+    other_game_id = "0022500502"
+    start_at = OBSERVED_AT + timedelta(minutes=5)
+    source = _closing_snapshot(catalog, OBSERVED_AT)
+    other_market = replace(
+        source.markets[0],
+        market_id="other-market",
+        athlete=replace(source.markets[0].athlete, canonical_id=201939, name="Stephen Curry"),
+        event=EventEvidence(canonical_id=other_game_id),
+    )
+    archive.ingest_complete_snapshot(
+        replace(source, markets=(*source.markets, other_market)),
+        query=query,
+        accepted_at=OBSERVED_AT,
+    )
+    events = tuple(
+        {
+            "nba_game_id": game_id,
+            "scheduled_at": start_at.isoformat(),
+            "status_text": "Q1",
+            "status_code": 2,
+            "first_observed_started_at": start_at.isoformat(),
+        }
+        for game_id in (GAME_ID, other_game_id)
+    )
+    ProjectionRecordingService(
+        archive,
+        ProjectionArchiveReadScope(provider="dabble", query=query),
+    ).freeze_closing_projection_sets(events=events, query=query, created_at=start_at)
+
+    class ScopedEvents:
+        def get_events_by_ids(self, _season, game_ids):
+            return tuple(event for event in events if event["nba_game_id"] in set(game_ids))
+
+    reader = LatestProjectionPlayerPoolReader(
+        engine,
+        ProjectionArchiveReadScope(provider="dabble", query=query),
+        clock=lambda: OBSERVED_AT + timedelta(minutes=10),
+        event_reader=ScopedEvents(),
+    )
+
+    pools = {
+        game_id: reader.get_pool_for_game(season=SEASON, game_id=game_id)
+        for game_id in (GAME_ID, other_game_id)
+    }
+
+    assert {
+        game_id: [player.canonical_player_id for player in pool.players] for game_id, pool in pools.items()
+    } == {
+        GAME_ID: [2544],
+        other_game_id: [201939],
+    }
+    assert pools[other_game_id].game_states == {
+        other_game_id: {"state": "closing", "observed_at": OBSERVED_AT.isoformat()}
+    }
+
+
 def _catalog_stale_slate(tmp_path, name):
     engine = create_engine(f"sqlite:///{tmp_path / name}")
     run_migrations(engine)

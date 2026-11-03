@@ -25,6 +25,7 @@ from sqlalchemy import (
     literal,
     or_,
     select,
+    tuple_,
     union_all,
     update,
 )
@@ -3596,17 +3597,20 @@ class LatestProjectionPlayerPoolReader:
         self, *, season: str, requested_games: tuple[str, ...], connection: Connection | None = None
     ) -> PlayerPool:
         providers = tuple(scope.provider for scope in self.scopes)
+        closing_sets = ClosingProjectionSet.__table__
         with self._pool_snapshot(connection) as connection:
+            # Every scope's closing sets for these games in one statement.
             closing_set_ids = [
-                closing_set_id
-                for scope in self.scopes
-                for closing_set_id in ProjectionArchive.closing_set_ids(
-                    connection,
-                    provider=scope.provider,
-                    season=season,
-                    query_key=scope.query_key,
-                    game_ids=requested_games,
-                ).values()
+                str(closing_set_id)
+                for closing_set_id in connection.execute(
+                    select(closing_sets.c.closing_set_id).where(
+                        tuple_(closing_sets.c.provider, closing_sets.c.query_key).in_(
+                            [(scope.provider, scope.query_key) for scope in self.scopes]
+                        ),
+                        closing_sets.c.season == season,
+                        closing_sets.c.canonical_game_id.in_(requested_games),
+                    )
+                ).scalars()
             ]
             rows = _closing_member_rows(connection, closing_set_ids)
         game_states: dict[str, dict[str, Any]] = {}
