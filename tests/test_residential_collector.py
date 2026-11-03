@@ -3805,6 +3805,33 @@ def test_a_tracking_shortfall_never_masks_a_malformed_shot_response(
     outbox.close()
 
 
+@pytest.mark.parametrize("tracking_gp", [6, 7])
+def test_a_tracking_shortfall_never_masks_an_incomplete_category(tmp_path: Path, monkeypatch, tracking_gp):
+    # Catch and Shoot is asked for and Pullups comes back: incomplete on equal
+    # games, so incomplete when tracking trails too.
+    _patch_opponent_shot_endpoints(
+        monkeypatch,
+        tracking_gp={LAC: tracking_gp},
+        box_score=lambda team_id: pd.DataFrame([{"TEAM_ID": team_id, **BOX_SCORE_7}]),
+        change=lambda frame: frame.assign(GENERAL_RANGE="Pullups"),
+    )
+    collector, transport, outbox = _collector(
+        tmp_path,
+        discovery=_opponent_discovery(
+            "shot_types_opponent", {"window": "season", "team_id": LAC, "category": "Catch and Shoot"}
+        ),
+        provider=_StandaloneNBAProvider(),
+        release_checksum="a" * 64,
+    )
+
+    result = collector.run()
+
+    assert (result.exit_code, result.failures, result.uploaded) == (20, ("incomplete_observation",), 0)
+    terminal = [call[4] for call in transport.calls if call[1].endswith("/api/collector/status")][-1]
+    assert (terminal["state"], terminal["reason"]) == ("non_retryable", "incomplete_observation")
+    outbox.close()
+
+
 def _patch_opponent_zone_endpoints(monkeypatch, *, zone_gp, opponent_totals, change=lambda row: row):
     """Serve a complete opponent zone row and its TeamStats evidence."""
 

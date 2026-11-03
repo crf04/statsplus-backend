@@ -121,10 +121,11 @@ def _defer_lagging_tracking(raw: Any, observation: NormalizedObservation) -> Nor
     It takes the finished observation, so it runs only once every check the
     normalizer and the window binding apply has passed.  The one problem left
     to find is tracking counting fewer games than the box score, which a
-    later run collects once tracking catches up.
+    later run collects once tracking catches up.  An incomplete observation
+    is returned as is, so the runner refuses it exactly as on equal games.
     """
 
-    if any(row["TRACKING_GP"] < row["GP"] for row in _records(raw) if "TRACKING_GP" in row):
+    if observation.complete and any(row["TRACKING_GP"] < row["GP"] for row in _records(raw) if "TRACKING_GP" in row):
         raise ProviderContractError("provider_window_unverified")
     return observation
 
