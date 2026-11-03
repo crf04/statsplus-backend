@@ -3,9 +3,9 @@
 A segment is one stretch of one period in which a team's five on-floor players
 do not change.  ``lineup_segment_players`` holds one row per on-floor player
 per segment: the lineup as a bitmask over the team-season's roster slots, the
-segment's length, that player's counts, and the team's on-floor totals for the
-segment (repeated on each of the five rows, so a split is one scan with no
-join).  A split sums the rows whose mask holds every ``on`` slot and no
+segment's length, that player's counts, the team's on-floor totals for the
+segment, and when the game was written (both repeated on each of the five
+rows, so a split and its newest included game are one scan with no join).  A split sums the rows whose mask holds every ``on`` slot and no
 ``off`` slot.
 
 ``lineup_segment_games`` heads each game the rotation job wrote or rejected,
@@ -79,6 +79,8 @@ class LineupSegmentPlayer(Base):
     seg = Column(SmallInteger, primary_key=True)
     player_id = Column(Integer, primary_key=True)
     season = Column(String(7), nullable=False)
+    #: The game's ``lineup_segment_games.written_at``.
+    written_at = Column(DateTime(timezone=True), nullable=False)
     lineup_mask = Column(BigInteger, nullable=False)
     duration_cs = Column(Integer, nullable=False)
     pts = Column(SmallInteger, nullable=False)

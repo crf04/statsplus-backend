@@ -55,7 +55,7 @@ def test_slot_63_sets_the_sign_bit_and_the_mask_predicate_still_selects_on_postg
         connection.execute(
             text(
                 "INSERT INTO lineup_segment_players VALUES "
-                "('0022500001', 1, 0, 7, '2025-26', :mask, 6000, 0,0,0,0,0,0,0,0, 0,0,0,0,0)"
+                "('0022500001', 1, 0, 7, '2025-26', now(), :mask, 6000, 0,0,0,0,0,0,0,0, 0,0,0,0,0)"
             ),
             {"mask": -(1 << 63) | 1},
         )

@@ -56,7 +56,8 @@ class SegmentSplit:
     #: Per player: ``player_id``, ``name``, ``duration_cs``, the :data:`COUNTS`
     #: and the team's on-floor totals while he played in the state.
     rows: tuple[Mapping[str, Any], ...]
-    #: When the newest stored game of the team-season was written.
+    #: When the newest game with a row in the split was written; ``None``
+    #: when no game has one.
     written_at: datetime | None
     #: The team-season's completed regular-season games in the Event Catalog
     #: with no stored segments (rejected, failed or not yet collected), oldest
@@ -106,6 +107,7 @@ def write_game(connection: Connection, season: str, segments: GameSegments, writ
                         "seg": segment.seg,
                         "player_id": player_id,
                         "season": season,
+                        "written_at": written_at,
                         "lineup_mask": mask,
                         "duration_cs": segment.duration_cs,
                         **segment.counts[player_id],
@@ -289,16 +291,10 @@ class LineupSegmentRepository:
                 (_missing_game(event) for event in unstored if _completed_regular_season(event)),
                 key=lambda game: (game["game_date"], game["game_id"]),
             )
-            written = connection.execute(
-                select(func.max(_GAMES.c.written_at)).where(
-                    _GAMES.c.season == season,
-                    _GAMES.c.rejected_reason.is_(None),
-                    or_(_GAMES.c.home_team_id == team_id, _GAMES.c.away_team_id == team_id),
-                )
-            ).scalar()
             rows: tuple[Mapping[str, Any], ...] = ()
+            written = None
             if all(player_id in roster for player_id in on):
-                rows = self._sums(
+                rows, written = self._sums(
                     connection,
                     season,
                     team_id,
@@ -320,13 +316,16 @@ class LineupSegmentRepository:
         on_mask: int,
         off_mask: int,
         names: Mapping[int, str],
-    ) -> tuple[Mapping[str, Any], ...]:
+    ) -> tuple[tuple[Mapping[str, Any], ...], datetime | None]:
+        """Each player's sums, and when the newest game with a row in the split was written."""
+
         mask = _PLAYERS.c.lineup_mask
         query = (
             select(
                 _PLAYERS.c.player_id,
                 func.sum(_PLAYERS.c.duration_cs).label("duration_cs"),
                 *(func.sum(_PLAYERS.c[key]).label(key) for key in (*COUNTS, *_TEAM_TOTALS)),
+                func.max(_PLAYERS.c.written_at).label("written_at"),
             )
             .where(_PLAYERS.c.team_id == team_id, _PLAYERS.c.season == season)
             .group_by(_PLAYERS.c.player_id)
@@ -336,9 +335,11 @@ class LineupSegmentRepository:
             query = query.where(mask.op("&")(on) == on)
         if off_mask:
             query = query.where(mask.op("&")(literal(off_mask, BigInteger())) == 0)
-        return tuple(
-            {**row, "name": names.get(row["player_id"], "")}
-            for row in (dict(row) for row in connection.execute(query).mappings())
+        rows = [dict(row) for row in connection.execute(query).mappings()]
+        written = [row.pop("written_at") for row in rows]
+        return (
+            tuple({**row, "name": names.get(row["player_id"], "")} for row in rows),
+            max(written, default=None),
         )
 
 

@@ -26,7 +26,7 @@ from app.services.lineup_segment_repository import (
     mask_of,
     write_game,
 )
-from app.services.lineup_segments import GameSegments, Segment, derive_segments
+from app.services.lineup_segments import COUNTS, GameSegments, Segment, derive_segments
 from app.services.on_off import OnOffService
 from app.services.rotation_collection import RotationCollectionService
 from app.services.rotation_derivation import RotationRejected
@@ -682,6 +682,38 @@ def test_games_missing_lists_every_completed_regular_season_game_with_no_stored_
         {"game_id": "0022500901", "game_date": "2025-11-18", "matchup": "BOS @ MIA"},
         {"game_id": "0022500900", "game_date": "2025-11-20", "matchup": "DET @ BOS"},
     ]
+
+
+def _store_lineup(engine, game_id, lineup, written_at, season="2025-26"):
+    counts = {player: dict.fromkeys(COUNTS, 0) for player in lineup}
+    with engine.begin() as connection:
+        write_game(
+            connection,
+            season,
+            GameSegments(
+                game_id,
+                BOS,
+                DEN,
+                {p: f"P{p}" for p in lineup},
+                (Segment(BOS, 0, lineup, 6000, counts, 0, 0, 0, 0, 0),),
+            ),
+            written_at,
+        )
+
+
+def test_cached_at_is_the_newest_write_among_the_games_the_split_includes(tmp_path, provider):
+    engine = _engine(tmp_path)
+    _store_lineup(engine, "0022500001", (1, 2, 3, 4, 5), datetime(2026, 11, 1, 9, 0, tzinfo=UTC))
+    _store_lineup(engine, "0022500002", (1, 2, 3, 4, 5), datetime(2026, 11, 2, 9, 0, tzinfo=UTC))
+    _store_lineup(engine, "0022500003", (6, 7, 8, 9, 10), datetime(2026, 11, 3, 9, 0, tzinfo=UTC))
+    LineupSegmentRepository(engine).record_coverage("2025-26", WRITTEN_AT)
+    service = _service(provider, engine)
+
+    first_two = service.get("BOS", "2025-26", on=[1])
+    all_three = service.get("BOS", "2025-26", off=[203999])
+
+    assert first_two["cached_at"] == "2026-11-02T09:00:00+00:00"
+    assert all_three["cached_at"] == "2026-11-03T09:00:00+00:00"
 
 
 def test_an_on_player_who_never_played_for_the_team_has_an_empty_split(covered, provider):

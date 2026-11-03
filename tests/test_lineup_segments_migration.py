@@ -41,6 +41,7 @@ def test_the_migration_creates_the_tables_and_reruns_as_a_noop(tmp_path):
         "seg",
         "player_id",
         "season",
+        "written_at",
         "lineup_mask",
         "duration_cs",
         "pts",

@@ -3374,7 +3374,8 @@ whose lineup segments are recorded as complete is answered from them instead
 of PBPStats: one SQL aggregate over the stored LiveData play-by-play, with no
 cache, throttle, per-user budget or deadline. The response has the same
 shape, except `"source": "statsplus"`, `"stale": false` always, `cached_at`
-when the newest included game's segments were written, and
+when the newest game with a row in the split had its segments written (`null`
+when the split includes no game), and
 `games_missing`, the team-season's completed regular-season games with no
 segments (a game the rotation derivation rejected, whose LiveData fetch
 failed, or that the nightly job has not collected yet), oldest first, `[]`
