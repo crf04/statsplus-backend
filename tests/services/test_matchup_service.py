@@ -2709,6 +2709,8 @@ def test_a_historical_blend_is_withheld_while_its_components_still_show():
         "player_diet:shot_zones",
         "player_diet:shot_types",
         "player_diet:assist_locations",
+        # OPP_REB fills the combo's cell, but the window has no OPP_PTS or OPP_AST.
+        "team_defense:traditional",
     ]
 
 
@@ -3122,6 +3124,38 @@ def test_a_historical_matchup_without_a_rebound_diet_keeps_the_traditional_blend
         "PRA": {"value": -0.054985, "thin": True},
     }
     assert base["REB"]["components"] == {"traditional": {"value": -0.022727, "thin": False}}
+
+
+def test_a_combo_withholds_its_blend_when_one_part_lacks_its_traditional_row():
+    # OPP_REB alone still fills RA's `traditional` cell, but AST's OPP_AST
+    # input is gone, so every combo with an AST part names the gap and a
+    # historical Matchup withholds its Blend. PR has no AST part.
+    diets, season_window, _last_15_window = _parity_evidence()
+
+    def keep(metric):
+        return (metric.base, metric.stat_key) != ("traditional", "OPP_AST")
+
+    without_opp_ast = replace(
+        season_window,
+        league_metrics=tuple(filter(keep, season_window.league_metrics)),
+        team_metrics={team: tuple(filter(keep, rows)) for team, rows in season_window.team_metrics.items()},
+    )
+    payload = _historical_service(
+        diets=diets, season_window=without_opp_ast, player_logs=RecordedGameLogs()
+    ).get_matchup(game_id=GAME_ID)
+    scores = next(row for row in payload["players"] if row["canonical_id"] == AWAY_PARTICIPANT)["scores"]
+
+    assert {
+        market: (scores[market]["season"]["missing_inputs"], scores[market]["season"]["blend"])
+        for market in ("AST", "PA", "RA", "PRA", "PR")
+    } == {
+        "AST": (["team_defense:traditional"], None),
+        "PA": (["team_defense:traditional"], None),
+        "RA": (["team_defense:traditional"], None),
+        "PRA": (["team_defense:traditional"], None),
+        "PR": ([], {"value": -0.047547, "thin": True}),
+    }
+    assert scores["RA"]["season"]["components"]["traditional"] == {"value": -0.012626, "thin": False}
 
 
 def test_participants_without_a_season_rate_stay_visible_and_name_the_gap():

@@ -2057,7 +2057,10 @@ additionally **withheld** whenever `missing_inputs` is nonempty, so `blend` is
 blended score. Component evidence still ships, and the named gaps explain the
 withheld Blend. Combos withhold
 their own Blend under the same rule rather than inheriting a partial one
-through their parts. The score formulas themselves are unchanged: a historical
+through their parts. A combo counts a Base as present only when every part
+with Season volume that requires it supplied it, so a window without `OPP_AST`
+names `team_defense:traditional` on PA, RA and PRA although `OPP_REB` or
+`OPP_PTS` still fills their `traditional` cell. The score formulas themselves are unchanged: a historical
 window whose `missing_inputs` is empty carries exactly the cells it always
 did.
 

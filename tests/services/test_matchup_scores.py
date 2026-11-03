@@ -1382,7 +1382,8 @@ def test_the_rebound_blend_reaches_pr_ra_and_pra_through_their_rebound_part():
     assert scores["REB"]["season"]["blend"] == {"value": 0.2425, "thin": False}
     # Each combo weighs the REB part by 8 rebounds a game over all the positive
     # per-game volumes (PR 28, RA 13, PRA 33); the PTS and AST parts have no
-    # stored defense here, so every combo cell is a thin partial.
+    # stored defense here, OPP_PTS and OPP_AST included, so every combo cell
+    # is a thin partial that names the Traditional gap.
     assert scores["PR"]["season"] == {
         "components": {
             "traditional": {"value": 0.071429, "thin": True},
@@ -1406,13 +1407,19 @@ def test_the_rebound_blend_reaches_pr_ra_and_pra_through_their_rebound_part():
     }
     assert {market: windows["season"]["missing_inputs"] for market, windows in player["scores"].items()} == {
         "REB": [],
-        "PR": ["team_defense:play_types", "team_defense:shot_zones", "team_defense:shot_types"],
-        "RA": ["team_defense:assist_locations"],
+        "PR": [
+            "team_defense:play_types",
+            "team_defense:shot_zones",
+            "team_defense:shot_types",
+            "team_defense:traditional",
+        ],
+        "RA": ["team_defense:assist_locations", "team_defense:traditional"],
         "PRA": [
             "team_defense:play_types",
             "team_defense:shot_zones",
             "team_defense:shot_types",
             "team_defense:assist_locations",
+            "team_defense:traditional",
         ],
     }
 

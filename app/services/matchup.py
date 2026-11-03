@@ -2160,8 +2160,16 @@ class MatchupService:
             )
             # An unavailable cell names what it lacked instead of leaving the
             # reader to guess why no blend arrived.
+            present = set(window["components"])
+            if market in _COMBO_PARTS and summary is not None and summary.season_rate is not None:
+                # One part's cell fills a combo component, so a Base counts
+                # only when every part with volume that requires it supplied it.
+                for part in _COMBO_PARTS[market]:
+                    if summary.season_rate.per_game.get(part, 0.0) > 0:
+                        supplied = memo[(part, window_name)]["components"]
+                        present -= {base for base in _SCORE_INPUT_BASES[part] if base not in supplied}
             window["missing_inputs"] = self._missing_score_inputs(
-                market, window_name, window["components"], summary, availability
+                market, window_name, present, summary, availability
             )
             memo[key] = window
         return memo[key]
@@ -2170,7 +2178,7 @@ class MatchupService:
     def _missing_score_inputs(
         market: str,
         window_name: str,
-        components: Mapping[str, Any],
+        present: set[str],
         summary: PlayerSeasonLogSummary | None,
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
     ) -> list[str]:
@@ -2182,7 +2190,7 @@ class MatchupService:
         for base in _SCORE_INPUT_BASES.get(market, ()):
             if availability[base][window_name]["status"] != "available":
                 missing.append(f"team_defense:{base}")
-            elif base in components or (needs_rate and rate_missing):
+            elif base in present or (needs_rate and rate_missing):
                 # A named missing Season rate already explains the gap; the
                 # Diet evidence behind it was never consulted.
                 continue
