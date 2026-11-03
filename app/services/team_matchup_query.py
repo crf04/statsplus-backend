@@ -403,7 +403,8 @@ class TeamMatchupQueryService:
 
         A base in ``unranked_bases`` is validated from its stats' summaries,
         unless a value the database could not prove rankable sends it through
-        the row check too.
+        the row check and the ranking, which refuse or fail on it as they
+        would for any other base.
         """
 
         summaries = self.repository.get_latest_metric_summaries(
@@ -428,7 +429,7 @@ class TeamMatchupQueryService:
             ),
             summaries=tuple(summary for summary in summaries if summary.base not in row_bases),
             observations=observations,
-            unranked_bases=unranked_bases,
+            unranked_bases=frozenset(unranked_bases) - row_bases,
         )
 
     def get_window(self, scope: TeamMatchupSnapshotScope, *, publication_snapshot=None) -> TeamMatchupWindow:

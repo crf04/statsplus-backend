@@ -40,8 +40,11 @@ from app.services.team_matchup_publications import (
 from app.utils.db import is_demo_database_url
 
 EASTERN = ZoneInfo("America/New_York")
-#: Bounds a stored float to the finite range a summary proves (float max is ~1.8e308).
-_FINITE_BOUND = 1e308
+#: The values a summary proves rankable: a raw value within +-1e100 over a
+#: denominator in [1e-100, 1e308] is at most ~3e203 allowed per 48, so the
+#: league mean, deviation and shot-type sums over 30 of them stay finite.
+_RANKABLE_RAW = 1e100
+_RANKABLE_DENOMINATOR = (1e-100, 1e308)
 
 _LEDGER_SURFACE_BY_STREAM = {
     "traditional_opponent_season": (0, "traditional"),
@@ -1261,13 +1264,13 @@ class TeamMatchupRepository:
             .where(*conditions, table.c.as_of_date <= as_of)
             .group_by(table.c.base)
         )
-        # Proves a value finite, positive where it must be, and in a known
-        # unit; NULL, NaN and the infinities all fail it, so a row it cannot
-        # prove is left to the window's own numeric check.
+        # Proves a value one the window would rank without refusing or
+        # failing on it; NULL, NaN, the infinities and any value whose per-48
+        # could overflow all fail it, so a row it cannot prove is left to the
+        # window's own check and ranking.
         proven = and_(
-            table.c.raw_value.between(-_FINITE_BOUND, _FINITE_BOUND),
-            table.c.denominator_value > 0,
-            table.c.denominator_value <= _FINITE_BOUND,
+            table.c.raw_value.between(-_RANKABLE_RAW, _RANKABLE_RAW),
+            table.c.denominator_value.between(*_RANKABLE_DENOMINATOR),
             table.c.denominator_unit.in_(("minutes", "seconds")),
         )
         statement = (

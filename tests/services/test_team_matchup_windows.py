@@ -2281,19 +2281,34 @@ def test_latest_window_ranks_each_base_from_its_own_newest_scope(tmp_path):
 
 
 _LEGACY_TRADITIONAL_AT = datetime(2026, 1, 9, 15, tzinfo=UTC)
-#: How a stored Traditional fact is damaged, whether the window still keeps
-#: the stored freshness, and how many statements read fact rows one per team.
+#: How a stored Traditional fact is damaged (its value is 10 per 48 minutes),
+#: what the window answers, and how many statements read fact rows one per
+#: team.  The answer is either whether the window keeps the stored freshness
+#: or the error it raises; each is the answer 3a1a7bb9 (before #672 read
+#: summaries) gives for the same fixture, so skipping the ranking of a base
+#: a publication replaces changes no answer.
 REPLACED_BASE_CASES = [
     pytest.param(None, True, 0, id="valid facts stay unread"),
     pytest.param({"delete": True}, False, 0, id="a missing team"),
     pytest.param({"denominator_value": 0}, False, 1, id="a zero denominator"),
     pytest.param({"raw_value": float("inf")}, False, 1, id="an infinite value"),
-    pytest.param({"raw_value": 1.5e308}, True, 1, id="a finite value past the proven bound"),
+    pytest.param({"raw_value": 1e100}, True, 0, id="the largest proven value"),
+    pytest.param({"denominator_value": 1e-100}, True, 0, id="the smallest proven denominator"),
+    pytest.param({"raw_value": 3e306}, True, 1, id="a finite value past the proven bound"),
+    pytest.param({"raw_value": 1.5e308}, AttributeError, 1, id="a value whose per-48 overflows"),
+    pytest.param({"raw_value": 1e308}, AttributeError, 1, id="a finite value whose per-48 overflows"),
+    pytest.param(
+        {"denominator_value": 1e-307}, AttributeError, 1, id="a tiny denominator whose per-48 overflows"
+    ),
 ]
 
 
-def check_replaced_base_freshness(engine, damage, *, retained, rows_read):
-    """Rank Traditional from its publication over stored facts damaged by ``damage``."""
+def replaced_base_outcome(engine, damage):
+    """Rank Traditional from its publication over stored facts damaged by ``damage``.
+
+    Returns whether the window kept the stored freshness, or the type of the
+    error it raised, and the statements that read fact rows one per team.
+    """
 
     from tests.support.publication_stubs import (
         RETRIEVED_AT,
@@ -2329,26 +2344,35 @@ def check_replaced_base_freshness(engine, damage, *, retained, rows_read):
     )
 
     fact_reads = _record_fact_row_reads(engine)
-    window = service.get_latest_window(SEASON, as_of=RETRIEVED_AT.date())
-
+    try:
+        window = service.get_latest_window(SEASON, as_of=RETRIEVED_AT.date())
+    except Exception as error:
+        return type(error), fact_reads
     assert window is not None
     traditional = next(item for item in window.observations if item.surface == "traditional")
     assert traditional.status == "available"
     # The publication ranks Traditional either way; valid stored facts only
     # keep the freshness they were retrieved at.
-    assert traditional.retrieved_at == (_LEGACY_TRADITIONAL_AT if retained else RETRIEVED_AT)
     assert {metric.base for metric in window.league_metrics} == {"traditional"}
+    assert traditional.retrieved_at in {_LEGACY_TRADITIONAL_AT, RETRIEVED_AT}
+    return traditional.retrieved_at == _LEGACY_TRADITIONAL_AT, fact_reads
+
+
+def check_replaced_base_freshness(engine, damage, *, answer, rows_read):
+    outcome, fact_reads = replaced_base_outcome(engine, damage)
+
+    assert outcome == answer
     assert len(fact_reads) == rows_read
 
 
-@pytest.mark.parametrize(("damage", "retained", "rows_read"), REPLACED_BASE_CASES)
-def test_a_publication_backed_base_keeps_its_stored_freshness_only_when_its_facts_are_valid(
-    tmp_path, damage, retained, rows_read
+@pytest.mark.parametrize(("damage", "answer", "rows_read"), REPLACED_BASE_CASES)
+def test_a_publication_backed_base_answers_as_its_ranked_stored_facts_would(
+    tmp_path, damage, answer, rows_read
 ):
     engine = create_engine(f"sqlite:///{tmp_path / 'replaced-base.sqlite3'}")
     run_migrations(engine)
 
-    check_replaced_base_freshness(engine, damage, retained=retained, rows_read=rows_read)
+    check_replaced_base_freshness(engine, damage, answer=answer, rows_read=rows_read)
 
 
 def test_latest_window_distinguishes_a_same_day_failure_from_older_facts(tmp_path):

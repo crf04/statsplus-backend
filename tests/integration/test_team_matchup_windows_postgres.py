@@ -40,7 +40,7 @@ def _empty_schema(engine):
 
 
 @pytest.mark.parametrize(
-    ("damage", "retained", "rows_read"),
+    ("damage", "answer", "rows_read"),
     [
         *REPLACED_BASE_CASES,
         pytest.param({"raw_value": float("nan")}, False, 1, id="a NaN value"),
@@ -49,7 +49,7 @@ def _empty_schema(engine):
         pytest.param({"raw_value": float("-inf")}, False, 1, id="a negative infinite value"),
     ],
 )
-def test_a_publication_backed_base_keeps_its_stored_freshness_only_when_its_facts_are_valid(
-    engine, damage, retained, rows_read
+def test_a_publication_backed_base_answers_as_its_ranked_stored_facts_would(
+    engine, damage, answer, rows_read
 ):
-    check_replaced_base_freshness(engine, damage, retained=retained, rows_read=rows_read)
+    check_replaced_base_freshness(engine, damage, answer=answer, rows_read=rows_read)
