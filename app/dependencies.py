@@ -181,6 +181,7 @@ def build_dependencies(
     from app.services.injury_scenarios import InjuryScenarioService
     from app.services.injury_snapshot_repository import InjurySnapshotRepository
     from app.services.job_service import build_data_refresh_job_service
+    from app.services.lineup_segment_repository import LineupSegmentRepository
     from app.services.llm_budget import LLMDailyBudget
     from app.services.matchup import MatchupService
     from app.services.matchup_injuries import MatchupInjuryService, StoredMatchupInjuryReader
@@ -900,7 +901,12 @@ def build_dependencies(
     )
 
     rotation_repository = RotationRepository(engine)
-    on_off_service = OnOffService(pbp_stats_provider, settings, redis_client=redis_client)
+    on_off_service = OnOffService(
+        pbp_stats_provider,
+        settings,
+        redis_client=redis_client,
+        segments=None if demo_database else LineupSegmentRepository(engine),
+    )
     return ApplicationDependencies(
         settings=settings,
         engine=engine,
