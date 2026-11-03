@@ -69,9 +69,8 @@ def mask_of(slots: Iterable[int]) -> int:
 
 
 def write_game(connection: Connection, season: str, segments: GameSegments, written_at: datetime) -> None:
-    """Replace one game's segments and mark it stored."""
+    """Write one game's segments and mark it stored, after ``delete_game``."""
 
-    delete_game(connection, segments.game_id)
     rows = []
     for team_id in (segments.home_team_id, segments.away_team_id):
         team_segments = [segment for segment in segments.segments if segment.team_id == team_id]
