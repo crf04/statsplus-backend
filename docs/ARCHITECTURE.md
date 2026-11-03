@@ -3114,7 +3114,16 @@ aggregate. Synergy exposes neither Last-N nor date
 bounds, so its fact-free Last-15 play-type observation is
 `unavailable/provider_window_unsupported`; no Season value is relabeled as Last-15.
 Season defensive play-type facts persist the raw `PTS` and `POSS` pair for
-each governed slice; `GP` is provider evidence rather than a display metric.
+each governed slice, plus `TOV` (`TOV_POSS_PCT x POSS`) and `FTT` free-throw
+trips (`FT_POSS_PCT x POSS`) when the response carries both rates
+(crf04/statsplus#416); `GP` is provider evidence rather than a display metric.
+The collector derives the same two counts on team and player Synergy rows. A
+Season play-type Publication carries either all 44 metrics or, while any
+accepted observation predates the rates, the 22 `PTS`/`POSS` metrics; the read
+side accepts either, and the player Diet carries `turnovers` and
+`free_throw_trips` per play type only for a player every one of whose rows has
+them. The legacy Diet table stores the pair in the play-type row's
+`shooting_detail` JSON (no migration); each Base reads only its own detail.
 The traditional NBA surface persists `OPP_REB`, `OPP_TOV`, `OPP_STL`, and
 `OPP_BLK` with the same authoritative minutes denominator for both windows.
 

@@ -595,6 +595,32 @@ def normalize_roster_response(
     )
 
 
+#: Synergy rates each play type's turnovers and free-throw trips as a share of
+#: its possessions; the counts are that share times the possessions.
+_SYNERGY_EVENT_SHARES = ("TOV_POSS_PCT", "FT_POSS_PCT")
+
+
+def _synergy_event_counts(
+    row: Mapping[str, Any], possessions: float, *, keys: Sequence[str]
+) -> dict[str, float]:
+    """Turnovers and free-throw trips from one Synergy row, else nothing.
+
+    A row carries both rates or neither (a recorded response from before they
+    were read); one alone is a changed provider schema.
+    """
+
+    shares = [_value(row, share_field) for share_field in _SYNERGY_EVENT_SHARES]
+    if all(share is None for share in shares):
+        return {}
+    counts = {}
+    for share, key in zip(shares, keys, strict=True):
+        number = _number(share)
+        if number > 1:
+            raise ProviderContractError("value_invariant_failed")
+        counts[key] = number * possessions
+    return counts
+
+
 def _stat_rows(
     response: Any,
     *,
@@ -664,6 +690,8 @@ def _stat_rows(
                 stats[target] = normalized_number
         if not stats:
             raise ProviderContractError("provider_schema_changed")
+        if "POSS" in stats:
+            stats.update(_synergy_event_counts(row, stats["POSS"], keys=("TOV", "FTT")))
         stats.update(identity)
         stats["category"] = category
         # Makes never exceed attempts.  This handles both NBA and rehearsal
@@ -764,6 +792,7 @@ def normalize_synergy_response(
                 "possessions": possessions,
                 "possession_share": share,
                 "category": category,
+                **_synergy_event_counts(row, possessions, keys=("turnovers", "free_throw_trips")),
             }
         )
     records.sort(key=lambda row: (row["player_id"], row["team_id"], row["category"]))

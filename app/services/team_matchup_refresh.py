@@ -224,6 +224,10 @@ class TeamWindowBoundaryResolver:
 
 _TRADITIONAL_STATS = ("OPP_REB", "OPP_TOV", "OPP_STL", "OPP_BLK")
 _SHOT_STATS = ("FG2M", "FG2A", "FG3M", "FG3A")
+#: Synergy rates turnovers and free-throw trips per possession; the stored
+#: counts are each rate times the play type's possessions.  A frame without
+#: the rates (a recorded response) stores only points and possessions.
+_PLAY_TYPE_EVENT_SHARES = {"TOV": "TOV_POSS_PCT", "FTT": "FT_POSS_PCT"}
 _ASSIST_STATS = (
     "Assists",
     "Arc3Assists",
@@ -1723,16 +1727,25 @@ class TeamMatchupRefreshService:
         facts = []
         for row in cls._flat_frame(frame).to_dict(orient="records"):
             denominator, unit = cls._denominator_for_team(row, minutes_by_team)
-            for stat_key in ("PTS", "POSS"):
-                if stat_key not in row:
-                    raise ValueError(f"play-type provider row is missing {stat_key}")
+            for column in ("PTS", "POSS"):
+                if column not in row:
+                    raise ValueError(f"play-type provider row is missing {column}")
+            values = {"PTS": float(row["PTS"]), "POSS": float(row["POSS"])}
+            if set(_PLAY_TYPE_EVENT_SHARES.values()) <= row.keys():
+                values.update(
+                    {
+                        stat_key: float(row[column]) * float(row["POSS"])
+                        for stat_key, column in _PLAY_TYPE_EVENT_SHARES.items()
+                    }
+                )
+            for stat_key, value in values.items():
                 facts.append(
                     TeamMatchupFact(
                         cls._team_id(row),
                         "play_types",
                         play_type,
                         stat_key,
-                        float(row[stat_key]),
+                        value,
                         denominator,
                         unit,
                         "nba_synergy",

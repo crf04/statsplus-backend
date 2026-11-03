@@ -160,3 +160,37 @@ def test_positive_possessions_can_round_to_zero_share_for_single_team():
     assert withheld == {}
     assert rows[0]["volume"] == 1
     assert rows[0]["share"] == 0
+
+
+def test_a_traded_players_turnovers_and_trips_sum_across_his_stints():
+    """#416: counts are additive, unlike shares."""
+
+    rows, withheld = aggregate_player_synergy(
+        [
+            record(turnovers=3.0, free_throw_trips=1.0),
+            record(category="Cut", poss=30, share=0.3, turnovers=0.0, free_throw_trips=2.0),
+            record(team=2, poss=40, share=0.4, turnovers=4.0, free_throw_trips=0.5),
+        ]
+    )
+
+    assert withheld == {}
+    assert {row["slice_key"]: (row["turnovers"], row["free_throw_trips"]) for row in rows} == {
+        "Isolation": (7.0, 1.5),
+        "Cut": (0.0, 2.0),
+    }
+
+
+def test_a_player_with_any_record_lacking_the_counts_publishes_none_of_them():
+    rows, withheld = aggregate_player_synergy(
+        [record(turnovers=3.0, free_throw_trips=1.0), record(category="Cut", poss=30, share=0.3)]
+    )
+
+    assert withheld == {}
+    assert all("turnovers" not in row and "free_throw_trips" not in row for row in rows)
+    assert {row["slice_key"]: row["volume"] for row in rows} == {"Isolation": 20, "Cut": 30}
+
+
+@pytest.mark.parametrize("value", [-1.0, float("nan"), True, "3"])
+def test_an_invalid_count_fails_the_whole_source(value):
+    with pytest.raises(ValueError, match="invalid player Synergy turnovers"):
+        aggregate_player_synergy([record(turnovers=value, free_throw_trips=1.0)])

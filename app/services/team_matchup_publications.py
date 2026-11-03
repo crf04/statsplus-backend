@@ -22,6 +22,7 @@ from app.domain.team_matchup_taxonomy import (
     SHOT_TYPE_STORED_TO_DISPLAY,
     SHOT_ZONE_SLICES,
     SHOT_ZONE_STATS,
+    nba_publication_taxonomies,
     publication_metric_identity,
 )
 from app.domain.utc import parse_utc_iso
@@ -63,8 +64,14 @@ def validate_publication_rows(
     accepted publication only after the payload has already proved the exact
     canonical NBA identity set.
     """
+    taxonomies = nba_publication_taxonomies(base) if base in NBA_PUBLICATION_TAXONOMY else ()
+    # Every row carries the one taxonomy the first row names: the current one,
+    # or the one a Publication composed before the optional stats carried.
+    first_keys = frozenset(rows[0].per48) if rows else frozenset()
     expected_keys = (
-        tuple(sorted(NBA_PUBLICATION_TAXONOMY[base])) if base in NBA_PUBLICATION_TAXONOMY else None
+        tuple(sorted(next((keys for keys in taxonomies if keys == first_keys), taxonomies[0])))
+        if taxonomies
+        else None
     )
     canonical_team_ids = set(NBA_TEAM_ID_TO_TRICODE)
     row_team_ids = [row.team_id for row in rows]

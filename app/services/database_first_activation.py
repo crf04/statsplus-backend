@@ -319,6 +319,7 @@ def decode_player_diet(payload: Any, *, base: str, retrieved_at: datetime) -> tu
     from app.services.player_diet import (
         PLAYER_DIET_BASES,
         PlayerDietFact,
+        decode_play_type_events,
         decode_shot_type_shooting,
     )
 
@@ -413,6 +414,9 @@ def decode_player_diet(payload: Any, *, base: str, retrieved_at: datetime) -> tu
                 # Shooting Type profile reports those slices as unavailable
                 # rather than inventing a two/three-point division.
                 shooting=(decode_shot_type_shooting(row.get("shooting")) if base == "shot_types" else None),
+                # Like the split: a Publication composed before
+                # crf04/statsplus#416, or an unusable pair, is no evidence.
+                play_type_events=(decode_play_type_events(row) if base == "play_types" else None),
             )
         )
     if not result:

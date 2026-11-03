@@ -3460,3 +3460,26 @@ def test_a_play_type_season_read_serves_the_full_reads_play_type_metrics(tmp_pat
         assert (league, teams) == ([], {})
     else:
         assert {metric.allowed_per_48 for metric in teams[team_id]} == {float(team_id)}
+
+
+def test_a_play_type_publication_carries_its_newest_taxonomy_or_the_one_before_the_counts():
+    """#416: a Publication composed before TOV and FTT still validates; a mix does not."""
+
+    from app.domain.team_matchup_taxonomy import NBA_PUBLICATION_OPTIONAL_METRIC_KEYS
+    from tests.support import publication_stubs
+
+    full = NBA_PUBLICATION_TAXONOMY["play_types"]
+    before = full - NBA_PUBLICATION_OPTIONAL_METRIC_KEYS["play_types"]
+
+    def rows(keys):
+        return publication_stubs.league(lambda _tricode: dict.fromkeys(keys, 1.0))
+
+    assert set(validate_publication_rows("play_types", rows(full))) == full
+    assert set(validate_publication_rows("play_types", rows(before))) == before
+    assert len(before) == 22 and len(full) == 44
+    with pytest.raises(PublicationValidationError, match="publication_metric_taxonomy_mismatch"):
+        validate_publication_rows("play_types", rows(before | {"Isolation_TOV"}))
+    mixed = list(rows(full))
+    mixed[5] = replace(mixed[5], per48=dict.fromkeys(before, 1.0))
+    with pytest.raises(PublicationValidationError, match="publication_metric_taxonomy_mismatch"):
+        validate_publication_rows("play_types", tuple(mixed))

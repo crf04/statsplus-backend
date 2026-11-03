@@ -139,6 +139,8 @@ _STAT_MARKETS = {
     "AtRimAssists": ("AST", "PA", "RA", "PRA"),
     "ShortMidRangeAssists": ("AST", "PA", "RA", "PRA"),
     "LongMidRangeAssists": ("AST", "PA", "RA", "PRA"),
+    "TOV": ("TOV",),
+    "FTT": ("FTA", "FTM"),
     "OPP_TOV": ("TOV",),
     "OPP_REB": ("REB", "PR", "RA", "PRA"),
     "OPP_STL": ("STL", "STKS"),
@@ -215,6 +217,17 @@ _PRIMITIVE_SCORE_INPUTS = {
     ),
     "AST": (("assist_locations", None, None),),
 }
+#: Score inputs that blend in when present and are never required, like
+#: ``rebound_types`` for REB: a Publication or Diet from before
+#: crf04/statsplus#416 leaves the Blend Traditional alone and names no gap.
+#: The play-type stat is weighed by the player's own turnovers (or free-throw
+#: trips; Synergy has no makes) by play type, not his possessions.
+_OPTIONAL_SCORE_INPUTS = {
+    "TOV": (("play_types", {"TOV": 1.0}, None),),
+    "FTA": (("play_types", {"FTT": 1.0}, None),),
+    "FTM": (("play_types", {"FTT": 1.0}, None),),
+}
+_PLAY_TYPE_EVENT_COUNTS = {"TOV": "turnovers", "FTT": "free_throw_trips"}
 # Markets that read both twos and threes (points, FGM, FGA) weigh a shot
 # type's twos and threes by the player's own mix inside that shot type rather
 # than the opponent's: his makes for the make markets, each scaled by the
@@ -2234,7 +2247,10 @@ class MatchupService:
                 memo,
             )
         components: dict[str, dict[str, Any]] = {}
-        for base, stat_weights, slice_keys in _PRIMITIVE_SCORE_INPUTS.get(market, ()):
+        for base, stat_weights, slice_keys in (
+            *_PRIMITIVE_SCORE_INPUTS.get(market, ()),
+            *_OPTIONAL_SCORE_INPUTS.get(market, ()),
+        ):
             component = self._diet_component(
                 base=base,
                 stat_weights=stat_weights,
@@ -2470,10 +2486,13 @@ class MatchupService:
             # play_types carries a single stat whose weight cancels inside the
             # opponent/league ratio, so the domain takes bare per-48 values.
             (stat_key,) = stat_weights
+            shares = self._play_type_shares(selected_facts, stat_key)
+            if shares is None:
+                return None
             identities = {fact.slice_key: (base, fact.slice_key, stat_key) for fact in selected_facts}
             opponent_metrics = metric_index.teams.get(opponent_id, {})
             value = play_type_matchup(
-                {fact.slice_key: fact.share for fact in selected_facts},
+                shares,
                 {
                     slice_key: metric.allowed_per_48
                     for slice_key, identity in identities.items()
@@ -2564,6 +2583,27 @@ class MatchupService:
         if base == "shot_types" and slice_reads:
             cell["slices"] = slice_reads
         return cell
+
+    @staticmethod
+    def _play_type_shares(facts: Sequence[StoredPlayerDietFact], stat_key: str) -> dict[str, float] | None:
+        """The player's play-type weights for one stat.
+
+        Points read his possession shares.  Turnovers and free-throw trips read
+        his own count by play type over his observed total, so a play type he
+        never turns it over in weighs nothing; a Diet without the counts, or
+        with none at all, has no such mix.
+        """
+
+        count_field = _PLAY_TYPE_EVENT_COUNTS.get(stat_key)
+        if count_field is None:
+            return {fact.slice_key: fact.share for fact in facts}
+        if any(fact.play_type_events is None for fact in facts):
+            return None
+        counts = {fact.slice_key: getattr(fact.play_type_events, count_field) for fact in facts}
+        total = sum(counts.values())
+        if total <= 0:
+            return None
+        return {slice_key: count / total for slice_key, count in counts.items()}
 
     @staticmethod
     def _player_mix_ratio(

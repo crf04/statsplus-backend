@@ -18,6 +18,9 @@ _FIELDS = frozenset(
         "category",
     }
 )
+#: Each category's turnovers and free-throw trips (crf04/statsplus#416).
+#: Source rows recorded before they were read carry neither.
+_EVENT_FIELDS = ("turnovers", "free_throw_trips")
 _HALF_ROUNDING_UNIT = Fraction(1, 2000)
 
 
@@ -56,9 +59,18 @@ def aggregate_player_synergy(
     players = defaultdict(lambda: defaultdict(list))
     seen = set()
     for record in records:
-        if not isinstance(record, Mapping) or set(record) != _FIELDS:
+        if not isinstance(record, Mapping) or set(record) not in (_FIELDS, _FIELDS | set(_EVENT_FIELDS)):
             raise ValueError("invalid player Synergy record fields")
         normalized = dict(record)
+        for field in _EVENT_FIELDS:
+            value = record.get(field, 0.0)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not isfinite(value)
+                or value < 0
+            ):
+                raise ValueError(f"invalid player Synergy {field}")
         for field in ("player_id", "team_id", "games_played", "possessions"):
             value = record[field]
             if (
@@ -113,9 +125,16 @@ def aggregate_player_synergy(
             withheld[player_id] = reason
             continue
         totals = defaultdict(int)
+        events = defaultdict(lambda: dict.fromkeys(_EVENT_FIELDS, 0.0))
         for team_records in teams.values():
             for record in team_records:
                 totals[record["category"]] += record["possessions"]
+                for field in _EVENT_FIELDS:
+                    events[record["category"]][field] += record.get(field, 0.0)
+        # Counts that some stint never reported would understate the player.
+        has_events = all(
+            field in record for records in teams.values() for record in records for field in _EVENT_FIELDS
+        )
         games = sum(team_records[0]["games_played"] for team_records in teams.values())
         if len(teams) == 1:
             shares = {record["category"]: record["possession_share"] for record in next(iter(teams.values()))}
@@ -138,6 +157,7 @@ def aggregate_player_synergy(
                 "games_played": games,
                 "volume_unit": "possessions",
                 "provider": "nba_synergy",
+                **(events[category] if has_events else {}),
             }
             for category in PLAY_TYPES
             if category in shares

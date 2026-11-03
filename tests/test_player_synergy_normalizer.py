@@ -147,3 +147,22 @@ def test_player_synergy_scope_records_actual_request_semantics():
         "value_mode": "totals",
     }
     assert result.payload["coverage"]["scope"] == result.scope
+
+
+def test_synergy_counts_turnovers_and_free_throw_trips_from_their_possession_rates():
+    """#416: Synergy rates both per possession; the counts are rate x possessions."""
+
+    (record,) = _normalize([_row(TOV_POSS_PCT=0.2, FT_POSS_PCT=0.1)]).payload["records"]
+
+    # 21 possessions.
+    assert (round(record["turnovers"], 9), round(record["free_throw_trips"], 9)) == (4.2, 2.1)
+
+
+def test_synergy_without_the_rates_records_no_counts_and_one_rate_alone_is_refused():
+    (record,) = _normalize([_row()]).payload["records"]
+    assert "turnovers" not in record and "free_throw_trips" not in record
+
+    with pytest.raises(ProviderContractError, match="provider_schema_changed"):
+        _normalize([_row(TOV_POSS_PCT=0.1)])
+    with pytest.raises(ProviderContractError, match="value_invariant_failed"):
+        _normalize([_row(TOV_POSS_PCT=1.5, FT_POSS_PCT=0.1)])

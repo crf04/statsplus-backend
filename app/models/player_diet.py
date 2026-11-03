@@ -34,7 +34,9 @@ class PlayerDietFactRow(Base):
     #: Type profile's two- and three-point columns, and the split has no
     #: meaning for the other Bases, so it is stored beside the fact rather
     #: than widening every Base's row.  ``NULL`` means the split was never
-    #: observed and the profile reports it as unavailable.
+    #: observed and the profile reports it as unavailable.  Play-type rows
+    #: store their turnovers and free-throw trips here the same way
+    #: (crf04/statsplus#416); each Base reads only its own detail.
     shooting_detail = Column(Text, nullable=True)
     retrieved_at = Column(DateTime(timezone=True), nullable=False)
 
