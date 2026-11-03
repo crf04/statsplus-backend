@@ -13,7 +13,7 @@ from math import isfinite
 from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, func, insert, select, tuple_
+from sqlalchemy import and_, case, delete, func, insert, or_, select, tuple_
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
@@ -40,6 +40,8 @@ from app.services.team_matchup_publications import (
 from app.utils.db import is_demo_database_url
 
 EASTERN = ZoneInfo("America/New_York")
+#: Bounds a stored float to the finite range a summary proves (float max is ~1.8e308).
+_FINITE_BOUND = 1e308
 
 _LEDGER_SURFACE_BY_STREAM = {
     "traditional_opponent_season": (0, "traditional"),
@@ -370,6 +372,21 @@ class TeamMetricFact(NamedTuple):
     raw_value: float | None
     denominator_value: float | None
     denominator_unit: str | None
+    retrieved_at: datetime
+
+
+class TeamMetricSummary(NamedTuple):
+    """One stored stat's league column, summarized for a window that does not rank it."""
+
+    base: str
+    slice_key: str
+    stat_key: str
+    as_of_date: date
+    teams: int
+    distinct_teams: int
+    #: Values the database could not prove rankable; the window reads the
+    #: base's rows and checks them itself when any are.
+    unproven: int
     retrieved_at: datetime
 
 
@@ -1218,20 +1235,18 @@ class TeamMatchupRepository:
             observations=tuple(_observation_from_row(row) for row in observation_rows),
         )
 
-    def get_latest_metric_facts(
+    def get_latest_metric_summaries(
         self,
         season: str,
         *,
         window_games: int | None = None,
         as_of: date,
         connection: Connection | None = None,
-    ) -> tuple[dict[str, TeamMatchupSnapshotScope], tuple[TeamMetricFact, ...]]:
-        """Return each base's newest fact scope through ``as_of`` and the values a window ranks.
+    ) -> tuple[TeamMetricSummary, ...]:
+        """Summarize every stored stat at its base's newest scope through ``as_of``.
 
-        One statement: each base is read at its own newest scope.  A window
-        ranks each stat across the league from these columns alone, so the
-        lineage columns (``game_ids`` JSON is most of a row's bytes) stay
-        unread.
+        One statement, one row per stat: what a window needs to validate a
+        base it does not rank, without reading the base's rows.
         """
 
         requested = TeamMatchupSnapshotScope(season, as_of, window_games)
@@ -1246,18 +1261,68 @@ class TeamMatchupRepository:
             .where(*conditions, table.c.as_of_date <= as_of)
             .group_by(table.c.base)
         )
+        # Proves a value finite, positive where it must be, and in a known
+        # unit; NULL, NaN and the infinities all fail it, so a row it cannot
+        # prove is left to the window's own numeric check.
+        proven = and_(
+            table.c.raw_value.between(-_FINITE_BOUND, _FINITE_BOUND),
+            table.c.denominator_value > 0,
+            table.c.denominator_value <= _FINITE_BOUND,
+            table.c.denominator_unit.in_(("minutes", "seconds")),
+        )
         statement = (
-            select(*(table.c[name] for name in TeamMetricFact._fields), table.c.as_of_date)
+            select(
+                table.c.base,
+                table.c.slice_key,
+                table.c.stat_key,
+                table.c.as_of_date,
+                func.count(),
+                func.count(table.c.team_id.distinct()),
+                func.sum(case((proven, 0), else_=1)),
+                func.max(table.c.retrieved_at),
+            )
             .where(*conditions, tuple_(table.c.base, table.c.as_of_date).in_(newest_by_base))
+            .group_by(table.c.base, table.c.as_of_date, table.c.slice_key, table.c.stat_key)
+            .order_by(table.c.base, table.c.slice_key, table.c.stat_key)
+        )
+        with read_connection(self.engine, connection) as connection:
+            rows = connection.execute(statement).all()
+        return tuple(TeamMetricSummary(*row[:7], retrieved_at=assume_utc(row[7])) for row in rows)
+
+    def get_metric_facts(
+        self,
+        fact_scopes: Mapping[str, TeamMatchupSnapshotScope],
+        *,
+        connection: Connection | None = None,
+    ) -> tuple[TeamMetricFact, ...]:
+        """Read the values a window ranks, each base from its own scope, in one statement.
+
+        A window ranks each stat across the league from these columns alone, so
+        the lineage columns (``game_ids`` JSON is most of a row's bytes) stay
+        unread.
+        """
+
+        if not fact_scopes:
+            return ()
+        bases_by_scope: dict[TeamMatchupSnapshotScope, list[str]] = defaultdict(list)
+        for base, scope in fact_scopes.items():
+            bases_by_scope[scope].append(base)
+        table = TeamMatchupFactRow.__table__
+        statement = (
+            select(*(table.c[name] for name in TeamMetricFact._fields))
+            .where(
+                or_(
+                    *(
+                        and_(*self._scope(table, scope), table.c.base.in_(sorted(bases)))
+                        for scope, bases in bases_by_scope.items()
+                    )
+                )
+            )
             .order_by(table.c.team_id, table.c.base, table.c.slice_key, table.c.stat_key)
         )
         with read_connection(self.engine, connection) as connection:
             rows = connection.execute(statement).all()
-        fact_scopes = {
-            row.base: TeamMatchupSnapshotScope(season, row.as_of_date, window_games) for row in rows
-        }
-        facts = tuple(TeamMetricFact(*row[:7], retrieved_at=assume_utc(row.retrieved_at)) for row in rows)
-        return fact_scopes, facts
+        return tuple(TeamMetricFact(*row[:-1], retrieved_at=assume_utc(row.retrieved_at)) for row in rows)
 
     def get_latest_scope(
         self,
@@ -1433,5 +1498,6 @@ __all__ = [
     "TeamMatchupRepository",
     "TeamMatchupSnapshotScope",
     "TeamMetricFact",
+    "TeamMetricSummary",
     "create_publication_write_capability",
 ]

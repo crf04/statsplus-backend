@@ -22,7 +22,7 @@ from app.models.team_matchup import (
 )
 from app.services.collection_control import ControlPlaneError, PublicationService
 from app.services.database_first_activation import LegacyWriteFence
-from app.services.team_matchup_query import TeamMatchupQueryService
+from app.services.team_matchup_query import TEAM_MATCHUP_PUBLICATION_STREAMS, TeamMatchupQueryService
 from app.services.team_matchup_refresh import (
     TeamMatchupRefreshService,
     TeamWindowBoundary,
@@ -296,13 +296,13 @@ def test_legacy_fence_checks_only_the_exact_surface_window_stream(tmp_path):
 
 
 def _record_fact_row_reads(engine) -> list[str]:
-    """Record every statement that reads stored fact rows, not a scope lookup."""
+    """Record every statement that reads stored fact rows one per team, not a summary."""
 
     statements: list[str] = []
 
     @event.listens_for(engine, "before_cursor_execute")
     def _record(_connection, _cursor, statement, *_args):
-        if "FROM team_matchup_facts" in statement and "team_matchup_facts.team_id" in statement:
+        if statement.lstrip().startswith("SELECT team_matchup_facts.team_id"):
             statements.append(statement)
 
     return statements
@@ -2278,6 +2278,77 @@ def test_latest_window_ranks_each_base_from_its_own_newest_scope(tmp_path):
     assert by_team[team_ids[0]] == {("shot_zones", 30.0, 30), ("traditional", 1.0, 1)}
     assert by_team[team_ids[29]] == {("shot_zones", 1.0, 1), ("traditional", 30.0, 30)}
     assert by_team[team_ids[9]] == {("shot_zones", 21.0, 21), ("traditional", 10.0, 10)}
+
+
+_LEGACY_TRADITIONAL_AT = datetime(2026, 1, 9, 15, tzinfo=UTC)
+#: How a stored Traditional fact is damaged, whether the window still keeps
+#: the stored freshness, and how many statements read fact rows one per team.
+REPLACED_BASE_CASES = [
+    pytest.param(None, True, 0, id="valid facts stay unread"),
+    pytest.param({"delete": True}, False, 0, id="a missing team"),
+    pytest.param({"denominator_value": 0}, False, 1, id="a zero denominator"),
+    pytest.param({"raw_value": float("inf")}, False, 1, id="an infinite value"),
+    pytest.param({"raw_value": 1.5e308}, True, 1, id="a finite value past the proven bound"),
+]
+
+
+def check_replaced_base_freshness(engine, damage, *, retained, rows_read):
+    """Rank Traditional from its publication over stored facts damaged by ``damage``."""
+
+    from tests.support.publication_stubs import (
+        RETRIEVED_AT,
+        SEASON,
+        StubReader,
+        league,
+        read,
+        traditional_per48,
+    )
+
+    repository = TeamMatchupRepository(engine)
+    team_ids = _fixture_team_ids()
+    _publish_snapshot_batch(
+        repository,
+        TeamMatchupSnapshotScope(SEASON, _LEGACY_TRADITIONAL_AT.date()),
+        facts=_complete_traditional_facts(),
+        observations=[TeamMatchupObservation("traditional", "available")],
+        retrieved_at=_LEGACY_TRADITIONAL_AT,
+    )
+    table = TeamMatchupFactRow.__table__
+    if damage is not None:
+        with engine.begin() as connection:
+            first_team = table.c.team_id == team_ids[0]
+            if damage.get("delete"):
+                connection.execute(delete(table).where(first_team))
+            else:
+                connection.execute(update(table).where(first_team).values(**damage))
+    stream_key = TEAM_MATCHUP_PUBLICATION_STREAMS["season"]["traditional"]
+    service = TeamMatchupQueryService(
+        repository,
+        clock=lambda: RETRIEVED_AT + timedelta(days=1),
+        publication_reader=StubReader({stream_key: read(stream_key, league(lambda _: traditional_per48()))}),
+    )
+
+    fact_reads = _record_fact_row_reads(engine)
+    window = service.get_latest_window(SEASON, as_of=RETRIEVED_AT.date())
+
+    assert window is not None
+    traditional = next(item for item in window.observations if item.surface == "traditional")
+    assert traditional.status == "available"
+    # The publication ranks Traditional either way; valid stored facts only
+    # keep the freshness they were retrieved at.
+    assert traditional.retrieved_at == (_LEGACY_TRADITIONAL_AT if retained else RETRIEVED_AT)
+    assert {metric.base for metric in window.league_metrics} == {"traditional"}
+    assert len(fact_reads) == rows_read
+
+
+@pytest.mark.parametrize(("damage", "retained", "rows_read"), REPLACED_BASE_CASES)
+def test_a_publication_backed_base_keeps_its_stored_freshness_only_when_its_facts_are_valid(
+    tmp_path, damage, retained, rows_read
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'replaced-base.sqlite3'}")
+    run_migrations(engine)
+
+    check_replaced_base_freshness(engine, damage, retained=retained, rows_read=rows_read)
 
 
 def test_latest_window_distinguishes_a_same_day_failure_from_older_facts(tmp_path):

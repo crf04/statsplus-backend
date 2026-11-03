@@ -50,6 +50,7 @@ from app.services.team_matchup_repository import (
     TeamMatchupRepository,
     TeamMatchupSnapshotScope,
     TeamMetricFact,
+    TeamMetricSummary,
 )
 from app.services.traditional_opponent_publications import (
     normalize_traditional_opponent_window,
@@ -370,27 +371,64 @@ class TeamMatchupQueryService:
                 connection=connection,
                 governance=governance,
             )
-        fact_scopes, facts = self.repository.get_latest_metric_facts(
-            season,
-            window_games=window_games,
-            as_of=cutoff,
-            connection=connection,
-        )
         return self._database_first_window(
             season,
             cutoff=cutoff,
             window_games=window_games,
             legacy=partial(
-                self._build_window,
+                self._stored_window,
                 observation_scope,
-                fact_scopes=fact_scopes,
-                facts=facts,
+                window_games=window_games,
+                cutoff=cutoff,
                 observations=observations,
+                connection=connection,
             ),
             strict_as_of=strict_as_of,
             publication_snapshot=publication_snapshot,
             connection=connection,
             governance=governance,
+        )
+
+    def _stored_window(
+        self,
+        scope: TeamMatchupSnapshotScope,
+        *,
+        window_games: int | None,
+        cutoff: date,
+        observations: tuple[StoredTeamMatchupObservation, ...],
+        connection: Connection | None,
+        unranked_bases: Collection[str] = (),
+    ) -> TeamMatchupWindow:
+        """Build the stored-fact window, reading rows only for the bases it ranks.
+
+        A base in ``unranked_bases`` is validated from its stats' summaries,
+        unless a value the database could not prove rankable sends it through
+        the row check too.
+        """
+
+        summaries = self.repository.get_latest_metric_summaries(
+            scope.season,
+            window_games=window_games,
+            as_of=cutoff,
+            connection=connection,
+        )
+        fact_scopes = {
+            summary.base: TeamMatchupSnapshotScope(scope.season, summary.as_of_date, window_games)
+            for summary in summaries
+        }
+        row_bases = {
+            summary.base for summary in summaries if summary.base not in unranked_bases or summary.unproven
+        }
+        return self._build_window(
+            scope,
+            fact_scopes=fact_scopes,
+            facts=self.repository.get_metric_facts(
+                {base: fact_scopes[base] for base in row_bases},
+                connection=connection,
+            ),
+            summaries=tuple(summary for summary in summaries if summary.base not in row_bases),
+            observations=observations,
+            unranked_bases=unranked_bases,
         )
 
     def get_window(self, scope: TeamMatchupSnapshotScope, *, publication_snapshot=None) -> TeamMatchupWindow:
@@ -868,7 +906,10 @@ class TeamMatchupQueryService:
         facts: Iterable[StoredTeamMatchupFact | TeamMetricFact],
         observations: Iterable[StoredTeamMatchupObservation],
         unranked_bases: Collection[str] = (),
+        summaries: Iterable[TeamMetricSummary] = (),
     ) -> TeamMatchupWindow:
+        """Validate and rank ``facts``; validate the bases ``summaries`` stand in for."""
+
         grouped = defaultdict(list)
         invalid_surfaces: dict[str, str] = {}
         fact_rows = tuple(facts)
@@ -893,6 +934,12 @@ class TeamMatchupQueryService:
             )
         }
         fact_rows = tuple(fact for fact in fact_rows if fact.base not in unavailable_nba_surfaces)
+        summary_rows = tuple(summary for summary in summaries if summary.base not in unavailable_nba_surfaces)
+        retrieved_by_surface: dict[str, datetime] = {}
+        for item in (*fact_rows, *summary_rows):
+            newest = retrieved_by_surface.get(item.base)
+            if newest is None or item.retrieved_at > newest:
+                retrieved_by_surface[item.base] = item.retrieved_at
         for surface in unavailable_nba_surfaces:
             observation = observations_by_surface[surface]
             invalid_surfaces[surface] = observation.unavailable_reason or "surface_unavailable"
@@ -909,6 +956,9 @@ class TeamMatchupQueryService:
                 len(team_values) != 30 or len({team_id for team_id, _ in team_values}) != 30
             ):
                 invalid_surfaces[key[0]] = "legacy_surface_incomplete"
+        for summary in summary_rows:
+            if summary.base not in invalid_surfaces and (summary.teams != 30 or summary.distinct_teams != 30):
+                invalid_surfaces[summary.base] = "legacy_surface_incomplete"
 
         league_metrics = []
         team_metrics = defaultdict(list)
@@ -960,12 +1010,11 @@ class TeamMatchupQueryService:
         for surface, reason in invalid_surfaces.items():
             observation = observations_by_surface.get(surface)
             if observation is None:
-                retrieved_at = max(fact.retrieved_at for fact in fact_rows if fact.base == surface)
                 observations_by_surface[surface] = StoredTeamMatchupObservation(
                     surface=surface,
                     status="unavailable",
                     unavailable_reason=reason,
-                    retrieved_at=retrieved_at,
+                    retrieved_at=retrieved_by_surface[surface],
                 )
             else:
                 observations_by_surface[surface] = replace(
@@ -981,7 +1030,7 @@ class TeamMatchupQueryService:
                 if surface not in invalid_surfaces
             },
             fact_retrieved_at={
-                surface: max(fact.retrieved_at for fact in fact_rows if fact.base == surface)
+                surface: retrieved_by_surface[surface]
                 for surface in fact_scopes
                 if surface not in invalid_surfaces
             },
