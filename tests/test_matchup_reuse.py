@@ -1102,3 +1102,41 @@ def test_a_cached_read_equals_an_uncached_compose_after_each_input_changes(name)
     assert json.dumps(hit) == json.dumps(expected)
     # The cache still works for what is rebuilt: only the uncached compose ran.
     assert (len(service.player_logs.summary_calls) == composes + 1) is must_hit, name
+
+
+@pytest.mark.parametrize("redis_client", [DictRedis, lambda: None], ids=["cached", "uncached"])
+def test_a_slates_games_read_stats_freshness_once_and_each_reports_it(redis_client):
+    import tests.services.test_matchup_service as service_doubles
+    from app.services.player_game_log_repository import PlayerGameLogRepository
+
+    later = {
+        **service_doubles._event(),
+        "nba_game_id": "0022500585",
+        "scheduled_at": "2026-01-16T03:00:00+00:00",
+    }
+    events = service_doubles.RecordedEvents(events=[service_doubles._event(), later])
+    service = service_doubles._service(events=events)
+    repo = SimpleNamespace(_publication_reader=object())
+    service.player_logs.get_read_freshness = (
+        lambda season, publication_snapshot: PlayerGameLogRepository.get_read_freshness(
+            repo, season, publication_snapshot=publication_snapshot
+        )
+    )
+    reader = SnapshotMatchups(
+        service,
+        _real_snapshot(age=0),
+        None,
+        season="2025-26",
+        cache=ComposedMatchupCache(redis_client()),
+        settings=service.settings,
+    )
+
+    documents = [
+        reader.get_matchup(game_id=event["nba_game_id"], game=service._game(event)) for event in events.events
+    ]
+
+    assert events.latest_final_calls == 1
+    assert [(document["game"]["game_id"], document["freshness"]["stats"]) for document in documents] == [
+        (service_doubles.GAME_ID, {"status": "fresh", "retrieved_at": "2026-01-15T10:00:00+00:00"}),
+        ("0022500585", {"status": "fresh", "retrieved_at": "2026-01-15T10:00:00+00:00"}),
+    ]

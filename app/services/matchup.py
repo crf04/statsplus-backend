@@ -733,6 +733,7 @@ class MatchupService:
         compose_cache: MatchupComposeCache | None = None,
         season: str | None = None,
         read_scope: tuple[Connection, Session] | None = None,
+        stats_freshness: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Compose one Matchup over a generation the caller already holds.
 
@@ -749,6 +750,8 @@ class MatchupService:
         snapshot for, so the two cannot disagree; omitted, it is resolved here.
         ``read_scope`` is the caller's ``(connection, session)``, the one its
         snapshot was captured on; omitted, the compose opens its own.
+        ``stats_freshness`` is the ``freshness.stats`` block the caller read
+        for this request (``stats_freshness_block``); omitted, it is read here.
         """
 
         scope = nullcontext(read_scope) if read_scope is not None else self.open_read_scope()
@@ -762,6 +765,7 @@ class MatchupService:
                 compose_cache=compose_cache,
                 season=season,
                 with_book_lines=False,
+                stats_freshness=stats_freshness,
             )
 
     def get_unscheduled_matchup(
@@ -1042,6 +1046,7 @@ class MatchupService:
         compose_cache: MatchupComposeCache | None = None,
         season: str | None = None,
         with_book_lines: bool = True,
+        stats_freshness: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         # Evidence (logs, Diets, windows) is the published season's; the
         # game's own schedule facts (event, pool, injuries) are its season's,
@@ -1231,7 +1236,11 @@ class MatchupService:
             "freshness": {
                 "schedule": schedule_freshness,
                 "pool": dict(pool.freshness),
-                "stats": self._stats_freshness(season, connection=connection),
+                "stats": (
+                    self._stats_freshness(season, connection=connection)
+                    if stats_freshness is None
+                    else dict(stats_freshness)
+                ),
                 "team_matchups": self._team_matchups_freshness(windows, availability),
                 "player_diets": diet_freshness,
                 "player_game_logs": self._timestamped_status(log_freshness),
