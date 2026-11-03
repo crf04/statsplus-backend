@@ -2009,6 +2009,43 @@ def _create_rotation_tables(connection: Connection) -> None:
         model.__table__.create(connection, checkfirst=True)
 
 
+def _create_lineup_segment_tables(connection: Connection) -> None:
+    """Create the on/off lineup segment tables (crf04/statsplus#410).
+
+    Repeatable: ``checkfirst`` skips an existing table and never touches its
+    rows.  Nothing is backfilled: ``scripts/lineup_segment_backfill.py`` fills a
+    season and records its coverage, and until then the season keeps the PBP
+    Stats on/off path.
+    """
+    from app.models.lineup_segments import (
+        LineupRosterSlot,
+        LineupSegmentGame,
+        LineupSegmentPlayer,
+        LineupSegmentSeason,
+    )
+
+    for model in (LineupRosterSlot, LineupSegmentGame, LineupSegmentPlayer, LineupSegmentSeason):
+        model.__table__.create(connection, checkfirst=True)
+
+
+def downgrade_lineup_segments(connection: Connection) -> None:
+    """Reverse ``084_lineup_segments``; also forgets its migration record.
+
+    Migrations here are forward-only at runtime.  This exists so the change is
+    provably reversible: it drops only the four lineup segment tables.
+    """
+    from app.models.lineup_segments import (
+        LineupRosterSlot,
+        LineupSegmentGame,
+        LineupSegmentPlayer,
+        LineupSegmentSeason,
+    )
+
+    for model in (LineupSegmentSeason, LineupSegmentPlayer, LineupSegmentGame, LineupRosterSlot):
+        model.__table__.drop(connection, checkfirst=True)
+    connection.execute(_schema_migrations.delete().where(_schema_migrations.c.version == 84))
+
+
 def _create_player_game_tracking_table(connection: Connection) -> None:
     """Create the player-tracking table (crf04/statsplus-backend#604).
 
@@ -3500,6 +3537,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(81, "081_report_edits", _add_report_edits),
     Migration(82, "082_report_origin", _add_report_origin),
     Migration(83, "083_usage_report_published", _admit_report_published_usage_event),
+    Migration(84, "084_lineup_segments", _create_lineup_segment_tables),
 )
 
 

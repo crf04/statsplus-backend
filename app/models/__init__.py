@@ -121,6 +121,12 @@ from .event_mapping import (  # noqa: E402
 )
 from .injury_snapshot import InjurySnapshot, InjurySourceSnapshot  # noqa: E402
 from .job import DataRefreshJob  # noqa: E402
+from .lineup_segments import (  # noqa: E402
+    LineupRosterSlot,
+    LineupSegmentGame,
+    LineupSegmentPlayer,
+    LineupSegmentSeason,
+)
 from .player_game_log import (  # noqa: E402
     PlayerGameLog,
     PlayerGameLogRefresh,
@@ -205,6 +211,10 @@ __all__ = [
     "LedgerBackfillState",
     "LedgerParityArtifact",
     "LedgerPublication",
+    "LineupRosterSlot",
+    "LineupSegmentGame",
+    "LineupSegmentPlayer",
+    "LineupSegmentSeason",
     "OperatorJob",
     "PlayerGameLog",
     "PlayerGameLogRefresh",

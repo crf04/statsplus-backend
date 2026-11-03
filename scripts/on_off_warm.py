@@ -7,6 +7,9 @@ fetches the two splits an Injury Scenario reads (teammates with him off, and
 with him on, the floor) into Redis.  Probable and Available players are not
 warmed.
 
+A season served from stored lineup segments (crf04/statsplus#410) needs no
+warm and is skipped: its splits are read from the database on request.
+
 Run it after each scheduled injury refresh (``railway.on_off_warm.json``:
 the ``railway.injuries.json`` cadence, offset five minutes).  It is idempotent:
 an entry still fresh in the 24-hour cache costs no upstream call, so each run
@@ -53,7 +56,14 @@ def warm(listing, service, season, target_date, prior_eligible=None):
     )
     if not requests:
         return {"state": "no_listed_players", "requests": 0}
-    return {"state": "warmed", "requests": len(requests), **service.warm(requests)}
+    from_segments = sorted(
+        season for season in {request.season for request in requests} if service.serves_from_segments(season)
+    )
+    requests = [request for request in requests if request.season not in from_segments]
+    skipped = {"segment_seasons": from_segments} if from_segments else {}
+    if not requests:
+        return {"state": "served_from_segments", "requests": 0, **skipped}
+    return {"state": "warmed", "requests": len(requests), **skipped, **service.warm(requests)}
 
 
 def main(argv=None):

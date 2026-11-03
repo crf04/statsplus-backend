@@ -1069,6 +1069,12 @@ that are never flagged.
   the `season_span` each was computed over. `baseline.on_floor_season_span` and
   `off_floor.season_span` name only the seasons that supplied on/off minutes.
 - `flagged`: both shifts at least +10%, or both at most -10%.
+- `on_off_sources` and `on_off_games_missing` (crf04/statsplus#410): the
+  sorted, distinct `source` values (`pbpstats`, `statsplus`) of the on/off
+  splits the row's numbers summed (the on-floor split, plus the off-floor one
+  in `sits` where the row has `off_floor`), and the union of their
+  `games_missing` entries (`{game_id, game_date, matchup}`, oldest first;
+  `[]` when none). A split with no copy adds nothing to either.
 - `limits`: `insufficient` (under 3 games without or under 150 off-floor
   minutes; never flagged), `no_line`, `stale_report`, `no_baseline`, and the
   on/off limits `on_off_not_warmed` (no cached split; a request without
@@ -3362,6 +3368,34 @@ warms the cache for the stored injury report's Out, Doubtful and Questionable
 players; run it after every scheduled injury refresh (`railway.on_off_warm.json`,
 five minutes past each refresh). It fetches only splits not already cached and
 exits 1 if it cannot write to Redis.
+
+**Seasons served from StatsPlus segments** (crf04/statsplus#410). A season
+whose lineup segments are recorded as complete is answered from them instead
+of PBPStats: one SQL aggregate over the stored LiveData play-by-play, with no
+cache, throttle, per-user budget or deadline. The response has the same
+shape, except `"source": "statsplus"`, `"stale": false` always, `cached_at`
+when the newest game with a row in the split had its segments written (`null`
+when the split includes no game), and
+`games_missing`, the team-season's completed regular-season games with no
+segments (a game the rotation derivation rejected, whose LiveData fetch
+failed, or that the nightly job has not collected yet), oldest first, `[]`
+when none:
+
+```json
+"games_missing": [{"game_id": "0022500093", "game_date": "2025-11-14", "matchup": "DET @ HOU"}]
+```
+
+`game_date` is the Eastern date and `matchup` is `AWAY @ HOME`, both from the
+Event Catalog. `minutes` round half up from the segments' seconds, as
+PBPStats rounds. `usage` is StatsPlus usage: 100 · (FGA + 0.44·FTA + TOV) /
+(team on-floor FGA + player-less heaves + 0.44·FTA + TOV). Free throws count
+for the lineup on the floor at the foul; from 2026-27 a heave counts as its
+shooter's missed FGA and 3PA. Every other season, and every season before
+2025-26, keeps the PBPStats path above unchanged, and the warm skips covered
+seasons. The nightly rotation job writes a game's segments with its stints;
+`python scripts/lineup_segment_backfill.py YYYY-YY --database-url ...` fills a
+season (resumable, about one LiveData request a second) and records its
+coverage once every completed game is stored or rejected.
 
 ### Get Rotation
 
