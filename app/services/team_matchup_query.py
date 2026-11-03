@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
+from functools import partial
 from math import isfinite
 from statistics import fmean, pstdev
 from types import MappingProxyType
@@ -376,17 +377,17 @@ class TeamMatchupQueryService:
             as_of=cutoff,
             connection=connection,
         )
-        legacy_window = self._build_window(
-            observation_scope,
-            fact_scopes=fact_scopes,
-            facts=self.repository.get_metric_facts(fact_scopes, connection=connection),
-            observations=observations,
-        )
         return self._database_first_window(
             season,
             cutoff=cutoff,
             window_games=window_games,
-            legacy=legacy_window,
+            legacy=partial(
+                self._build_window,
+                observation_scope,
+                fact_scopes=fact_scopes,
+                facts=self.repository.get_metric_facts(fact_scopes, connection=connection),
+                observations=observations,
+            ),
             strict_as_of=strict_as_of,
             publication_snapshot=publication_snapshot,
             connection=connection,
@@ -395,17 +396,17 @@ class TeamMatchupQueryService:
 
     def get_window(self, scope: TeamMatchupSnapshotScope, *, publication_snapshot=None) -> TeamMatchupWindow:
         snapshot = self.repository.get_snapshot(scope)
-        legacy_window = self._build_window(
-            scope,
-            fact_scopes={fact.base: scope for fact in snapshot.facts},
-            facts=snapshot.facts,
-            observations=snapshot.observations,
-        )
         return self._database_first_window(
             scope.season,
             cutoff=scope.as_of,
             window_games=scope.window_games,
-            legacy=legacy_window,
+            legacy=partial(
+                self._build_window,
+                scope,
+                fact_scopes={fact.base: scope for fact in snapshot.facts},
+                facts=snapshot.facts,
+                observations=snapshot.observations,
+            ),
             publication_snapshot=publication_snapshot,
         )
 
@@ -415,17 +416,21 @@ class TeamMatchupQueryService:
         *,
         cutoff: date,
         window_games: int | None,
-        legacy: TeamMatchupWindow | None,
+        legacy: Callable[..., TeamMatchupWindow] | None,
         strict_as_of: bool = False,
         publication_snapshot=None,
         bases: Collection[str] | None = None,
         connection: Connection | None = None,
         governance=None,
     ) -> TeamMatchupWindow | None:
-        """Overlay only activated windows; inactive bases remain legacy-backed."""
+        """Overlay only activated windows; inactive bases remain legacy-backed.
+
+        ``legacy`` builds the stored-fact window; it is given the bases a
+        publication replaces, which it validates but does not rank.
+        """
 
         if self._publication_reader is None:
-            return legacy
+            return None if legacy is None else legacy()
         if governance is None:
             governance = self.request_governance(connection)
         window = "l15" if window_games is not None else "season"
@@ -488,6 +493,7 @@ class TeamMatchupQueryService:
             or base == REBOUND_TYPES_BASE
             or not read.legacy_fallback_allowed
         }
+        legacy = None if legacy is None else legacy(unranked_bases=frozenset(active))
         legacy_observations = () if legacy is None else legacy.observations
         # Durable Last-15 observations are league-wide authority for their own
         # scope.  The waiting reason outranks any older still-active
@@ -862,6 +868,7 @@ class TeamMatchupQueryService:
         fact_scopes: dict[str, TeamMatchupSnapshotScope],
         facts: Iterable[StoredTeamMatchupFact | TeamMetricFact],
         observations: Iterable[StoredTeamMatchupObservation],
+        unranked_bases: Collection[str] = (),
     ) -> TeamMatchupWindow:
         grouped = defaultdict(list)
         invalid_surfaces: dict[str, str] = {}
@@ -907,7 +914,7 @@ class TeamMatchupQueryService:
         league_metrics = []
         team_metrics = defaultdict(list)
         for key in sorted(grouped):
-            if key[0] in invalid_surfaces:
+            if key[0] in invalid_surfaces or key[0] in unranked_bases:
                 continue
             team_values = grouped[key]
             values = [value for _, value in team_values]
@@ -927,7 +934,7 @@ class TeamMatchupQueryService:
                         rank=ranks[value],
                     )
                 )
-        if "shot_types" not in invalid_surfaces:
+        if "shot_types" not in invalid_surfaces and "shot_types" not in unranked_bases:
             legacy_table = {
                 f"{slice_key}_{stat_key}": league_metric_column(dict(team_values))
                 for (base, slice_key, stat_key), team_values in grouped.items()
