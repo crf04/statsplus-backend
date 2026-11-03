@@ -3377,9 +3377,9 @@ shape, except `"source": "statsplus"`, `"stale": false` always, `cached_at`
 when the newest game with a row in the split had its segments written (`null`
 when the split includes no game), and
 `games_missing`, the team-season's completed regular-season games with no
-segments (a game the rotation derivation rejected, whose LiveData fetch
-failed, or that the nightly job has not collected yet), oldest first, `[]`
-when none:
+segments (a game whose rotation or segments the derivation rejected, whose
+LiveData fetch failed, or that the nightly job has not collected yet), oldest
+first, `[]` when none:
 
 ```json
 "games_missing": [{"game_id": "0022500093", "game_date": "2025-11-14", "matchup": "DET @ HOU"}]
@@ -3651,7 +3651,9 @@ Rotations are stored whole or not at all (see "Game rotations" in
 rotation, runs nightly after the ledger refresh (`railway.ledger.json`), and
 is also the season backfill (run it repeatedly with `--max-games` until
 `remaining` is 0). Its JSON summary lists `rejected` games (the LiveData did not
-yield a trustworthy rotation; nothing stored), `failed` games (not fetched;
+yield a trustworthy rotation; nothing stored), `segments_rejected` games (the
+rotation is stored, but its on/off segments were refused, so the game counts in
+`games_missing`), `failed` games (not fetched;
 retried later, behind games not yet tried) and `given_up` games. Rejections are
 remembered in `rotation_attempts`; a game rejected 3 times is no longer an
 automatic candidate (it stays in `given_up` until `--game-id <id>` forces a

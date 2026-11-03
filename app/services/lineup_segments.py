@@ -102,6 +102,15 @@ class GameSegments:
     segments: tuple[Segment, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class RejectedSegments:
+    """A game whose rotation is stored but whose segments ``derive_segments`` refused."""
+
+    home_team_id: int
+    away_team_id: int
+    reason: str
+
+
 @dataclass(slots=True)
 class _Open:
     team_id: int
@@ -126,7 +135,11 @@ def derive_segments(box: Mapping[str, Any], play_by_play: Mapping[str, Any], sea
 
     game = box["game"]
     periods = int(game["period"])
-    actions: Sequence[Mapping[str, Any]] = play_by_play["game"]["actions"]
+    # The game's start and end markers are no play; LiveData has tagged a
+    # regulation game's end with period 5.
+    actions: Sequence[Mapping[str, Any]] = [
+        action for action in play_by_play["game"]["actions"] if action["actionType"] != "game"
+    ]
     team_of: dict[int, int] = {}
     names: dict[int, str] = {}
     on: dict[int, set[int]] = {}
@@ -445,4 +458,4 @@ def _scores(action: Mapping[str, Any]) -> bool:
     )
 
 
-__all__ = ["COUNTS", "GameSegments", "Segment", "derive_segments"]
+__all__ = ["COUNTS", "GameSegments", "RejectedSegments", "Segment", "derive_segments"]

@@ -34,7 +34,7 @@ from app.domain.nba_events import (
 )
 from app.errors import sanitize_public_value
 from app.models.rotation import MAX_REJECTIONS
-from app.services.lineup_segments import derive_segments
+from app.services.lineup_segments import GameSegments, RejectedSegments, derive_segments
 from app.services.rotation_derivation import RotationRejected, derive_rotation
 from app.utils.telemetry import ProviderResponseError
 
@@ -127,6 +127,7 @@ class RotationCollectionService:
         batch = pending if max_games is None else pending[:max_games]
         stored: list[str] = []
         rejected: list[dict[str, str]] = []
+        segments_rejected: list[dict[str, str]] = []
         failed: list[dict[str, str]] = []
         for index, game_id in enumerate(batch):
             if index and throttle_seconds:
@@ -142,7 +143,6 @@ class RotationCollectionService:
                 continue
             try:
                 rotation = derive_rotation(box, play_by_play)
-                segments = derive_segments(box, play_by_play, season)
             except (RotationRejected, KeyError, TypeError, ValueError) as error:
                 logger.warning("rotation rejected for %s: %s", game_id, error)
                 rejected.append({"game_id": game_id, "reason": str(error)})
@@ -150,6 +150,14 @@ class RotationCollectionService:
                     season, game_id, "rejected", str(error), self._clock(), team_ids=_team_ids(box)
                 )
                 continue
+            segments: GameSegments | RejectedSegments | None
+            try:
+                segments = derive_segments(box, play_by_play, season)
+            except (RotationRejected, KeyError, TypeError, ValueError) as error:
+                logger.warning("lineup segments rejected for %s: %s", game_id, error)
+                segments_rejected.append({"game_id": game_id, "reason": str(error)})
+                team_ids = _team_ids(box)
+                segments = None if team_ids is None else RejectedSegments(*team_ids, str(error))
             self.repository.replace_game(season, rotation, self._clock(), segments)
             stored.append(game_id)
         return {
@@ -159,6 +167,7 @@ class RotationCollectionService:
             "stored": len(stored),
             "stored_game_ids": stored,
             "rejected": rejected,
+            "segments_rejected": segments_rejected,
             "failed": failed,
             "given_up": given_up,
             "remaining": len(pending) - len(batch),
