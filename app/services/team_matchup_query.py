@@ -368,16 +368,10 @@ class TeamMatchupQueryService:
             as_of=cutoff,
             connection=connection,
         )
-        surfaces_by_scope = defaultdict(set)
-        for surface, fact_scope in fact_scopes.items():
-            surfaces_by_scope[fact_scope].add(surface)
-        facts = []
-        for fact_scope, surfaces in surfaces_by_scope.items():
-            facts.extend(self.repository.get_metric_facts(fact_scope, surfaces, connection=connection))
         legacy_window = self._build_window(
             observation_scope,
             fact_scopes=fact_scopes,
-            facts=facts,
+            facts=self.repository.get_metric_facts(fact_scopes, connection=connection),
             observations=observations,
         )
         return self._database_first_window(

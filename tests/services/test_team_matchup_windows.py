@@ -2211,7 +2211,7 @@ def test_latest_window_reads_each_distinct_usable_fact_scope_once(tmp_path):
         ("shot_zones", 20),
         ("traditional", 10),
     }
-    assert len(fact_reads) == 2
+    assert len(fact_reads) == 1
 
 
 def test_latest_window_ranks_each_base_from_its_own_newest_scope(tmp_path):

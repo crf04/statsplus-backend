@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime
@@ -13,7 +13,7 @@ from math import isfinite
 from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, func, insert, select
+from sqlalchemy import and_, delete, func, insert, or_, select
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
@@ -1237,22 +1237,33 @@ class TeamMatchupRepository:
 
     def get_metric_facts(
         self,
-        scope: TeamMatchupSnapshotScope,
-        bases: Collection[str],
+        fact_scopes: Mapping[str, TeamMatchupSnapshotScope],
         *,
         connection: Connection | None = None,
     ) -> tuple[TeamMetricFact, ...]:
-        """Read the values a window ranks for ``bases`` at one scope.
+        """Read the values a window ranks, each base from its own scope, in one statement.
 
         A window ranks each stat across the league from these columns alone, so
         the lineage columns (``game_ids`` JSON is most of a row's bytes) stay
         unread.
         """
 
+        if not fact_scopes:
+            return ()
+        bases_by_scope: dict[TeamMatchupSnapshotScope, list[str]] = defaultdict(list)
+        for base, scope in fact_scopes.items():
+            bases_by_scope[scope].append(base)
         table = TeamMatchupFactRow.__table__
         statement = (
             select(*(table.c[name] for name in TeamMetricFact._fields))
-            .where(*self._scope(table, scope), table.c.base.in_(sorted(bases)))
+            .where(
+                or_(
+                    *(
+                        and_(*self._scope(table, scope), table.c.base.in_(sorted(bases)))
+                        for scope, bases in bases_by_scope.items()
+                    )
+                )
+            )
             .order_by(table.c.team_id, table.c.base, table.c.slice_key, table.c.stat_key)
         )
         with read_connection(self.engine, connection) as connection:
