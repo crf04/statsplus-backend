@@ -511,6 +511,50 @@ def test_games_keep_the_slates_order_and_the_date_is_forwarded():
     assert slates.calls == [None]
 
 
+class NeighbourSlate:
+    """A Slate that names its next game date only when its neighbours are read."""
+
+    def __init__(self, games_by_day, today="2026-04-10", next_day="2026-04-11"):
+        self.games_by_day = games_by_day
+        self.today = today
+        self.next_day = next_day
+        self.calls = []
+
+    def get_slate(self, requested_date=None, *, neighbours=True):
+        day = requested_date or self.today
+        self.calls.append((day, neighbours))
+        return {
+            "slate_date": day,
+            "games": self.games_by_day.get(day, []),
+            "previous_game_date": None,
+            "next_game_date": self.next_day if neighbours and day == self.today else None,
+        }
+
+
+def test_next_game_day_from_an_empty_day_answers_the_next_slate():
+    service = SlateEdgesService(
+        slates=NeighbourSlate({"2026-04-11": [_game("G1")]}),
+        matchups=FakeMatchups({"G1": _matchup([_blend_player(1, "A", 0.05)])}),
+    )
+
+    edges = service.get_edges(fallback="next_game_day")
+
+    assert edges["slate_date"] == "2026-04-11"
+    assert [game["game_id"] for game in edges["games"]] == ["G1"]
+
+
+def test_a_day_with_games_never_reads_its_neighbouring_dates():
+    slates = NeighbourSlate({"2026-04-10": [_game("G1")]})
+    service = SlateEdgesService(
+        slates=slates,
+        matchups=FakeMatchups({"G1": _matchup([_blend_player(1, "A", 0.05)])}),
+    )
+
+    service.get_edges(fallback="next_game_day")
+
+    assert slates.calls == [("2026-04-10", False)]
+
+
 def test_an_invalid_date_is_the_slates_invalid_input():
     service = SlateEdgesService(
         slates=FakeSlate([], error=InvalidInputError("The slate date must use YYYY-MM-DD.")),
@@ -617,7 +661,14 @@ def test_a_cached_response_is_returned_without_composing_any_matchup():
 
 
 def _assert_misses(
-    games, payloads, *, second_games=None, publications=None, settings=None, first_date="d", second_date="d"
+    games,
+    payloads,
+    *,
+    second_games=None,
+    publications=None,
+    settings=None,
+    first_date="2026-04-10",
+    second_date="2026-04-10",
 ):
     """Prime the cache, change one input, and require a recomposed body."""
 
@@ -723,8 +774,8 @@ def test_a_disabled_flag_or_missing_client_never_caches():
             cache={"slate_edges_enabled": False},
         ),
     )
-    bodies = [off.get_edges("d"), off.get_edges("d")]
-    no_client = _cached_service(SnapshotComposer(payloads), None, games).get_edges("d")
+    bodies = [off.get_edges("2026-04-10"), off.get_edges("2026-04-10")]
+    no_client = _cached_service(SnapshotComposer(payloads), None, games).get_edges("2026-04-10")
 
     assert redis_client.values == {}
     assert off.matchups.calls == ["G1", "G2", "G1", "G2"]
@@ -744,7 +795,7 @@ def test_a_redis_failure_is_a_miss_not_an_error():
 
     games, payloads = _two_games()
 
-    edges = _cached_service(SnapshotComposer(payloads), Down(), games).get_edges("d")
+    edges = _cached_service(SnapshotComposer(payloads), Down(), games).get_edges("2026-04-10")
 
     assert [game["game_id"] for game in edges["games"]] == ["G1", "G2"]
 
@@ -754,11 +805,41 @@ def test_matchups_compose_one_at_a_time_in_slate_order():
     payloads = {f"G{i}": _matchup([_blend_player(i, f"P{i}", 0.01 * i)]) for i in range(6)}
     composer = SnapshotComposer(payloads, delay=0.01)
 
-    edges = _cached_service(composer, None, games).get_edges("d")
+    edges = _cached_service(composer, None, games).get_edges("2026-04-10")
 
     assert composer.peak == 1
     assert composer.calls == [f"G{i}" for i in range(6)]
     assert [game["game_id"] for game in edges["games"]] == [f"G{i}" for i in range(6)]
+
+
+@pytest.mark.parametrize("selected", [None, "2025-26"], ids=["omitted", "selected"])
+def test_only_a_selected_season_composes_every_game_on_one_snapshot(selected):
+    """As 3a1a7bb9: an omitted season composes each game on a scope of its own,
+    and a selection's capture and games share one REPEATABLE READ scope."""
+
+    from sqlalchemy import create_engine
+
+    class ScopedComposer(SnapshotComposer):
+        def get_matchup_from_snapshot(self, *, read_scope=None, **kwargs):
+            self.scopes.append(read_scope)
+            return super().get_matchup_from_snapshot(**kwargs)
+
+    games, payloads = _two_games()
+    composer = ScopedComposer(payloads)
+    composer.scopes = []
+    publications = Publications()
+    publications.selected_season = selected
+    service = _cached_service(composer, None, games, publications=publications)
+    service._engine = create_engine("sqlite://")
+
+    service.get_edges("2026-04-10")
+
+    first, second = composer.scopes
+    if selected is None:
+        assert (first, second) == (None, None)
+    else:
+        assert first is not None
+        assert second is first
 
 
 def test_an_edges_miss_composes_fresh_and_never_stacks_a_cached_matchup():
@@ -975,3 +1056,69 @@ def test_a_cached_response_keeps_its_trailing_families_under_the_current_schema(
     # A body cached before ``trailing`` (schema 2) or the preview cards'
     # ``players`` (schema 3) existed is never served.
     assert [key.split(":")[2] for key in redis_client.values] == ["v5"]
+
+
+def test_the_edges_and_their_matchups_write_what_the_previous_release_wrote():
+    """Every Redis key and stored payload (sha256 of its JSON text) of one edges
+    miss, as 3a1a7bb9 wrote them before #671 changed how the reads are made.
+
+    A change to either is a cache-format change: bump its schema instead.
+    """
+
+    import hashlib
+    import zlib
+
+    import tests.services.test_matchup_service as doubles
+    from app.services.matchup_injuries import unavailable_injury_result
+    from app.services.matchup_reuse import ComposedMatchupCache
+    from app.services.player_game_log_repository import PlayerGameLogRepository
+    from tests.test_matchup_reuse import _real_snapshot
+
+    later = {**doubles._event(), "nba_game_id": "0022500585", "scheduled_at": "2026-01-16T03:00:00+00:00"}
+    events = doubles.RecordedEvents(events=[doubles._event(), later])
+    composer = doubles._service(events=events)
+    repo = SimpleNamespace(_publication_reader=object())
+    composer.player_logs.get_read_freshness = (
+        lambda season, publication_snapshot: PlayerGameLogRepository.get_read_freshness(
+            repo, season, publication_snapshot=publication_snapshot
+        )
+    )
+    games = [composer._game(event) for event in events.events]
+
+    class Slate:
+        def get_slate(self, requested_date=None):
+            return {"slate_date": requested_date, "games": games}
+
+    class Publications:
+        def snapshot(self, stream_keys, *, season, **_):
+            return _real_snapshot(age=0)
+
+    class Injuries:
+        def get_injuries(self, *, event, season, pool_players):
+            return unavailable_injury_result("disabled")
+
+    redis_client = DictRedis()
+    SlateEdgesService(
+        slates=Slate(),
+        matchups=composer,
+        publication_reader=Publications(),
+        injuries=Injuries(),
+        settings=composer.settings,
+        redis_client=redis_client,
+        matchup_cache=ComposedMatchupCache(redis_client),
+    ).get_edges("2026-01-15")
+
+    assert {
+        key: hashlib.sha256(zlib.decompress(payload)).hexdigest()
+        for key, payload in redis_client.values.items()
+    } == {
+        "matchup:composed:v6:38d9d4f6762886ee3f2574ececd4ea1ea619f29874506034630c46840222c2ce": (
+            "771620b644bb2e6944e42374ca16c1489b0feb9ab7ae155854ac6a0de7a4beb5"
+        ),
+        "matchup:composed:v6:624e8b0e000d9a70e295a45225a0e9c7b0b77b59a01d1e560d5f7f26c1535a69": (
+            "823c591123e66a77239df466ce602910b9527bd77d1f83abc445c24769d21643"
+        ),
+        "slate:edges:v5:eaaed90b3da80d226407e416882ad97f14439056c46d62791ffb56dd545c51c7": (
+            "85542ea8a3695da15ec4c69b0a37cc79b2a6b26a62c64788446e568f105c1552"
+        ),
+    }

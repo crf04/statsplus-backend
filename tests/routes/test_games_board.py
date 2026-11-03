@@ -878,8 +878,8 @@ def test_the_slate_is_read_in_the_same_statements_whatever_its_game_count(board,
         "event_catalog": 2,
         "latest_player_projections": 1,
         "projection_provider_polls": 1,
-        # One closing-set lookup per DFS provider, never per game.
-        "projection_closing_sets": len(dfs_provider_names()),
+        # One closing-set lookup for every DFS provider, never per game.
+        "projection_closing_sets": 1,
         "projection_closing_memberships": 1,
         "injury_snapshots": 1,
         "sportsbook_prop_latest": 1,

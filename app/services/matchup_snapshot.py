@@ -221,6 +221,7 @@ class SnapshotMatchups:
         # The stats freshness keyed and the compose stored under that key read
         # one snapshot, so a hit serves a document whose freshness is its own.
         with self._scope() as read_scope:
+            stats = self._stats_freshness(read_scope)
             key = self._cache.key(
                 self._settings,
                 self.snapshot,
@@ -230,13 +231,13 @@ class SnapshotMatchups:
                 pool,
                 self._started(game),
                 as_of=None if snapshot is self.snapshot else snapshot,
-                stats=self._stats_freshness(read_scope),
+                stats=stats,
             )
             if key is None:
-                return self._compose(game_id, snapshot, read_scope)
+                return self._compose(game_id, snapshot, read_scope, stats=stats)
             entry = self._cache.get(key) if self._cache_reads else None
             if entry is None:
-                document = self._compose(game_id, snapshot, read_scope)
+                document = self._compose(game_id, snapshot, read_scope, stats=stats)
                 if not _agrees_with_lookup(document, found, identity):
                     # Composition read a different retained Publication than the
                     # key names (a correction activated in between): its data
@@ -285,17 +286,19 @@ class SnapshotMatchups:
             return True
 
     def _stats_freshness(self, read_scope: tuple[Any, Any] | None) -> Any:
-        """The ``freshness.stats`` block on ``read_scope``, read once per caller scope."""
+        """The ``freshness.stats`` block, read once per request on the first game's scope.
 
-        if read_scope is self._read_scope and "stats" in self._retained:
+        It names no game, so every game keys on and composes with this one read.
+        """
+
+        if "stats" in self._retained:
             return self._retained["stats"]
         method = getattr(self.composer, "stats_freshness_block", None)
         connection = None if read_scope is None else read_scope[0]
         stats = (
             None if not callable(method) else call_with_read_scope(method, self.season, connection=connection)
         )
-        if read_scope is self._read_scope:
-            self._retained["stats"] = stats
+        self._retained["stats"] = stats
         return stats
 
     def _retained_publication(self, game_id: str) -> Any:
@@ -358,12 +361,21 @@ class SnapshotMatchups:
         return document
 
     def _compose(
-        self, game_id: str, snapshot: Any = None, read_scope: tuple[Any, Any] | None = None
+        self,
+        game_id: str,
+        snapshot: Any = None,
+        read_scope: tuple[Any, Any] | None = None,
+        *,
+        stats: Any = None,
     ) -> Mapping[str, Any]:
+        """``stats`` is the request's ``freshness.stats`` block when its key read one."""
+
         read_scope = self._read_scope if read_scope is None else read_scope
         kwargs: dict[str, Any] = {}
         if accepts_keyword(self.composer.get_matchup_from_snapshot, "compose_cache"):
             kwargs["compose_cache"] = self._compose_cache
+        if stats is not None and accepts_keyword(self.composer.get_matchup_from_snapshot, "stats_freshness"):
+            kwargs["stats_freshness"] = stats
         if self.season is not None and accepts_keyword(self.composer.get_matchup_from_snapshot, "season"):
             kwargs["season"] = self.season
         if read_scope is not None:

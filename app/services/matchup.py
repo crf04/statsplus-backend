@@ -304,6 +304,9 @@ class MatchupComposeCache:
         default_factory=dict
     )
     diet_baselines: dict[Any, dict[tuple[str, str], Any]] = field(default_factory=dict)
+    #: The Event Catalog's refresh row per schedule season: every game of a
+    #: season reports the same schedule retrieval.
+    schedule_refreshes: dict[str, Mapping[str, Any]] = field(default_factory=dict)
 
 
 class EventCatalogReader(Protocol):
@@ -733,6 +736,7 @@ class MatchupService:
         compose_cache: MatchupComposeCache | None = None,
         season: str | None = None,
         read_scope: tuple[Connection, Session] | None = None,
+        stats_freshness: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Compose one Matchup over a generation the caller already holds.
 
@@ -749,6 +753,8 @@ class MatchupService:
         snapshot for, so the two cannot disagree; omitted, it is resolved here.
         ``read_scope`` is the caller's ``(connection, session)``, the one its
         snapshot was captured on; omitted, the compose opens its own.
+        ``stats_freshness`` is the ``freshness.stats`` block the caller read
+        for this request (``stats_freshness_block``); omitted, it is read here.
         """
 
         scope = nullcontext(read_scope) if read_scope is not None else self.open_read_scope()
@@ -762,6 +768,7 @@ class MatchupService:
                 compose_cache=compose_cache,
                 season=season,
                 with_book_lines=False,
+                stats_freshness=stats_freshness,
             )
 
     def get_unscheduled_matchup(
@@ -1042,6 +1049,7 @@ class MatchupService:
         compose_cache: MatchupComposeCache | None = None,
         season: str | None = None,
         with_book_lines: bool = True,
+        stats_freshness: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         # Evidence (logs, Diets, windows) is the published season's; the
         # game's own schedule facts (event, pool, injuries) are its season's,
@@ -1065,7 +1073,10 @@ class MatchupService:
         # A game read as of its tip finds its own box score only in the newest capture.
         latest = getattr(publication_snapshot, "latest", None)
         schedule_freshness = self._schedule_freshness(
-            schedule_season, observed_at=observed_at, connection=connection
+            schedule_season,
+            observed_at=observed_at,
+            connection=connection,
+            cache=None if compose_cache is None else compose_cache.schedule_refreshes,
         )
 
         pool = (
@@ -1231,7 +1242,11 @@ class MatchupService:
             "freshness": {
                 "schedule": schedule_freshness,
                 "pool": dict(pool.freshness),
-                "stats": self._stats_freshness(season, connection=connection),
+                "stats": (
+                    self._stats_freshness(season, connection=connection)
+                    if stats_freshness is None
+                    else dict(stats_freshness)
+                ),
                 "team_matchups": self._team_matchups_freshness(windows, availability),
                 "player_diets": diet_freshness,
                 "player_game_logs": self._timestamped_status(log_freshness),
@@ -1596,15 +1611,22 @@ class MatchupService:
         *,
         observed_at: datetime,
         connection: Connection | None = None,
+        cache: dict[str, Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        """``cache`` holds each season's refresh row for a caller composing many games."""
+
         if self.event_catalog is None:
             return {"status": "missing", "retrieved_at": None}
-        observed = call_with_read_scope(
-            self.event_catalog.get_freshness,
-            season,
-            now=observed_at,
-            connection=connection,
-        )
+        observed = None if cache is None else cache.get(season)
+        if observed is None:
+            observed = call_with_read_scope(
+                self.event_catalog.get_freshness,
+                season,
+                now=observed_at,
+                connection=connection,
+            )
+            if cache is not None:
+                cache[season] = observed
         retrieved_at = observed.get("last_success_at")
         if retrieved_at is None:
             return {"status": "missing", "retrieved_at": None}
@@ -1644,11 +1666,13 @@ class MatchupService:
         if self.team_matchups is None:
             return None
         if cache is not None:
+            # ``as_of=None`` reads the window as of today's Slate Date, so a
+            # pending game shares the started games' read.
             key = (
                 getattr(publication_snapshot, "generation", publication_snapshot),
                 season,
                 window_games,
-                as_of,
+                as_of or assume_utc(self._clock()).astimezone(EASTERN).date(),
             )
             if key in cache:
                 return cache[key]

@@ -115,6 +115,25 @@ def test_an_off_day_points_at_the_game_days_around_it(world):
     assert world.neighbours("2026-01-05") == ("2026-01-02", None)
 
 
+def test_a_slate_read_without_neighbours_is_the_slate_without_its_neighbour_dates(world):
+    world.store(
+        "2025-26",
+        _row("0022500001", "2025-26", "2026-01-03T00:00:00+00:00"),  # Jan 2 ET
+        _row("0022500002", "2025-26", "2026-01-06T00:30:00+00:00"),  # Jan 5 ET
+    )
+    statements = []
+    event.listen(world.engine, "before_cursor_execute", lambda *arguments: statements.append(arguments[2]))
+
+    full = world.slate.get_slate("2026-01-02")
+    full_reads = len(statements)
+    statements.clear()
+    lean = world.slate.get_slate("2026-01-02", neighbours=False)
+
+    assert full["next_game_date"] == "2026-01-05"
+    assert lean == {**full, "previous_game_date": None, "next_game_date": None}
+    assert len(statements) < full_reads
+
+
 def test_neighbours_are_bucketed_by_eastern_day_like_the_slate(world):
     world.store(
         "2025-26",

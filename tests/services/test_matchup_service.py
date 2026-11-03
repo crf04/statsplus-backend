@@ -19,7 +19,7 @@ from app.services.database_first_activation import (
     DatabaseFirstPublicationReader,
     PublicationRead,
 )
-from app.services.matchup import MatchupService
+from app.services.matchup import MatchupComposeCache, MatchupService
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_diet import (
     PlayerDietBaseline,
@@ -1231,6 +1231,151 @@ def test_future_matchup_queries_both_team_windows_without_a_future_cutoff():
         (SEASON, None, None, False),
         (SEASON, 15, None, False),
     ]
+
+
+def test_games_composed_for_one_request_read_each_slate_dates_windows_once():
+    # Today's started game reads the windows as of today, the date a pending
+    # game's undated read resolves to; an earlier game reads its own date.
+    started = {**_event(), "nba_game_id": "0022500585", "scheduled_at": "2026-01-15T11:00:00+00:00"}
+    earlier = {**_event(), "nba_game_id": "0022500586", "scheduled_at": "2026-01-14T00:30:00+00:00"}
+    service = _service(events=RecordedEvents(events=[started, _event(), earlier]))
+    compose_cache = MatchupComposeCache()
+
+    for game_id in ("0022500585", GAME_ID, "0022500586"):
+        service.get_matchup_from_snapshot(
+            game_id=game_id, publication_snapshot=None, injuries=None, compose_cache=compose_cache
+        )
+
+    assert service.team_matchups.calls == [
+        (SEASON, None, date(2026, 1, 15), False),
+        (SEASON, 15, date(2026, 1, 15), False),
+        (SEASON, None, date(2026, 1, 13), False),
+        (SEASON, 15, date(2026, 1, 13), False),
+    ]
+
+
+def test_games_sharing_a_team_compose_together_as_each_composes_alone():
+    # LAL @ BOS three times: started today, pending tonight, and two days ago,
+    # whose Defense Sheet windows differ from today's.
+    started = {**_event(), "nba_game_id": "0022500585", "scheduled_at": "2026-01-15T11:00:00+00:00"}
+    earlier = {**_event(), "nba_game_id": "0022500586", "scheduled_at": "2026-01-14T00:30:00+00:00"}
+    earlier_traditional = (
+        ("traditional", "OPP_TOV", "OPP_TOV", 20.0),
+        ("traditional", "OPP_STL", "OPP_STL", 9.0),
+        ("traditional", "OPP_BLK", "OPP_BLK", 3.0),
+    )
+
+    class DatedWindows(RecordedTeamWindows):
+        def get_latest_window(self, season, *, window_games=None, as_of=None):
+            self.calls.append((season, window_games, as_of, False))
+            return _window(
+                last_15=window_games is not None,
+                traditional_metrics=earlier_traditional if as_of == date(2026, 1, 13) else None,
+            )
+
+    def service():
+        built = _service(events=RecordedEvents(events=[started, _event(), earlier]))
+        built.team_matchups = DatedWindows(None, None)
+        return built
+
+    game_ids = ("0022500585", GAME_ID, "0022500586")
+    together = service()
+    compose_cache = MatchupComposeCache()
+    composed = [
+        together.get_matchup_from_snapshot(
+            game_id=game_id, publication_snapshot=None, injuries=None, compose_cache=compose_cache
+        )
+        for game_id in game_ids
+    ]
+    alone = [
+        service().get_matchup_from_snapshot(game_id=game_id, publication_snapshot=None, injuries=None)
+        for game_id in game_ids
+    ]
+
+    assert [json.dumps(document, sort_keys=True) for document in composed] == [
+        json.dumps(document, sort_keys=True) for document in alone
+    ]
+    tov = [
+        next(row for row in document["league"]["defense_sheet"]["traditional"] if row["key"] == "OPP_TOV")
+        for document in composed
+    ]
+    assert [row["season"]["average_allowed_per_48"] for row in tov] == [13.0, 13.0, 20.0]
+
+
+def test_games_composed_for_one_request_read_the_schedule_refresh_once():
+    class CountedEvents(RecordedEvents):
+        freshness_calls = 0
+
+        def get_freshness(self, season, *, now):
+            self.freshness_calls += 1
+            return super().get_freshness(season, now=now)
+
+    later = {**_event(), "nba_game_id": "0022500585", "scheduled_at": "2026-01-16T03:00:00+00:00"}
+    events = CountedEvents(events=[_event(), later])
+    service = _service(events=events)
+    compose_cache = MatchupComposeCache()
+
+    schedules = [
+        service.get_matchup_from_snapshot(
+            game_id=game_id, publication_snapshot=None, injuries=None, compose_cache=compose_cache
+        )["freshness"]["schedule"]
+        for game_id in (GAME_ID, "0022500585")
+    ]
+
+    assert events.freshness_calls == 1
+    assert schedules == [{"status": "fresh", "retrieved_at": "2026-01-15T10:00:00+00:00"}] * 2
+
+
+def test_games_of_two_schedule_seasons_each_report_their_seasons_refresh():
+    """Opening night: a 2026-27 game beside 2025-26 ones, the evidence still 2025-26."""
+
+    next_season = {**_event(), "nba_game_id": "0022600001", "season": "2026-27"}
+    later = {**_event(), "nba_game_id": "0022500585", "scheduled_at": "2026-01-16T03:00:00+00:00"}
+    refreshed = {SEASON: RETRIEVED_AT, "2026-27": datetime(2026, 1, 15, 11, tzinfo=UTC)}
+
+    class SeasonEvents(RecordedEvents):
+        freshness_calls = 0
+
+        def count_events(self, season):
+            return self.count
+
+        def get_event(self, season, game_id):
+            return next(
+                (
+                    event
+                    for event in self.events
+                    if (event["season"], event["nba_game_id"]) == (season, game_id)
+                ),
+                None,
+            )
+
+        def get_freshness(self, season, *, now):
+            self.freshness_calls += 1
+            return {"last_success_at": refreshed[season].isoformat(), "fresh": True}
+
+    events = SeasonEvents(events=[_event(), next_season, later])
+    service = _service(events=events)
+    # Unpinned, so each game's schedule facts are the season its ID names.
+    service.settings = RuntimeSettings(environment="testing")
+    compose_cache = MatchupComposeCache()
+
+    schedules = [
+        service.get_matchup_from_snapshot(
+            game_id=game_id,
+            publication_snapshot=None,
+            injuries=None,
+            compose_cache=compose_cache,
+            season=SEASON,
+        )["freshness"]["schedule"]
+        for game_id in (GAME_ID, "0022600001", "0022500585")
+    ]
+
+    assert schedules == [
+        {"status": "fresh", "retrieved_at": "2026-01-15T10:00:00+00:00"},
+        {"status": "fresh", "retrieved_at": "2026-01-15T11:00:00+00:00"},
+        {"status": "fresh", "retrieved_at": "2026-01-15T10:00:00+00:00"},
+    ]
+    assert events.freshness_calls == 2
 
 
 def test_missing_pool_and_stats_are_degraded_without_provider_fallback():
