@@ -7815,7 +7815,7 @@ class PublicationService(_SessionService):
         ``player_game_logs`` candidate's manifest and Event Catalog); without
         it the candidate is judged on its own, as an Unpublished Season read
         judges it (crf04/statsplus#330).  Without ``ledger_lineage`` the
-        verdict leaves out ``season_candidate_lineage_refusal``, the one check
+        verdict leaves out ``season_candidate_lineage_refusals``, the one check
         a later ledger correction can change, so it holds for the publication.
         Without ``readiness_rule`` it leaves out the Readiness Rule: a reader
         who selects the season judges its sample (crf04/statsplus#386).
@@ -7836,22 +7836,49 @@ class PublicationService(_SessionService):
             return error.reason
         return None
 
-    def season_candidate_lineage_refusal(
-        self, session: Session, stream: PublicationStream, candidate: PublicationVersion
-    ) -> str | None:
-        """Why a ledger candidate's games are no longer the ledger's accepted evidence, or ``None``.
+    def season_candidate_lineage_refusals(
+        self, session: Session, candidates: Sequence[tuple[PublicationStream, PublicationVersion]]
+    ) -> dict[str, str | None]:
+        """Why each ledger candidate's games are no longer the ledger's accepted evidence, by publication ID.
 
         The ledger replaces a corrected game's source observation in place, so
-        this can refuse a candidate whose other checks passed.
+        this can refuse a candidate whose other checks passed.  Candidates
+        that record the same games under the same manifest and cutoff share
+        one verdict, judged once.
         """
 
-        if stream.provider != "ledger":
-            return None
-        try:
-            self._assert_candidate_ledger_lineage(session, candidate)
-        except ControlPlaneError as error:
-            return error.reason
-        return None
+        refusals: dict[str, str | None] = {}
+        verdicts: dict[tuple[str, datetime, str | None, frozenset[tuple[str, str]]], str | None] = {}
+        for stream, candidate in candidates:
+            refusals[candidate.publication_id] = None
+            if stream.provider != "ledger":
+                continue
+            try:
+                provenance = self._candidate_ledger_lineage(session, candidate)
+            except ControlPlaneError as error:
+                refusals[candidate.publication_id] = error.reason
+                continue
+            lineage = (
+                candidate.season,
+                _aware(candidate.cutoff),
+                candidate.manifest_id,
+                frozenset(provenance.items()),
+            )
+            if lineage not in verdicts:
+                try:
+                    self._assert_ledger_provenance(
+                        session,
+                        season=candidate.season,
+                        cutoff=_aware(candidate.cutoff),
+                        provenance=provenance,
+                        manifest_id=candidate.manifest_id,
+                    )
+                except ControlPlaneError as error:
+                    verdicts[lineage] = error.reason
+                else:
+                    verdicts[lineage] = None
+            refusals[candidate.publication_id] = verdicts[lineage]
+        return refusals
 
     def _assert_cutover_candidate(
         self,

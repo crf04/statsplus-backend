@@ -761,13 +761,13 @@ def test_slate_edges_judge_each_candidate_once_however_many_games_they_score(ser
     served.slates.event_catalog.events_by_season[NEW].append(second)
     served.service.event_catalog = served.slates.event_catalog
     judged = []
-    lineage = served.publications.season_candidate_lineage_refusal
+    lineage = served.publications.season_candidate_lineage_refusals
 
-    def counted(session, stream, candidate):
-        judged.append(candidate.stream_key)
-        return lineage(session, stream, candidate)
+    def counted(session, candidates):
+        judged.extend(candidate.stream_key for _stream, candidate in candidates)
+        return lineage(session, candidates)
 
-    served.publications.season_candidate_lineage_refusal = counted
+    served.publications.season_candidate_lineage_refusals = counted
 
     body = client.get(f"{ROUTES['slate_edges']}&season={NEW}", headers=authenticate()).get_json()
 
