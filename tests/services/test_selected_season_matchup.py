@@ -755,23 +755,37 @@ def test_selected_game_logs_list_their_trailing_families_with_their_sample(serve
 # --- cost -----------------------------------------------------------------------
 
 
-def test_slate_edges_judge_each_candidate_once_however_many_games_they_score(served, client, authenticate):
+def test_slate_edges_prove_one_shared_ledger_lineage_once_without_evidence_payloads(
+    served, client, authenticate
+):
     served.hold_ten_games()
     second = {**_game_event(), "nba_game_id": "0022600161", "scheduled_at": "2026-10-27T00:00:00+00:00"}
     served.slates.event_catalog.events_by_season[NEW].append(second)
     served.service.event_catalog = served.slates.event_catalog
-    judged = []
-    lineage = served.publications.season_candidate_lineage_refusal
+    path = f"{ROUTES['slate_edges']}&season={NEW}"
+    proved = []
+    prove = served.publications._assert_ledger_provenance
 
-    def counted(session, stream, candidate):
-        judged.append(candidate.stream_key)
-        return lineage(session, stream, candidate)
+    def counted(session, **kwargs):
+        proved.append(kwargs["manifest_id"])
+        return prove(session, **kwargs)
 
-    served.publications.season_candidate_lineage_refusal = counted
+    served.publications._assert_ledger_provenance = counted
+    statements = []
 
-    body = client.get(f"{ROUTES['slate_edges']}&season={NEW}", headers=authenticate()).get_json()
+    def record(connection, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(served.engine, "before_cursor_execute", record)
+    try:
+        body = client.get(path, headers=authenticate()).get_json()
+    finally:
+        event.remove(served.engine, "before_cursor_execute", record)
 
     assert [game["game_id"] for game in body["games"]] == [GAME_ID, "0022600161"]
-    # Both candidates pass their memoized checks; each one's ledger lineage is
-    # rechecked once for the request, not once per game.
-    assert sorted(judged) == sorted([PLAYER_LOGS, "traditional_opponent_season"])
+    # Both candidates record the same games under one manifest and cutoff, so
+    # the ledger proves their lineage once for the request: not once per
+    # stream, nor once per game.
+    assert proved == ["manifest-new"]
+    # Evidence is judged by its identity; no read loads an observation's payload.
+    assert [statement for statement in statements if "collection_observations.payload" in statement] == []

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack
 from copy import copy
 from dataclasses import dataclass, replace
@@ -888,9 +888,9 @@ class SeasonCandidateChecks(Protocol):
         readiness_rule: bool,
     ) -> str | None: ...
 
-    def season_candidate_lineage_refusal(
-        self, session: Session, stream: Any, candidate: Any
-    ) -> str | None: ...
+    def season_candidate_lineage_refusals(
+        self, session: Session, candidates: Sequence[tuple[Any, Any]]
+    ) -> dict[str, str | None]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -2116,17 +2116,36 @@ class DatabaseFirstPublicationReader:
             if key in versions and bool(stream.enabled) and current is not None and current.season != season
         }
         chosen: dict[str, PublicationVersion] = {}
-        refused: dict[str, str] = {}
-        for key, stream in sorted(moving.items()):
-            reasons = []
-            for version in versions[key]:
-                reason = self._candidate_refusal(session, stream, version, season=season)
+        untried = {key: iter(versions[key]) for key in moving}
+        reasons: dict[str, list[str]] = {key: [] for key in moving}
+        pending = sorted(moving)
+        while pending:
+            # Each pending stream's newest version its once-per-publication
+            # checks pass, then the ledger lineage of all of them at once.
+            passing: dict[str, PublicationVersion] = {}
+            for key in pending:
+                for version in untried[key]:
+                    reason = self._candidate_refusal(session, moving[key], version, season=season)
+                    if reason is None:
+                        passing[key] = version
+                        break
+                    reasons[key].append(reason)
+            lineage = (
+                self._season_candidates.season_candidate_lineage_refusals(
+                    session, [(moving[key], version) for key, version in passing.items()]
+                )
+                if passing
+                else {}
+            )
+            pending = []
+            for key, version in passing.items():
+                reason = lineage[version.publication_id]
                 if reason is None:
                     chosen[key] = version
-                    break
-                reasons.append(reason)
-            if key not in chosen:
-                refused[key] = reasons[0]
+                else:
+                    reasons[key].append(reason)
+                    pending.append(key)
+        refused = {key: reasons[key][0] for key in moving if key not in chosen}
         left_behind = coupled_left_behind(moving, refused)
         serving = {key: version for key, version in chosen.items() if key not in left_behind}
         held_back = {key: _held_back_reason(key, held=key in moving) for key in judged if key not in serving}
@@ -2170,11 +2189,11 @@ class DatabaseFirstPublicationReader:
     def _candidate_refusal(
         self, session: Session, stream: PublicationStream, candidate: PublicationVersion, *, season: str
     ) -> str | None:
-        """The cutover's verdict on one candidate, without its Readiness Rule.
+        """The cutover's verdict on one candidate, without its Readiness Rule or ledger lineage.
 
         Every check but ledger lineage is judged once per publication; a
         ledger correction can withdraw a candidate's games at any time, so
-        lineage is judged on every read.
+        lineage is judged on every read (``_unpublished_versions``).
         """
 
         if self._season_candidates is None:
@@ -2193,7 +2212,7 @@ class DatabaseFirstPublicationReader:
                 self._candidate_refusals[key] = refusal
                 while len(self._candidate_refusals) > self._CANDIDATE_CHECKS_KEPT:
                     self._candidate_refusals.popitem(last=False)
-        return refusal or self._season_candidates.season_candidate_lineage_refusal(session, stream, candidate)
+        return refusal
 
     def season_choices(self, listed: Iterable[str]) -> tuple[SeasonChoice, ...]:
         """Every season a request may select, newest first.
