@@ -861,6 +861,78 @@ def test_a_traditional_sheet_row_filters_game_logs_by_its_per_48_metric(
     assert matchups(["sheet:traditional:OPP_PTS"], ["-1"]) == matchups(["OPP_PTS"], ["-1"]) == ["BOS @ MIA"]
 
 
+def test_a_play_type_turnover_sheet_row_filters_game_logs_by_its_per_48_metric(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    """#416: ``<PlayType>:TOV`` and ``:FTT`` rank the counts the Sheet shows.
+
+    LAL forces the most PRBallHandler turnovers per 48, MIA the second most
+    and CHI the fewest, while PRBallHandler points and trips run otherwise.
+    A Season publication from before the counts ranks nobody by them.
+    """
+
+    from app.domain.team_matchup_taxonomy import (
+        NBA_PUBLICATION_OPTIONAL_METRIC_KEYS,
+        NBA_PUBLICATION_TAXONOMY,
+    )
+    from app.services.team_filter_rankings import TeamFilterRankingService
+    from tests.support.publication_stubs import StubGovernance, StubReader, league, read
+
+    turnovers = {"LAL": 4.0, "MIA": 3.0, "CHI": 0.5}
+    trips = {"CHI": 3.0, "MIA": 0.2}
+    points = {"CHI": 20.0, "LAL": 2.0}
+
+    def per48(tricode):
+        metrics = dict.fromkeys(NBA_PUBLICATION_TAXONOMY["play_types"], 1.0)
+        metrics["PRBallHandler_TOV"] = turnovers.get(tricode, 2.0)
+        metrics["PRBallHandler_FTT"] = trips.get(tricode, 1.0)
+        metrics["PRBallHandler_PTS"] = points.get(tricode, 10.0)
+        return metrics
+
+    def service_for(per48):
+        stream = "synergy_play_types_opponent_season"
+        service = GameService(
+            mock_db_engine,
+            mock_redis_client,
+            settings=RuntimeSettings(
+                environment="testing",
+                nba=NBASeasonSettings(current_season="2024-25"),
+            ),
+            team_filter_rankings=TeamFilterRankingService(
+                StubReader({stream: read(stream, league(per48))}),
+                governance_resolver=StubGovernance(),
+            ),
+        )
+        monkeypatch.setattr(service, "_get_game_logs", lambda name, season: (_game_logs_frame(), None))
+
+        def matchups(teams_against, rank_filter):
+            query = GameLogQuery(
+                season_filter="2024-25", teams_against=teams_against, rank_filter=rank_filter
+            )
+            return [row["MATCHUP"] for row in service.get_filtered_logs("LeBron James", query)["game_logs"]]
+
+        return matchups
+
+    matchups = service_for(per48)
+    assert matchups(["sheet:play_types:PRBallHandler:TOV"], ["1,1"]) == ["BOS vs. LAL"]
+    assert matchups(["sheet:play_types:PRBallHandler:TOV"], ["1,2"]) == ["BOS vs. LAL", "BOS @ MIA"]
+    assert matchups(["sheet:play_types:PRBallHandler:TOV"], ["-1"]) == ["BOS vs. CHI"]
+    assert matchups(["sheet:play_types:PRBallHandler:FTT"], ["1"]) == ["BOS vs. CHI"]
+    assert matchups(["sheet:play_types:PRBallHandler:FTT"], ["-1"]) == ["BOS @ MIA"]
+    assert matchups(["sheet:play_types:PRBallHandler:PTS"], ["-1"]) == ["BOS vs. LAL"]
+
+    def before_the_counts(tricode):
+        return {
+            key: value
+            for key, value in per48(tricode).items()
+            if key not in NBA_PUBLICATION_OPTIONAL_METRIC_KEYS["play_types"]
+        }
+
+    matchups = service_for(before_the_counts)
+    assert matchups(["sheet:play_types:PRBallHandler:TOV"], ["1"]) == []
+    assert matchups(["sheet:play_types:PRBallHandler:PTS"], ["-1"]) == ["BOS vs. LAL"]
+
+
 def test_a_url_encoded_sheet_row_filters_game_logs_over_http(
     monkeypatch, mock_db_engine, mock_redis_client, dependencies, client
 ):
