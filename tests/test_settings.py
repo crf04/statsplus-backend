@@ -1,6 +1,6 @@
 """Tests for the validated runtime settings interface."""
 
-from datetime import date
+from datetime import date, timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -645,6 +645,42 @@ def test_local_dfs_registry_defaults_to_none_and_is_not_feature_flagged(monkeypa
 def test_board_deadline_setting_cannot_exceed_fifteen_seconds():
     with pytest.raises(ConfigurationError):
         load_settings(environ={"DFS_BOARD_DEADLINE_SECONDS": "15.1"})
+
+
+def test_projection_collector_board_deadline_is_separate_from_the_request_time_board():
+    settings = load_settings(
+        environ={
+            "DFS_BOARD_DEADLINE_SECONDS": "12",
+            "PROJECTION_COLLECTION_BOARD_DEADLINE_SECONDS": "50",
+        }
+    )
+
+    assert settings.providers.dfs_board_deadline_seconds == 12.0
+    assert settings.projection_collection.board_deadline == timedelta(seconds=50)
+
+
+@pytest.mark.parametrize(
+    "environ",
+    (
+        {"PROJECTION_COLLECTION_LEASE_SECONDS": "60"},
+        {"PROJECTION_COLLECTION_BOARD_DEADLINE_SECONDS": "100"},
+        {"PROJECTION_COLLECTION_BOARD_DEADLINE_SECONDS": "30", "PROJECTION_COLLECTION_LEASE_SECONDS": "119"},
+    ),
+)
+def test_collector_lease_must_outlast_its_board_and_the_mapping_work_after_it(environ):
+    with pytest.raises(ConfigurationError, match="lease"):
+        load_settings(environ=environ)
+
+
+def test_collector_lease_may_end_exactly_when_board_and_mapping_allowance_do():
+    settings = load_settings(
+        environ={
+            "PROJECTION_COLLECTION_BOARD_DEADLINE_SECONDS": "30",
+            "PROJECTION_COLLECTION_LEASE_SECONDS": "120",
+        }
+    )
+
+    assert settings.projection_collection.lease_duration == timedelta(seconds=120)
 
 
 def test_app_startup_exposes_one_settings_object(monkeypatch):
