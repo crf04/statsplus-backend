@@ -19,7 +19,8 @@ from app.domain.team_matchup_taxonomy import (
 )
 from app.domain.utc import parse_utc_iso
 from app.errors import ResourceNotFoundError
-from app.services.research_season import schedule_season
+from app.services.database_first_activation import ReadSeason
+from app.services.research_season import schedule_season, season_context, selected_season
 from app.services.team_filter_rankings import (
     TEAM_FILTER_PUBLICATION_STREAM_KEYS,
     team_filter_ranking,
@@ -105,6 +106,8 @@ class NextOpponentService:
         self.game = game
         self.events = events
         self.rankings = rankings
+        # ``season_scoped`` replaces this with the selected season's reader.
+        self.publication_reader = getattr(rankings, "publication_reader", None)
         self.clock = clock or (lambda: datetime.now(UTC))
 
     def _team_id(self, player_id, season):
@@ -117,9 +120,28 @@ class NextOpponentService:
         return athlete.get("team_id") if athlete else None
 
     def get_next_opponent(self, player_name):
-        # Who the player is and how opponents rank come from the published
-        # season; the next game comes from the schedule covering today.
-        season = self.game.default_season()
+        """The next game and its opponent's ranks, with ``season_context`` for a selection.
+
+        Who the player is comes from the published season and the next game
+        from the schedule covering today, whatever the selection; only the
+        opponent's ranks read the selected season (crf04/statsplus#415).  A
+        selection is captured first, so one that is not offered is refused
+        whatever the schedule holds.
+        """
+
+        reader = self.publication_reader
+        if selected_season(reader) is None:
+            return self._next_opponent(player_name, self.game.default_season(), None)
+        capture = reader.snapshot(
+            tuple(TEAM_FILTER_PUBLICATION_STREAM_KEYS),
+            season=ReadSeason(self.game.settings.nba.current_season),
+        )
+        return {
+            **self._next_opponent(player_name, self.game.default_season(), capture),
+            "season_context": season_context(reader, capture, self.game.default_season),
+        }
+
+    def _next_opponent(self, player_name, season, capture):
         try:
             player_id = self.game.get_player_id(player_name, season)
         except ValueError as error:
@@ -163,9 +185,13 @@ class NextOpponentService:
         home = team_id == event["home_team"]["id"]
         opponent = event["away_team" if home else "home_team"]
         ranks = []
-        reader = self.rankings.publication_reader
+        reader = self.publication_reader
         if reader is not None and opponent["id"] in NBA_TEAM_ID_TO_TRICODE:
-            snapshot = reader.snapshot(tuple(TEAM_FILTER_PUBLICATION_STREAM_KEYS), season=season)
+            snapshot = (
+                capture
+                if capture is not None
+                else reader.snapshot(tuple(TEAM_FILTER_PUBLICATION_STREAM_KEYS), season=season)
+            )
             rows_by_base = self.rankings.season_rows_by_base(
                 (
                     "traditional",
@@ -174,7 +200,7 @@ class NextOpponentService:
                     "shot_zones",
                     "shot_types",
                 ),
-                season,
+                season if capture is None else capture.season,
                 publication_snapshot=snapshot,
             )
             # Every team ties on a column that cannot vary (no 3s inside

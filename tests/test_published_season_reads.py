@@ -394,6 +394,9 @@ class ScheduleCatalog(NoNeighbourEvents):
     def count_events(self, season):
         return len(self.events_by_season.get(season, ()))
 
+    def get_events(self, season):
+        return list(self.events_by_season.get(season, ()))
+
     def get_freshness(self, season, *, now=None):
         return {"last_success_at": "2026-10-21T10:00:00+00:00", "fresh": True}
 

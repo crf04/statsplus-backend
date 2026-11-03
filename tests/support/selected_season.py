@@ -32,6 +32,7 @@ from app.services.matchup_injuries import unavailable_injury_result
 from app.services.matchup_reuse import ComposedMatchupCache, PublicationSnapshotReuse
 from app.services.matchup_selection import MatchupSelectionService
 from app.services.matchup_snapshot import capture_matchup_snapshot
+from app.services.next_opponent import NextOpponentService
 from app.services.player_game_log_repository import PlayerGameLogRepository
 from app.services.player_service import PlayerProfileReader, PlayerService
 from app.services.slate_edges import SlateEdgesService
@@ -249,6 +250,12 @@ class SelectedWorld(World):
                 governance_resolver=ActiveManifestLedgerGovernanceReader(self.engine, clock=lambda: NOW),
                 clock=lambda: NOW,
             ),
+        )
+        self.next_opponent = NextOpponentService(
+            self.games,
+            ScheduleCatalog({NEW: [_game_event()], OLD: [_old_game_event()]}),
+            self.teams.publications,
+            clock=lambda: NOW,
         )
 
     def live(self, stream_key):
