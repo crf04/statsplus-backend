@@ -35,7 +35,7 @@ from scripts.lineup_segment_backfill import backfill
 from scripts.on_off_parity import load_games
 from tests.services.test_on_off import NOW, Clock, FakeProvider, FakeRedis
 
-BOS, DEN = 1610612738, 1610612743
+BOS, DEN, NOP = 1610612738, 1610612743, 1610612740
 TATUM, BROWN = 1628369, 1627759
 WRITTEN_AT = datetime(2026, 11, 3, 12, 0, tzinfo=UTC)
 
@@ -205,8 +205,8 @@ def test_a_technical_free_throw_answers_the_other_teams_technical():
 
 
 def test_a_technical_whose_free_throw_was_never_shot_claims_no_later_free_throw():
-    """A double technical awards no free throw; a 1-of-1 at a later clock
-    answers the personal foul before it."""
+    """Technicals whose free throws never come claim no 1-of-1 at a later
+    clock; it answers the personal foul before it."""
 
     play_by_play = _game(
         ("foul", "PT08M00.00S", {"teamId": DEN, "personId": 11, "subType": "technical"}),
@@ -230,6 +230,35 @@ def test_a_technical_whose_free_throw_was_never_shot_claims_no_later_free_throw(
         ((1, 3, 4, 5, 6), 1),
         ((1, 2, 4, 5, 6), 0),
     ]
+
+
+def test_offsetting_double_technicals_leave_a_missed_and_one_and_its_putback_one_possession():
+    """Recorded DEN game 0022600140, Q3 1:04: a NOP layup, a shooting foul, the
+    and-one missed, an offensive rebound and a putback.  Double technicals at
+    that clock offset and award no free throw, so the 1-of-1 is still the and-one."""
+
+    original = load_games("den_2026_27")["0022600140"]
+    game = copy.deepcopy(original)
+    actions = game["pbp"]["game"]["actions"]
+    at = next(index for index, action in enumerate(actions) if action["actionNumber"] == 492)
+    actions[at:at] = [
+        {
+            "actionType": "foul",
+            "subType": "technical",
+            "descriptor": "double",
+            "period": 3,
+            "clock": "PT01M04.00S",
+            "teamId": team_id,
+            "personId": person_id,
+            "possession": NOP,
+        }
+        for team_id, person_id in ((DEN, 203999), (NOP, 1642852))
+    ]
+
+    segments = derive_segments(game["box"], game["pbp"], "2026-27").segments
+
+    assert sum(segment.off_poss for segment in segments if segment.team_id == NOP) == 100
+    assert segments == derive_segments(original["box"], original["pbp"], "2026-27").segments
 
 
 def test_an_and_one_keeps_the_possession_until_its_free_throw():

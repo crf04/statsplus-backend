@@ -10,9 +10,9 @@ match PBP Stats WOWY (the prototype in the parent issue measured them):
   except free throws, which count in the lineup on the floor at the foul
   that caused them (substitutions often come between the foul and the
   shots).  A technical foul's free throw is the first 1-of-1 the other team
-  shoots at the technical's game clock; every other free throw answers the
-  latest foul that is not a technical, so a technical called during a trip
-  leaves the trip's lineup alone.
+  shoots at the technical's game clock (double technicals offset and award
+  none); every other free throw answers the latest foul that is not a
+  technical, so a technical called during a trip leaves the trip's lineup alone.
 * An offensive possession is credited to the offense's segment at the event
   that ends it: a made field goal that is not an and-one, a defensive
   rebound, a turnover, the last free throw of a trip made, or the end of the
@@ -164,7 +164,8 @@ def derive_segments(box: Mapping[str, Any], play_by_play: Mapping[str, Any], sea
     answered: list[Mapping[str, Any] | None] = []
     trip_foul: Mapping[str, Any] | None = None
     foul_lineups: dict[int, _Open] | None = None
-    #: Technical fouls at the current game clock whose free throw is not shot yet.
+    #: Technical fouls at the current game clock whose free throw is not shot yet;
+    #: a double technical's penalties offset, so it never has one.
     technicals: list[tuple[Mapping[str, Any], dict[int, _Open]]] = []
     for action in actions:
         action_type = action["actionType"]
@@ -199,7 +200,8 @@ def derive_segments(box: Mapping[str, Any], play_by_play: Mapping[str, Any], sea
         technicals = [(foul, at) for foul, at in technicals if _same_moment(foul, action)]
         foul, trip_lineups = None, None
         if action_type == "foul" and action.get("subType") == "technical":
-            technicals.append((action, lineups))
+            if _kind(action) != "double":
+                technicals.append((action, lineups))
         elif action_type == "foul":
             trip_foul, foul_lineups = action, lineups
         elif action_type == "freethrow":
