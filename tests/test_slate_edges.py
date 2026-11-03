@@ -511,6 +511,36 @@ def test_games_keep_the_slates_order_and_the_date_is_forwarded():
     assert slates.calls == [None]
 
 
+class NeighbourSlate:
+    """A Slate that names its next game date only when its neighbours are read."""
+
+    def __init__(self, games_by_day, today="2026-04-10", next_day="2026-04-11"):
+        self.games_by_day = games_by_day
+        self.today = today
+        self.next_day = next_day
+
+    def get_slate(self, requested_date=None, *, neighbours=True):
+        day = requested_date or self.today
+        return {
+            "slate_date": day,
+            "games": self.games_by_day.get(day, []),
+            "previous_game_date": None,
+            "next_game_date": self.next_day if neighbours and day == self.today else None,
+        }
+
+
+def test_next_game_day_from_an_empty_day_answers_the_next_slate():
+    service = SlateEdgesService(
+        slates=NeighbourSlate({"2026-04-11": [_game("G1")]}),
+        matchups=FakeMatchups({"G1": _matchup([_blend_player(1, "A", 0.05)])}),
+    )
+
+    edges = service.get_edges(fallback="next_game_day")
+
+    assert edges["slate_date"] == "2026-04-11"
+    assert [game["game_id"] for game in edges["games"]] == ["G1"]
+
+
 def test_an_invalid_date_is_the_slates_invalid_input():
     service = SlateEdgesService(
         slates=FakeSlate([], error=InvalidInputError("The slate date must use YYYY-MM-DD.")),

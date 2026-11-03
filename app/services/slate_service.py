@@ -108,18 +108,29 @@ class SlateService:
         self.schedule_max_age_seconds = exact_seconds(self.schedule_max_age)
 
     def get_slate(
-        self, requested_date: str | None = None, *, fallback: str | None = None, season: str | None = None
+        self,
+        requested_date: str | None = None,
+        *,
+        fallback: str | None = None,
+        season: str | None = None,
+        neighbours: bool = True,
     ) -> dict[str, Any]:
         """One ET Slate Date; ``fallback`` is the shared previous-game-day rule.
 
         ``season`` reads the date from that season's schedule rather than the
         date's own (or the pinned) season: a game's preview card reads the
-        season its game ID names.
+        season its game ID names.  ``neighbours=False`` leaves
+        ``previous_game_date`` and ``next_game_date`` unread (``None``), for a
+        caller that never shows them.
         """
 
-        return read_slate(lambda day: self._slate_for(day, season), requested_date, fallback)
+        return read_slate(
+            lambda day: self._slate_for(day, season, neighbours=neighbours), requested_date, fallback
+        )
 
-    def _slate_for(self, requested_date: str | None, season: str | None = None) -> dict[str, Any]:
+    def _slate_for(
+        self, requested_date: str | None, season: str | None = None, *, neighbours: bool = True
+    ) -> dict[str, Any]:
         slate_date = self._parse_slate_date(requested_date)
         if self.event_catalog is None:
             raise ProviderUnavailableError("The NBA schedule is not available. Please try again later.")
@@ -219,8 +230,10 @@ class SlateService:
             ),
             "retrieved_at": retrieved_at,
         }
-        previous_game_date, next_game_date = neighbouring_game_dates(
-            self.settings, self.event_catalog, slate_date
+        previous_game_date, next_game_date = (
+            neighbouring_game_dates(self.settings, self.event_catalog, slate_date)
+            if neighbours
+            else (None, None)
         )
         selected = selected_season(self.publication_reader) is not None
         # An explicit selection is captured even with no games, so a season

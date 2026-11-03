@@ -46,6 +46,7 @@ from app.services.matchup_snapshot import (
     read_game_matchup,
     request_matchups,
 )
+from app.services.publication_snapshot_calls import accepts_keyword
 from app.services.request_reads import request_read_scope
 from app.services.research_season import refuse_evidence_after_game, season_context, selected_season
 from app.services.serving_season import merge_trailing
@@ -114,7 +115,7 @@ class SlateEdgesService:
         a malformed one is its ``invalid_input`` refusal; ``fallback`` is the
         Slate's ``previous_game_day``/``next_game_day`` rule (``slate_fallback.read_slate``)."""
 
-        slate = read_slate(self.slates.get_slate, requested_date, fallback)
+        slate = read_slate(self._slate, requested_date, fallback)
         # Each game's schedule facts are its own season's (crf04/statsplus#330 AC9).
         for game in slate["games"]:
             refuse_evidence_after_game(self.publication_reader, season_for_game_id(game["game_id"]))
@@ -134,6 +135,18 @@ class SlateEdgesService:
                 for game in response["games"]
             ],
         }
+
+    def _slate(self, requested_date: str | None) -> dict[str, Any]:
+        """The Slate of ``requested_date``, its neighbouring dates read only for a day without games.
+
+        The edges never show them, and ``read_slate`` falls back on them only
+        when the day lists no game.
+        """
+
+        if not accepts_keyword(self.slates.get_slate, "neighbours"):
+            return self.slates.get_slate(requested_date)
+        slate = self.slates.get_slate(requested_date, neighbours=False)
+        return slate if slate["games"] else self.slates.get_slate(requested_date)
 
     def preview_read(
         self,
