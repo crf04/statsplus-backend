@@ -318,6 +318,9 @@ class _SnapshotRecorder:
 
     def __getattr__(self, name):
         method = getattr(self._target, name)
+        if name == "request_governance":
+            # Binds governance reads to the request; it reads nothing itself.
+            return method
 
         def read(*args, publication_snapshot=None, **kwargs):
             self._seen.append((name, publication_snapshot))

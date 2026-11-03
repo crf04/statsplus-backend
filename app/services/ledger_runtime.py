@@ -152,6 +152,9 @@ class ActiveManifestLedgerGovernanceReader:
         self.engine = engine
         self.clock = clock or (lambda: datetime.now(UTC))
         self._connection = None
+        #: Governance a request-bound reader already read, by (season,
+        #: cutoff, manifest); ``None`` on the shared reader, which never keeps it.
+        self._request_governance: dict[tuple, LedgerGovernance] | None = None
         # Parsed Event Catalog payloads by (publication, checksum, season,
         # cutoff): a payload that matched its checksum is not fetched again.
         self._catalog_events: OrderedDict[tuple, tuple[tuple[Mapping[str, object], ...], bool]] = (
@@ -160,12 +163,16 @@ class ActiveManifestLedgerGovernanceReader:
         self._catalog_events_lock = Lock()
 
     def for_request(self, connection) -> ActiveManifestLedgerGovernanceReader:
-        """This reader on one request's connection, so its reads take no checkout of their own."""
+        """This reader for one request: on its connection, reading each manifest's governance once.
 
-        if connection is None:
-            return self
+        The Season and Last-15 windows of one Matchup are governed by the same
+        manifests; the request holds one bound reader for both and drops it
+        when it ends.
+        """
+
         bound = copy(self)
         bound._connection = connection
+        bound._request_governance = {}
         return bound
 
     def read(self, season: str, cutoff: datetime) -> LedgerGovernance:
@@ -181,12 +188,23 @@ class ActiveManifestLedgerGovernanceReader:
         cutoff: datetime,
         manifest_id: str | None = None,
     ) -> LedgerGovernance:
-        return self._read(
-            season,
-            cutoff,
-            require_collection_authorization=False,
-            manifest_id=manifest_id,
-        )
+        if self._request_governance is None:
+            return self._read(
+                season,
+                cutoff,
+                require_collection_authorization=False,
+                manifest_id=manifest_id,
+            )
+        key = (season, cutoff, manifest_id)
+        governance = self._request_governance.get(key)
+        if governance is None:
+            governance = self._request_governance[key] = self._read(
+                season,
+                cutoff,
+                require_collection_authorization=False,
+                manifest_id=manifest_id,
+            )
+        return governance
 
     def resolve_l15_game_ids(self, season: str, cutoff: date | datetime):
         """Return the exact governed L15 IDs for one season and cutoff.

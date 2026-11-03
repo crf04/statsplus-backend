@@ -256,11 +256,13 @@ class TeamMatchupQueryService:
         publication_snapshot=None,
         connection: Connection | None = None,
         bases: Collection[str] | None = None,
+        governance=None,
     ) -> TeamMatchupWindow | None:
         """Read the newest stored window on or before an optional slate date.
 
         ``bases`` names the only surfaces the caller reads; the window may
-        then leave the others out.
+        then leave the others out.  ``governance`` is a ``request_governance``
+        result shared with the request's other windows.
 
         This is the completed-season read: it honors the #41 completed-season
         exemption, so a finished season's aggregate answers for any date inside
@@ -280,6 +282,7 @@ class TeamMatchupQueryService:
             publication_snapshot=publication_snapshot,
             connection=connection,
             bases=bases,
+            governance=governance,
         )
 
     def get_focal_safe_window(
@@ -324,6 +327,7 @@ class TeamMatchupQueryService:
         publication_snapshot=None,
         connection: Connection | None = None,
         bases: Collection[str] | None = None,
+        governance=None,
     ) -> TeamMatchupWindow | None:
         current_date = assume_utc(self._clock()).astimezone(EASTERN).date()
         if as_of is not None and as_of > current_date:
@@ -346,6 +350,7 @@ class TeamMatchupQueryService:
                 publication_snapshot=publication_snapshot,
                 bases=bases,
                 connection=connection,
+                governance=governance,
             )
         observation_scope = self.repository.get_latest_scope(
             season,
@@ -362,6 +367,7 @@ class TeamMatchupQueryService:
                 strict_as_of=strict_as_of,
                 publication_snapshot=publication_snapshot,
                 connection=connection,
+                governance=governance,
             )
         observations = self.repository.get_observations(observation_scope, connection=connection)
         fact_scopes = self.repository.get_latest_fact_scopes(
@@ -384,6 +390,7 @@ class TeamMatchupQueryService:
             strict_as_of=strict_as_of,
             publication_snapshot=publication_snapshot,
             connection=connection,
+            governance=governance,
         )
 
     def get_window(self, scope: TeamMatchupSnapshotScope, *, publication_snapshot=None) -> TeamMatchupWindow:
@@ -413,12 +420,14 @@ class TeamMatchupQueryService:
         publication_snapshot=None,
         bases: Collection[str] | None = None,
         connection: Connection | None = None,
+        governance=None,
     ) -> TeamMatchupWindow | None:
         """Overlay only activated windows; inactive bases remain legacy-backed."""
 
         if self._publication_reader is None:
             return legacy
-        governance = self._governance_for(connection)
+        if governance is None:
+            governance = self.request_governance(connection)
         window = "l15" if window_games is not None else "season"
         stream_by_base = dict(TEAM_MATCHUP_PUBLICATION_STREAMS[window])
         optional_by_base = TEAM_MATCHUP_OPTIONAL_PUBLICATION_STREAMS[window]
@@ -785,12 +794,16 @@ class TeamMatchupQueryService:
         except PublicationGovernanceUnavailable:
             return None
 
-    def _governance_for(self, connection: Connection | None):
-        """The governance source, reading on the request's connection when it can."""
+    def request_governance(self, connection: Connection | None = None):
+        """One request's governance source: on its connection, each manifest read once.
+
+        A caller building several windows for one request passes the result
+        to each ``get_latest_window`` so they share it.
+        """
 
         source = self._governance_source
         for_request = getattr(source, "for_request", None)
-        return for_request(connection) if connection is not None and callable(for_request) else source
+        return for_request(connection) if callable(for_request) else source
 
     @property
     def _governance_source(self):
