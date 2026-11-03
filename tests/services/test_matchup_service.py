@@ -19,7 +19,7 @@ from app.services.database_first_activation import (
     DatabaseFirstPublicationReader,
     PublicationRead,
 )
-from app.services.matchup import MatchupService
+from app.services.matchup import MatchupComposeCache, MatchupService
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_diet import (
     PlayerDietBaseline,
@@ -1230,6 +1230,27 @@ def test_future_matchup_queries_both_team_windows_without_a_future_cutoff():
     assert service.team_matchups.calls == [
         (SEASON, None, None, False),
         (SEASON, 15, None, False),
+    ]
+
+
+def test_games_composed_for_one_request_read_each_slate_dates_windows_once():
+    # Today's started game reads the windows as of today, the date a pending
+    # game's undated read resolves to; an earlier game reads its own date.
+    started = {**_event(), "nba_game_id": "0022500585", "scheduled_at": "2026-01-15T11:00:00+00:00"}
+    earlier = {**_event(), "nba_game_id": "0022500586", "scheduled_at": "2026-01-14T00:30:00+00:00"}
+    service = _service(events=RecordedEvents(events=[started, _event(), earlier]))
+    compose_cache = MatchupComposeCache()
+
+    for game_id in ("0022500585", GAME_ID, "0022500586"):
+        service.get_matchup_from_snapshot(
+            game_id=game_id, publication_snapshot=None, injuries=None, compose_cache=compose_cache
+        )
+
+    assert service.team_matchups.calls == [
+        (SEASON, None, date(2026, 1, 15), False),
+        (SEASON, 15, date(2026, 1, 15), False),
+        (SEASON, None, date(2026, 1, 13), False),
+        (SEASON, 15, date(2026, 1, 13), False),
     ]
 
 

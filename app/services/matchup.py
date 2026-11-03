@@ -1643,11 +1643,13 @@ class MatchupService:
         if self.team_matchups is None:
             return None
         if cache is not None:
+            # ``as_of=None`` reads the window as of today's Slate Date, so a
+            # pending game shares the started games' read.
             key = (
                 getattr(publication_snapshot, "generation", publication_snapshot),
                 season,
                 window_games,
-                as_of,
+                as_of or assume_utc(self._clock()).astimezone(EASTERN).date(),
             )
             if key in cache:
                 return cache[key]
