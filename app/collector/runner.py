@@ -24,6 +24,12 @@ EXIT_RETRY = 10
 EXIT_BUSY = 11
 EXIT_NON_RETRYABLE = 20
 RUN_LEASE_SECONDS = 8 * 60 * 60
+# Work left uncollected without a defect to fix.  ``provider_window_unverified``
+# is NBA tracking trailing the box score's games played; a later run within the
+# manifest collects the scope once tracking catches up.
+DEFERRED_FAILURES = frozenset(
+    {"bootstrap_expired", "manifest_expired", "provider_window_unsupported", "provider_window_unverified"}
+)
 BUSY_RETRY_LIMIT = 10
 
 
@@ -695,10 +701,7 @@ class ResidentialCollector:
                 self.status.record("outbox_retention")
             if transient:
                 disposition = RunDisposition.RETRY
-            elif local_failures and any(
-                code not in {"bootstrap_expired", "manifest_expired", "provider_window_unsupported"}
-                for code in local_failures
-            ):
+            elif local_failures and any(code not in DEFERRED_FAILURES for code in local_failures):
                 disposition = RunDisposition.NON_RETRYABLE
             elif (
                 not bootstraps and not manifests and not self.outbox.count() and not uploaded and not spooled
