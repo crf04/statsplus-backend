@@ -21,6 +21,7 @@ from .normalizers import (
     PLAY_TYPES,
     SHOT_TYPES,
     _flatten_frame_columns,
+    _records,
     normalize_grouped_shot_response,
     normalize_opponent_grouped_shot_response,
     normalize_opponent_synergy_response,
@@ -112,6 +113,20 @@ def _box_score_window(evidence: Any, *, team_id: int) -> tuple[int, float]:
     if not math.isfinite(minutes) or minutes <= 0:
         raise ProviderContractError("value_invariant_failed")
     return games, minutes
+
+
+def _defer_lagging_tracking(raw: Any, observation: NormalizedObservation) -> NormalizedObservation:
+    """Return a validated observation unless its tracking trails the box score.
+
+    It takes the finished observation, so it runs only once every check the
+    normalizer and the window binding apply has passed.  The one problem left
+    to find is tracking counting fewer games than the box score, which a
+    later run collects once tracking catches up.
+    """
+
+    if any(row["TRACKING_GP"] < row["GP"] for row in _records(raw) if "TRACKING_GP" in row):
+        raise ProviderContractError("provider_window_unverified")
+    return observation
 
 
 def _scope_mapping(value: Any) -> dict[str, Any]:
@@ -279,19 +294,22 @@ class ResidentialScopeExecutor:
                         last_n_games=15 if window == "l15" else None,
                         per_mode_simple=str(parameters.get("per_mode", "Totals")),
                     )
-                    yield normalize_opponent_grouped_shot_response(
+                    yield _defer_lagging_tracking(
                         raw,
-                        season=work.season,
-                        cutoff=work.cutoff,
-                        team_id=int(team_id),
-                        window=window,
-                        category=category,
-                        value_mode=str(parameters.get("value_mode", "totals_with_minutes")),
-                        endpoint_window={
-                            "last_n_games": 15 if window == "l15" else 0,
-                            "date_from": parameters.get("date_from"),
-                            "date_to": parameters.get("date_to"),
-                        },
+                        normalize_opponent_grouped_shot_response(
+                            raw,
+                            season=work.season,
+                            cutoff=work.cutoff,
+                            team_id=int(team_id),
+                            window=window,
+                            category=category,
+                            value_mode=str(parameters.get("value_mode", "totals_with_minutes")),
+                            endpoint_window={
+                                "last_n_games": 15 if window == "l15" else 0,
+                                "date_from": parameters.get("date_from"),
+                                "date_to": parameters.get("date_to"),
+                            },
+                        ),
                     )
                 return
             # Player tracking can trail the box score by days, and it says so
@@ -354,18 +372,21 @@ class ResidentialScopeExecutor:
                         last_n_games=15 if window == "l15" else 0,
                         per_mode_detailed=str(parameters.get("per_mode", "Totals")),
                     )
-                    return normalize_opponent_zone_response(
+                    return _defer_lagging_tracking(
                         raw,
-                        season=work.season,
-                        cutoff=work.cutoff,
-                        team_id=int(team_id),
-                        window=window,
-                        value_mode=str(parameters.get("value_mode", "totals_with_minutes")),
-                        endpoint_window={
-                            "last_n_games": 15 if window == "l15" else 0,
-                            "date_from": parameters.get("date_from"),
-                            "date_to": parameters.get("date_to"),
-                        },
+                        normalize_opponent_zone_response(
+                            raw,
+                            season=work.season,
+                            cutoff=work.cutoff,
+                            team_id=int(team_id),
+                            window=window,
+                            value_mode=str(parameters.get("value_mode", "totals_with_minutes")),
+                            endpoint_window={
+                                "last_n_games": 15 if window == "l15" else 0,
+                                "date_from": parameters.get("date_from"),
+                                "date_to": parameters.get("date_to"),
+                            },
+                        ),
                     )
 
                 try:
@@ -484,11 +505,10 @@ class _StandaloneNBAProvider:
     def _bind_window_gp(frame: Any, evidence: Any, *, team_id: int) -> Any:
         """Bind the box score's games and minutes to the tracking frame.
 
-        Only valid tracking counting fewer games than the box score is
-        ``provider_window_unverified``: tracking trails the box score for
-        hours after a game, and the runner defers that scope to a later run.
-        Tracking counting more games than were played, or any malformed
-        count, is a contract failure.
+        Tracking trails the box score for hours after a game, so its own
+        count is kept as ``TRACKING_GP`` for the executor to defer on once the
+        response has passed every other check.  Tracking counting more games
+        than were played, or any malformed count, is a contract failure.
         """
 
         try:
@@ -497,11 +517,11 @@ class _StandaloneNBAProvider:
             merged = frame.copy()
             if not (merged["TEAM_ID"] == team_id).all():
                 raise ProviderContractError("manifest_scope_mismatch")
-            tracked_gp = _game_counts(merged["GP"]) if "GP" in merged else []
-            if any(games > expected_gp for games in tracked_gp):
-                raise ProviderContractError("value_invariant_failed")
-            if any(games < expected_gp for games in tracked_gp):
-                raise ProviderContractError("provider_window_unverified")
+            if "GP" in merged:
+                tracked_gp = _game_counts(merged["GP"])
+                if any(games > expected_gp for games in tracked_gp):
+                    raise ProviderContractError("value_invariant_failed")
+                merged["TRACKING_GP"] = tracked_gp
             merged["GP"] = expected_gp
             merged["MIN"] = expected_minutes
             return merged

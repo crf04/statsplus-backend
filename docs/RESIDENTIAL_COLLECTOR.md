@@ -69,9 +69,11 @@ for the same window fails as `provider_window_unverified`. Tracking trails the
 box score for hours after a game, so this is not a contract break: the run
 still exits `0`, names the code in its `failures` and terminal status, and
 later runs within the manifest collect the scope once tracking catches up.
-Only that shortfall is deferred, and only after both responses validate: whole,
-non-negative game counts, finite positive box-score minutes, and exactly one
-box-score row for the team. A malformed response is `provider_schema_changed`;
+Only that shortfall is deferred, and only as the last decision: the response
+must first pass every check the scope applies when the counts agree, from its
+values and rows to the box-score evidence and the normalizer's own checks.
+Those include whole, non-negative game counts, finite positive box-score
+minutes, and exactly one box-score row for the team. A malformed response is `provider_schema_changed`;
 an invalid count or minutes, a missing or duplicated team, or tracking (or a
 Synergy play type) counting more games than the box score is
 `value_invariant_failed`. Both exit `20`. Playoffs, Play-In, and cross-phase responses are rejected before

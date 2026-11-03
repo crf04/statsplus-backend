@@ -3595,7 +3595,7 @@ def _opponent_shot_discovery(*team_ids):
     )
 
 
-def _patch_opponent_shot_endpoints(monkeypatch, *, tracking_gp, box_score):
+def _patch_opponent_shot_endpoints(monkeypatch, *, tracking_gp, box_score, change=lambda frame: frame):
     """Serve NBA tracking and box-score frames at the nba_api boundary."""
 
     from nba_api.stats import endpoints
@@ -3607,17 +3607,19 @@ def _patch_opponent_shot_endpoints(monkeypatch, *, tracking_gp, box_score):
 
         def get_data_frames(self):
             return [
-                pd.DataFrame(
-                    [
-                        {
-                            "TEAM_ID": self.team_id,
-                            "GP": tracking_gp[self.team_id],
-                            "FG2M": 10,
-                            "FG2A": 20,
-                            "FG3M": 5,
-                            "FG3A": 15,
-                        }
-                    ]
+                change(
+                    pd.DataFrame(
+                        [
+                            {
+                                "TEAM_ID": self.team_id,
+                                "GP": tracking_gp[self.team_id],
+                                "FG2M": 10,
+                                "FG2A": 20,
+                                "FG3M": 5,
+                                "FG3A": 15,
+                            }
+                        ]
+                    )
                 )
             ]
 
@@ -3767,17 +3769,45 @@ def test_synergy_window_failures_are_never_deferred(
     outbox.close()
 
 
+@pytest.mark.parametrize("tracking_gp", [6, 7])
 @pytest.mark.parametrize(
-    ("zone_gp", "opponent_totals", "exit_code", "failures"),
+    ("change", "failure"),
     [
-        (6, {"OPP_FGM": 21, "OPP_FGA": 43}, 0, ("provider_window_unverified",)),
-        (7, {"OPP_FGA": 43}, 20, ("provider_schema_changed",)),
-        (7, {"OPP_FGM": -1, "OPP_FGA": 43}, 20, ("value_invariant_failed",)),
+        (lambda frame: frame.assign(FG2M=-1), "value_invariant_failed"),
+        (lambda frame: frame.assign(FG2M=100), "value_invariant_failed"),
+        (lambda frame: pd.concat([frame, frame], ignore_index=True), "provider_schema_changed"),
     ],
+    ids=["negative makes", "makes exceed attempts", "duplicate tracking rows"],
 )
-def test_opponent_zone_window_defers_only_a_tracking_shortfall(
-    tmp_path: Path, monkeypatch, zone_gp, opponent_totals, exit_code, failures
+def test_a_tracking_shortfall_never_masks_a_malformed_shot_response(
+    tmp_path: Path, monkeypatch, tracking_gp, change, failure
 ):
+    # Whether tracking trails the box score or not, a malformed response
+    # fails the run exactly as it does on master.
+    _patch_opponent_shot_endpoints(
+        monkeypatch,
+        tracking_gp={LAC: tracking_gp},
+        box_score=lambda team_id: pd.DataFrame([{"TEAM_ID": team_id, **BOX_SCORE_7}]),
+        change=change,
+    )
+    collector, transport, outbox = _collector(
+        tmp_path,
+        discovery=_opponent_shot_discovery(LAC),
+        provider=_StandaloneNBAProvider(),
+        release_checksum="a" * 64,
+    )
+
+    result = collector.run()
+
+    assert (result.exit_code, result.failures, result.uploaded) == (20, (failure,), 0)
+    terminal = [call[4] for call in transport.calls if call[1].endswith("/api/collector/status")][-1]
+    assert (terminal["state"], terminal["reason"]) == ("non_retryable", failure)
+    outbox.close()
+
+
+def _patch_opponent_zone_endpoints(monkeypatch, *, zone_gp, opponent_totals, change=lambda row: row):
+    """Serve a complete opponent zone row and its TeamStats evidence."""
+
     from nba_api.stats import endpoints
 
     class TeamShotLocations:
@@ -3785,7 +3815,13 @@ def test_opponent_zone_window_defers_only_a_tracking_shortfall(
             self.team_id = team_id_nullable
 
         def get_data_frames(self):
-            return [pd.DataFrame([{"TEAM_ID": self.team_id, "GP": zone_gp}])]
+            row = {"TEAM_ID": self.team_id, "GP": zone_gp}
+            for zone in ("Restricted Area", "In The Paint (Non-RA)", "Mid-Range", "Above the Break 3"):
+                row.update({f"{zone}_OPP_FGM": 4, f"{zone}_OPP_FGA": 8})
+            for zone in ("Left Corner 3", "Right Corner 3"):
+                row.update({f"{zone}_OPP_FGM": 2, f"{zone}_OPP_FGA": 4})
+            row.update({"Backcourt_OPP_FGM": 1, "Backcourt_OPP_FGA": 3})
+            return [pd.DataFrame([change(row)])]
 
     class TeamStats:
         def __init__(self, *, team_id_nullable, **_kwargs):
@@ -3796,17 +3832,84 @@ def test_opponent_zone_window_defers_only_a_tracking_shortfall(
 
     monkeypatch.setattr(endpoints, "LeagueDashTeamShotLocations", TeamShotLocations)
     monkeypatch.setattr(endpoints, "LeagueDashTeamStats", TeamStats)
-    discovery = _opponent_discovery(
-        "shot_zones_opponent",
-        {"window": "season", "team_id": LAC, "per_mode": "Totals", "value_mode": "totals_with_minutes"},
-    )
+
+
+ZONE_DISCOVERY = _opponent_discovery(
+    "shot_zones_opponent",
+    {"window": "season", "team_id": LAC, "per_mode": "Totals", "value_mode": "totals_with_minutes"},
+)
+ZONE_TOTALS = {"OPP_FGM": 21, "OPP_FGA": 43}
+
+
+@pytest.mark.parametrize(
+    ("zone_gp", "exit_code", "failures", "uploaded"),
+    [
+        (6, 0, ("provider_window_unverified",), 0),
+        (7, 0, (), 1),
+    ],
+)
+def test_opponent_zone_window_defers_a_valid_tracking_shortfall(
+    tmp_path: Path, monkeypatch, zone_gp, exit_code, failures, uploaded
+):
+    _patch_opponent_zone_endpoints(monkeypatch, zone_gp=zone_gp, opponent_totals=ZONE_TOTALS)
     collector, _transport, outbox = _collector(
-        tmp_path, discovery=discovery, provider=_StandaloneNBAProvider()
+        tmp_path, discovery=ZONE_DISCOVERY, provider=_StandaloneNBAProvider()
     )
 
     result = collector.run()
 
-    assert (result.exit_code, result.failures, result.uploaded) == (exit_code, failures, 0)
+    assert (result.exit_code, result.failures, result.uploaded) == (exit_code, failures, uploaded)
+    outbox.close()
+
+
+@pytest.mark.parametrize("zone_gp", [6, 7])
+@pytest.mark.parametrize(
+    ("change", "failure"),
+    [
+        (
+            lambda row: {key: value for key, value in row.items() if key != "Mid-Range_OPP_FGA"},
+            "provider_schema_changed",
+        ),
+        (lambda row: {**row, "Mid-Range_OPP_FGM": -4}, "value_invariant_failed"),
+        (lambda row: {**row, "Mid-Range_OPP_FGM": 5}, "value_invariant_failed"),
+    ],
+    ids=["missing zone attempts", "negative zone makes", "zones off the opponent totals"],
+)
+def test_a_tracking_shortfall_never_masks_a_malformed_zone_row(
+    tmp_path: Path, monkeypatch, zone_gp, change, failure
+):
+    _patch_opponent_zone_endpoints(monkeypatch, zone_gp=zone_gp, opponent_totals=ZONE_TOTALS, change=change)
+    collector, _transport, outbox = _collector(
+        tmp_path, discovery=ZONE_DISCOVERY, provider=_StandaloneNBAProvider()
+    )
+
+    result = collector.run()
+
+    assert (result.exit_code, result.failures, result.uploaded) == (20, (failure,), 0)
+    outbox.close()
+
+
+@pytest.mark.parametrize("zone_gp", [6, 7])
+@pytest.mark.parametrize(
+    ("opponent_totals", "failure"),
+    [
+        ({"OPP_FGA": 43}, "provider_schema_changed"),
+        ({"OPP_FGM": -1, "OPP_FGA": 43}, "value_invariant_failed"),
+        ({"OPP_FGM": 21, "OPP_FGA": float("nan")}, "value_invariant_failed"),
+    ],
+    ids=["missing OPP_FGM", "negative OPP_FGM", "NaN OPP_FGA"],
+)
+def test_a_tracking_shortfall_never_masks_malformed_zone_evidence(
+    tmp_path: Path, monkeypatch, zone_gp, opponent_totals, failure
+):
+    _patch_opponent_zone_endpoints(monkeypatch, zone_gp=zone_gp, opponent_totals=opponent_totals)
+    collector, _transport, outbox = _collector(
+        tmp_path, discovery=ZONE_DISCOVERY, provider=_StandaloneNBAProvider()
+    )
+
+    result = collector.run()
+
+    assert (result.exit_code, result.failures, result.uploaded) == (20, (failure,), 0)
     outbox.close()
 
 
