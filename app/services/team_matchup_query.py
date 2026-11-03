@@ -402,9 +402,10 @@ class TeamMatchupQueryService:
         """Build the stored-fact window, reading rows only for the bases it ranks.
 
         A base in ``unranked_bases`` is validated from its stats' summaries,
-        unless a value the database could not prove rankable sends it through
-        the row check and the ranking, which refuse or fail on it as they
-        would for any other base.
+        unless a value the database could not prove rankable, or stats of
+        thirty teams each that are not the same thirty, send it through the
+        row check and the ranking, which refuse or fail on it as they would
+        for any other base.
         """
 
         summaries = self.repository.get_latest_metric_summaries(
@@ -418,7 +419,11 @@ class TeamMatchupQueryService:
             for summary in summaries
         }
         row_bases = {
-            summary.base for summary in summaries if summary.base not in unranked_bases or summary.unproven
+            summary.base
+            for summary in summaries
+            if summary.base not in unranked_bases
+            or summary.unproven
+            or (summary.distinct_teams == 30 and summary.base_teams != 30)
         }
         return self._build_window(
             scope,

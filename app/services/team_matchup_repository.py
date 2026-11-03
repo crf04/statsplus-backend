@@ -387,6 +387,9 @@ class TeamMetricSummary(NamedTuple):
     as_of_date: date
     teams: int
     distinct_teams: int
+    #: Distinct teams across every stat of the base at this scope; thirty
+    #: teams per stat prove the same thirty only when this is thirty too.
+    base_teams: int
     #: Values the database could not prove rankable; the window reads the
     #: base's rows and checks them itself when any are.
     unproven: int
@@ -1273,6 +1276,13 @@ class TeamMatchupRepository:
             table.c.denominator_value.between(*_RANKABLE_DENOMINATOR),
             table.c.denominator_unit.in_(("minutes", "seconds")),
         )
+        newest = tuple_(table.c.base, table.c.as_of_date).in_(newest_by_base)
+        base_teams = (
+            select(table.c.base, func.count(table.c.team_id.distinct()).label("teams"))
+            .where(*conditions, newest)
+            .group_by(table.c.base)
+            .subquery()
+        )
         statement = (
             select(
                 table.c.base,
@@ -1281,16 +1291,20 @@ class TeamMatchupRepository:
                 table.c.as_of_date,
                 func.count(),
                 func.count(table.c.team_id.distinct()),
+                base_teams.c.teams,
                 func.sum(case((proven, 0), else_=1)),
                 func.max(table.c.retrieved_at),
             )
-            .where(*conditions, tuple_(table.c.base, table.c.as_of_date).in_(newest_by_base))
-            .group_by(table.c.base, table.c.as_of_date, table.c.slice_key, table.c.stat_key)
+            .join(base_teams, base_teams.c.base == table.c.base)
+            .where(*conditions, newest)
+            .group_by(
+                table.c.base, table.c.as_of_date, table.c.slice_key, table.c.stat_key, base_teams.c.teams
+            )
             .order_by(table.c.base, table.c.slice_key, table.c.stat_key)
         )
         with read_connection(self.engine, connection) as connection:
             rows = connection.execute(statement).all()
-        return tuple(TeamMetricSummary(*row[:7], retrieved_at=assume_utc(row[7])) for row in rows)
+        return tuple(TeamMetricSummary(*row[:8], retrieved_at=assume_utc(row[8])) for row in rows)
 
     def get_metric_facts(
         self,

@@ -14,6 +14,7 @@ from tests.services.test_team_matchup_windows import (
     PUBLISHED_AT,
     REPLACED_BASE_CASES,
     check_replaced_base_freshness,
+    mismatched_shot_types_outcome,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_migrations]
@@ -54,3 +55,7 @@ def test_a_publication_backed_base_answers_as_its_ranked_stored_facts_would(
     engine, damage, answer, rows_read
 ):
     check_replaced_base_freshness(engine, damage, answer=answer, rows_read=rows_read)
+
+
+def test_a_publication_backed_base_with_stats_of_different_teams_fails_as_its_ranking_would(engine):
+    assert mismatched_shot_types_outcome(engine) is KeyError

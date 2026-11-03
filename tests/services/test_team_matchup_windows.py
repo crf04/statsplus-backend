@@ -14,6 +14,7 @@ import requests
 from sqlalchemy import create_engine, delete, event, insert, inspect, select, update
 from sqlalchemy.exc import IntegrityError
 
+from app.domain.team_matchup_taxonomy import NBA_PUBLICATION_TAXONOMY
 from app.migrations import run_migrations
 from app.models.collection_control import PublicationStream
 from app.models.team_matchup import (
@@ -2481,6 +2482,72 @@ def test_a_publication_backed_base_answers_as_its_ranked_stored_facts_would(
     run_migrations(engine)
 
     check_replaced_base_freshness(engine, damage, answer=answer, rows_read=rows_read)
+
+
+def mismatched_shot_types_outcome(engine):
+    """Rank Shot Types from its publication over two stored stats of thirty
+    teams each that are not the same thirty: ``FG3M`` swaps the first team for
+    team id 1.
+
+    Returns the error the window raises.  3a1a7bb9 (before #672 read
+    summaries) ranks the stored facts and fails deriving points for the team
+    ``FG3M`` lacks; thirty teams per stat must not let a summary skip that.
+    """
+
+    from tests.support.publication_stubs import RETRIEVED_AT, SEASON, StubGovernance, StubReader, league, read
+
+    as_of = _LEGACY_TRADITIONAL_AT.date()
+    team_ids = _fixture_team_ids()
+    stored = {"season": SEASON, "as_of_date": as_of, "window_kind": "season", "window_games": 0}
+    with engine.begin() as connection:
+        connection.execute(
+            insert(TeamMatchupFactRow),
+            [
+                {
+                    **stored,
+                    "team_id": team_id,
+                    "base": "shot_types",
+                    "slice_key": "catch_and_shoot",
+                    "stat_key": stat_key,
+                    "raw_value": 10.0,
+                    "denominator_value": 48.0,
+                    "denominator_unit": "minutes",
+                    "provider": "nba",
+                    "window_end_date": as_of,
+                    "retrieved_at": _LEGACY_TRADITIONAL_AT,
+                }
+                for stat_key, teams in (("FG2M", team_ids), ("FG3M", [1, *team_ids[1:]]))
+                for team_id in teams
+            ],
+        )
+        connection.execute(
+            insert(TeamMatchupSurfaceObservationRow),
+            {
+                **stored,
+                "surface": "shot_types",
+                "status": "available",
+                "retrieved_at": _LEGACY_TRADITIONAL_AT,
+            },
+        )
+    stream_key = TEAM_MATCHUP_PUBLICATION_STREAMS["season"]["shot_types"]
+    per48 = dict.fromkeys(NBA_PUBLICATION_TAXONOMY["shot_types"], 1.0)
+    service = TeamMatchupQueryService(
+        TeamMatchupRepository(engine),
+        clock=lambda: RETRIEVED_AT + timedelta(days=1),
+        publication_reader=StubReader({stream_key: read(stream_key, league(lambda _: per48))}),
+        l15_expectation_resolver=StubGovernance(),
+    )
+
+    with pytest.raises(Exception) as raised:
+        service.get_latest_window(SEASON, as_of=RETRIEVED_AT.date())
+    return raised.type
+
+
+def test_a_publication_backed_base_with_stats_of_different_teams_fails_as_its_ranking_would(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'mismatched-shot-types.sqlite3'}")
+    run_migrations(engine)
+
+    assert mismatched_shot_types_outcome(engine) is KeyError
 
 
 def test_latest_window_distinguishes_a_same_day_failure_from_older_facts(tmp_path):
