@@ -2719,8 +2719,9 @@ whose `player_game_logs` can be read through a published Publication
 
 `GET /api/games/matchup`, `/api/games/matchup/selection`,
 `/api/matchups/unscheduled`, `/api/games/slate`, `/api/games/slate/edges`,
-`/api/players/profile`, `/api/teams/stats` and `/api/diet/baselines` take an optional `season` (canonical `YYYY-YY`), the Evidence season
-(crf04/statsplus#330, #369). Game logs keep `season_filter`, which follows the same
+`/api/players/profile`, `/api/teams/stats`, `/api/diet/baselines` and
+`/api/players/next-opponent` take an optional `season` (canonical `YYYY-YY`), the Evidence season
+(crf04/statsplus#330, #369, #415). Game logs keep `season_filter`, which follows the same
 rules. Without `season` every response is byte for byte what it was.
 
 - A selected season reads as game logs' `season_filter` does: the Published
@@ -2752,6 +2753,9 @@ rules. Without `season` every response is byte for byte what it was.
   scored. A Matchup's `as_of.season` stays the Published Season, equal to
   `season_context.published_season`; each section's own `season` names the
   season it serves.
+- `/api/players/next-opponent` ranks the opponent in the selected season and
+  adds only `season_context`; its `next_game` is still the schedule covering
+  today.
 - `/api/diet/baselines` adds `bases`, each Diet base's family and the season
   it serves (`null` when it serves nothing), and `trailing` for the families
   that serve an earlier one. `season` is the latest season any base serves,
@@ -6779,7 +6783,9 @@ list entries and are applied sequentially.
 bearer authentication. `player_name` is the sole required parameter and resolves
 through the game-log identity reader. Unknown players return the same `404
 resource_not_found` error as game logs. Malformed or repeated parameters return
-`400 invalid_input`.
+`400 invalid_input`. An optional `season` ranks the opponent in that
+[Evidence season](#evidence-season) and adds `season_context`; without it the
+ranks read the Published Season.
 
 The response is `{next_game, opponent_ranks}`. `next_game` is null when the player
 has no scheduled game (including unavailable team identity or schedule), otherwise

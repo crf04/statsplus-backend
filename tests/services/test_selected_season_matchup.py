@@ -78,6 +78,7 @@ def served(world, dependencies):
     dependencies.player_service = world.profiles
     dependencies.diet_baselines_service = world.baselines
     dependencies.team_service = world.teams
+    dependencies.next_opponent_service = world.next_opponent
     return world
 
 
@@ -90,6 +91,7 @@ ROUTES = {
     "diet_baselines": "/api/diet/baselines?",
     "unscheduled": f"/api/matchups/unscheduled?player_id={PLAYER_ID}&opponent={TRICODES[BOS]}",
     "team_stats": "/api/teams/stats?category=Traditional&team=Boston+Celtics",
+    "next_opponent": "/api/players/next-opponent?player_name=Player+0",
 }
 #: Slate, edges, profile and team stats also answer anonymous callers.
 ANONYMOUS = ("slate", "slate_edges", "profile", "team_stats")
@@ -736,6 +738,107 @@ def test_a_selected_2026_27_team_profile_trails_team_defense_on_2025_26(served, 
 
     assert _isolation(body["data"]) == {"Isolation": 1.0, "Isolation_RANK": 1, "Cut": 1.0, "Cut_RANK": 1}
     assert (body["season_context"], body["trailing"]) == (CONTEXT, [TEAM_DEFENSE])
+
+
+# --- Next opponent (crf04/statsplus#415) ----------------------------------------
+
+NEXT_OPPONENT = ROUTES["next_opponent"]
+NEXT_GAME = {
+    "game_id": GAME_ID,
+    "date": "2026-10-26",
+    "opponent": "BOS",
+    "opponent_name": "BOS team",
+    "home": False,
+}
+
+
+def _bos_isolation_payload(points, build=_PLAY_TYPE_PAYLOADS[PLAY_TYPE_DEFENSE]):
+    def payload(games):
+        built = build(games)
+        for row in built["rows"]:
+            if row["team_id"] == BOS:
+                row["per48"] = {**row["per48"], "Isolation_PTS": points}
+        return built
+
+    return payload
+
+
+def _isolation_rank(body):
+    row = next(row for row in body["opponent_ranks"] if row["label"] == "Isolation points")
+    return {key: row[key] for key in ("value", "most_rank", "ranked_teams", "team_filter")}
+
+
+@pytest.fixture
+def isolation_seasons(served, monkeypatch):
+    """BOS allows the most isolation points in 2025-26 and the fewest in 2026-27."""
+
+    monkeypatch.setitem(_PLAY_TYPE_PAYLOADS, PLAY_TYPE_DEFENSE, _bos_isolation_payload(4.0))
+    served.publish_play_types()
+    served.hold_opening_week()
+    served.publications.recompose_ledger(
+        PLAY_TYPE_DEFENSE,
+        season=NEW,
+        cutoff=THIN_CUTOFF,
+        payload=_bos_isolation_payload(0.5)(THIN_GAMES),
+        provenance=THIN_PROVENANCE,
+        reason="2026-27 ledger composition",
+    )
+    return served
+
+
+def test_a_selected_2026_27_next_opponent_ranks_the_opponent_in_2026_27(
+    isolation_seasons, client, authenticate
+):
+    body = client.get(f"{NEXT_OPPONENT}&season={NEW}", headers=authenticate()).get_json()
+
+    assert body["next_game"] == NEXT_GAME
+    assert body["season_context"] == CONTEXT
+    assert _isolation_rank(body) == {
+        "value": 0.5,
+        "most_rank": 30,
+        "ranked_teams": 30,
+        "team_filter": "sheet:play_types:Isolation:PTS",
+    }
+
+
+def test_a_next_opponent_without_a_season_ranks_the_published_season_as_before(
+    isolation_seasons, client, authenticate
+):
+    body = client.get(NEXT_OPPONENT, headers=authenticate()).get_json()
+
+    assert set(body) == {"next_game", "opponent_ranks"}
+    assert body["next_game"] == NEXT_GAME
+    assert _isolation_rank(body) == {
+        "value": 4.0,
+        "most_rank": 1,
+        "ranked_teams": 30,
+        "team_filter": "sheet:play_types:Isolation:PTS",
+    }
+
+
+def test_a_selected_published_season_next_opponent_matches_the_omitted_read_plus_its_context(
+    isolation_seasons, client, authenticate
+):
+    selected = client.get(f"{NEXT_OPPONENT}&season={OLD}", headers=authenticate()).get_json()
+    omitted = client.get(NEXT_OPPONENT, headers=authenticate()).get_json()
+
+    assert selected.pop("season_context") == {"selected_season": OLD, "published_season": OLD}
+    assert selected == omitted
+
+
+def test_a_malformed_next_opponent_season_names_the_season_parameter(served, client, authenticate):
+    response = client.get(f"{NEXT_OPPONENT}&season=2026-28", headers=authenticate())
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["details"] == {"parameters": ["season"]}
+
+
+def test_an_unoffered_next_opponent_season_is_refused_even_with_no_next_game(served, client, authenticate):
+    served.next_opponent.events = None
+
+    response = client.get(f"{NEXT_OPPONENT}&season={NEW}", headers=authenticate())
+
+    assert _refusal(response) == (503, "season_unavailable", CONTEXT)
 
 
 def test_selected_game_logs_list_their_trailing_families_with_their_sample(served):
