@@ -7165,7 +7165,16 @@ class PublicationService(_SessionService):
             (str(game_id), str(observation_id)) for observation_id, game_id in provenance.items()
         }
         game_ids = tuple(sorted({game_id for game_id, _ in expected_pairs}))
-        observation_ids = tuple(sorted({observation_id for _, observation_id in expected_pairs}))
+        # Each game with whether the ledger recorded its current source
+        # observation as evidence of that game.
+        evidenced = (
+            select(LedgerObservationEvidence.game_id)
+            .where(
+                LedgerObservationEvidence.game_id == CanonicalGameLedgerGame.game_id,
+                LedgerObservationEvidence.observation_id == CanonicalGameLedgerGame.source_observation_id,
+            )
+            .exists()
+        )
         games = session.execute(
             select(
                 CanonicalGameLedgerGame.game_id,
@@ -7173,22 +7182,11 @@ class PublicationService(_SessionService):
                 CanonicalGameLedgerGame.game_date,
                 CanonicalGameLedgerGame.home_team_id,
                 CanonicalGameLedgerGame.away_team_id,
+                evidenced.label("evidenced"),
             ).where(CanonicalGameLedgerGame.game_id.in_(game_ids))
         ).all()
         current_pairs = {(str(game.game_id), str(game.source_observation_id)) for game in games}
-        evidence_pairs = {
-            (str(game_id), str(observation_id))
-            for game_id, observation_id in session.execute(
-                select(
-                    LedgerObservationEvidence.game_id,
-                    LedgerObservationEvidence.observation_id,
-                ).where(
-                    LedgerObservationEvidence.game_id.in_(game_ids),
-                    LedgerObservationEvidence.observation_id.in_(observation_ids),
-                )
-            )
-        }
-        if current_pairs != expected_pairs or not expected_pairs <= evidence_pairs:
+        if current_pairs != expected_pairs or not all(game.evidenced for game in games):
             raise ControlPlaneError("ledger_provenance_not_accepted")
         # Every game, whichever night accepted it, must be the game the
         # composing manifest's Event Catalog lists.  The catalog is held with
