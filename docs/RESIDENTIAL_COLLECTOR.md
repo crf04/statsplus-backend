@@ -68,8 +68,13 @@ attempted. A scope whose NBA tracking counts fewer games than the box score
 for the same window fails as `provider_window_unverified`. Tracking trails the
 box score for hours after a game, so this is not a contract break: the run
 still exits `0`, names the code in its `failures` and terminal status, and
-later runs within the manifest collect the scope once tracking catches up. A
-malformed response keeps `provider_schema_changed` and exits `20`. Playoffs, Play-In, and cross-phase responses are rejected before
+later runs within the manifest collect the scope once tracking catches up.
+Only that shortfall is deferred, and only after both responses validate: whole,
+non-negative game counts, finite positive box-score minutes, and exactly one
+box-score row for the team. A malformed response is `provider_schema_changed`;
+an invalid count or minutes, a missing or duplicated team, or tracking (or a
+Synergy play type) counting more games than the box score is
+`value_invariant_failed`. Both exit `20`. Playoffs, Play-In, and cross-phase responses are rejected before
 spooling. Provider timeouts/schema drift, wrong environment, revoked/expired
 tokens, duplicate checksum conflicts, and disk-limit failures are stable safe
 codes; player facts and provider response bodies do not enter diagnostics.
@@ -238,7 +243,7 @@ collector makes three reads for one observation:
 | denominator | `LeagueDashPlayerStats` | `Totals` (`GP`) | `games_played` |
 
 All three carry the manifest's date bound, and all three must describe the same
-players; a disagreement is `provider_window_unverified` rather than a partial
+players; a disagreement is `value_invariant_failed` rather than a partial
 observation. The scope and payload state both per-modes explicitly
 (`profile_value_mode`, `diet_value_mode`), and a candidate that does not state
 them cannot authorize a publication.

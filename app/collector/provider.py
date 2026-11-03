@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
+import numbers
 import os
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
@@ -80,6 +81,37 @@ def _call(provider: Any, method: str, *args: Any, **kwargs: Any) -> Any:
         ):
             raise ProviderTransientError("provider_unavailable") from error
         raise
+
+
+def _game_counts(values: Iterable[Any]) -> list[int]:
+    """Parse games-played values: each a whole, non-negative number."""
+
+    counts = []
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, numbers.Real):
+            raise ProviderContractError("provider_schema_changed")
+        if not math.isfinite(value) or value < 0 or value != int(value):
+            raise ProviderContractError("value_invariant_failed")
+        counts.append(int(value))
+    return counts
+
+
+def _box_score_window(evidence: Any, *, team_id: int) -> tuple[int, float]:
+    """Return one team's box-score games and minutes from ``LeagueDashTeamStats``.
+
+    The team must appear exactly once, with a valid game count and positive
+    minutes; anything else is a contract failure, never a lagging window.
+    """
+
+    evidence = _flatten_frame_columns(evidence)
+    rows = evidence.loc[evidence["TEAM_ID"] == team_id, ["GP", "MIN"]]
+    if len(rows.index) != 1:
+        raise ProviderContractError("value_invariant_failed")
+    (games,) = _game_counts(rows["GP"])
+    minutes = float(rows.iloc[0]["MIN"])
+    if not math.isfinite(minutes) or minutes <= 0:
+        raise ProviderContractError("value_invariant_failed")
+    return games, minutes
 
 
 def _scope_mapping(value: Any) -> dict[str, Any]:
@@ -452,26 +484,23 @@ class _StandaloneNBAProvider:
     def _bind_window_gp(frame: Any, evidence: Any, *, team_id: int) -> Any:
         """Bind the box score's games and minutes to the tracking frame.
 
-        Only the two endpoints disagreeing about the window is
+        Only valid tracking counting fewer games than the box score is
         ``provider_window_unverified``: tracking trails the box score for
         hours after a game, and the runner defers that scope to a later run.
-        A malformed response stays ``provider_schema_changed``.
+        Tracking counting more games than were played, or any malformed
+        count, is a contract failure.
         """
 
         try:
             frame = _flatten_frame_columns(frame)
-            evidence = _flatten_frame_columns(evidence)
-            rows = evidence.loc[evidence["TEAM_ID"] == team_id, ["TEAM_ID", "GP", "MIN"]]
-            if len(rows.index) != 1:
-                raise ProviderContractError("provider_window_unverified")
-            expected_gp = int(rows.iloc[0]["GP"])
-            expected_minutes = float(rows.iloc[0]["MIN"])
-            if not math.isfinite(expected_minutes) or expected_minutes <= 0:
-                raise ProviderContractError("value_invariant_failed")
+            expected_gp, expected_minutes = _box_score_window(evidence, team_id=team_id)
             merged = frame.copy()
             if not (merged["TEAM_ID"] == team_id).all():
                 raise ProviderContractError("manifest_scope_mismatch")
-            if "GP" in merged and not (merged["GP"] == expected_gp).all():
+            tracked_gp = _game_counts(merged["GP"]) if "GP" in merged else []
+            if any(games > expected_gp for games in tracked_gp):
+                raise ProviderContractError("value_invariant_failed")
+            if any(games < expected_gp for games in tracked_gp):
                 raise ProviderContractError("provider_window_unverified")
             merged["GP"] = expected_gp
             merged["MIN"] = expected_minutes
@@ -615,15 +644,19 @@ class _StandaloneNBAProvider:
         """
 
         try:
-            minute_rows = minutes[["TEAM_ID", "MIN", "GP"]].rename(columns={"GP": "WINDOW_GP"})
-            merged = frame.merge(minute_rows, on="TEAM_ID", how="left")
-            if merged[["MIN", "WINDOW_GP"]].isna().any().any():
-                raise ProviderContractError("provider_window_unverified")
-            if "GP" in merged and not (merged["GP"] <= merged["WINDOW_GP"]).all():
-                raise ProviderContractError("provider_window_unverified")
-            merged["GP"] = merged["WINDOW_GP"]
-            return merged.drop(columns=["WINDOW_GP"])
-        except (KeyError, TypeError, AttributeError) as error:
+            merged = frame.copy()
+            windows = [_box_score_window(minutes, team_id=team_id) for team_id in merged["TEAM_ID"]]
+            if "GP" in merged and any(
+                games > window_games
+                for games, (window_games, _minutes) in zip(_game_counts(merged["GP"]), windows, strict=True)
+            ):
+                raise ProviderContractError("value_invariant_failed")
+            merged["GP"] = [games for games, _minutes in windows]
+            merged["MIN"] = [window_minutes for _games, window_minutes in windows]
+            return merged
+        except ProviderContractError:
+            raise
+        except (KeyError, TypeError, AttributeError, ValueError) as error:
             raise ProviderContractError("provider_schema_changed") from error
 
     def fetch_player_shot_type(
@@ -861,10 +894,7 @@ class _StandaloneNBAProvider:
         merged = cls._bind_window_gp(frame, evidence, team_id=team_id)
         try:
             flattened = _flatten_frame_columns(evidence)
-            rows = flattened.loc[flattened["TEAM_ID"] == team_id]
-            if len(rows.index) != 1:
-                raise ProviderContractError("provider_window_unverified")
-            row = rows.iloc[0]
+            row = flattened.loc[flattened["TEAM_ID"] == team_id].iloc[0]
             merged = merged.copy()
             for column, source in (
                 ("OPP_TOTAL_FGM", "OPP_FGM"),
