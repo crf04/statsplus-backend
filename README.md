@@ -104,7 +104,8 @@ the most important variables:
 | `NBA_API_TIMEOUT_CONNECT` / `NBA_API_TIMEOUT_READ` | No | `10` / `30`; PBP Stats connect/read timeouts |
 | `NBA_API_MAX_RETRIES` | No | `3`; retries for safe PBP Stats requests |
 | `DFS_ENABLED_PROVIDERS` | Empty by default in local/test; production requires the variable explicitly | Comma-separated internal DFS provider registry (`dabble`, `prizepicks`, `underdog`, `kalshi`, `polymarket`, `novig`); an explicit empty value disables all providers |
-| `DFS_BOARD_DEADLINE_SECONDS` | No | `15`; one absolute internal collector deadline |
+| `DFS_BOARD_DEADLINE_SECONDS` | No | `15`, at most `15`; one absolute deadline for a request-time DFS board read |
+| `PROJECTION_COLLECTION_BOARD_DEADLINE_SECONDS` | No | `45`; the projection collector's own board deadline. `PROJECTION_COLLECTION_LEASE_SECONDS` (`180`) must be at least this plus `90` |
 | `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS` / `DFS_PROVIDER_READ_TIMEOUT_SECONDS` | No | `3` / `8`; DFS GET caps, reduced to remaining deadline |
 | `DFS_COMPARISON_MAX_MARKETS` | No | `10000`; post-filter Comparison Board ceiling |
 | `PROJECTION_ARCHIVE_MAX_MARKETS` | No | `10000`; independent pre-persistence ceiling for one normalized provider snapshot |

@@ -87,20 +87,20 @@ class FakeProvider:
         return self.result
 
 
-def test_board_context_is_capped_to_fifteen_seconds_and_parent_deadline() -> None:
+def test_board_context_is_capped_to_the_configured_and_parent_deadlines() -> None:
     provider = FakeProvider("dabble")
     parent = RetrievalContext(
         deadline=datetime.now(UTC) + timedelta(seconds=60),
         request_id="board-test",
     )
-    service = DFSBoardService(provider_registry={"dabble": provider}, deadline_seconds=60)
+    service = DFSBoardService(provider_registry={"dabble": provider}, deadline_seconds=45)
 
     service.get_board(NBAMarketQuery(), parent)
 
     child = provider.calls[0][1]
     assert child is not parent
     assert child.request_id == parent.request_id
-    assert child.deadline <= datetime.now(UTC) + timedelta(seconds=15.1)
+    assert child.deadline <= datetime.now(UTC) + timedelta(seconds=45.1)
     assert child.deadline <= parent.deadline
 
 

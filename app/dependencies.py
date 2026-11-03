@@ -326,7 +326,10 @@ def build_dependencies(
 
     dfs_providers: dict[str, Any] = {}
     cached_dfs_providers: dict[str, Any] = {}
-    dfs_snapshot_cache = ProviderSnapshotCacheCoordinator()
+    # Every enabled provider can be in flight at once, so the collector board
+    # never queues a slow provider behind the others.
+    dfs_provider_slots = max(1, len(settings.providers.dfs_enabled_providers))
+    dfs_snapshot_cache = ProviderSnapshotCacheCoordinator(max_workers=dfs_provider_slots)
     dfs_runtime = DFSProviderRuntime(
         connect_timeout_seconds=settings.providers.dfs_provider_connect_timeout_seconds,
         read_timeout_seconds=settings.providers.dfs_provider_read_timeout_seconds,
@@ -554,16 +557,19 @@ def build_dependencies(
         player_service=player_service,
     )
 
+    board_collaborators = {
+        "provider_registry": cached_dfs_providers,
+        "settings": settings,
+        "statistic_catalog": statistic_catalog,
+        "athlete_resolver": athlete_resolver,
+        "athlete_mapping_repository": athlete_mapping_repository,
+        "event_resolver": event_resolver,
+        "event_mapping_repository": event_mapping_repository,
+    }
     dfs_board_service = DFSBoardService(
-        provider_registry=cached_dfs_providers,
         max_concurrency=3,
         deadline_seconds=settings.providers.dfs_board_deadline_seconds,
-        settings=settings,
-        statistic_catalog=statistic_catalog,
-        athlete_resolver=athlete_resolver,
-        athlete_mapping_repository=athlete_mapping_repository,
-        event_resolver=event_resolver,
-        event_mapping_repository=event_mapping_repository,
+        **board_collaborators,
     )
     comparison_board_service = ComparisonBoardService(
         dfs_board_service,
@@ -640,7 +646,13 @@ def build_dependencies(
 
         projection_collection_coordinator = ProjectionCollectionCoordinator(
             engine,
-            board_service=dfs_board_service,
+            # The collector answers no request, so it is not held to the
+            # request-time ceiling.
+            board_service=DFSBoardService(
+                max_concurrency=dfs_provider_slots,
+                deadline_seconds=settings.projection_collection.board_deadline.total_seconds(),
+                **board_collaborators,
+            ),
             recording_service=projection_recorder,
             event_reader=(event_catalog_service.get_events if event_catalog_service is not None else None),
             season=settings.nba.current_season,
