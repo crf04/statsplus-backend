@@ -518,9 +518,11 @@ class NeighbourSlate:
         self.games_by_day = games_by_day
         self.today = today
         self.next_day = next_day
+        self.calls = []
 
     def get_slate(self, requested_date=None, *, neighbours=True, connection=None):
         day = requested_date or self.today
+        self.calls.append((day, neighbours))
         return {
             "slate_date": day,
             "games": self.games_by_day.get(day, []),
@@ -539,6 +541,18 @@ def test_next_game_day_from_an_empty_day_answers_the_next_slate():
 
     assert edges["slate_date"] == "2026-04-11"
     assert [game["game_id"] for game in edges["games"]] == ["G1"]
+
+
+def test_a_day_with_games_never_reads_its_neighbouring_dates():
+    slates = NeighbourSlate({"2026-04-10": [_game("G1")]})
+    service = SlateEdgesService(
+        slates=slates,
+        matchups=FakeMatchups({"G1": _matchup([_blend_player(1, "A", 0.05)])}),
+    )
+
+    service.get_edges(fallback="next_game_day")
+
+    assert slates.calls == [("2026-04-10", False)]
 
 
 def test_an_invalid_date_is_the_slates_invalid_input():
