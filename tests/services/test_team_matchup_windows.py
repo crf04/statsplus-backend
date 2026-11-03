@@ -5,13 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 
 import pandas as pd
 import pytest
 import requests
-from sqlalchemy import create_engine, delete, event, inspect, update
+from sqlalchemy import create_engine, delete, event, insert, inspect, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.migrations import run_migrations
@@ -2280,21 +2280,102 @@ def test_latest_window_ranks_each_base_from_its_own_newest_scope(tmp_path):
     assert by_team[team_ids[9]] == {("shot_zones", 21.0, 21), ("traditional", 10.0, 10)}
 
 
+def test_a_window_between_stored_scopes_ranks_the_facts_through_its_cutoff(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'between-scopes.sqlite3'}")
+    run_migrations(engine)
+    repository = TeamMatchupRepository(engine)
+    team_ids = _fixture_team_ids()
+    earlier = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 13), 15)
+    later = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), 15)
+    for scope, value_for_index in ((earlier, lambda index: index + 1), (later, lambda index: 30 - index)):
+        _publish_snapshot_batch(
+            repository,
+            scope,
+            facts=[
+                replace(fact, raw_value=value_for_index(index))
+                for index, fact in enumerate(_complete_traditional_facts())
+            ],
+            observations=[TeamMatchupObservation("traditional", "available")],
+            retrieved_at=datetime.combine(scope.as_of, time(15), UTC),
+        )
+
+    latest = TeamMatchupQueryService(
+        repository,
+        clock=lambda: datetime(2025, 4, 16, 16, tzinfo=UTC),
+    ).get_latest_window("2024-25", window_games=15, as_of=date(2025, 4, 14))
+
+    assert latest is not None
+    assert latest.fact_scopes == {"traditional": earlier}
+    assert latest.fact_retrieved_at == {"traditional": datetime(2025, 4, 13, 15, tzinfo=UTC)}
+    ranked = {
+        team_id: [(m.allowed_per_48, m.rank) for m in metrics]
+        for team_id, metrics in latest.team_metrics.items()
+    }
+    assert ranked[team_ids[0]] == [(1.0, 1)]
+    assert ranked[team_ids[29]] == [(30.0, 30)]
+
+
+def test_a_fact_counted_in_seconds_ranks_per_48_minutes(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'seconds.sqlite3'}")
+    run_migrations(engine)
+    repository = TeamMatchupRepository(engine)
+    team_ids = _fixture_team_ids()
+    scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 13), 15)
+    # 24 minutes of play, counted in seconds: each value doubles to per 48.
+    _publish_snapshot_batch(
+        repository,
+        scope,
+        facts=[
+            replace(fact, raw_value=index + 1, denominator_value=1440, denominator_unit="seconds")
+            for index, fact in enumerate(_complete_traditional_facts())
+        ],
+        observations=[TeamMatchupObservation("traditional", "available")],
+        retrieved_at=datetime(2025, 4, 13, 15, tzinfo=UTC),
+    )
+
+    latest = TeamMatchupQueryService(
+        repository,
+        clock=lambda: datetime(2025, 4, 14, 16, tzinfo=UTC),
+    ).get_latest_window("2024-25", window_games=15)
+
+    assert latest is not None
+    ranked = {
+        team_id: [(m.allowed_per_48, m.rank) for m in metrics]
+        for team_id, metrics in latest.team_metrics.items()
+    }
+    assert ranked[team_ids[0]] == [(2.0, 1)]
+    assert ranked[team_ids[29]] == [(60.0, 30)]
+
+
 _LEGACY_TRADITIONAL_AT = datetime(2026, 1, 9, 15, tzinfo=UTC)
-#: How a stored Traditional fact is damaged (its value is 10 per 48 minutes),
-#: what the window answers, and how many statements read fact rows one per
-#: team.  The answer is either whether the window keeps the stored freshness
-#: or the error it raises; each is the answer 3a1a7bb9 (before #672 read
-#: summaries) gives for the same fixture, so skipping the ranking of a base
-#: a publication replaces changes no answer.
+#: When the Traditional publication was retrieved (``publication_stubs``).
+PUBLISHED_AT = datetime(2026, 1, 10, 12, 0, tzinfo=UTC)
+#: How the stored Traditional facts (one stat, 10 per 48 minutes for every
+#: team) are damaged, what the window answers, and how many statements read
+#: fact rows one per team.  The answer is the freshness the window reports
+#: -- the stored facts' newest when they are a complete, valid league, else
+#: the publication's -- or the error it raises.  Each answer is the one
+#: 3a1a7bb9 (before #672 read summaries) gives for the same fixture, so
+#: skipping the ranking of a base a publication replaces changes no answer.
 REPLACED_BASE_CASES = [
-    pytest.param(None, True, 0, id="valid facts stay unread"),
-    pytest.param({"delete": True}, False, 0, id="a missing team"),
-    pytest.param({"denominator_value": 0}, False, 1, id="a zero denominator"),
-    pytest.param({"raw_value": float("inf")}, False, 1, id="an infinite value"),
-    pytest.param({"raw_value": 1e100}, True, 0, id="the largest proven value"),
-    pytest.param({"denominator_value": 1e-100}, True, 0, id="the smallest proven denominator"),
-    pytest.param({"raw_value": 3e306}, True, 1, id="a finite value past the proven bound"),
+    pytest.param(None, _LEGACY_TRADITIONAL_AT, 0, id="valid facts stay unread"),
+    pytest.param({"delete": True}, PUBLISHED_AT, 0, id="a missing team"),
+    pytest.param({"extra_team": True}, PUBLISHED_AT, 0, id="a thirty-first team"),
+    pytest.param({"second_stat": "every team"}, _LEGACY_TRADITIONAL_AT, 0, id="two complete stats"),
+    pytest.param({"second_stat": "half the league"}, PUBLISHED_AT, 0, id="two stats of fifteen teams each"),
+    pytest.param(
+        {"retrieved_at": _LEGACY_TRADITIONAL_AT + timedelta(hours=1)},
+        _LEGACY_TRADITIONAL_AT + timedelta(hours=1),
+        0,
+        id="one team retrieved later",
+    ),
+    pytest.param({"denominator_value": 0}, PUBLISHED_AT, 1, id="a zero denominator"),
+    pytest.param({"raw_value": float("inf")}, PUBLISHED_AT, 1, id="an infinite value"),
+    pytest.param({"raw_value": 1e100}, _LEGACY_TRADITIONAL_AT, 0, id="the largest proven value"),
+    pytest.param(
+        {"denominator_value": 1e-100}, _LEGACY_TRADITIONAL_AT, 0, id="the smallest proven denominator"
+    ),
+    pytest.param({"raw_value": 3e306}, _LEGACY_TRADITIONAL_AT, 1, id="a finite value past the proven bound"),
     pytest.param({"raw_value": 1.5e308}, AttributeError, 1, id="a value whose per-48 overflows"),
     pytest.param({"raw_value": 1e308}, AttributeError, 1, id="a finite value whose per-48 overflows"),
     pytest.param(
@@ -2303,11 +2384,45 @@ REPLACED_BASE_CASES = [
 ]
 
 
+def _without_id(row):
+    return {name: value for name, value in row.items() if name != "id"}
+
+
+def _damage_traditional_facts(engine, damage):
+    table = TeamMatchupFactRow.__table__
+    team_ids = _fixture_team_ids()
+    first_team = table.c.team_id == team_ids[0]
+    with engine.begin() as connection:
+        if damage.get("delete"):
+            connection.execute(delete(table).where(first_team))
+        elif damage.get("extra_team"):
+            row = connection.execute(select(table).where(first_team)).mappings().one()
+            connection.execute(insert(table).values({**_without_id(row), "team_id": 1}))
+        elif "second_stat" in damage:
+            # A second stat for every team, or one that splits the league
+            # with the first: fifteen teams each, thirty between them.
+            rows = connection.execute(select(table)).mappings().all()
+            moved = team_ids[15:]
+            if damage["second_stat"] == "every team":
+                connection.execute(
+                    insert(table),
+                    [{**_without_id(row), "slice_key": "OPP_PTS", "stat_key": "OPP_PTS"} for row in rows],
+                )
+            else:
+                connection.execute(
+                    update(table)
+                    .where(table.c.team_id.in_(moved))
+                    .values(slice_key="OPP_PTS", stat_key="OPP_PTS")
+                )
+        else:
+            connection.execute(update(table).where(first_team).values(**damage))
+
+
 def replaced_base_outcome(engine, damage):
     """Rank Traditional from its publication over stored facts damaged by ``damage``.
 
-    Returns whether the window kept the stored freshness, or the type of the
-    error it raised, and the statements that read fact rows one per team.
+    Returns the freshness the window reports for Traditional, or the type of
+    the error it raises, and the statements that read fact rows one per team.
     """
 
     from tests.support.publication_stubs import (
@@ -2319,8 +2434,8 @@ def replaced_base_outcome(engine, damage):
         traditional_per48,
     )
 
+    assert RETRIEVED_AT == PUBLISHED_AT
     repository = TeamMatchupRepository(engine)
-    team_ids = _fixture_team_ids()
     _publish_snapshot_batch(
         repository,
         TeamMatchupSnapshotScope(SEASON, _LEGACY_TRADITIONAL_AT.date()),
@@ -2328,14 +2443,8 @@ def replaced_base_outcome(engine, damage):
         observations=[TeamMatchupObservation("traditional", "available")],
         retrieved_at=_LEGACY_TRADITIONAL_AT,
     )
-    table = TeamMatchupFactRow.__table__
     if damage is not None:
-        with engine.begin() as connection:
-            first_team = table.c.team_id == team_ids[0]
-            if damage.get("delete"):
-                connection.execute(delete(table).where(first_team))
-            else:
-                connection.execute(update(table).where(first_team).values(**damage))
+        _damage_traditional_facts(engine, damage)
     stream_key = TEAM_MATCHUP_PUBLICATION_STREAMS["season"]["traditional"]
     service = TeamMatchupQueryService(
         repository,
@@ -2354,8 +2463,7 @@ def replaced_base_outcome(engine, damage):
     # The publication ranks Traditional either way; valid stored facts only
     # keep the freshness they were retrieved at.
     assert {metric.base for metric in window.league_metrics} == {"traditional"}
-    assert traditional.retrieved_at in {_LEGACY_TRADITIONAL_AT, RETRIEVED_AT}
-    return traditional.retrieved_at == _LEGACY_TRADITIONAL_AT, fact_reads
+    return traditional.retrieved_at, fact_reads
 
 
 def check_replaced_base_freshness(engine, damage, *, answer, rows_read):

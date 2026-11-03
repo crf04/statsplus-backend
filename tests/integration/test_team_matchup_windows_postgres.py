@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, text
 
 from app.migrations import run_migrations
 from tests.services.test_team_matchup_windows import (
+    PUBLISHED_AT,
     REPLACED_BASE_CASES,
     check_replaced_base_freshness,
 )
@@ -43,10 +44,10 @@ def _empty_schema(engine):
     ("damage", "answer", "rows_read"),
     [
         *REPLACED_BASE_CASES,
-        pytest.param({"raw_value": float("nan")}, False, 1, id="a NaN value"),
-        pytest.param({"denominator_value": float("nan")}, False, 1, id="a NaN denominator"),
-        pytest.param({"denominator_value": float("inf")}, False, 1, id="an infinite denominator"),
-        pytest.param({"raw_value": float("-inf")}, False, 1, id="a negative infinite value"),
+        pytest.param({"raw_value": float("nan")}, PUBLISHED_AT, 1, id="a NaN value"),
+        pytest.param({"denominator_value": float("nan")}, PUBLISHED_AT, 1, id="a NaN denominator"),
+        pytest.param({"denominator_value": float("inf")}, PUBLISHED_AT, 1, id="an infinite denominator"),
+        pytest.param({"raw_value": float("-inf")}, PUBLISHED_AT, 1, id="a negative infinite value"),
     ],
 )
 def test_a_publication_backed_base_answers_as_its_ranked_stored_facts_would(

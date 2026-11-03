@@ -39,7 +39,10 @@ from app.services.ledger_runtime import (
     LedgerGovernance,
     LedgerRuntime,
 )
-from app.services.team_matchup_publications import NBA_PUBLICATION_STREAM_KEYS
+from app.services.team_matchup_publications import (
+    NBA_PUBLICATION_STREAM_KEYS,
+    PublicationGovernanceUnavailable,
+)
 from app.services.team_matchup_repository import (
     TeamMatchupRepository,
     TeamMatchupSnapshotScope,
@@ -508,7 +511,9 @@ def test_numeric_final_collector_shape_enters_immutable_governed_set(tmp_path):
 GOVERNED_CUTOFF = datetime(2025, 11, 3, 4, 30, tzinfo=UTC)
 
 
-def seed_governed_manifest(connection, manifest_id, game_id, *, created_at, cutoff=GOVERNED_CUTOFF):
+def seed_governed_manifest(
+    connection, manifest_id, game_id, *, created_at, cutoff=GOVERNED_CUTOFF, catalog_season="2025-26"
+):
     """Insert one manifest bound to its own Event Catalog of one final game."""
 
     normalized = normalize_schedule_response(
@@ -529,7 +534,7 @@ def seed_governed_manifest(connection, manifest_id, game_id, *, created_at, cuto
     connection.execute(
         CatalogPublication.__table__.insert().values(
             publication_id=f"{manifest_id}-catalog",
-            season="2025-26",
+            season=catalog_season,
             catalog_type="event",
             cutoff=cutoff,
             version="event-v1",
@@ -625,6 +630,18 @@ def test_a_request_reader_reads_each_manifest_once_and_only_for_its_own_request(
 
     assert _governed_games(later) == {"0022500003"}
     assert len(manifest_reads) == 4
+
+
+def test_a_manifest_bound_to_another_seasons_catalog_has_no_governance(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'catalog-season.sqlite3'}")
+    run_migrations(engine)
+    with engine.begin() as connection:
+        seed_governed_manifest(
+            connection, "manifest", "0022500001", created_at=GOVERNED_CUTOFF, catalog_season="2024-25"
+        )
+
+    with pytest.raises(PublicationGovernanceUnavailable, match="inconsistent"):
+        ActiveManifestLedgerGovernanceReader(engine).read_for_composition("2025-26", GOVERNED_CUTOFF)
 
 
 def test_runtime_governance_owns_exact_games_teams_cutoff_and_l15(tmp_path):
