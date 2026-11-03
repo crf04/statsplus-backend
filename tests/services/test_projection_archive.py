@@ -1523,6 +1523,76 @@ def test_a_closed_games_pool_serves_only_its_own_closing_set(tmp_path):
     }
 
 
+def test_a_closing_pool_reads_its_own_providers_and_query_in_provider_order(tmp_path):
+    """Closing sets of another provider or another query for the same game are
+    not the reader's; a player two providers name differently takes the name
+    of the first provider alphabetically, whatever order the scopes list."""
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-closing-scopes.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    query = NBAMarketQuery(season=SEASON)
+    available_only = NBAMarketQuery(season=SEASON, market_statuses=(MarketStatus.AVAILABLE,))
+    start_at = OBSERVED_AT + timedelta(minutes=5)
+    source = _closing_snapshot(catalog, OBSERVED_AT)
+    events = (
+        {
+            "nba_game_id": GAME_ID,
+            "scheduled_at": start_at.isoformat(),
+            "status_text": "Q1",
+            "status_code": 2,
+            "first_observed_started_at": start_at.isoformat(),
+        },
+    )
+    for provider, market_query, players in (
+        ("dabble", query, ((2544, "LeBron James"),)),
+        ("prizepicks", query, ((2544, "Lebron James"), (203999, "Nikola Jokic"))),
+        ("dabble", available_only, ((201939, "Stephen Curry"),)),
+    ):
+        template = source.markets[0]
+        markets = tuple(
+            replace(
+                template,
+                provider=provider,
+                market_id=f"{provider}-{player_id}",
+                athlete=replace(template.athlete, canonical_id=player_id, name=name),
+                statistic_match=replace(template.statistic_match, provider=provider),
+            )
+            for player_id, name in players
+        )
+        archive.ingest_complete_snapshot(
+            replace(source, provider=provider, markets=markets), query=market_query, accepted_at=OBSERVED_AT
+        )
+        ProjectionRecordingService(
+            archive, ProjectionArchiveReadScope(provider=provider, query=market_query)
+        ).freeze_closing_projection_sets(events=events, query=market_query, created_at=start_at)
+
+    class ScopedEvents:
+        def get_events_by_ids(self, _season, game_ids):
+            return tuple(event for event in events if event["nba_game_id"] in set(game_ids))
+
+    def pool(*providers):
+        reader = LatestProjectionPlayerPoolReader(
+            engine,
+            [ProjectionArchiveReadScope(provider=provider, query=query) for provider in providers],
+            clock=lambda: OBSERVED_AT + timedelta(minutes=10),
+            event_reader=ScopedEvents(),
+        )
+        return [
+            (player.canonical_player_id, player.name, player.provenance)
+            for player in reader.get_pool_for_game(season=SEASON, game_id=GAME_ID).players
+        ]
+
+    assert pool("dabble") == [(2544, "LeBron James", {"dabble": ("PTS",)})]
+    both = [
+        (2544, "LeBron James", {"dabble": ("PTS",), "prizepicks": ("PTS",)}),
+        (203999, "Nikola Jokic", {"prizepicks": ("PTS",)}),
+    ]
+    assert pool("dabble", "prizepicks") == both
+    assert pool("prizepicks", "dabble") == both
+
+
 def _catalog_stale_slate(tmp_path, name):
     engine = create_engine(f"sqlite:///{tmp_path / name}")
     run_migrations(engine)

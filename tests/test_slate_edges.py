@@ -1070,3 +1070,69 @@ def test_a_cached_response_keeps_its_trailing_families_under_the_current_schema(
     # A body cached before ``trailing`` (schema 2) or the preview cards'
     # ``players`` (schema 3) existed is never served.
     assert [key.split(":")[2] for key in redis_client.values] == ["v5"]
+
+
+def test_the_edges_and_their_matchups_write_what_the_previous_release_wrote():
+    """Every Redis key and stored payload (sha256 of its JSON text) of one edges
+    miss, as 3a1a7bb9 wrote them before #671 changed how the reads are made.
+
+    A change to either is a cache-format change: bump its schema instead.
+    """
+
+    import hashlib
+    import zlib
+
+    import tests.services.test_matchup_service as doubles
+    from app.services.matchup_injuries import unavailable_injury_result
+    from app.services.matchup_reuse import ComposedMatchupCache
+    from app.services.player_game_log_repository import PlayerGameLogRepository
+    from tests.test_matchup_reuse import _real_snapshot
+
+    later = {**doubles._event(), "nba_game_id": "0022500585", "scheduled_at": "2026-01-16T03:00:00+00:00"}
+    events = doubles.RecordedEvents(events=[doubles._event(), later])
+    composer = doubles._service(events=events)
+    repo = SimpleNamespace(_publication_reader=object())
+    composer.player_logs.get_read_freshness = (
+        lambda season, publication_snapshot: PlayerGameLogRepository.get_read_freshness(
+            repo, season, publication_snapshot=publication_snapshot
+        )
+    )
+    games = [composer._game(event) for event in events.events]
+
+    class Slate:
+        def get_slate(self, requested_date=None):
+            return {"slate_date": requested_date, "games": games}
+
+    class Publications:
+        def snapshot(self, stream_keys, *, season, **_):
+            return _real_snapshot(age=0)
+
+    class Injuries:
+        def get_injuries(self, *, event, season, pool_players):
+            return unavailable_injury_result("disabled")
+
+    redis_client = DictRedis()
+    SlateEdgesService(
+        slates=Slate(),
+        matchups=composer,
+        publication_reader=Publications(),
+        injuries=Injuries(),
+        settings=composer.settings,
+        redis_client=redis_client,
+        matchup_cache=ComposedMatchupCache(redis_client),
+    ).get_edges("2026-01-15")
+
+    assert {
+        key: hashlib.sha256(zlib.decompress(payload)).hexdigest()
+        for key, payload in redis_client.values.items()
+    } == {
+        "matchup:composed:v6:38d9d4f6762886ee3f2574ececd4ea1ea619f29874506034630c46840222c2ce": (
+            "771620b644bb2e6944e42374ca16c1489b0feb9ab7ae155854ac6a0de7a4beb5"
+        ),
+        "matchup:composed:v6:624e8b0e000d9a70e295a45225a0e9c7b0b77b59a01d1e560d5f7f26c1535a69": (
+            "823c591123e66a77239df466ce602910b9527bd77d1f83abc445c24769d21643"
+        ),
+        "slate:edges:v5:eaaed90b3da80d226407e416882ad97f14439056c46d62791ffb56dd545c51c7": (
+            "85542ea8a3695da15ec4c69b0a37cc79b2a6b26a62c64788446e568f105c1552"
+        ),
+    }
