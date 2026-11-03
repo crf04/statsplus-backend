@@ -270,6 +270,30 @@ def test_a_technical_free_throw_does_not_end_the_possession():
     assert (segment.counts[1]["fta"], segment.counts[1]["pts"], segment.off_poss) == (1, 1, 1)
 
 
+def test_the_dead_ball_rebound_after_a_missed_technical_free_throw_ends_no_possession():
+    play_by_play = _game(
+        ("foul", "PT06M00.00S", {"teamId": DEN, "personId": 11, "subType": "technical"}),
+        (
+            "freethrow",
+            "PT06M00.00S",
+            {
+                "teamId": BOS,
+                "personId": 1,
+                "subType": "1 of 1",
+                "shotResult": "Missed",
+                "description": "MISS BOS 1 technical Free Throw 1 of 1",
+            },
+        ),
+        ("rebound", "PT06M00.00S", {"teamId": DEN, "personId": 0, "subType": "defensive"}),
+        ("2pt", "PT05M40.00S", {"teamId": BOS, "personId": 2, "shotResult": "Made"}),
+    )
+
+    segments = derive_segments(_box(), play_by_play, "2025-26").segments
+
+    # BOS's one possession ends at the made shot; DEN's then runs to the end of the period.
+    assert {segment.team_id: segment.off_poss for segment in segments} == {BOS: 1, DEN: 1}
+
+
 @pytest.mark.parametrize(
     ("season", "shooter", "team_fga", "team_heaves"),
     [("2026-27", (1, 1), 1, 0), ("2025-26", (0, 0), 0, 1)],
@@ -548,6 +572,42 @@ def test_the_backfill_resumes_skips_written_games_and_records_coverage_when_done
     assert segments.covered("2025-26")
 
 
+class FlakyLiveData(FakeLiveData):
+    """Recorded games, except that ``unreachable`` cannot be fetched."""
+
+    def __init__(self, games, unreachable):
+        super().__init__(games)
+        self.unreachable = unreachable
+
+    def fetch_game_stats(self, game_id, season):
+        if game_id == self.unreachable:
+            raise requests.ConnectionError("LiveData unreachable")
+        return super().fetch_game_stats(game_id, season)
+
+
+def test_a_game_whose_fetch_failed_stays_pending_and_the_season_uncovered(tmp_path, bos_games):
+    engine = _engine(tmp_path)
+    game_ids = sorted(bos_games)[:2]
+    events = [
+        _event(game_id, datetime(2025, 11, 1 + n, 23, 0, tzinfo=UTC)) for n, game_id in enumerate(game_ids)
+    ]
+    segments = LineupSegmentRepository(engine)
+    flaky = RotationCollectionService(
+        FlakyLiveData(bos_games, game_ids[1]),
+        RotationRepository(engine),
+        lambda season: list(events),
+        clock=lambda: WRITTEN_AT,
+    )
+
+    first = backfill(flaky, segments, "2025-26", throttle_seconds=0)
+
+    assert [game["game_id"] for game in first["failed"]] == [game_ids[1]]
+    assert (first["stored"], first["remaining"], first["covered"]) == (1, 1, False)
+    assert not segments.covered("2025-26")
+    second = backfill(_collection(engine, bos_games, events), segments, "2025-26", throttle_seconds=0)
+    assert (second["attempted"], second["remaining"], second["covered"]) == (1, 0, True)
+
+
 def test_the_backfill_refuses_seasons_before_2025_26(tmp_path):
     engine = _engine(tmp_path)
     with pytest.raises(ValueError, match="2024-25 keeps PBP Stats"):
@@ -602,14 +662,29 @@ def _service(provider, engine=None, redis=None):
     )
 
 
+class RecordingRedis(FakeRedis):
+    """FakeRedis that records the name of every command it receives."""
+
+    COMMANDS = frozenset({"get", "set", "incr", "expire", "exists", "delete", "pttl"})
+
+    def __init__(self):
+        super().__init__()
+        self.commands = []
+
+    def __getattribute__(self, name):
+        if name in RecordingRedis.COMMANDS:
+            super().__getattribute__("commands").append(name)
+        return super().__getattribute__(name)
+
+
 def test_a_covered_season_is_served_from_segments_without_pbp_stats_or_redis(covered, provider):
-    redis = FakeRedis()
+    redis = RecordingRedis()
     service = _service(provider, covered.engine, redis)
 
     body = service.get("BOS", "2025-26", off=[TATUM], user_id="u1", deadline=0.0)
+    cached = service.get_cached("BOS", "2025-26", off=[TATUM])
 
-    assert provider.calls == []
-    assert (redis.data, redis.slots, redis.counters) == ({}, {}, {})
+    assert (provider.calls, redis.commands) == ([], [])
     assert (body["status"], body["source"], body["stale"]) == ("ok", "statsplus", False)
     assert body["cached_at"] == "2026-11-03T12:00:00+00:00"
     assert list(body) == [
@@ -633,7 +708,28 @@ def test_a_covered_season_is_served_from_segments_without_pbp_stats_or_redis(cov
         "totals",
         "per36",
     }
-    assert service.get_cached("BOS", "2025-26", off=[TATUM]) == body
+    assert cached == body
+    # An uncovered season goes through Redis, so the recorder does see commands.
+    service.get("BOS", "2024-25", off=[TATUM])
+    assert "get" in redis.commands
+
+
+def test_another_seasons_segments_for_the_team_stay_out_of_the_split(tmp_path, provider):
+    engine = _engine(tmp_path)
+    _store_lineup(engine, "0022500001", (1, 2, 3, 4, 5), datetime(2026, 11, 1, 9, 0, tzinfo=UTC))
+    _store_lineup(engine, "0022600001", (1, 2, 3, 4, 5), datetime(2026, 11, 2, 9, 0, tzinfo=UTC), "2026-27")
+    LineupSegmentRepository(engine).record_coverage("2025-26", WRITTEN_AT)
+
+    body = _service(provider, engine).get("BOS", "2025-26", on=[1])
+
+    assert [(player["player_id"], player["minutes"]) for player in body["players"]] == [
+        (1, 1),
+        (2, 1),
+        (3, 1),
+        (4, 1),
+        (5, 1),
+    ]
+    assert body["cached_at"] == "2026-11-01T09:00:00+00:00"
 
 
 def test_games_missing_names_each_rejected_game_by_its_eastern_date_and_teams(covered, provider):
