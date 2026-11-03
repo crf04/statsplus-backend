@@ -1055,12 +1055,13 @@ def test_a_cached_response_keeps_its_trailing_families_under_the_current_schema(
     assert (cold["trailing"], warm["trailing"]) == ([DEFENSE_TRAILING], [DEFENSE_TRAILING])
     # A body cached before ``trailing`` (schema 2) or the preview cards'
     # ``players`` (schema 3) existed is never served.
-    assert [key.split(":")[2] for key in redis_client.values] == ["v5"]
+    assert [key.split(":")[2] for key in redis_client.values] == ["v6"]
 
 
 def test_the_edges_and_their_matchups_write_what_the_previous_release_wrote():
     """Every Redis key and stored payload (sha256 of its JSON text) of one edges
-    miss, as 3a1a7bb9 wrote them before #671 changed how the reads are made.
+    miss, as 3a1a7bb9 wrote them before #671 changed how the reads are made,
+    under the schemas #407 bumped for its Matchup scores.
 
     A change to either is a cache-format change: bump its schema instead.
     """
@@ -1112,13 +1113,13 @@ def test_the_edges_and_their_matchups_write_what_the_previous_release_wrote():
         key: hashlib.sha256(zlib.decompress(payload)).hexdigest()
         for key, payload in redis_client.values.items()
     } == {
-        "matchup:composed:v6:38d9d4f6762886ee3f2574ececd4ea1ea619f29874506034630c46840222c2ce": (
-            "771620b644bb2e6944e42374ca16c1489b0feb9ab7ae155854ac6a0de7a4beb5"
+        "matchup:composed:v7:4e9ca1f54fcef4785252c8ac229b8ef1d65684195a4bb6a2f57dd0b3c16b8452": (
+            "1e52e4b117ba6fd9f993eef34d2dc4993c5ec2c5602d63f8389d4d3c902a64a2"
         ),
-        "matchup:composed:v6:624e8b0e000d9a70e295a45225a0e9c7b0b77b59a01d1e560d5f7f26c1535a69": (
-            "823c591123e66a77239df466ce602910b9527bd77d1f83abc445c24769d21643"
+        "matchup:composed:v7:caa9946a7f646d5b3a15ba044ace4ae309c67c46dd1b2fa16f0a7da81141590b": (
+            "b5345cc554cbf6241d257c47247feb7857cf96bc33ae1fcf4f403a4cacd8087a"
         ),
-        "slate:edges:v5:eaaed90b3da80d226407e416882ad97f14439056c46d62791ffb56dd545c51c7": (
+        "slate:edges:v6:2de609c0a2610faeff3d33ecd4f502503a0a5a2d0b354a5aed1f48e236f9e74e": (
             "85542ea8a3695da15ec4c69b0a37cc79b2a6b26a62c64788446e568f105c1552"
         ),
     }

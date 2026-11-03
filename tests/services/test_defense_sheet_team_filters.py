@@ -61,14 +61,14 @@ def _distinct(tricode, position):
 
 def _per48_builder(base):
     if base == "traditional":
+        counted = tuple(
+            metric for metric in LEDGER_DEFENSE_SHEET_METRICS["traditional"].values() if metric != "rebounds"
+        )
 
         def per48(tricode):
-            values = {
-                metric: _distinct(tricode, position) + 1.0
-                for position, metric in enumerate(("turnovers", "steals", "blocks"))
-            }
+            values = {metric: _distinct(tricode, position) + 1.0 for position, metric in enumerate(counted)}
             return traditional_per48(
-                offensive_rebounds=_distinct(tricode, 3),
+                offensive_rebounds=_distinct(tricode, len(counted)),
                 defensive_rebounds=3.0,
                 **values,
             )
@@ -163,6 +163,8 @@ def test_contract_examples_resolve_to_their_publication_metrics():
         "traditional",
         "rebounds",
     )
+    assert defense_sheet_filter("sheet:traditional:OPP_PTS") == ("traditional", "points")
+    assert defense_sheet_filter("sheet:traditional:OPP_FTA") == ("traditional", "free_throws_attempted")
     assert defense_sheet_filter("sheet:assist_locations:Corner3Assists") == (
         "assist_locations",
         "corner3_assists",
@@ -180,7 +182,7 @@ def test_contract_examples_resolve_to_their_publication_metrics():
         "sheet:unknown:Transition:PTS",
         "sheet:shot_zones:Paint:FGM",
         "sheet:shot_types:catch_and_shoot:FG3M",
-        "sheet:traditional:OPP_PTS",
+        "sheet:traditional:OPP_PF",
         "Sheet:play_types:Transition:PTS",
         "play_types:Transition:PTS",
     ],

@@ -84,7 +84,7 @@ from app.services.ledger_matchup_materialization import (
 from app.services.ledger_materialization import LedgerMaterializationService
 from app.services.ledger_parity import LedgerParityArtifactRepository
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
-from app.services.matchup import MatchupService
+from app.services.matchup import MatchupService, slice_markets
 from app.services.matchup_injuries import MatchupInjuryService
 from app.services.matchup_parity import MatchupParityRunner, StoredLegacyMatchupSource
 from app.services.matchup_selection import MatchupSelectionService
@@ -242,6 +242,28 @@ def _source_independent_matchup_contract(response):
     payload = json.loads(response.data)
     payload.pop("provenance", None)
     payload.pop("coverage", None)
+    return payload
+
+
+#: #407's Traditional rows.  Only the ledger publication carries them: the
+#: legacy LeagueDashTeamStats snapshot stores OPP_REB/TOV/STL/BLK alone.
+_LEDGER_ONLY_TRADITIONAL = frozenset(
+    {"OPP_PTS", "OPP_AST", "OPP_FGM", "OPP_FGA", "OPP_FG3M", "OPP_FG3A", "OPP_FTM", "OPP_FTA"}
+)
+
+
+def _without_ledger_only_traditional(payload):
+    """The contract without the ledger-only Traditional rows and the scores they feed."""
+
+    for sheet in (payload["league"], *payload["teams"]):
+        sheet["defense_sheet"]["traditional"] = [
+            row for row in sheet["defense_sheet"]["traditional"] if row["key"] not in _LEDGER_ONLY_TRADITIONAL
+        ]
+    fed = {market for key in _LEDGER_ONLY_TRADITIONAL for market in slice_markets("traditional", key, key)}
+    for player in payload["players"]:
+        player["scores"] = {
+            market: windows for market, windows in player["scores"].items() if market not in fed
+        }
     return payload
 
 
@@ -2875,13 +2897,12 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
         for window_name in ("season", "last_15"):
             window = score[window_name]
             assert isinstance(window["components"], dict)
+            assert window["components"]
+            assert set(window["blend"]) == {"value", "thin"}
+            assert isinstance(window["blend"]["value"], float)
+            assert isinstance(window["blend"]["thin"], bool)
             if market in {"TOV", "STL", "BLK", "STKS"}:
-                assert "blend" not in window
-            else:
-                assert window["components"]
-                assert set(window["blend"]) == {"value", "thin"}
-                assert isinstance(window["blend"]["value"], float)
-                assert isinstance(window["blend"]["thin"], bool)
+                assert window["blend"] == window["components"]["traditional"]
     for market in ("3PM", "FG3A"):
         for window_name in ("season", "last_15"):
             assert scores[market][window_name]["components"]["shot_types"] == {
@@ -2891,15 +2912,15 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
     assert "shot_types" in scores["PA"]["season"]["components"]
     assert {row["key"]: row["markets"] for row in payload["teams"][0]["defense_sheet"]["shot_zones"]} == {
         "Above the Break 3:FGA": ["FGA", "FG3A"],
-        "Above the Break 3:FGM": ["PTS", "3PM", "PA", "PR", "PRA"],
+        "Above the Break 3:FGM": ["PTS", "3PM", "FGM", "PA", "PR", "PRA"],
         "Corner 3:FGA": ["FGA", "FG3A"],
-        "Corner 3:FGM": ["PTS", "3PM", "PA", "PR", "PRA"],
+        "Corner 3:FGM": ["PTS", "3PM", "FGM", "PA", "PR", "PRA"],
         "In The Paint (Non-RA):FGA": ["FGA", "FG2A"],
-        "In The Paint (Non-RA):FGM": ["PTS", "PA", "PR", "PRA"],
+        "In The Paint (Non-RA):FGM": ["PTS", "FGM", "FG2M", "PA", "PR", "PRA"],
         "Mid-Range:FGA": ["FGA", "FG2A"],
-        "Mid-Range:FGM": ["PTS", "PA", "PR", "PRA"],
+        "Mid-Range:FGM": ["PTS", "FGM", "FG2M", "PA", "PR", "PRA"],
         "Restricted Area:FGA": ["FGA", "FG2A"],
-        "Restricted Area:FGM": ["PTS", "PA", "PR", "PRA"],
+        "Restricted Area:FGM": ["PTS", "FGM", "FG2M", "PA", "PR", "PRA"],
     }
     player_shot_types = {row["key"] for row in payload["players"][0]["diet_shares"]["shot_types"]}
     assert player_shot_types == {
@@ -3893,9 +3914,21 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     assert slate_response.status_code == 200
     assert matchup_response.status_code == 200
     assert repeated_matchup_response.status_code == 200
-    assert _source_independent_matchup_contract(matchup_response) == (
-        _source_independent_matchup_contract(pre_matchup_response)
+    assert _without_ledger_only_traditional(_source_independent_matchup_contract(matchup_response)) == (
+        _without_ledger_only_traditional(_source_independent_matchup_contract(pre_matchup_response))
     )
+    for response, rows in ((pre_matchup_response, set()), (matchup_response, _LEDGER_ONLY_TRADITIONAL)):
+        payload = response.get_json()
+        for sheet in (payload["league"], *payload["teams"]):
+            assert {
+                row["key"] for row in sheet["defense_sheet"]["traditional"]
+            } & _LEDGER_ONLY_TRADITIONAL == rows
+    pre_pts, pts = (
+        response.get_json()["players"][0]["scores"]["PTS"]
+        for response in (pre_matchup_response, matchup_response)
+    )
+    assert "team_defense:traditional" in pre_pts["season"]["missing_inputs"]
+    assert pts["season"]["components"]["traditional"] == {"value": 0.056209, "thin": False}
     assert repeated_matchup_response.data == matchup_bytes
     assert selection_response.status_code == 200
     assert player_game_log_response.status_code == 200
@@ -5588,7 +5621,7 @@ def _dabble_snapshot(catalog, markets, *, retrieved_at):
     )
 
 
-def test_dabble_shooting_lines_are_targetable_and_served_without_a_matchup_score(
+def test_dabble_shooting_lines_are_targetable_and_scored(
     projection_route_context,
 ):
     context = projection_route_context
@@ -5636,9 +5669,25 @@ def test_dabble_shooting_lines_are_targetable_and_served_without_a_matchup_score
     assert player["line_prices"] == {
         "dabble": {market: {"over": -122, "under": -104} for market in ("FG2M", "FGM", "FTA", "FTM", "PTS")}
     }
-    unscored = {"components": {}, "blend": None, "missing_inputs": []}
+    # #407: FGM and FG2M score from shot zones and shot types; FTA and FTM
+    # read only their Traditional rows, which this world's stored legacy
+    # facts lack, so they name that input.
+    shots = {
+        "components": {
+            "shot_zones": {"value": -0.870968, "thin": True},
+            "shot_types": {"value": -0.870968, "thin": True},
+        },
+        "blend": {"value": -0.870968, "thin": True},
+    }
+    free_throws = {"components": {}, "blend": None, "missing_inputs": ["team_defense:traditional"]}
+    expected = {
+        "FG2M": {**shots, "missing_inputs": []},
+        "FGM": {**shots, "missing_inputs": ["team_defense:traditional"]},
+        "FTA": free_throws,
+        "FTM": free_throws,
+    }
     assert {market: player["scores"][market] for market in ("FG2M", "FGM", "FTA", "FTM")} == {
-        market: {"season": unscored, "last_15": unscored} for market in ("FG2M", "FGM", "FTA", "FTM")
+        market: {"season": window, "last_15": window} for market, window in expected.items()
     }
     assert player["scores"]["PTS"] == points_only["scores"]["PTS"]
     assert player["scores"]["PTS"]["season"]["blend"] is not None

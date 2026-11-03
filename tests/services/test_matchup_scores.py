@@ -653,9 +653,10 @@ def test_combo_score_weights_component_markets_by_season_volumes():
     }
 
 
-def test_defensive_scores_use_one_traditional_component_and_no_blend():
+@pytest.mark.parametrize(("game_count", "stocks_thin"), ((20, False), (4, True)))
+def test_defensive_scores_blend_is_their_one_traditional_component(game_count, stocks_thin):
     player = _service(
-        markets=("TOV", "STKS"),
+        markets=("TOV", "STL", "BLK", "STKS"),
         facts=(),
         season_metrics=(
             ("traditional", "OPP_REB", "OPP_REB", 10.0, 10.0),
@@ -664,13 +665,18 @@ def test_defensive_scores_use_one_traditional_component_and_no_blend():
             ("traditional", "OPP_BLK", "OPP_BLK", 2.0, 3.0),
         ),
         per_game={"TOV": 4.0, "STL": 2.0, "BLK": 1.0, "STKS": 3.0},
+        game_count=game_count,
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    assert _computed_scores(player)["TOV"]["season"] == {
-        "components": {"traditional": {"value": 0.2, "thin": False}}
+    # STKS: (2 * -0.2 + 1 * 0.5) / 3, thin below the Season-rate game floor.
+    expected = {
+        "TOV": {"value": 0.2, "thin": False},
+        "STL": {"value": -0.2, "thin": False},
+        "BLK": {"value": 0.5, "thin": False},
+        "STKS": {"value": 0.033333, "thin": stocks_thin},
     }
-    assert _computed_scores(player)["STKS"]["season"] == {
-        "components": {"traditional": {"value": 0.033333, "thin": False}}
+    assert {market: windows["season"] for market, windows in _computed_scores(player).items()} == {
+        market: {"components": {"traditional": cell}, "blend": cell} for market, cell in expected.items()
     }
 
 
@@ -979,10 +985,23 @@ def test_common_posted_market_union_has_decoder_safe_blends_for_every_offensive_
     )
     metrics = [
         ("play_types", "Transition", "PTS", 10.0, 11.0),
-        ("traditional", "OPP_REB", "OPP_REB", 10.0, 11.0),
-        ("traditional", "OPP_TOV", "OPP_TOV", 10.0, 11.0),
-        ("traditional", "OPP_STL", "OPP_STL", 10.0, 11.0),
-        ("traditional", "OPP_BLK", "OPP_BLK", 10.0, 11.0),
+        *(
+            ("traditional", key, key, 10.0, 11.0)
+            for key in (
+                "OPP_REB",
+                "OPP_TOV",
+                "OPP_STL",
+                "OPP_BLK",
+                "OPP_PTS",
+                "OPP_AST",
+                "OPP_FGM",
+                "OPP_FGA",
+                "OPP_FG3M",
+                "OPP_FG3A",
+                "OPP_FTM",
+                "OPP_FTA",
+            )
+        ),
     ]
     metrics.extend(
         ("shot_zones", slice_key, stat, 10.0, 11.0) for slice_key in zone_slices for stat in ("FGM", "FGA")
@@ -998,9 +1017,13 @@ def test_common_posted_market_union_has_decoder_safe_blends_for_every_offensive_
         "REB",
         "AST",
         "3PM",
+        "FGM",
+        "FG2M",
         "FGA",
         "FG2A",
         "FG3A",
+        "FTM",
+        "FTA",
         "PRA",
         "PA",
         "PR",
@@ -1036,11 +1059,8 @@ def test_common_posted_market_union_has_decoder_safe_blends_for_every_offensive_
     for market in markets:
         for window_name in ("season", "last_15"):
             window = _computed_scores(player)[market][window_name]
-            if market in {"TOV", "STL", "BLK", "STKS"}:
-                assert "blend" not in window
-            else:
-                assert window["components"]
-                assert window["blend"] == {"value": 0.1, "thin": False}
+            assert window["components"]
+            assert window["blend"] == {"value": 0.1, "thin": False}
 
 
 @pytest.mark.parametrize(
@@ -1362,7 +1382,8 @@ def test_the_rebound_blend_reaches_pr_ra_and_pra_through_their_rebound_part():
     assert scores["REB"]["season"]["blend"] == {"value": 0.2425, "thin": False}
     # Each combo weighs the REB part by 8 rebounds a game over all the positive
     # per-game volumes (PR 28, RA 13, PRA 33); the PTS and AST parts have no
-    # stored defense here, so every combo cell is a thin partial.
+    # stored defense here, OPP_PTS and OPP_AST included, so every combo cell
+    # is a thin partial that names the Traditional gap.
     assert scores["PR"]["season"] == {
         "components": {
             "traditional": {"value": 0.071429, "thin": True},
@@ -1386,13 +1407,19 @@ def test_the_rebound_blend_reaches_pr_ra_and_pra_through_their_rebound_part():
     }
     assert {market: windows["season"]["missing_inputs"] for market, windows in player["scores"].items()} == {
         "REB": [],
-        "PR": ["team_defense:play_types", "team_defense:shot_zones", "team_defense:shot_types"],
-        "RA": ["team_defense:assist_locations"],
+        "PR": [
+            "team_defense:play_types",
+            "team_defense:shot_zones",
+            "team_defense:shot_types",
+            "team_defense:traditional",
+        ],
+        "RA": ["team_defense:assist_locations", "team_defense:traditional"],
         "PRA": [
             "team_defense:play_types",
             "team_defense:shot_zones",
             "team_defense:shot_types",
             "team_defense:assist_locations",
+            "team_defense:traditional",
         ],
     }
 
@@ -1630,3 +1657,146 @@ def test_slices_ride_only_the_shot_types_cell_of_points_and_fga_in_both_windows(
     }
     assert "slices" not in scores["PA"]["season"]["components"]["shot_types"]
     assert all("slices" not in score["blend"] for windows in scores.values() for score in windows.values())
+
+
+# --- Traditional rows join every Blend; FGM, FG2M, FTA, FTM score (#407) -----
+#
+# One opponent, BOS. League / BOS allowed per 48, and the Traditional score
+# each row gives: BOS / league - 1.
+_TRADITIONAL_METRICS = (
+    ("traditional", "OPP_REB", "OPP_REB", 40.0, 44.0),  # 0.1
+    ("traditional", "OPP_TOV", "OPP_TOV", 10.0, 12.0),  # 0.2
+    ("traditional", "OPP_STL", "OPP_STL", 5.0, 4.0),  # -0.2
+    ("traditional", "OPP_BLK", "OPP_BLK", 2.0, 3.0),  # 0.5
+    ("traditional", "OPP_PTS", "OPP_PTS", 110.0, 121.0),  # 0.1
+    ("traditional", "OPP_AST", "OPP_AST", 25.0, 20.0),  # -0.2
+    ("traditional", "OPP_FGM", "OPP_FGM", 40.0, 42.0),  # 0.05
+    ("traditional", "OPP_FGA", "OPP_FGA", 80.0, 88.0),  # 0.1
+    ("traditional", "OPP_FG3M", "OPP_FG3M", 12.0, 15.0),  # 0.25
+    ("traditional", "OPP_FG3A", "OPP_FG3A", 30.0, 33.0),  # 0.1
+    ("traditional", "OPP_FTM", "OPP_FTM", 16.0, 20.0),  # 0.25
+    ("traditional", "OPP_FTA", "OPP_FTA", 20.0, 18.0),  # -0.1
+)
+_ZONE_SLICES = ("Restricted Area", "In The Paint (Non-RA)", "Mid-Range", "Corner 3", "Above the Break 3")
+_ASSIST_SLICES = (
+    "Arc3Assists",
+    "Corner3Assists",
+    "AtRimAssists",
+    "ShortMidRangeAssists",
+    "LongMidRangeAssists",
+)
+
+
+def _coverage_player(markets, *, per_game=None):
+    """Every Base for one player against BOS, with the shot-type mix of #578."""
+
+    return _service(
+        markets=markets,
+        facts=(
+            *_complete_play_facts(_fact("play_types", "Transition", 1.0, 100)),
+            *(_fact("shot_zones", slice_key, 0.2, 20) for slice_key in _ZONE_SLICES),
+            *_mix_facts(),
+            *(_fact("assist_locations", slice_key, 0.2, 8) for slice_key in _ASSIST_SLICES),
+        ),
+        season_metrics=(
+            ("play_types", "Transition", "PTS", 10.0, 12.0),
+            # Restricted Area makes 1.3x the league; every other zone 1x.
+            *(
+                (
+                    "shot_zones",
+                    slice_key,
+                    stat,
+                    10.0,
+                    13.0 if (slice_key, stat) == ("Restricted Area", "FGM") else 10.0,
+                )
+                for slice_key in _ZONE_SLICES
+                for stat in ("FGM", "FGA")
+            ),
+            *_MIX_METRICS,
+            # At-rim assists 1.5x the league; every other location 1x.
+            *(
+                ("assist_locations", slice_key, slice_key, 5.0, 7.5 if slice_key == "AtRimAssists" else 5.0)
+                for slice_key in _ASSIST_SLICES
+            ),
+            *_TRADITIONAL_METRICS,
+        ),
+        per_game=per_game,
+    ).get_matchup(game_id=GAME_ID)["players"][0]
+
+
+def test_each_market_blends_its_traditional_row_with_its_diet_components_as_a_plain_mean():
+    player = _coverage_player(("PTS", "AST", "3PM", "FGA", "FG3A", "FGM", "FG2M", "FTA", "FTM"))
+
+    def cells(**values):
+        return {base: {"value": value, "thin": False} for base, value in values.items()}
+
+    # Shot zones: makes over every zone 0.2 * 1.3 + 0.8 - 1 = 0.06; over the
+    # three 2PT zones (equal volume) (1.3 + 1 + 1) / 3 - 1 = 0.1; threes and
+    # attempts read the league.  Shot types: points, FGA, 3PM and FG3A as
+    # pinned by the #578 tests above; FG2M 0.3 * 0.1 + 0.2 * 0.1 = 0.05; FGM
+    # weighs each slice's twos and threes by his made counts (not points):
+    # Catch and Shoot 15:10 -> 0.6 * 1 + 0.4 * 1.25 = 1.1, Pullups 2:8 ->
+    # 0.2 * 1.1 + 0.8 * 1.5 = 1.42, Less Than 10 ft the twos ratio 1.1, so
+    # 0.5 * 0.1 + 0.3 * 0.42 + 0.2 * 0.1 = 0.196.
+    assert {market: windows["season"] for market, windows in _computed_scores(player).items()} == {
+        "PTS": {
+            "components": cells(play_types=0.2, shot_zones=0.06, shot_types=0.215357, traditional=0.1),
+            # (0.2 + 0.06 + 0.215357 + 0.1) / 4
+            "blend": {"value": 0.143839, "thin": False},
+        },
+        "AST": {
+            "components": cells(assist_locations=0.1, traditional=-0.2),
+            "blend": {"value": -0.05, "thin": False},
+        },
+        "3PM": {
+            "components": cells(shot_zones=0.0, shot_types=0.275, traditional=0.25),
+            "blend": {"value": 0.175, "thin": False},
+        },
+        "FGA": {
+            "components": cells(shot_zones=0.0, shot_types=0.11675, traditional=0.1),
+            "blend": {"value": 0.07225, "thin": False},
+        },
+        "FG3A": {
+            "components": cells(shot_zones=0.0, shot_types=0.185, traditional=0.1),
+            "blend": {"value": 0.095, "thin": False},
+        },
+        "FGM": {
+            "components": cells(shot_zones=0.06, shot_types=0.196, traditional=0.05),
+            "blend": {"value": 0.102, "thin": False},
+        },
+        "FG2M": {
+            "components": cells(shot_zones=0.1, shot_types=0.05),
+            "blend": {"value": 0.075, "thin": False},
+        },
+        "FTA": {"components": cells(traditional=-0.1), "blend": {"value": -0.1, "thin": False}},
+        "FTM": {"components": cells(traditional=0.25), "blend": {"value": 0.25, "thin": False}},
+    }
+    assert all(windows["season"]["missing_inputs"] == [] for windows in player["scores"].values())
+
+
+def test_fgm_shot_types_list_each_slice_read_for_his_made_count_mix():
+    player = _coverage_player(("FGM",))
+
+    assert _computed_scores(player, keep_slices=True)["FGM"]["season"]["components"]["shot_types"] == {
+        "value": 0.196,
+        "thin": False,
+        "slices": [
+            {"key": "Catch and Shoot", "percent_vs_league_average": 10.0},
+            {"key": "Pullups", "percent_vs_league_average": 42.0},
+            {"key": "Less Than 10 ft", "percent_vs_league_average": 10.0},
+        ],
+    }
+
+
+def test_combos_build_their_traditional_cell_from_their_parts_rows():
+    player = _coverage_player(("PA", "PRA"), per_game={"PTS": 30.0, "REB": 10.0, "AST": 10.0})
+
+    scores = _computed_scores(player)
+    # PA: (30 * OPP_PTS 0.1 + 10 * OPP_AST -0.2) / 40; its Blend weighs the
+    # PTS Blend 0.143839 and the AST Blend -0.05 the same way.
+    assert scores["PA"]["season"]["components"]["traditional"] == {"value": 0.025, "thin": False}
+    assert scores["PA"]["season"]["blend"] == {"value": 0.095379, "thin": False}
+    # PRA adds REB's OPP_REB 0.1: (3 + 1 - 2) / 50, and Blend
+    # (30 * 0.143839 + 10 * 0.1 + 10 * -0.05) / 50.
+    assert scores["PRA"]["season"]["components"]["traditional"] == {"value": 0.04, "thin": False}
+    assert scores["PRA"]["season"]["blend"] == {"value": 0.096303, "thin": False}

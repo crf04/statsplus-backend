@@ -38,6 +38,7 @@ from app.domain.play_type_matchup import complete_play_type_shares, play_type_ma
 from app.domain.rebound_types import REBOUND_TYPE_WIRE_NAMES, REBOUND_TYPES_BASE
 from app.domain.team_matchup_taxonomy import (
     DEFENSE_SHEET_BASES,
+    LEDGER_DEFENSE_SHEET_METRICS,
     SHOT_TYPE_DISPLAY_TO_STORED,
     SHOT_TYPE_SLICES,
     SHOT_TYPE_STORED_TO_DISPLAY,
@@ -126,11 +127,11 @@ _GOVERNED_SHOT_TYPES = frozenset(SHOT_TYPE_SLICES)
 _STAT_MARKETS = {
     "PTS": ("PTS", "PA", "PR", "PRA"),
     "POSS": ("PTS",),
-    "FGM": ("PTS", "PA", "PR", "PRA"),
+    "FGM": ("PTS", "FGM", "PA", "PR", "PRA"),
     "FGA": ("FGA", "FG2A", "FG3A"),
-    "FG2M": ("PTS", "PA", "PR", "PRA"),
+    "FG2M": ("PTS", "FGM", "FG2M", "PA", "PR", "PRA"),
     "FG2A": ("FGA", "FG2A"),
-    "FG3M": ("3PM", "PTS", "PA", "PR", "PRA"),
+    "FG3M": ("3PM", "PTS", "FGM", "PA", "PR", "PRA"),
     "FG3A": ("FGA", "FG3A"),
     "Assists": ("AST", "PA", "RA", "PRA"),
     "Arc3Assists": ("AST", "PA", "RA", "PRA"),
@@ -142,6 +143,14 @@ _STAT_MARKETS = {
     "OPP_REB": ("REB", "PR", "RA", "PRA"),
     "OPP_STL": ("STL", "STKS"),
     "OPP_BLK": ("BLK", "STKS"),
+    "OPP_PTS": ("PTS", "PA", "PR", "PRA"),
+    "OPP_AST": ("AST", "PA", "RA", "PRA"),
+    "OPP_FGM": ("FGM",),
+    "OPP_FGA": ("FGA",),
+    "OPP_FG3M": ("3PM",),
+    "OPP_FG3A": ("FG3A",),
+    "OPP_FTM": ("FTM",),
+    "OPP_FTA": ("FTA",),
     # Rebound Types rows are evidence for every market with a rebound part.
     **{wire: ("REB", "PR", "RA", "PRA") for wire in REBOUND_TYPE_WIRE_NAMES},
 }
@@ -151,11 +160,29 @@ _COMBO_PARTS = {
     "PR": ("PTS", "REB"),
     "RA": ("REB", "AST"),
 }
-_DEFENSIVE_MARKET_COLUMNS = {
+#: The Traditional row each Stat Category reads as its ``traditional``
+#: component: opponent allowed per 48 against the league average.
+_TRADITIONAL_SCORE_COLUMNS = {
+    "PTS": "OPP_PTS",
+    "AST": "OPP_AST",
+    "3PM": "OPP_FG3M",
+    "FGM": "OPP_FGM",
+    "FGA": "OPP_FGA",
+    "FG3A": "OPP_FG3A",
+    "FTM": "OPP_FTM",
+    "FTA": "OPP_FTA",
+    "REB": "OPP_REB",
     "TOV": "OPP_TOV",
     "STL": "OPP_STL",
     "BLK": "OPP_BLK",
 }
+#: Traditional rows a window may lack without degrading the Base.  Stored
+#: legacy-provider windows, and ledger windows materialized before #407, hold
+#: only the defensive columns and OPP_REB (none before OPP_REB existed), so
+#: the missing rows' cells are empty and the scores reading them name the gap.
+_OPTIONAL_TRADITIONAL_IDENTITIES = frozenset(
+    (key, key) for key in LEDGER_DEFENSE_SHEET_METRICS["traditional"] if key not in DEFENSIVE_COLUMNS
+)
 _PRIMITIVE_SCORE_INPUTS = {
     "PTS": (
         ("play_types", {"PTS": 1.0}, None),
@@ -170,6 +197,14 @@ _PRIMITIVE_SCORE_INPUTS = {
         ("shot_zones", {"FGM": 1.0}, _THREE_POINT_SHOT_ZONES),
         ("shot_types", {"FG3M": 1.0}, None),
     ),
+    "FGM": (
+        ("shot_zones", {"FGM": 1.0}, None),
+        ("shot_types", {"FG2M": 1.0, "FG3M": 1.0}, None),
+    ),
+    "FG2M": (
+        ("shot_zones", {"FGM": 1.0}, _TWO_POINT_SHOT_ZONES),
+        ("shot_types", {"FG2M": 1.0}, None),
+    ),
     "FG2A": (
         ("shot_zones", {"FGA": 1.0}, _TWO_POINT_SHOT_ZONES),
         ("shot_types", {"FG2A": 1.0}, None),
@@ -180,10 +215,11 @@ _PRIMITIVE_SCORE_INPUTS = {
     ),
     "AST": (("assist_locations", None, None),),
 }
-# Points and total-attempt markets weigh a shot type's twos and threes by the
-# player's own mix inside that shot type rather than the opponent's: makes for
-# points (so the weights are points), attempts for FGA. Single-stat markets
-# have one stat and are unchanged.
+# Markets that read both twos and threes (points, FGM, FGA) weigh a shot
+# type's twos and threes by the player's own mix inside that shot type rather
+# than the opponent's: his makes for the make markets, each scaled by the
+# market's stat weight (so points weigh 2 and 3), his attempts for FGA.
+# Single-stat markets have one stat and are unchanged.
 _PLAYER_MIX_SHOT_STATS = {
     frozenset({"FG2M", "FG3M"}): "makes",
     frozenset({"FG2A", "FG3A"}): "attempts",
@@ -221,22 +257,17 @@ _DIET_SHARE_BOUNDS = {
 # The score contract's required Bases per governed Stat Category. A Base named
 # here and absent from a window's computed components is a named missing input
 # rather than a silent partial blend.
+# rebound_types is an optional second REB component (see
+# ``_rebound_score_window``): it blends in when stored and is never a required
+# input, so its absence adds nothing to ``missing_inputs``.
 _SCORE_INPUT_BASES = {
-    market: tuple(base for base, _weights, _slices in inputs)
-    for market, inputs in _PRIMITIVE_SCORE_INPUTS.items()
+    market: (
+        *(base for base, _weights, _slices in _PRIMITIVE_SCORE_INPUTS.get(market, ())),
+        *(("traditional",) if market in _TRADITIONAL_SCORE_COLUMNS else ()),
+    )
+    for market in (*_PRIMITIVE_SCORE_INPUTS, *_TRADITIONAL_SCORE_COLUMNS)
 }
-_SCORE_INPUT_BASES.update(
-    {
-        # rebound_types is an optional second REB component (see
-        # ``_rebound_score_window``): it blends in when stored and is never a
-        # required input, so its absence adds nothing to ``missing_inputs``.
-        "REB": ("traditional",),
-        "TOV": ("traditional",),
-        "STL": ("traditional",),
-        "BLK": ("traditional",),
-        "STKS": ("traditional",),
-    }
-)
+_SCORE_INPUT_BASES["STKS"] = ("traditional",)
 _SCORE_INPUT_BASES.update(
     {
         market: tuple(
@@ -467,8 +498,9 @@ def slice_markets(base: str, slice_key: str, stat_key: str) -> tuple[str, ...]:
     is evidence for, combos included: a row feeding the PTS part of PRA, PR or
     PA lists that combo, as ``_combo_score_window`` builds those scores from
     their parts.  A shot zone's markets depend on the slice as well as the
-    statistic -- only a three-point zone's makes bear on 3PM -- so the zone
-    cases are stated before the statistic table.  Public so the mapping has
+    statistic -- only a three-point zone's makes bear on 3PM, and only a
+    two-point zone's on FG2M -- so the zone cases are stated before the
+    statistic table.  Public so the mapping has
     one definition; the Defense Sheet payload is its only caller.
     """
 
@@ -477,12 +509,12 @@ def slice_markets(base: str, slice_key: str, stat_key: str) -> tuple[str, ...]:
             if stat_key == "FGA":
                 return ("FGA", "FG2A")
             if stat_key == "FGM":
-                return ("PTS", "PA", "PR", "PRA")
+                return ("PTS", "FGM", "FG2M", "PA", "PR", "PRA")
         if slice_key in _THREE_POINT_SHOT_ZONES:
             if stat_key == "FGA":
                 return ("FGA", "FG3A")
             if stat_key == "FGM":
-                return ("PTS", "3PM", "PA", "PR", "PRA")
+                return ("PTS", "3PM", "FGM", "PA", "PR", "PRA")
     return _STAT_MARKETS.get(stat_key, ())
 
 
@@ -2128,8 +2160,16 @@ class MatchupService:
             )
             # An unavailable cell names what it lacked instead of leaving the
             # reader to guess why no blend arrived.
+            present = set(window["components"])
+            if market in _COMBO_PARTS and summary is not None and summary.season_rate is not None:
+                # One part's cell fills a combo component, so a Base counts
+                # only when every part with volume that requires it supplied it.
+                for part in _COMBO_PARTS[market]:
+                    if summary.season_rate.per_game.get(part, 0.0) > 0:
+                        supplied = memo[(part, window_name)]["components"]
+                        present -= {base for base in _SCORE_INPUT_BASES[part] if base not in supplied}
             window["missing_inputs"] = self._missing_score_inputs(
-                market, window_name, window["components"], summary, availability
+                market, window_name, present, summary, availability
             )
             memo[key] = window
         return memo[key]
@@ -2138,7 +2178,7 @@ class MatchupService:
     def _missing_score_inputs(
         market: str,
         window_name: str,
-        components: Mapping[str, Any],
+        present: set[str],
         summary: PlayerSeasonLogSummary | None,
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
     ) -> list[str]:
@@ -2150,7 +2190,7 @@ class MatchupService:
         for base in _SCORE_INPUT_BASES.get(market, ()):
             if availability[base][window_name]["status"] != "available":
                 missing.append(f"team_defense:{base}")
-            elif base in components or (needs_rate and rate_missing):
+            elif base in present or (needs_rate and rate_missing):
                 # A named missing Season rate already explains the gap; the
                 # Diet evidence behind it was never consulted.
                 continue
@@ -2171,15 +2211,8 @@ class MatchupService:
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
         memo: dict[tuple[str, str], dict[str, Any]],
     ) -> dict[str, Any]:
-        if market in {*_DEFENSIVE_MARKET_COLUMNS, "STKS"}:
-            return self._defensive_score_window(
-                market,
-                window_name,
-                metric_index,
-                opponent_id,
-                summary,
-                availability,
-            )
+        if market == "STKS":
+            return self._stocks_score_window(window_name, metric_index, opponent_id, summary, availability)
         if market == "REB":
             return self._rebound_score_window(
                 window_name,
@@ -2215,6 +2248,11 @@ class MatchupService:
             )
             if component is not None:
                 components[base] = component
+        traditional = self._traditional_component(
+            market, window_name, metric_index, opponent_id, availability
+        )
+        if traditional is not None:
+            components["traditional"] = traditional
         return {
             "components": components,
             "blend": self._blend_components(components),
@@ -2252,9 +2290,9 @@ class MatchupService:
         response (``missing_inputs`` included) is as before the Base existed.
         """
 
-        window = self._aggregate_offensive_score_window(window_name, metric_index, opponent_id, availability)
-        if not window["components"]:
-            return window
+        traditional = self._traditional_component("REB", window_name, metric_index, opponent_id, availability)
+        if traditional is None:
+            return {"components": {}, "blend": None}
         component = self._diet_component(
             base=REBOUND_TYPES_BASE,
             stat_weights=None,
@@ -2266,78 +2304,76 @@ class MatchupService:
             diet=diet,
             availability=availability,
         )
-        components = dict(window["components"])
+        components = {"traditional": traditional}
         if component is not None:
             components[REBOUND_TYPES_BASE] = component
         return {"components": components, "blend": self._blend_components(components)}
 
-    def _aggregate_offensive_score_window(
+    def _traditional_component(
         self,
+        market: str,
         window_name: str,
         metric_index: _WindowMetricIndex | None,
         opponent_id: int,
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
-    ) -> dict[str, Any]:
-        if metric_index is None or availability["traditional"][window_name]["status"] != "available":
-            return {"components": {}, "blend": None}
-        identity = ("traditional", "OPP_REB", "OPP_REB")
+    ) -> dict[str, Any] | None:
+        value = self._traditional_value(market, window_name, metric_index, opponent_id, availability)
+        if value is None:
+            return None
+        return {"value": self._number(value), "thin": False}
+
+    @staticmethod
+    def _traditional_value(
+        market: str,
+        window_name: str,
+        metric_index: _WindowMetricIndex | None,
+        opponent_id: int,
+        availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    ) -> float | None:
+        """The market's Traditional row: opponent allowed per 48 / league average - 1."""
+
+        column = _TRADITIONAL_SCORE_COLUMNS.get(market)
+        if (
+            column is None
+            or metric_index is None
+            or availability["traditional"][window_name]["status"] != "available"
+        ):
+            return None
+        identity = ("traditional", column, column)
         league = metric_index.league.get(identity)
         team = metric_index.teams.get(opponent_id, {}).get(identity)
         if league is None or team is None or league.average_allowed_per_48 <= 0:
-            return {"components": {}, "blend": None}
-        cell = {
-            "value": self._number(team.allowed_per_48 / league.average_allowed_per_48 - 1),
-            "thin": False,
-        }
-        return {"components": {"traditional": cell}, "blend": dict(cell)}
+            return None
+        return team.allowed_per_48 / league.average_allowed_per_48 - 1
 
-    def _defensive_score_window(
+    def _stocks_score_window(
         self,
-        market: str,
         window_name: str,
         metric_index: _WindowMetricIndex | None,
         opponent_id: int,
         summary: PlayerSeasonLogSummary | None,
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
     ) -> dict[str, Any]:
-        if metric_index is None or availability["traditional"][window_name]["status"] != "available":
-            return {"components": {}}
-
-        def column_score(column: str) -> float | None:
-            identity = ("traditional", column, column)
-            league = metric_index.league.get(identity)
-            team = metric_index.teams.get(opponent_id, {}).get(identity)
-            if league is None or team is None or league.average_allowed_per_48 <= 0:
-                return None
-            return team.allowed_per_48 / league.average_allowed_per_48 - 1
-
-        if market in _DEFENSIVE_MARKET_COLUMNS:
-            value = column_score(_DEFENSIVE_MARKET_COLUMNS[market])
-            if value is None:
-                return {"components": {}}
-            return {"components": {"traditional": {"value": self._number(value), "thin": False}}}
+        """STKS: STL and BLK Traditional rows weighed by his own per-game rates."""
 
         if summary is None or summary.season_rate is None:
-            return {"components": {}}
+            return {"components": {}, "blend": None}
         contributors = []
         for part in ("STL", "BLK"):
             weight = summary.season_rate.per_game.get(part, 0.0)
-            value = column_score(_DEFENSIVE_MARKET_COLUMNS[part])
+            value = self._traditional_value(part, window_name, metric_index, opponent_id, availability)
             if weight > 0 and value is not None:
                 contributors.append((weight, value))
         if not contributors:
-            return {"components": {}}
+            return {"components": {}, "blend": None}
         total_weight = sum(weight for weight, _value in contributors)
-        return {
-            "components": {
-                "traditional": {
-                    "value": self._number(
-                        sum(weight * value for weight, value in contributors) / total_weight
-                    ),
-                    "thin": (summary.season_rate.game_count < self.settings.matchup_scores.min_games),
-                }
+        components = {
+            "traditional": {
+                "value": self._number(sum(weight * value for weight, value in contributors) / total_weight),
+                "thin": (summary.season_rate.game_count < self.settings.matchup_scores.min_games),
             }
         }
+        return {"components": components, "blend": self._blend_components(components)}
 
     def _combo_score_window(
         self,
@@ -2500,7 +2536,7 @@ class MatchupService:
                 ratio = team_value / league_value
                 if mix_kind is not None:
                     ratio, own_mix = self._player_mix_ratio(
-                        fact, mix_kind, slice_key, metric_index, opponent_id, ratio
+                        fact, mix_kind, stat_weights, slice_key, metric_index, opponent_id, ratio
                     )
                     # A slice scored without his own split is not "for his mix".
                     if own_mix:
@@ -2533,6 +2569,7 @@ class MatchupService:
     def _player_mix_ratio(
         fact: Any,
         mix_kind: str,
+        stat_weights: Mapping[str, float],
         slice_key: str,
         metric_index: _WindowMetricIndex,
         opponent_id: int,
@@ -2541,9 +2578,10 @@ class MatchupService:
         """One shot type's opponent/league ratio, weighing twos and threes by his own mix.
 
         ``p2 * (T2 / L2) + p3 * (T3 / L3)`` where the player's split is read
-        from his made shots in the slice (``2 * FG2M`` against ``3 * FG3M``),
-        falling back to ``2 * FG2A`` against ``3 * FG3A`` when he made none,
-        or from his attempts for the attempt markets. A slice where the league
+        from his made shots in the slice, each scaled by its stat weight
+        (``2 * FG2M`` against ``3 * FG3M`` for points, ``FG2M`` against
+        ``FG3M`` for FGM), falling back to his attempts on the same weights
+        when he made none, or from his attempts for the attempt markets. A slice where the league
         has no threes (or no twos) reduces to the other ratio. With no shooting
         split to read, the opponent-mix ratio stands and the flag is false.
 
@@ -2557,9 +2595,12 @@ class MatchupService:
             two, three = shooting.two_point_attempts, shooting.three_point_attempts
             stats = ("FG2A", "FG3A")
         else:
-            two, three = 2 * shooting.two_point_makes, 3 * shooting.three_point_makes
+            two_weight, three_weight = stat_weights["FG2M"], stat_weights["FG3M"]
+            two = two_weight * shooting.two_point_makes
+            three = three_weight * shooting.three_point_makes
             if two + three <= 0:
-                two, three = 2 * shooting.two_point_attempts, 3 * shooting.three_point_attempts
+                two = two_weight * shooting.two_point_attempts
+                three = three_weight * shooting.three_point_attempts
             stats = ("FG2M", "FG3M")
         if two + three <= 0:
             return opponent_mix_ratio, False
@@ -2618,7 +2659,7 @@ class MatchupService:
             result[base] = {}
             expected = expected_by_base[base]
             if base == "traditional":
-                expected = (expected | _REQUIRED_TRADITIONAL_IDENTITIES) - {("OPP_REB", "OPP_REB")}
+                expected = (expected | _REQUIRED_TRADITIONAL_IDENTITIES) - _OPTIONAL_TRADITIONAL_IDENTITIES
             for window_name, window in windows.items():
                 metric_index = metric_indexes[window_name]
                 state = cls._availability(window, base)
@@ -2729,7 +2770,7 @@ class MatchupService:
             return None
         metric = metric_index.league.get((base, slice_key, stat_key))
         if metric is None:
-            if base == "traditional" and slice_key == stat_key == "OPP_REB":
+            if base == "traditional" and (slice_key, stat_key) in _OPTIONAL_TRADITIONAL_IDENTITIES:
                 return None
             raise ProviderUnavailableError("Stored matchup league facts are incomplete.")
         return {
@@ -2751,7 +2792,7 @@ class MatchupService:
             return None
         metric = metric_index.teams.get(team_id, {}).get((base, slice_key, stat_key))
         if metric is None:
-            if base == "traditional" and slice_key == stat_key == "OPP_REB":
+            if base == "traditional" and (slice_key, stat_key) in _OPTIONAL_TRADITIONAL_IDENTITIES:
                 return None
             raise ProviderUnavailableError("Stored matchup team facts are incomplete.")
         return {

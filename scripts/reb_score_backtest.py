@@ -5,7 +5,7 @@ from Canonical Game Ledger facts dated strictly before that game, in both the
 Season-to-date and the Last 15 window the Matchup shows:
 
 * current: the opponent's ``OPP_REB`` allowed per 48 over the league average,
-  minus 1 (``MatchupService._aggregate_offensive_score_window``);
+  minus 1 (``MatchupService._traditional_component`` for ``REB``);
 * candidate (``--candidate rebound_types``, the default): the sum over the six miss-type slices of (the player's share of
   his rebounds x the opponent's slice allowed per 48 over the league's slice
   average), minus 1 (``MatchupService._diet_component`` on ``rebound_types``),
@@ -18,7 +18,7 @@ methods above.  Each test day is scored by handing those functions only games
 dated before it, so a fact from the test game or later cannot be read.
 
 The "current" score is always the flat traditional score, computed directly
-from ``_aggregate_offensive_score_window``.  Since REB was switched to the
+from ``_traditional_component``.  Since REB was switched to the
 blend (#447) it is no longer what the Matchup serves for REB, but it is the
 baseline the switch was decided against, and it keeps ``--candidate blend`` from
 comparing the Matchup's blend with itself.
@@ -212,7 +212,7 @@ def score_pair(
     """``(current, candidate, fell_back)`` for one window, or ``None``."""
 
     availability = _availability(window_name)
-    current = scorer._aggregate_offensive_score_window(window_name, index, opponent_id, availability)["blend"]
+    current = scorer._traditional_component("REB", window_name, index, opponent_id, availability)
     if current is None:
         return None
     candidate = scorer._diet_component(

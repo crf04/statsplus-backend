@@ -80,8 +80,8 @@ from app.domain.team_matchup_taxonomy import (
 from app.domain.utc import assume_utc
 from app.models.collection_control import PublicationVersion
 from app.services.ledger_derivations import (
+    LEGACY_PARITY_TRADITIONAL_KEYS,
     MATCHUP_ASSIST_KEYS,
-    MATCHUP_TRADITIONAL_KEYS,
     competition_ranks,
     nominal_window_minutes,
 )
@@ -112,7 +112,7 @@ LEDGER_OWNED_SURFACES = LEDGER_PARITY_MATCHUP_SURFACES
 
 #: Per-surface contracted count metrics: stat key -> canonical count metric.
 _SURFACE_COUNT_KEYS = {
-    "traditional": MATCHUP_TRADITIONAL_KEYS,
+    "traditional": LEGACY_PARITY_TRADITIONAL_KEYS,
     "assist_locations": MATCHUP_ASSIST_KEYS,
 }
 

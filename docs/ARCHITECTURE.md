@@ -2437,17 +2437,24 @@ opponent evidence against a non-positive league denominator fails closed, and
 an all-structural-zero component remains absent. A
 blendable offensive window emits a score-cell Blend exactly when at least one
 component computes; zero computable components remain `components: {}` with
-`blend: null`. Newly collected traditional surfaces include `OPP_REB` for REB
-and rebound-containing combos in addition to the three defensive score columns;
-legacy windows missing only OPP_REB retain the defensive surface and degrade
-REB locally. When the other window supplies the OPP_REB row identity, its
-league/team value is null only in the legacy window even though traditional
-availability remains available; OPP_TOV/OPP_STL/OPP_BLK rows and defensive
-scores remain populated. OPP_REB is the sole row-level exception: every other
-metric identity divergence marks the affected Base/window
-`unavailable/legacy_surface_incomplete` and nulls all of its rows. Normalization
-therefore validates the cross-window traditional identity union plus the three
-required defensive columns, excluding only OPP_REB for that carveout. REB
+`blend: null`. Every market with a Traditional row (`OPP_PTS`, `OPP_AST`,
+`OPP_FGM`, `OPP_FGA`, `OPP_FG3M`, `OPP_FG3A`, `OPP_FTM`, `OPP_FTA`, `OPP_REB`
+and the three defensive columns) has a `traditional` component that joins its
+plain-mean Blend (crf04/statsplus#407); FTA and FTM score from it alone, and a
+defensive window's Blend is its one component. The ledger team-window
+Publication carries all twelve rows; stored legacy windows carry only
+`OPP_REB` and the three defensive columns, and may lack `OPP_REB` too. A legacy
+window missing any of those nine retains the defensive surface and degrades
+only the scores that read the missing row, which name
+`team_defense:traditional`. When the other window supplies such a row identity,
+its league/team value is null only in the legacy window even though
+traditional availability remains available; OPP_TOV/OPP_STL/OPP_BLK rows and
+defensive scores remain populated. Those nine rows are the sole row-level
+exception: every other metric identity divergence marks the affected
+Base/window `unavailable/legacy_surface_incomplete` and nulls all of its rows.
+Normalization therefore validates the cross-window traditional identity union
+plus the three required defensive columns, excluding those nine for that
+carveout. REB
 blends its implicit-share-one `traditional` cell with a `rebound_types` diet
 component through `MatchupService._blend_components` (the plain mean of the
 components present), per the backtest on crf04/statsplus#234; without a rebound

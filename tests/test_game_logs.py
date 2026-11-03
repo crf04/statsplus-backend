@@ -808,6 +808,59 @@ def test_a_shot_zone_sheet_row_filters_game_logs(monkeypatch, mock_db_engine, mo
     assert matchups([restricted], ["2"], date_to="2024-01-16") == ["BOS vs. LAL"]
 
 
+def test_a_traditional_sheet_row_filters_game_logs_by_its_per_48_metric(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    """#407: a new Traditional Sheet row ranks the publication metric it shows.
+
+    MIA allows the most free throws made per 48, LAL the second most and CHI
+    the fewest, while points run the other way.
+    """
+
+    from app.services.team_filter_rankings import TeamFilterRankingService
+    from tests.support.publication_stubs import (
+        StubGovernance,
+        StubReader,
+        league,
+        read,
+        traditional_per48,
+    )
+
+    free_throws = {"MIA": 30.0, "LAL": 25.0, "CHI": 10.0}
+    points = {"MIA": 100.0, "LAL": 105.0, "CHI": 130.0}
+
+    def per48(tricode):
+        return traditional_per48(
+            free_throws_made=free_throws.get(tricode, 20.0),
+            points=points.get(tricode, 110.0),
+        )
+
+    stream = "traditional_opponent_season"
+    service = GameService(
+        mock_db_engine,
+        mock_redis_client,
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season="2024-25"),
+        ),
+        team_filter_rankings=TeamFilterRankingService(
+            StubReader({stream: read(stream, league(per48))}),
+            governance_resolver=StubGovernance(),
+        ),
+    )
+    monkeypatch.setattr(service, "_get_game_logs", lambda name, season: (_game_logs_frame(), None))
+
+    def matchups(teams_against, rank_filter):
+        query = GameLogQuery(season_filter="2024-25", teams_against=teams_against, rank_filter=rank_filter)
+        return [row["MATCHUP"] for row in service.get_filtered_logs("LeBron James", query)["game_logs"]]
+
+    assert matchups(["sheet:traditional:OPP_FTM"], ["1,1"]) == ["BOS @ MIA"]
+    assert matchups(["sheet:traditional:OPP_FTM"], ["1,2"]) == ["BOS vs. LAL", "BOS @ MIA"]
+    assert matchups(["sheet:traditional:OPP_FTM"], ["-1"]) == ["BOS vs. CHI"]
+    assert matchups(["sheet:traditional:OPP_PTS"], ["1"]) == ["BOS vs. CHI"]
+    assert matchups(["sheet:traditional:OPP_PTS"], ["-1"]) == matchups(["OPP_PTS"], ["-1"]) == ["BOS @ MIA"]
+
+
 def test_a_url_encoded_sheet_row_filters_game_logs_over_http(
     monkeypatch, mock_db_engine, mock_redis_client, dependencies, client
 ):

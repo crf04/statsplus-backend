@@ -5,7 +5,10 @@ Slate edges, and #552 adds ``trailing`` to the Slate and ``as_of`` to a game
 Matchup.  Before a cutover nothing trails, so each response must equal
 trunk's apart from those additive keys, which carry their resting values.
 #654 later adds ``last_five_games`` and ``season_averages`` to each Matchup
-player row; they are stripped too and pinned on their own.
+player row; they are stripped too and pinned on their own.  #407 makes PTS and
+FGA read the Traditional ``OPP_PTS`` and ``OPP_FGA`` rows, which the seeded
+legacy facts lack, so those windows name ``team_defense:traditional``; that
+entry is stripped too and pinned on its own.
 The golden file is trunk's (622a98b4) output of ``_responses``, captured by
 running this module's ``__main__`` against a ``git archive`` of that commit;
 regenerate it only from trunk.  Publication ids are random, so they are
@@ -132,6 +135,10 @@ def _without_serving_season_keys(responses: dict) -> dict:
     for player in stripped["matchup"]["players"]:
         player.pop("last_five_games", None)
         player.pop("season_averages", None)
+        for window in (window for windows in player["scores"].values() for window in windows.values()):
+            window["missing_inputs"] = [
+                name for name in window["missing_inputs"] if name != "team_defense:traditional"
+            ]
     window_states = [
         stripped["matchup"]["experience"]["sections"][section]
         for section in ("season_defense", "last_15_defense")
@@ -182,6 +189,14 @@ def test_before_a_cutover_matchup_slate_and_edges_equal_trunk_but_for_the_servin
         }
     ]
     assert player["season_averages"] == {"PTS": 31.0, "FGA": 18.0}
+    assert {
+        market: [
+            window_name
+            for window_name, window in windows.items()
+            if "team_defense:traditional" in window["missing_inputs"]
+        ]
+        for market, windows in player["scores"].items()
+    } == {"PTS": ["last_15", "season"], "FGA": ["last_15", "season"]}
     assert responses["matchup"]["trailing"] == []
     assert responses["slate"]["trailing"] == []
     assert responses["edges"]["trailing"] == []

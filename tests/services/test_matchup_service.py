@@ -620,6 +620,8 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
             "assist_locations": True,
             "rebound_types": True,
         },
+        # `_window` carries only the defensive Traditional rows, like a
+        # ledger materialization, so OPP_PTS and OPP_FGA are named as missing.
         "scores": {
             "PTS": {
                 # One observed play type is a complete Synergy Diet, so the
@@ -630,6 +632,7 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
                     "missing_inputs": [
                         "player_diet:shot_zones",
                         "player_diet:shot_types",
+                        "team_defense:traditional",
                     ],
                 },
                 "last_15": {
@@ -639,6 +642,7 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
                         "team_defense:play_types",
                         "player_diet:shot_zones",
                         "player_diet:shot_types",
+                        "team_defense:traditional",
                     ],
                 },
             },
@@ -649,6 +653,7 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
                     "missing_inputs": [
                         "player_diet:shot_zones",
                         "player_diet:shot_types",
+                        "team_defense:traditional",
                     ],
                 },
                 "last_15": {
@@ -657,6 +662,7 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
                     "missing_inputs": [
                         "player_diet:shot_zones",
                         "player_diet:shot_types",
+                        "team_defense:traditional",
                     ],
                 },
             },
@@ -789,15 +795,15 @@ def test_shot_zone_rows_expose_only_governed_compatible_markets():
     rows = {row["key"]: row["markets"] for row in payload["teams"][0]["defense_sheet"]["shot_zones"]}
     assert rows == {
         "Above the Break 3:FGA": ["FGA", "FG3A"],
-        "Above the Break 3:FGM": ["PTS", "3PM", "PA", "PR", "PRA"],
+        "Above the Break 3:FGM": ["PTS", "3PM", "FGM", "PA", "PR", "PRA"],
         "Corner 3:FGA": ["FGA", "FG3A"],
-        "Corner 3:FGM": ["PTS", "3PM", "PA", "PR", "PRA"],
+        "Corner 3:FGM": ["PTS", "3PM", "FGM", "PA", "PR", "PRA"],
         "In The Paint (Non-RA):FGA": ["FGA", "FG2A"],
-        "In The Paint (Non-RA):FGM": ["PTS", "PA", "PR", "PRA"],
+        "In The Paint (Non-RA):FGM": ["PTS", "FGM", "FG2M", "PA", "PR", "PRA"],
         "Mid-Range:FGA": ["FGA", "FG2A"],
-        "Mid-Range:FGM": ["PTS", "PA", "PR", "PRA"],
+        "Mid-Range:FGM": ["PTS", "FGM", "FG2M", "PA", "PR", "PRA"],
         "Restricted Area:FGA": ["FGA", "FG2A"],
-        "Restricted Area:FGM": ["PTS", "PA", "PR", "PRA"],
+        "Restricted Area:FGM": ["PTS", "FGM", "FG2M", "PA", "PR", "PRA"],
     }
 
 
@@ -1130,6 +1136,7 @@ def test_legacy_traditional_without_rebounds_keeps_defensive_scores_available(
         for window_name in ("season", "last_15"):
             assert scores[market][window_name] == {
                 "components": {"traditional": {"value": value, "thin": False}},
+                "blend": {"value": value, "thin": False},
                 "missing_inputs": [],
             }
     assert scores["REB"][missing_rebound_window] == {
@@ -1142,6 +1149,160 @@ def test_legacy_traditional_without_rebounds_keeps_defensive_scores_available(
         "components": {"traditional": {"value": -0.1, "thin": False}},
         "blend": {"value": -0.1, "thin": False},
         "missing_inputs": [],
+    }
+
+
+def test_new_traditional_rows_list_their_markets_and_a_window_without_them_stays_available():
+    """A Last-15 materialization from before #407 carries only the defensive
+    rows: its new-row cells are empty and PTS names the missing row, while the
+    Season window, which has them, scores and lists them."""
+
+    markets = ("PTS", "FTA")
+    pool = PlayerPool(
+        players=(PoolPlayer(2544, "LeBron James", LAL, markets, {"prizepicks": markets}),),
+        team_counts={LAL: 1},
+        freshness={"status": "fresh", "retrieved_at": RETRIEVED_AT.isoformat(), "providers": {}},
+    )
+    defensive = (
+        ("traditional", "OPP_TOV", "OPP_TOV", 13.0),
+        ("traditional", "OPP_STL", "OPP_STL", 7.0),
+        ("traditional", "OPP_BLK", "OPP_BLK", 5.0),
+    )
+    new_rows = (
+        ("traditional", "OPP_PTS", "OPP_PTS", 110.0),
+        ("traditional", "OPP_AST", "OPP_AST", 25.0),
+        ("traditional", "OPP_FGM", "OPP_FGM", 40.0),
+        ("traditional", "OPP_FGA", "OPP_FGA", 80.0),
+        ("traditional", "OPP_FG3M", "OPP_FG3M", 12.0),
+        ("traditional", "OPP_FG3A", "OPP_FG3A", 32.0),
+        ("traditional", "OPP_FTM", "OPP_FTM", 16.0),
+        ("traditional", "OPP_FTA", "OPP_FTA", 20.0),
+    )
+
+    payload = _service(
+        pool=pool,
+        season_window=_window(traditional_metrics=(*defensive, *new_rows)),
+        last_15_window=_window(last_15=True, traditional_metrics=defensive),
+    ).get_matchup(game_id=GAME_ID)
+
+    assert payload["league"]["surface_availability"]["traditional"]["last_15"]["status"] == "available"
+    boston = next(team for team in payload["teams"] if team["team_id"] == BOS)
+    rows = {row["key"]: row for row in boston["defense_sheet"]["traditional"]}
+    assert {key: rows[key]["markets"] for _base, key, _stat, _average in new_rows} == {
+        "OPP_PTS": ["PTS", "PA", "PR", "PRA"],
+        "OPP_AST": ["AST", "PA", "RA", "PRA"],
+        "OPP_FGM": ["FGM"],
+        "OPP_FGA": ["FGA"],
+        "OPP_FG3M": ["3PM"],
+        "OPP_FG3A": ["FG3A"],
+        "OPP_FTM": ["FTM"],
+        "OPP_FTA": ["FTA"],
+    }
+    # BOS allows the league average minus one per 48 in `_window`.
+    assert rows["OPP_FTA"]["season"] == {
+        "allowed_per_48": 19.0,
+        "percent_vs_league_average": -5.0,
+        "sigma_deviation": -0.5,
+        "rank": 14,
+    }
+    assert rows["OPP_FTA"]["last_15"] is None
+    assert rows["OPP_TOV"]["last_15"] is not None
+
+    scores = payload["players"][0]["scores"]
+    assert scores["FTA"] == {
+        "season": {
+            "components": {"traditional": {"value": -0.05, "thin": False}},
+            "blend": {"value": -0.05, "thin": False},
+            "missing_inputs": [],
+        },
+        "last_15": {"components": {}, "blend": None, "missing_inputs": ["team_defense:traditional"]},
+    }
+    assert scores["PTS"]["season"]["components"]["traditional"] == {"value": -0.009091, "thin": False}
+    assert "traditional" not in scores["PTS"]["last_15"]["components"]
+    assert scores["PTS"]["last_15"]["missing_inputs"][-1] == "team_defense:traditional"
+
+
+def test_a_raw_traditional_publication_projects_each_row_into_the_sheet_and_scores():
+    """The ledger team-window Publication carries counts by ledger metric; each
+    Defense Sheet row and Traditional score reads its own metric. BOS differs
+    from the other 29 teams on every metric by a different ratio, so a row that
+    read a neighbouring metric would show another number."""
+
+    from sqlalchemy import create_engine
+
+    from app.migrations import run_migrations
+    from app.services.team_matchup_query import TeamMatchupQueryService
+    from app.services.team_matchup_repository import TeamMatchupRepository
+    from tests.support import publication_stubs
+
+    others = {
+        "points": 110.0,
+        "assists": 25.0,
+        "field_goals_made": 40.0,
+        "field_goals_attempted": 80.0,
+        "three_pointers_made": 12.0,
+        "three_pointers_attempted": 32.0,
+        "free_throws_made": 16.0,
+        "free_throws_attempted": 20.0,
+    }
+    boston = {
+        "points": 116.0,
+        "assists": 22.0,
+        "field_goals_made": 43.0,
+        "field_goals_attempted": 84.0,
+        "three_pointers_made": 15.0,
+        "three_pointers_attempted": 35.0,
+        "free_throws_made": 13.0,
+        "free_throws_attempted": 17.0,
+    }
+    stream = "traditional_opponent_season"
+    publication = publication_stubs.read(
+        stream,
+        publication_stubs.league(
+            lambda tricode: publication_stubs.traditional_per48(**(boston if tricode == "BOS" else others))
+        ),
+    )
+    engine = create_engine("sqlite://")
+    run_migrations(engine)
+    season_window = TeamMatchupQueryService(
+        TeamMatchupRepository(engine),
+        clock=lambda: publication_stubs.RETRIEVED_AT,
+        publication_reader=publication_stubs.StubReader({stream: publication}),
+    ).get_latest_window(publication_stubs.SEASON, as_of=publication_stubs.RETRIEVED_AT.date())
+    markets = ("PTS", "AST", "FGM", "FGA", "3PM", "FG3A", "FTM", "FTA")
+    pool = PlayerPool(
+        players=(PoolPlayer(2544, "LeBron James", LAL, markets, {"prizepicks": markets}),),
+        team_counts={LAL: 1},
+        freshness={"status": "fresh", "retrieved_at": RETRIEVED_AT.isoformat(), "providers": {}},
+    )
+
+    payload = _service(pool=pool, season_window=season_window).get_matchup(game_id=GAME_ID)
+
+    boston_sheet = next(team for team in payload["teams"] if team["team_id"] == BOS)["defense_sheet"]
+    rows = {row["key"]: row["season"]["allowed_per_48"] for row in boston_sheet["traditional"]}
+    assert {key: rows[key] for key in ("OPP_PTS", "OPP_AST", "OPP_FGM", "OPP_FGA")} == {
+        "OPP_PTS": 116.0,
+        "OPP_AST": 22.0,
+        "OPP_FGM": 43.0,
+        "OPP_FGA": 84.0,
+    }
+    assert {key: rows[key] for key in ("OPP_FG3M", "OPP_FG3A", "OPP_FTM", "OPP_FTA")} == {
+        "OPP_FG3M": 15.0,
+        "OPP_FG3A": 35.0,
+        "OPP_FTM": 13.0,
+        "OPP_FTA": 17.0,
+    }
+    # Each is BOS / the 30-team mean - 1, e.g. FGM 43 / 40.1 - 1.
+    scores = payload["players"][0]["scores"]
+    assert {market: scores[market]["season"]["components"]["traditional"]["value"] for market in markets} == {
+        "PTS": 0.052632,
+        "AST": -0.116466,
+        "FGM": 0.072319,
+        "FGA": 0.048253,
+        "3PM": 0.239669,
+        "FG3A": 0.090343,
+        "FTM": -0.18239,
+        "FTA": -0.145729,
     }
 
 
@@ -2598,6 +2759,7 @@ def test_historical_scores_name_missing_inputs_without_a_partial_blend():
             "player_diet:play_types",
             "player_diet:shot_zones",
             "player_diet:shot_types",
+            "team_defense:traditional",
         ],
     }
     assert scores["PTS"]["last_15"]["missing_inputs"][0] == ("team_defense:play_types")
@@ -2631,6 +2793,8 @@ def test_a_historical_blend_is_withheld_while_its_components_still_show():
         "player_diet:shot_zones",
         "player_diet:shot_types",
         "player_diet:assist_locations",
+        # OPP_REB fills the combo's cell, but the window has no OPP_PTS or OPP_AST.
+        "team_defense:traditional",
     ]
 
 
@@ -2715,11 +2879,13 @@ def test_a_historical_score_uses_stored_player_diet_as_evidence():
     season = payload["players"][0]["scores"]["PTS"]["season"]
     # play_types is a complete partition with its one stored slice and now
     # computes. shot_zones' one stored slice is not a whole partition and
-    # shot_types has no stored evidence at all; both are still named.
+    # shot_types has no stored evidence at all; both are still named, and
+    # so is the OPP_PTS row this window does not carry.
     assert season["components"]["play_types"]["value"] is not None
     assert season["missing_inputs"] == [
         "player_diet:shot_zones",
         "player_diet:shot_types",
+        "team_defense:traditional",
     ]
 
 
@@ -2790,7 +2956,7 @@ def test_a_historical_window_with_every_required_input_keeps_its_cells():
     payload = _historical_service(diets=RecordedPartialDiets()).get_matchup(game_id=GAME_ID)
 
     # The traditional Base consumes no Diet, so TOV needs nothing it lacks and
-    # its cells are exactly what they were. Defensive windows omit `blend`.
+    # its cells are exactly what they were.
     season = payload["players"][0]["scores"]["TOV"]["season"]
     assert season["missing_inputs"] == []
     assert season["components"]["traditional"]["value"] is not None
@@ -2804,7 +2970,7 @@ def test_a_current_matchup_keeps_its_partial_blend_unchanged():
     assert payload["players"][0]["scores"]["PTS"]["season"] == {
         "components": {"play_types": {"value": -0.011875, "thin": True}},
         "blend": {"value": -0.011875, "thin": True},
-        "missing_inputs": ["player_diet:shot_zones", "player_diet:shot_types"],
+        "missing_inputs": ["player_diet:shot_zones", "player_diet:shot_types", "team_defense:traditional"],
     }
 
 
@@ -2842,8 +3008,12 @@ _PARITY_MARKETS = (
     "AST",
     "BLK",
     "FG2A",
+    "FG2M",
     "FG3A",
     "FGA",
+    "FGM",
+    "FTA",
+    "FTM",
     "PA",
     "PR",
     "PRA",
@@ -2888,6 +3058,14 @@ def _parity_evidence(rebound_type_metrics=()):
         ("traditional", "OPP_STL", "OPP_STL", 7.0),
         ("traditional", "OPP_BLK", "OPP_BLK", 5.0),
         ("traditional", "OPP_REB", "OPP_REB", 44.0),
+        ("traditional", "OPP_PTS", "OPP_PTS", 110.0),
+        ("traditional", "OPP_AST", "OPP_AST", 25.0),
+        ("traditional", "OPP_FGM", "OPP_FGM", 40.0),
+        ("traditional", "OPP_FGA", "OPP_FGA", 80.0),
+        ("traditional", "OPP_FG3M", "OPP_FG3M", 12.0),
+        ("traditional", "OPP_FG3A", "OPP_FG3A", 32.0),
+        ("traditional", "OPP_FTM", "OPP_FTM", 16.0),
+        ("traditional", "OPP_FTA", "OPP_FTA", 20.0),
     )
     assist_location_metrics = tuple(
         ("assist_locations", slice_key, slice_key, 6.0)
@@ -3021,13 +3199,47 @@ def test_a_historical_matchup_without_a_rebound_diet_keeps_the_traditional_blend
         "RA": [],
         "PRA": [],
     }
+    # The PTS and AST parts blend in their OPP_PTS and OPP_AST rows: AST is
+    # mean(-1/6, -1/25), so RA = (5 * -1/44 + 4 * -0.103334) / 9.
     assert {market: window["blend"] for market, window in base.items()} == {
         "REB": {"value": -0.022727, "thin": False},
-        "PR": {"value": -0.059491, "thin": True},
-        "RA": {"value": -0.0867, "thin": False},
-        "PRA": {"value": -0.073781, "thin": True},
+        "PR": {"value": -0.047547, "thin": True},
+        "RA": {"value": -0.058552, "thin": False},
+        "PRA": {"value": -0.054985, "thin": True},
     }
     assert base["REB"]["components"] == {"traditional": {"value": -0.022727, "thin": False}}
+
+
+def test_a_combo_withholds_its_blend_when_one_part_lacks_its_traditional_row():
+    # OPP_REB alone still fills RA's `traditional` cell, but AST's OPP_AST
+    # input is gone, so every combo with an AST part names the gap and a
+    # historical Matchup withholds its Blend. PR has no AST part.
+    diets, season_window, _last_15_window = _parity_evidence()
+
+    def keep(metric):
+        return (metric.base, metric.stat_key) != ("traditional", "OPP_AST")
+
+    without_opp_ast = replace(
+        season_window,
+        league_metrics=tuple(filter(keep, season_window.league_metrics)),
+        team_metrics={team: tuple(filter(keep, rows)) for team, rows in season_window.team_metrics.items()},
+    )
+    payload = _historical_service(
+        diets=diets, season_window=without_opp_ast, player_logs=RecordedGameLogs()
+    ).get_matchup(game_id=GAME_ID)
+    scores = next(row for row in payload["players"] if row["canonical_id"] == AWAY_PARTICIPANT)["scores"]
+
+    assert {
+        market: (scores[market]["season"]["missing_inputs"], scores[market]["season"]["blend"])
+        for market in ("AST", "PA", "RA", "PRA", "PR")
+    } == {
+        "AST": (["team_defense:traditional"], None),
+        "PA": (["team_defense:traditional"], None),
+        "RA": (["team_defense:traditional"], None),
+        "PRA": (["team_defense:traditional"], None),
+        "PR": ([], {"value": -0.047547, "thin": True}),
+    }
+    assert scores["RA"]["season"]["components"]["traditional"] == {"value": -0.012626, "thin": False}
 
 
 def test_participants_without_a_season_rate_stay_visible_and_name_the_gap():
