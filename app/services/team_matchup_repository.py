@@ -13,7 +13,7 @@ from math import isfinite
 from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, delete, func, insert, or_, select
+from sqlalchemy import delete, func, insert, select, tuple_
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
@@ -1218,40 +1218,46 @@ class TeamMatchupRepository:
             observations=tuple(_observation_from_row(row) for row in observation_rows),
         )
 
-    def get_metric_facts(
+    def get_latest_metric_facts(
         self,
-        fact_scopes: Mapping[str, TeamMatchupSnapshotScope],
+        season: str,
         *,
+        window_games: int | None = None,
+        as_of: date,
         connection: Connection | None = None,
-    ) -> tuple[TeamMetricFact, ...]:
-        """Read the values a window ranks, each base from its own scope, in one statement.
+    ) -> tuple[dict[str, TeamMatchupSnapshotScope], tuple[TeamMetricFact, ...]]:
+        """Return each base's newest fact scope through ``as_of`` and the values a window ranks.
 
-        A window ranks each stat across the league from these columns alone, so
-        the lineage columns (``game_ids`` JSON is most of a row's bytes) stay
+        One statement: each base is read at its own newest scope.  A window
+        ranks each stat across the league from these columns alone, so the
+        lineage columns (``game_ids`` JSON is most of a row's bytes) stay
         unread.
         """
 
-        if not fact_scopes:
-            return ()
-        bases_by_scope: dict[TeamMatchupSnapshotScope, list[str]] = defaultdict(list)
-        for base, scope in fact_scopes.items():
-            bases_by_scope[scope].append(base)
+        requested = TeamMatchupSnapshotScope(season, as_of, window_games)
         table = TeamMatchupFactRow.__table__
+        conditions = (
+            table.c.season == season,
+            table.c.window_kind == requested.window_kind,
+            table.c.window_games == requested.stored_window_games,
+        )
+        newest_by_base = (
+            select(table.c.base, func.max(table.c.as_of_date))
+            .where(*conditions, table.c.as_of_date <= as_of)
+            .group_by(table.c.base)
+        )
         statement = (
-            select(*(table.c[name] for name in TeamMetricFact._fields))
-            .where(
-                or_(
-                    *(
-                        and_(*self._scope(table, scope), table.c.base.in_(sorted(bases)))
-                        for scope, bases in bases_by_scope.items()
-                    )
-                )
-            )
+            select(*(table.c[name] for name in TeamMetricFact._fields), table.c.as_of_date)
+            .where(*conditions, tuple_(table.c.base, table.c.as_of_date).in_(newest_by_base))
             .order_by(table.c.team_id, table.c.base, table.c.slice_key, table.c.stat_key)
         )
         with read_connection(self.engine, connection) as connection:
             rows = connection.execute(statement).all()
-        return tuple(TeamMetricFact(*row[:-1], retrieved_at=assume_utc(row.retrieved_at)) for row in rows)
+        fact_scopes = {
+            row.base: TeamMatchupSnapshotScope(season, row.as_of_date, window_games) for row in rows
+        }
+        facts = tuple(TeamMetricFact(*row[:7], retrieved_at=assume_utc(row.retrieved_at)) for row in rows)
+        return fact_scopes, facts
 
     def get_latest_scope(
         self,
@@ -1311,34 +1317,6 @@ class TeamMatchupRepository:
             return None, ()
         scope = TeamMatchupSnapshotScope(season, rows[0]["as_of_date"], window_games)
         return scope, tuple(_observation_from_row(row) for row in rows)
-
-    def get_latest_fact_scopes(
-        self,
-        season: str,
-        *,
-        window_games: int | None = None,
-        as_of: date,
-        connection: Connection | None = None,
-    ) -> dict[str, TeamMatchupSnapshotScope]:
-        """Return each surface's newest fact-bearing scope through ``as_of``."""
-
-        requested = TeamMatchupSnapshotScope(season, as_of, window_games)
-        table = TeamMatchupFactRow.__table__
-        statement = (
-            select(table.c.base, func.max(table.c.as_of_date).label("as_of_date"))
-            .where(
-                table.c.season == season,
-                table.c.window_kind == requested.window_kind,
-                table.c.window_games == requested.stored_window_games,
-                table.c.as_of_date <= as_of,
-            )
-            .group_by(table.c.base)
-        )
-        with read_connection(self.engine, connection) as scoped:
-            rows = scoped.execute(statement).mappings().all()
-        return {
-            row["base"]: TeamMatchupSnapshotScope(season, row["as_of_date"], window_games) for row in rows
-        }
 
 
 def _game_ids_json(game_ids: tuple[str, ...]) -> str | None:

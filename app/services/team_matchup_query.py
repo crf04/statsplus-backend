@@ -370,7 +370,7 @@ class TeamMatchupQueryService:
                 connection=connection,
                 governance=governance,
             )
-        fact_scopes = self.repository.get_latest_fact_scopes(
+        fact_scopes, facts = self.repository.get_latest_metric_facts(
             season,
             window_games=window_games,
             as_of=cutoff,
@@ -384,7 +384,7 @@ class TeamMatchupQueryService:
                 self._build_window,
                 observation_scope,
                 fact_scopes=fact_scopes,
-                facts=self.repository.get_metric_facts(fact_scopes, connection=connection),
+                facts=facts,
                 observations=observations,
             ),
             strict_as_of=strict_as_of,
