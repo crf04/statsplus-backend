@@ -3567,6 +3567,122 @@ def test_runner_provider_schema_failure_is_non_retryable(tmp_path: Path):
     outbox.close()
 
 
+LAC = 1610612746
+OKC = 1610612760
+
+
+def _opponent_shot_discovery(*team_ids):
+    return {
+        "environment": "testing",
+        "bootstrap_requests": [],
+        "manifests": [
+            {
+                "manifest_id": "m-opponent-shots",
+                "season": "2026-27",
+                "cutoff": NOW.isoformat(),
+                "collect_before": (NOW + timedelta(hours=1)).isoformat(),
+                "accepted_versions": [2],
+                "scopes": ["shot_types_opponent"],
+                "scope_descriptors": [
+                    {"scope": "shot_types_opponent", "parameters": {"window": "season", "team_id": team_id}}
+                    for team_id in team_ids
+                ],
+            }
+        ],
+    }
+
+
+def _patch_opponent_shot_endpoints(monkeypatch, *, tracking_gp, box_score):
+    """Serve NBA tracking and box-score frames at the nba_api boundary."""
+
+    from nba_api.stats import endpoints
+
+    class OppPtShot:
+        def __init__(self, *, general_range_nullable, team_id_nullable, **_kwargs):
+            self.category = general_range_nullable
+            self.team_id = team_id_nullable
+
+        def get_data_frames(self):
+            return [
+                pd.DataFrame(
+                    [
+                        {
+                            "TEAM_ID": self.team_id,
+                            "GP": tracking_gp[self.team_id],
+                            "FG2M": 10,
+                            "FG2A": 20,
+                            "FG3M": 5,
+                            "FG3A": 15,
+                        }
+                    ]
+                )
+            ]
+
+    class TeamStats:
+        def __init__(self, *, team_id_nullable, **_kwargs):
+            self.team_id = team_id_nullable
+
+        def get_data_frames(self):
+            return [box_score(self.team_id)]
+
+    monkeypatch.setattr(endpoints, "LeagueDashOppPtShot", OppPtShot)
+    monkeypatch.setattr(endpoints, "LeagueDashTeamStats", TeamStats)
+
+
+def test_tracking_behind_the_box_score_defers_the_team_without_failing_the_run(
+    tmp_path: Path, monkeypatch
+):
+    # NBA tracking dropped LAC @ OKC on 10/25 for a day: tracking counts six
+    # LAC games where the box score counts seven.
+    _patch_opponent_shot_endpoints(
+        monkeypatch,
+        tracking_gp={LAC: 6, OKC: 7},
+        box_score=lambda team_id: pd.DataFrame([{"TEAM_ID": team_id, "GP": 7, "MIN": 1691.0}]),
+    )
+    collector, transport, outbox = _collector(
+        tmp_path,
+        discovery=_opponent_shot_discovery(LAC, OKC),
+        provider=_StandaloneNBAProvider(),
+        release_checksum="a" * 64,
+    )
+
+    result = collector.run()
+
+    assert result.exit_code == 0
+    assert result.disposition is RunDisposition.COMPLETE
+    assert result.failures == ("provider_window_unverified",)
+    assert result.spooled == 3
+    assert result.uploaded == 3
+    terminal = [call[4] for call in transport.calls if call[1].endswith("/api/collector/status")][-1]
+    assert (terminal["state"], terminal["reason"]) == ("complete", "provider_window_unverified")
+    outbox.close()
+
+
+@pytest.mark.parametrize(
+    ("box_score_row", "failure"),
+    [
+        ({"GAMES": 7, "MIN": 1691.0}, "provider_schema_changed"),
+        ({"GP": 7, "MIN": 0.0}, "value_invariant_failed"),
+    ],
+)
+def test_a_malformed_box_score_still_fails_the_run(tmp_path: Path, monkeypatch, box_score_row, failure):
+    _patch_opponent_shot_endpoints(
+        monkeypatch,
+        tracking_gp={LAC: 7},
+        box_score=lambda team_id: pd.DataFrame([{"TEAM_ID": team_id, **box_score_row}]),
+    )
+    collector, transport, outbox = _collector(
+        tmp_path, discovery=_opponent_shot_discovery(LAC), provider=_StandaloneNBAProvider()
+    )
+
+    result = collector.run()
+
+    assert result.exit_code == 20
+    assert result.disposition is RunDisposition.NON_RETRYABLE
+    assert result.failures == (failure,)
+    outbox.close()
+
+
 def test_cached_instruction_is_used_before_expiry_during_railway_outage(tmp_path: Path):
     discovery = {
         "environment": "testing",

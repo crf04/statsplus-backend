@@ -450,6 +450,14 @@ class _StandaloneNBAProvider:
 
     @staticmethod
     def _bind_window_gp(frame: Any, evidence: Any, *, team_id: int) -> Any:
+        """Bind the box score's games and minutes to the tracking frame.
+
+        Only the two endpoints disagreeing about the window is
+        ``provider_window_unverified``: tracking trails the box score for
+        hours after a game, and the runner defers that scope to a later run.
+        A malformed response stays ``provider_schema_changed``.
+        """
+
         try:
             frame = _flatten_frame_columns(frame)
             evidence = _flatten_frame_columns(evidence)
@@ -459,17 +467,19 @@ class _StandaloneNBAProvider:
             expected_gp = int(rows.iloc[0]["GP"])
             expected_minutes = float(rows.iloc[0]["MIN"])
             if not math.isfinite(expected_minutes) or expected_minutes <= 0:
-                raise ProviderContractError("provider_window_unverified")
+                raise ProviderContractError("value_invariant_failed")
             merged = frame.copy()
-            if "TEAM_ID" not in merged or not (merged["TEAM_ID"] == team_id).all():
-                raise ProviderContractError("provider_window_unverified")
+            if not (merged["TEAM_ID"] == team_id).all():
+                raise ProviderContractError("manifest_scope_mismatch")
             if "GP" in merged and not (merged["GP"] == expected_gp).all():
                 raise ProviderContractError("provider_window_unverified")
             merged["GP"] = expected_gp
             merged["MIN"] = expected_minutes
             return merged
+        except ProviderContractError:
+            raise
         except (KeyError, TypeError, AttributeError, ValueError) as error:
-            raise ProviderContractError("provider_window_unverified") from error
+            raise ProviderContractError("provider_schema_changed") from error
 
     def _team_window_evidence(
         self,
@@ -614,7 +624,7 @@ class _StandaloneNBAProvider:
             merged["GP"] = merged["WINDOW_GP"]
             return merged.drop(columns=["WINDOW_GP"])
         except (KeyError, TypeError, AttributeError) as error:
-            raise ProviderContractError("provider_window_unverified") from error
+            raise ProviderContractError("provider_schema_changed") from error
 
     def fetch_player_shot_type(
         self,
@@ -862,11 +872,13 @@ class _StandaloneNBAProvider:
             ):
                 value = float(row[source])
                 if not math.isfinite(value) or value < 0:
-                    raise ProviderContractError("provider_window_unverified")
+                    raise ProviderContractError("value_invariant_failed")
                 merged[column] = value
             return merged
+        except ProviderContractError:
+            raise
         except (KeyError, TypeError, AttributeError, ValueError) as error:
-            raise ProviderContractError("provider_window_unverified") from error
+            raise ProviderContractError("provider_schema_changed") from error
 
 
 class NBAStatsProviderAdapter:
