@@ -7185,16 +7185,21 @@ class PublicationService(_SessionService):
         if current_pairs != expected_pairs or not expected_pairs <= evidence_pairs:
             raise ControlPlaneError("ledger_provenance_not_accepted")
         # Every game, whichever night accepted it, must be the game the
-        # composing manifest's Event Catalog lists.
+        # composing manifest's Event Catalog lists.  The catalog is held with
+        # its payload, so the authority check verifies the very payload the
+        # games are read from, downloaded once.
+        catalog = (
+            session.get(CatalogPublication, composing.event_catalog_publication_id)
+            if composing.event_catalog_publication_id
+            else None
+        )
         try:
-            authority = resolve_publication_authority(
+            resolve_publication_authority(
                 session, season=season, cutoff=cutoff, manifest_id=composing.manifest_id
             )
         except PublicationGovernanceUnavailable as error:
             raise ControlPlaneError("event_catalog_required") from error
-        governed = _catalog_game_identities(
-            session.get(CatalogPublication, authority.event_catalog_publication_id).payload, cutoff
-        )
+        governed = _catalog_game_identities(catalog.payload, cutoff)
         for game in games:
             if governed.get(str(game.game_id)) != (game.game_date, game.home_team_id, game.away_team_id):
                 raise ControlPlaneError("ledger_provenance_catalog_mismatch")
