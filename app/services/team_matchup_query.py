@@ -48,6 +48,7 @@ from app.services.team_matchup_repository import (
     StoredTeamMatchupObservation,
     TeamMatchupRepository,
     TeamMatchupSnapshotScope,
+    TeamMetricFact,
 )
 from app.services.traditional_opponent_publications import (
     normalize_traditional_opponent_window,
@@ -360,8 +361,7 @@ class TeamMatchupQueryService:
                 strict_as_of=strict_as_of,
                 publication_snapshot=publication_snapshot,
             )
-        observation_snapshot = self.repository.get_snapshot(observation_scope, connection=connection)
-        observations = observation_snapshot.observations
+        observations = self.repository.get_observations(observation_scope, connection=connection)
         fact_scopes = self.repository.get_latest_fact_scopes(
             season,
             window_games=window_games,
@@ -371,14 +371,9 @@ class TeamMatchupQueryService:
         surfaces_by_scope = defaultdict(set)
         for surface, fact_scope in fact_scopes.items():
             surfaces_by_scope[fact_scope].add(surface)
-        snapshots_by_scope = {observation_scope: observation_snapshot}
         facts = []
         for fact_scope, surfaces in surfaces_by_scope.items():
-            if fact_scope not in snapshots_by_scope:
-                snapshots_by_scope[fact_scope] = self.repository.get_snapshot(
-                    fact_scope, connection=connection
-                )
-            facts.extend(fact for fact in snapshots_by_scope[fact_scope].facts if fact.base in surfaces)
+            facts.extend(self.repository.get_metric_facts(fact_scope, surfaces, connection=connection))
         legacy_window = self._build_window(
             observation_scope,
             fact_scopes=fact_scopes,
@@ -845,7 +840,7 @@ class TeamMatchupQueryService:
         scope: TeamMatchupSnapshotScope,
         *,
         fact_scopes: dict[str, TeamMatchupSnapshotScope],
-        facts: Iterable[StoredTeamMatchupFact],
+        facts: Iterable[StoredTeamMatchupFact | TeamMetricFact],
         observations: Iterable[StoredTeamMatchupObservation],
     ) -> TeamMatchupWindow:
         grouped = defaultdict(list)

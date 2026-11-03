@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from functools import lru_cache
 from math import isfinite
+from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, func, insert, select
@@ -357,6 +358,19 @@ class StoredTeamMatchupFact(TeamMatchupFact):
 @dataclass(frozen=True, slots=True)
 class StoredTeamMatchupObservation(TeamMatchupObservation):
     retrieved_at: datetime = datetime.min
+
+
+class TeamMetricFact(NamedTuple):
+    """The columns of one stored fact that a Defense Sheet window ranks."""
+
+    team_id: int
+    base: str
+    slice_key: str
+    stat_key: str
+    raw_value: float | None
+    denominator_value: float | None
+    denominator_unit: str | None
+    retrieved_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -1201,27 +1215,49 @@ class TeamMatchupRepository:
                 )
                 for row in fact_rows
             ),
-            observations=tuple(
-                StoredTeamMatchupObservation(
-                    surface=row["surface"],
-                    status=row["status"],
-                    unavailable_reason=row["unavailable_reason"],
-                    retrieved_at=assume_utc(row["retrieved_at"]),
-                    game_ids=_parse_game_ids(row["game_ids"]),
-                    ledger_checksum=row["ledger_checksum"],
-                    source_observation_ids=_parse_source_observation_ids(row["source_observation_ids"]),
-                    game_set_checksum=row["game_set_checksum"],
-                    cutoff=_optional_aware(row["cutoff"]),
-                    recomposition_reason=row["recomposition_reason"],
-                    manifest_id=row["manifest_id"],
-                    event_catalog_publication_id=row["event_catalog_publication_id"],
-                    event_catalog_checksum=row["event_catalog_checksum"],
-                    provider_window_identity=row["provider_window_identity"],
-                    publication=_publication_from_row(row),
-                )
-                for row in observation_rows
-            ),
+            observations=tuple(_observation_from_row(row) for row in observation_rows),
         )
+
+    def get_observations(
+        self,
+        scope: TeamMatchupSnapshotScope,
+        *,
+        connection: Connection | None = None,
+    ) -> tuple[StoredTeamMatchupObservation, ...]:
+        """Read one scope's surface observations without its facts."""
+
+        table = TeamMatchupSurfaceObservationRow.__table__
+        with read_connection(self.engine, connection) as connection:
+            rows = (
+                connection.execute(select(table).where(*self._scope(table, scope)).order_by(table.c.surface))
+                .mappings()
+                .all()
+            )
+        return tuple(_observation_from_row(row) for row in rows)
+
+    def get_metric_facts(
+        self,
+        scope: TeamMatchupSnapshotScope,
+        bases: Collection[str],
+        *,
+        connection: Connection | None = None,
+    ) -> tuple[TeamMetricFact, ...]:
+        """Read the values a window ranks for ``bases`` at one scope.
+
+        A window ranks each stat across the league from these columns alone, so
+        the lineage columns (``game_ids`` JSON is most of a row's bytes) stay
+        unread.
+        """
+
+        table = TeamMatchupFactRow.__table__
+        statement = (
+            select(*(table.c[name] for name in TeamMetricFact._fields))
+            .where(*self._scope(table, scope), table.c.base.in_(sorted(bases)))
+            .order_by(table.c.team_id, table.c.base, table.c.slice_key, table.c.stat_key)
+        )
+        with read_connection(self.engine, connection) as connection:
+            rows = connection.execute(statement).all()
+        return tuple(TeamMetricFact(*row[:-1], retrieved_at=assume_utc(row.retrieved_at)) for row in rows)
 
     def get_latest_scope(
         self,
@@ -1332,6 +1368,26 @@ def _optional_aware(value: datetime | None) -> datetime | None:
     return None if value is None else assume_utc(value)
 
 
+def _observation_from_row(row) -> StoredTeamMatchupObservation:
+    return StoredTeamMatchupObservation(
+        surface=row["surface"],
+        status=row["status"],
+        unavailable_reason=row["unavailable_reason"],
+        retrieved_at=assume_utc(row["retrieved_at"]),
+        game_ids=_parse_game_ids(row["game_ids"]),
+        ledger_checksum=row["ledger_checksum"],
+        source_observation_ids=_parse_source_observation_ids(row["source_observation_ids"]),
+        game_set_checksum=row["game_set_checksum"],
+        cutoff=_optional_aware(row["cutoff"]),
+        recomposition_reason=row["recomposition_reason"],
+        manifest_id=row["manifest_id"],
+        event_catalog_publication_id=row["event_catalog_publication_id"],
+        event_catalog_checksum=row["event_catalog_checksum"],
+        provider_window_identity=row["provider_window_identity"],
+        publication=_publication_from_row(row),
+    )
+
+
 def _publication_columns(
     publication: PublicationLineage | None,
 ) -> dict[str, object]:
@@ -1369,5 +1425,6 @@ __all__ = [
     "TeamMatchupObservation",
     "TeamMatchupRepository",
     "TeamMatchupSnapshotScope",
+    "TeamMetricFact",
     "create_publication_write_capability",
 ]

@@ -11,7 +11,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 import requests
-from sqlalchemy import create_engine, delete, inspect, update
+from sqlalchemy import create_engine, delete, event, inspect, update
 from sqlalchemy.exc import IntegrityError
 
 from app.migrations import run_migrations
@@ -295,14 +295,17 @@ def test_legacy_fence_checks_only_the_exact_surface_window_stream(tmp_path):
     )
 
 
-class _CountingTeamMatchupRepository(TeamMatchupRepository):
-    def __init__(self, engine):
-        super().__init__(engine)
-        self.snapshot_calls = []
+def _record_fact_row_reads(engine) -> list[str]:
+    """Record every statement that reads stored fact rows, not a scope lookup."""
 
-    def get_snapshot(self, scope, **read_scope):
-        self.snapshot_calls.append(scope)
-        return super().get_snapshot(scope, **read_scope)
+    statements: list[str] = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _record(_connection, _cursor, statement, *_args):
+        if "FROM team_matchup_facts" in statement and "team_matchup_facts.team_id" in statement:
+            statements.append(statement)
+
+    return statements
 
 
 def _one_game_for_every_team(played_on: date) -> list[dict]:
@@ -2107,7 +2110,7 @@ def test_latest_window_reads_a_shared_fact_scope_once(tmp_path):
     )
     engine = create_engine(f"sqlite:///{tmp_path / 'latest-query-count.sqlite3'}")
     run_migrations(engine)
-    repository = _CountingTeamMatchupRepository(engine)
+    repository = TeamMatchupRepository(engine)
     scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), 15)
     facts = [
         TeamMatchupFact(
@@ -2131,6 +2134,7 @@ def test_latest_window_reads_a_shared_fact_scope_once(tmp_path):
         retrieved_at=datetime(2025, 4, 15, 15, tzinfo=UTC),
     )
 
+    fact_reads = _record_fact_row_reads(engine)
     latest = TeamMatchupQueryService(
         repository,
         clock=lambda: datetime(2025, 4, 15, 16, tzinfo=UTC),
@@ -2141,13 +2145,15 @@ def test_latest_window_reads_a_shared_fact_scope_once(tmp_path):
     assert latest.fact_scopes == {surface: scope for surface in surfaces}
     assert len(latest.league_metrics) == 5
     assert len(latest.team_metrics) == 30
-    assert repository.snapshot_calls == [scope]
+    assert len(fact_reads) == 1
+    # A window ranks values; the per-team lineage text is never read for it.
+    assert not any("game_ids" in statement for statement in fact_reads)
 
 
 def test_latest_window_reads_each_distinct_usable_fact_scope_once(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'distinct-query-count.sqlite3'}")
     run_migrations(engine)
-    repository = _CountingTeamMatchupRepository(engine)
+    repository = TeamMatchupRepository(engine)
     traditional_scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 13), 15)
     zone_scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 14), 15)
     observation_scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), 15)
@@ -2189,12 +2195,14 @@ def test_latest_window_reads_each_distinct_usable_fact_scope_once(tmp_path):
         retrieved_at=datetime(2025, 4, 15, 15, tzinfo=UTC),
     )
 
+    fact_reads = _record_fact_row_reads(engine)
     latest = TeamMatchupQueryService(
         repository,
         clock=lambda: datetime(2025, 4, 15, 16, tzinfo=UTC),
     ).get_latest_window("2024-25", window_games=15)
 
     assert latest is not None
+    assert latest.scope == observation_scope
     assert latest.fact_scopes == {
         "shot_zones": zone_scope,
         "traditional": traditional_scope,
@@ -2203,13 +2211,73 @@ def test_latest_window_reads_each_distinct_usable_fact_scope_once(tmp_path):
         ("shot_zones", 20),
         ("traditional", 10),
     }
-    assert repository.snapshot_calls[0] == observation_scope
-    assert len(repository.snapshot_calls) == 3
-    assert set(repository.snapshot_calls) == {
-        observation_scope,
-        zone_scope,
-        traditional_scope,
+    assert len(fact_reads) == 2
+
+
+def test_latest_window_ranks_each_base_from_its_own_newest_scope(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'fallback-ranks.sqlite3'}")
+    run_migrations(engine)
+    repository = TeamMatchupRepository(engine)
+    team_ids = _fixture_team_ids()
+    older_scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 13), 15)
+    newer_scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 14), 15)
+    older_at = datetime(2025, 4, 13, 15, tzinfo=UTC)
+    newer_at = datetime(2025, 4, 14, 15, tzinfo=UTC)
+
+    def zone_facts(value_for_index):
+        return [
+            TeamMatchupFact(
+                team_id=team_id,
+                base="shot_zones",
+                slice_key="Restricted Area",
+                stat_key="FGM",
+                raw_value=value_for_index(index),
+                denominator_value=48,
+                denominator_unit="minutes",
+                provider="nba_stats",
+            )
+            for index, team_id in enumerate(team_ids)
+        ]
+
+    traditional = [
+        replace(fact, raw_value=index + 1) for index, fact in enumerate(_complete_traditional_facts())
+    ]
+    _publish_snapshot_batch(
+        repository,
+        older_scope,
+        facts=[*traditional, *zone_facts(lambda _index: 5)],
+        observations=[
+            TeamMatchupObservation("shot_zones", "available"),
+            TeamMatchupObservation("traditional", "available"),
+        ],
+        retrieved_at=older_at,
+    )
+    # The newer scope restates only the zones, so Traditional falls back to
+    # the older scope while its stale zone rows stay out of the ranking.
+    _publish_snapshot_batch(
+        repository,
+        newer_scope,
+        facts=zone_facts(lambda index: 30 - index),
+        observations=[TeamMatchupObservation("shot_zones", "available")],
+        retrieved_at=newer_at,
+    )
+
+    latest = TeamMatchupQueryService(
+        repository,
+        clock=lambda: datetime(2025, 4, 15, 16, tzinfo=UTC),
+    ).get_latest_window("2024-25", window_games=15)
+
+    assert latest is not None
+    assert latest.scope == newer_scope
+    assert latest.fact_scopes == {"shot_zones": newer_scope, "traditional": older_scope}
+    assert latest.fact_retrieved_at == {"shot_zones": newer_at, "traditional": older_at}
+    by_team = {
+        team_id: {(metric.base, metric.allowed_per_48, metric.rank) for metric in metrics}
+        for team_id, metrics in latest.team_metrics.items()
     }
+    assert by_team[team_ids[0]] == {("shot_zones", 30.0, 30), ("traditional", 1.0, 1)}
+    assert by_team[team_ids[29]] == {("shot_zones", 1.0, 1), ("traditional", 30.0, 30)}
+    assert by_team[team_ids[9]] == {("shot_zones", 21.0, 21), ("traditional", 10.0, 10)}
 
 
 def test_latest_window_distinguishes_a_same_day_failure_from_older_facts(tmp_path):
