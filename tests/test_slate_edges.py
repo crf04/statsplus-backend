@@ -825,14 +825,18 @@ def test_matchups_compose_one_at_a_time_in_slate_order():
     assert [game["game_id"] for game in edges["games"]] == [f"G{i}" for i in range(6)]
 
 
-def test_every_game_of_an_omitted_season_request_reads_one_snapshot():
-    """The Slate, the capture and each game's compose share the request's one REPEATABLE READ scope."""
+@pytest.mark.parametrize("selected", [None, "2025-26"], ids=["omitted", "selected"])
+def test_only_a_selected_season_composes_every_game_on_one_snapshot(selected):
+    """As 3a1a7bb9: an omitted season composes each game on a scope of its own,
+    and a selection's capture and games share one REPEATABLE READ scope.  The
+    Slate reads on a connection of its own, returned before any game composes."""
 
     from sqlalchemy import create_engine
 
     class ScopedComposer(SnapshotComposer):
         def get_matchup_from_snapshot(self, *, read_scope=None, **kwargs):
             self.scopes.append(read_scope)
+            self.slate_closed.append([connection.closed for connection in service.slates.connections])
             return super().get_matchup_from_snapshot(**kwargs)
 
     class ConnectedSlate(FakeSlate):
@@ -842,8 +846,10 @@ def test_every_game_of_an_omitted_season_request_reads_one_snapshot():
 
     games, payloads = _two_games()
     composer = ScopedComposer(payloads)
-    composer.scopes = []
-    service = _cached_service(composer, None, games)
+    composer.scopes, composer.slate_closed = [], []
+    publications = Publications()
+    publications.selected_season = selected
+    service = _cached_service(composer, None, games, publications=publications)
     service.slates = ConnectedSlate(games)
     service.slates.connections = []
     service._engine = create_engine("sqlite://")
@@ -851,9 +857,15 @@ def test_every_game_of_an_omitted_season_request_reads_one_snapshot():
     service.get_edges("2026-04-10")
 
     first, second = composer.scopes
-    assert first is not None
-    assert second is first
-    assert service.slates.connections == [first[0]]
+    if selected is None:
+        assert (first, second) == (None, None)
+    else:
+        assert first is not None
+        assert second is first
+        assert first[0] not in service.slates.connections
+    assert len(service.slates.connections) == 1
+    assert service.slates.connections[0] is not None
+    assert composer.slate_closed == [[True], [True]]
 
 
 def test_an_edges_miss_composes_fresh_and_never_stacks_a_cached_matchup():

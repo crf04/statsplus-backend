@@ -117,16 +117,21 @@ class SlateEdgesService:
 
         # Refused before a connection is checked out, as the Slate refuses it.
         check_slate_request(requested_date, fallback)
-        # The Slate, the capture and every game's reads share one REPEATABLE
-        # READ snapshot, as a selected Matchup's do, so a prune that commits in
-        # between cannot empty a later game's projection reads.  None of them
-        # writes.
-        with request_read_scope(self._engine, repeatable_read=True) as read_scope:
-            slate = read_slate(partial(self._slate, connection=read_scope[0]), requested_date, fallback)
-            # Each game's schedule facts are its own season's (crf04/statsplus#330 AC9).
-            for game in slate["games"]:
-                refuse_evidence_after_game(self.publication_reader, season_for_game_id(game["game_id"]))
-            matchups = self._request_matchups(read_scope=None if self._engine is None else read_scope)
+        # The Slate's schedule, pool and injury reads share a connection of
+        # their own, returned before the capture: no game composes in its
+        # transaction.
+        with request_read_scope(self._engine) as (connection, _session):
+            slate = read_slate(partial(self._slate, connection=connection), requested_date, fallback)
+        # Each game's schedule facts are its own season's (crf04/statsplus#330 AC9).
+        for game in slate["games"]:
+            refuse_evidence_after_game(self.publication_reader, season_for_game_id(game["game_id"]))
+        # A selection's capture and every game's reads share one REPEATABLE
+        # READ snapshot, as a selected Matchup's do, so a prune that commits
+        # in between cannot empty a later game's projection reads.  None of
+        # them writes.  Otherwise each game composes on a scope of its own.
+        engine = None if selected_season(self.publication_reader) is None else self._engine
+        with request_read_scope(engine, repeatable_read=True) as read_scope:
+            matchups = self._request_matchups(read_scope=None if engine is None else read_scope)
             _slate, response = self._read(slate, matchups, may_compose=lambda: True, read_scope=read_scope)
         context = season_context(self.publication_reader, getattr(matchups, "snapshot", None), lambda: None)
         return {
