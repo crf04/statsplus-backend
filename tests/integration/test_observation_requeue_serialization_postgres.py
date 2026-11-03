@@ -91,3 +91,43 @@ def test_an_upload_during_a_composition_is_retried_and_requeues_the_job(engine):
     assert _composition_job(engine, STREAM) == (("queued", None, 1, 2), None)
     assert _compose_queued_slice(engine) == 1
     assert _composition_job(engine, STREAM)[0] == ("succeeded", None, 1, 2)
+
+
+def test_an_upload_during_a_recomposition_is_retried_and_requeues_the_succeeded_job(engine):
+    _, _, _, deliver = _grouped_shot_type_control_plane(None, None, engine=engine)
+
+    def deliver_rows(fgm, suffix=""):
+        deliver(
+            lambda category: _player_shot_type_rows(2544, category, share=0.25, fga=100, fgm=fgm),
+            only=("Pullups",) if suffix else None,
+            suffix=suffix,
+        )
+
+    deliver_rows(46)
+    assert _compose_queued_slice(engine) == 1
+    assert _composition_job(engine, STREAM)[0] == ("succeeded", None, 0, 1)
+
+    pool = ThreadPoolExecutor(max_workers=1)
+    with Session(engine) as worker, worker.begin():
+        job = worker.scalar(
+            select(CompositionJob).where(CompositionJob.stream_key == STREAM).with_for_update()
+        )
+        job.status = "running"
+        job.claimed_generation = job.generation
+        worker.flush()
+        upload = pool.submit(deliver_rows, 50, "-recollected")
+        returned_during_composition = upload in wait([upload], timeout=10).done
+        job.status = "succeeded"
+        job.claimed_generation = None
+    error = upload.exception(timeout=30)
+    pool.shutdown()
+
+    assert returned_during_composition, "the upload waited for the composition"
+    assert isinstance(error, ControlPlaneError) and str(error) == "collector_busy"
+    assert _accepted(engine) == 3
+
+    deliver_rows(50, "-recollected")
+    assert _accepted(engine) == 4
+    assert _composition_job(engine, STREAM)[0] == ("queued", None, 0, 2)
+    assert _compose_queued_slice(engine) == 1
+    assert _composition_job(engine, STREAM)[0] == ("succeeded", None, 0, 2)
