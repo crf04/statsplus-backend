@@ -1613,27 +1613,39 @@ governed franchise fact set makes otherwise available Base/windows
 stored response sections still return.
 
 There is exactly one row-level exception while a Base/window remains
-`available`: a pre-OPP_REB traditional Season or Last-15 snapshot may omit only
-`OPP_REB`. If the other window supplies that identity, the league and team
-`OPP_REB` row windows are `null` only for the legacy scope, while traditional
+`available`: a legacy traditional Season or Last-15 snapshot may omit any
+traditional row other than `OPP_TOV`, `OPP_STL` and `OPP_BLK`. That covers a
+pre-OPP_REB snapshot and every stored legacy snapshot's missing
+`OPP_PTS`, `OPP_AST`, `OPP_FGM`, `OPP_FGA`, `OPP_FG3M`, `OPP_FG3A`, `OPP_FTM`
+and `OPP_FTA` (crf04/statsplus#407): only the ledger team-window Publication
+carries those eight. If the other window supplies such an identity, its league
+and team row windows are `null` only for the legacy scope, while traditional
 availability and the `OPP_TOV`, `OPP_STL`, and `OPP_BLK` rows and defensive
-columns stay available. The matching REB score window is
-`components: {}` / `blend: null`; the other REB window remains computable.
-Every other missing or divergent metric identity still downgrades the entire
-affected Base/window to `unavailable/legacy_surface_incomplete` and nulls all
-of its row windows. The expected traditional identity set is the union across
-the independently stored windows (plus the required defensive columns), with
-only `OPP_REB` excluded for the compatibility carveout; for example, an
-`OPP_PF` row present in only one window downgrades the other window locally.
+columns stay available. A score window that reads the absent row has no
+`traditional` component and names `team_defense:traditional` in
+`missing_inputs` (REB then has `components: {}` / `blend: null`); the other
+window remains computable. Every other missing or divergent metric identity
+still downgrades the entire affected Base/window to
+`unavailable/legacy_surface_incomplete` and nulls all of its row windows. The
+expected traditional identity set is the union across the independently stored
+windows (plus the required defensive columns), with those nine rows excluded
+for the compatibility carveout; for example, an `OPP_PF` row present in only
+one window downgrades the other window locally.
 
 Shot-zone row markets are constrained by the slice as well as the statistic.
 Restricted Area, In The Paint (Non-RA), and Mid-Range FGA rows target only FGA
 and FG2A; Corner 3 and Above the Break 3 FGA rows target only FGA and FG3A.
-Two-point-zone FGM lists `["PTS","PA","PR","PRA"]`, while three-point-zone FGM
-lists `["PTS","3PM","PA","PR","PRA"]`. Shot-type FG2M lists
-`["PTS","PA","PR","PRA"]` and FG3M lists `["3PM","PTS","PA","PR","PRA"]`: the
-PA, PR, and PRA scores build their shot components from the PTS part, which
-reads those rows. Order is part of the contract.
+Two-point-zone FGM lists `["PTS","FGM","FG2M","PA","PR","PRA"]`, while
+three-point-zone FGM lists `["PTS","3PM","FGM","PA","PR","PRA"]`. Shot-type
+FG2M lists `["PTS","FGM","FG2M","PA","PR","PRA"]` and FG3M lists
+`["3PM","PTS","FGM","PA","PR","PRA"]`: the PA, PR, and PRA scores build their
+shot components from the PTS part, which reads those rows. Traditional rows
+list the markets whose `traditional` component reads them: `OPP_PTS`
+`["PTS","PA","PR","PRA"]`, `OPP_AST` `["AST","PA","RA","PRA"]`, `OPP_REB`
+`["REB","PR","RA","PRA"]`, `OPP_FGM` `["FGM"]`, `OPP_FGA` `["FGA"]`,
+`OPP_FG3M` `["3PM"]`, `OPP_FG3A` `["FG3A"]`, `OPP_FTM` `["FTM"]`, `OPP_FTA`
+`["FTA"]`, `OPP_TOV` `["TOV"]`, `OPP_STL` `["STL","STKS"]` and `OPP_BLK`
+`["BLK","STKS"]`. Order is part of the contract.
 Those five slices are the complete nonoverlapping shot-zone response vocabulary;
 stored Left/Right Corner 3 children, Backcourt, and unknown duplicate slices are
 not emitted or aggregated. If any of the five aggregate slices is absent, the
@@ -1955,25 +1967,33 @@ truthfully mean that zero components were computable. Whenever at least one
 offensive component is present, `blend` is a score cell with `value` and
 `thin`; the backend never fabricates a numeric Blend merely to avoid `null`.
 
-FTA, FTM, FGM and FG2M (Dabble lines, crf04/statsplus#370) have no Matchup
-Score. A pool player who has one posted carries it in `stat_categories`,
-`posted_markets`, `lines` and `line_prices` like any other category, and its
-`scores` row has both windows as
-`{"components": {}, "blend": null, "missing_inputs": []}`. A Historical
-Matchup never lists them, because its categories are the scored ones.
-
 The stored Diet/sheet intersection supports PTS through play types, shot zones,
-and shot types; FGA through shot zones and shot types; AST through assist
-locations; and 3PM, FG2A, and FG3A through shot zones and shot types. PTS
-shot-type concessions derive stored points as `2 × FG2M + 3 × FG3M`, and FGA
-derives `FG2A + FG3A`. Each shot type's twos and threes are weighted by the player's own mix, not the
-opponent's: `ratio = p2 * (T_FG2 / L_FG2) + p3 * (T_FG3 / L_FG3)`, with `p2`
-the player's share of the slice's points from his made shots (`2 * FG2M`
-against `3 * FG3M`), falling back to `2 * FG2A` against `3 * FG3A` when he made
-none; FGA uses his attempt shares instead. A slice whose league allows no
+and shot types; FGA, 3PM and FG3A through shot zones and shot types; FGM through
+shot zones (`FGM`, every zone) and shot types (`FG2M` and `FG3M`); FG2M through
+shot zones (`FGM`, the two-point zones) and shot types (`FG2M`); AST through
+assist locations; and FG2A through shot zones and shot types.
+
+Every market with a Traditional row (crf04/statsplus#407) also has a
+`traditional` component: the opponent's row allowed per 48 over the league
+average, minus one, `thin: false`. The rows are `OPP_PTS` (PTS), `OPP_AST`
+(AST), `OPP_FGM` (FGM), `OPP_FGA` (FGA), `OPP_FG3M` (3PM), `OPP_FG3A` (FG3A),
+`OPP_FTM` (FTM), `OPP_FTA` (FTA), `OPP_REB` (REB), `OPP_TOV` (TOV), `OPP_STL`
+(STL) and `OPP_BLK` (BLK). It joins the Blend as one more component of the
+plain mean, and FTA and FTM score from it alone. FG2A has no Traditional row.
+A pool player's posted FGM, FG2M, FTA or FTM is scored like any other
+category, and a Historical Matchup lists them among its scored categories.
+
+PTS shot-type concessions derive stored points as `2 × FG2M + 3 × FG3M`, FGM
+derives `FG2M + FG3M`, and FGA derives `FG2A + FG3A`. Each shot type's twos and
+threes are weighted by the player's own mix, not the opponent's:
+`ratio = p2 * (T_FG2 / L_FG2) + p3 * (T_FG3 / L_FG3)`, with `p2` the player's
+share of the slice's made shots, each weighed by the market's stat weight
+(`2 * FG2M` against `3 * FG3M` for PTS, `FG2M` against `FG3M` for FGM),
+falling back to his attempts on the same weights when he made none; FGA uses
+his attempt shares instead. A slice whose league allows no
 threes (Less Than 10 ft) reduces to the twos ratio, and a slice with no stored
 shooting split keeps the opponent-mix ratio. 3PM, FG2A and FG3A are single-stat
-and unchanged. In the PTS and FGA markets each window's `components.shot_types`
+and unchanged. In the PTS, FGM and FGA markets each window's `components.shot_types`
 cell also carries `slices`, one entry per slice the component used, in Player
 Diet order: `{"key": "Pullups", "percent_vs_league_average": 20.84}`, the
 slice's ratio minus one in percent (the Defense Sheet's units). A slice the
@@ -2012,12 +2032,14 @@ of all required parts with positive Season volume. An unavailable part supplies
 a neutral zero-delta numerator without renormalizing the surviving parts; if
 some parts remain computable, the truthful partial numeric result is retained
 and every delivered combo component and Blend is thin. `blend` remains null
-when no part contributes. TOV, STL, and BLK
-have only a `traditional` component against their matching `OPP_*` column.
-STKS Season-volume-weights the stored OPP_STL and OPP_BLK comparisons into one
-`traditional` component. These defensive windows omit `blend` (a JSON `null`
-is also contract-equivalent) so the response never pretends a one-Base result
-is a Blend.
+when no part contributes. Each combo's `traditional` component is built the
+same way from its parts' `traditional` cells (`OPP_PTS`, `OPP_REB`, `OPP_AST`).
+TOV, STL, and BLK have only a `traditional` component against their matching
+`OPP_*` column. STKS Season-volume-weights the stored OPP_STL and OPP_BLK
+comparisons into one `traditional` component, thin when the player's Season
+sample is below `MATCHUP_SCORE_MIN_GAMES`. Each defensive window's `blend`
+equals its one component, `thin` included, and is `null` when the component is
+absent (crf04/statsplus#407).
 
 Every score window additionally carries `missing_inputs`, an always-present
 list naming the score-contract inputs that window could not consume. Its values
@@ -2033,7 +2055,7 @@ identical to what they were before. In historical mode the Blend is
 additionally **withheld** whenever `missing_inputs` is nonempty, so `blend` is
 `null` and a mean of the surviving Bases is never presented as a complete
 blended score. Component evidence still ships, and the named gaps explain the
-withheld Blend. Defensive windows omit `blend` in both modes. Combos withhold
+withheld Blend. Combos withhold
 their own Blend under the same rule rather than inheriting a partial one
 through their parts. The score formulas themselves are unchanged: a historical
 window whose `missing_inputs` is empty carries exactly the cells it always
@@ -6696,7 +6718,7 @@ on exactly the metric the Matchup showed:
 | `shot_zones` | `Restricted Area:FGM`, `Mid-Range:FGA`, `Corner 3:FGM` (each governed zone with `FGM` and `FGA`) |
 | `shot_types` | `Catch and Shoot:FG3M`, `Pullups:FG2A`, `Less Than 10 ft:FG2M` (each shot type with `FG2M`, `FG2A`, `FG3M`, `FG3A`, plus the derived `PTS`, e.g. `Catch and Shoot:PTS`, which ranks `2 x FG2M + 3 x FG3M`, the same order as the Sheet row and as the `C&S PTS` filter) |
 | `assist_locations` | `Assists`, `Arc3Assists`, `Corner3Assists`, `AtRimAssists`, `ShortMidRangeAssists`, `LongMidRangeAssists` |
-| `traditional` | `OPP_REB`, `OPP_TOV`, `OPP_STL`, `OPP_BLK` |
+| `traditional` | `OPP_PTS`, `OPP_REB`, `OPP_AST`, `OPP_FGM`, `OPP_FGA`, `OPP_FG3M`, `OPP_FG3A`, `OPP_FTM`, `OPP_FTA`, `OPP_TOV`, `OPP_STL`, `OPP_BLK` (each ranks the per-48 allowed the Sheet row shows) |
 
 The Matchup's `rebound_types` rows are not offered here: a `sheet:rebound_types:*`
 entry is refused like any other unknown row.

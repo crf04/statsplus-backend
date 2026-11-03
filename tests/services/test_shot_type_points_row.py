@@ -89,9 +89,9 @@ def test_the_row_is_keyed_by_display_slice_and_carries_the_points_markets():
     assert MatchupService._metric_key("shot_types", "pullups", "PTS") == "Pullups:PTS"
     assert MatchupService._metric_key("shot_types", "less_than_10_ft", "PTS") == "Less Than 10 ft:PTS"
     assert slice_markets("shot_types", "catch_and_shoot", "PTS") == ("PTS", "PA", "PR", "PRA")
-    # The rows that were already there keep their markets.
-    assert slice_markets("shot_types", "catch_and_shoot", "FG2M") == ("PTS", "PA", "PR", "PRA")
-    assert slice_markets("shot_types", "catch_and_shoot", "FG3M") == ("3PM", "PTS", "PA", "PR", "PRA")
+    # The make rows also feed FGM, and the twos FG2M (#407).
+    assert slice_markets("shot_types", "catch_and_shoot", "FG2M") == ("PTS", "FGM", "FG2M", "PA", "PR", "PRA")
+    assert slice_markets("shot_types", "catch_and_shoot", "FG3M") == ("3PM", "PTS", "FGM", "PA", "PR", "PRA")
 
 
 def test_the_publication_taxonomy_does_not_gain_a_points_metric():

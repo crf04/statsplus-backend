@@ -423,10 +423,20 @@ def test_unscheduled_scores_equal_the_game_matchup_scores(tmp_path):
         "diet_thin",
         "season_scoring",
         "last_10_minutes",
-        "last_five_games",
-        "season_averages",
     ):
         assert unscheduled_player[key] == game_player[key], key
+    # Averages and a recent game's stat line cover the player's categories:
+    # the game's posted markets, and on the Unscheduled Matchup every scored
+    # one.
+    averages = unscheduled_player["season_averages"]
+    assert {key: averages[key] for key in game_player["season_averages"]} == game_player["season_averages"]
+    assert set(averages) == set(unscheduled_scores)
+    for game_line, unscheduled_line in zip(
+        game_player["last_five_games"], unscheduled_player["last_five_games"], strict=True
+    ):
+        stats = unscheduled_line["stats"]
+        assert {**unscheduled_line, "stats": {key: stats[key] for key in game_line["stats"]}} == game_line
+        assert set(stats) == set(unscheduled_scores)
     # The recent games and averages really are served, so that is not vacuous.
     assert [game["game_id"] for game in unscheduled_player["last_five_games"]] == ["0022500500"]
     assert unscheduled_player["season_averages"]["PTS"] == 25.0
@@ -438,23 +448,23 @@ def test_unscheduled_scores_equal_the_game_matchup_scores(tmp_path):
 
 
 def test_shot_rows_list_the_combined_markets_on_both_matchups(tmp_path):
-    """The PTS shot rows that feed PA, PR and PRA list them, in this order."""
+    """The shot rows list every market that reads them, combos last, in this order."""
 
     client = _fixture_client(tmp_path)
     expected = {
         "shot_zones": {
-            "Restricted Area:FGM": ["PTS", "PA", "PR", "PRA"],
-            "In The Paint (Non-RA):FGM": ["PTS", "PA", "PR", "PRA"],
-            "Mid-Range:FGM": ["PTS", "PA", "PR", "PRA"],
-            "Corner 3:FGM": ["PTS", "3PM", "PA", "PR", "PRA"],
-            "Above the Break 3:FGM": ["PTS", "3PM", "PA", "PR", "PRA"],
+            "Restricted Area:FGM": ["PTS", "FGM", "FG2M", "PA", "PR", "PRA"],
+            "In The Paint (Non-RA):FGM": ["PTS", "FGM", "FG2M", "PA", "PR", "PRA"],
+            "Mid-Range:FGM": ["PTS", "FGM", "FG2M", "PA", "PR", "PRA"],
+            "Corner 3:FGM": ["PTS", "3PM", "FGM", "PA", "PR", "PRA"],
+            "Above the Break 3:FGM": ["PTS", "3PM", "FGM", "PA", "PR", "PRA"],
         },
         "shot_types": {
             f"{shot_type}:{stat}": markets
             for shot_type in ("Catch and Shoot", "Pullups", "Less Than 10 ft")
             for stat, markets in (
-                ("FG2M", ["PTS", "PA", "PR", "PRA"]),
-                ("FG3M", ["3PM", "PTS", "PA", "PR", "PRA"]),
+                ("FG2M", ["PTS", "FGM", "FG2M", "PA", "PR", "PRA"]),
+                ("FG3M", ["3PM", "PTS", "FGM", "PA", "PR", "PRA"]),
             )
         },
     }
@@ -547,10 +557,11 @@ def test_unscheduled_matchup_omits_every_per_game_part(tmp_path):
     assert player["lines"] == {}
     assert player["line_prices"] == {}
     assert player["stat_categories"] == sorted(player["scores"])
-    # Current-mode blend rules: a scored offensive window keeps its blend and
-    # defensive markets carry none.
+    # Current-mode blend rules: a scored window keeps its blend, and a
+    # defensive market's Blend is its one Traditional component.
     assert player["scores"]["PTS"]["season"]["blend"] is not None
-    assert "blend" not in player["scores"]["TOV"]["season"]
+    tov = player["scores"]["TOV"]["season"]
+    assert tov["blend"] == tov["components"]["traditional"]
 
 
 def test_unscheduled_diet_as_of_is_the_eastern_publication_date(tmp_path):
