@@ -115,15 +115,15 @@ class SlateEdgesService:
         a malformed one is its ``invalid_input`` refusal; ``fallback`` is the
         Slate's ``previous_game_day``/``next_game_day`` rule (``slate_fallback.read_slate``)."""
 
-        slate = read_slate(self._slate, requested_date, fallback)
-        # Each game's schedule facts are its own season's (crf04/statsplus#330 AC9).
-        for game in slate["games"]:
-            refuse_evidence_after_game(self.publication_reader, season_for_game_id(game["game_id"]))
-        # The capture and every game's reads share one REPEATABLE READ
-        # snapshot, as a selected Matchup's do, so a prune that commits in
+        # The Slate, the capture and every game's reads share one REPEATABLE
+        # READ snapshot, as a selected Matchup's do, so a prune that commits in
         # between cannot empty a later game's projection reads.  None of them
         # writes.
         with request_read_scope(self._engine, repeatable_read=True) as read_scope:
+            slate = read_slate(partial(self._slate, connection=read_scope[0]), requested_date, fallback)
+            # Each game's schedule facts are its own season's (crf04/statsplus#330 AC9).
+            for game in slate["games"]:
+                refuse_evidence_after_game(self.publication_reader, season_for_game_id(game["game_id"]))
             matchups = self._request_matchups(read_scope=None if self._engine is None else read_scope)
             _slate, response = self._read(slate, matchups, may_compose=lambda: True)
         context = season_context(self.publication_reader, getattr(matchups, "snapshot", None), lambda: None)
@@ -136,8 +136,9 @@ class SlateEdgesService:
             ],
         }
 
-    def _slate(self, requested_date: str | None) -> dict[str, Any]:
-        """The Slate of ``requested_date``, its neighbouring dates read only for a day without games.
+    def _slate(self, requested_date: str | None, *, connection: Any = None) -> dict[str, Any]:
+        """The Slate of ``requested_date`` on ``connection``, its neighbouring
+        dates read only for a day without games.
 
         The edges never show them, and ``read_slate`` falls back on them only
         when the day lists no game.
@@ -145,8 +146,9 @@ class SlateEdgesService:
 
         if not accepts_keyword(self.slates.get_slate, "neighbours"):
             return self.slates.get_slate(requested_date)
-        slate = self.slates.get_slate(requested_date, neighbours=False)
-        return slate if slate["games"] else self.slates.get_slate(requested_date)
+        get_slate = partial(self.slates.get_slate, requested_date, connection=connection)
+        slate = get_slate(neighbours=False)
+        return slate if slate["games"] else get_slate()
 
     def preview_read(
         self,

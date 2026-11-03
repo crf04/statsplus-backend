@@ -8,6 +8,7 @@ from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from nba_api.stats.static import teams as nba_teams
+from sqlalchemy.engine import Connection
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.domain.freshness import (
@@ -34,6 +35,7 @@ from app.errors import (
 )
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_pool import PlayerPool, PlayerPoolReader, PoolPlayer
+from app.services.publication_snapshot_calls import call_with_read_scope
 from app.services.research_season import (
     game_capture,
     refuse_evidence_after_game,
@@ -114,6 +116,7 @@ class SlateService:
         fallback: str | None = None,
         season: str | None = None,
         neighbours: bool = True,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         """One ET Slate Date; ``fallback`` is the shared previous-game-day rule.
 
@@ -121,15 +124,23 @@ class SlateService:
         date's own (or the pinned) season: a game's preview card reads the
         season its game ID names.  ``neighbours=False`` leaves
         ``previous_game_date`` and ``next_game_date`` unread (``None``), for a
-        caller that never shows them.
+        caller that never shows them.  ``connection`` is a caller's request
+        connection the schedule and pool reads share.
         """
 
         return read_slate(
-            lambda day: self._slate_for(day, season, neighbours=neighbours), requested_date, fallback
+            lambda day: self._slate_for(day, season, neighbours=neighbours, connection=connection),
+            requested_date,
+            fallback,
         )
 
     def _slate_for(
-        self, requested_date: str | None, season: str | None = None, *, neighbours: bool = True
+        self,
+        requested_date: str | None,
+        season: str | None = None,
+        *,
+        neighbours: bool = True,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         slate_date = self._parse_slate_date(requested_date)
         if self.event_catalog is None:
@@ -139,22 +150,26 @@ class SlateService:
         season = season or schedule_season(self.settings, self.event_catalog, slate_date)
         refuse_evidence_after_game(self.publication_reader, season)
         observed_at = assume_utc(self._clock())
-        if self.event_catalog.count_events(season) == 0:
+        if call_with_read_scope(self.event_catalog.count_events, season, connection=connection) == 0:
             # Neither the date's season nor the one before was ever collected;
             # retrying cannot change that, so it is a definite answer.
             raise ResourceNotFoundError(
                 f"No NBA schedule is stored for the {season} season.",
                 public_details={"season": season},
             )
-        freshness = self.event_catalog.get_freshness(season, now=observed_at)
+        freshness = call_with_read_scope(
+            self.event_catalog.get_freshness, season, now=observed_at, connection=connection
+        )
         retrieved_at = freshness.get("last_success_at")
 
         local_start = datetime.combine(slate_date, datetime.min.time(), EASTERN)
         local_end = local_start + timedelta(days=1)
-        events = self.event_catalog.get_events_between(
+        events = call_with_read_scope(
+            self.event_catalog.get_events_between,
             season,
             local_start.astimezone(UTC),
             local_end.astimezone(UTC),
+            connection=connection,
         )
         games = []
         selected_events = []
@@ -186,9 +201,11 @@ class SlateService:
         pool_freshness = PlayerPool.unavailable_freshness()
         injury_freshness = UNAVAILABLE_SOURCE
         if self.player_pool is not None:
-            pool = self.player_pool.get_pool(
+            pool = call_with_read_scope(
+                self.player_pool.get_pool,
                 season=season,
                 game_ids={game["game_id"] for game in games},
+                connection=connection,
             )
             pool_freshness = dict(pool.freshness)
             removed_player_ids: set[int] = set()
@@ -199,10 +216,12 @@ class SlateService:
                     pool_players_by_game[str(event.get("nba_game_id", ""))] = tuple(
                         player for player in pool.players if player.team_id in team_ids
                     )
-                results = self.injuries.get_stored_injuries_many(
+                results = call_with_read_scope(
+                    self.injuries.get_stored_injuries_many,
                     events=selected_events,
                     season=season,
                     pool_players_by_game=pool_players_by_game,
+                    connection=connection,
                 )
                 for result in results.values():
                     removed_player_ids.update(result.out_player_ids)

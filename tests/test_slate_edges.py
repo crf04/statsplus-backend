@@ -519,7 +519,7 @@ class NeighbourSlate:
         self.today = today
         self.next_day = next_day
 
-    def get_slate(self, requested_date=None, *, neighbours=True):
+    def get_slate(self, requested_date=None, *, neighbours=True, connection=None):
         day = requested_date or self.today
         return {
             "slate_date": day,
@@ -792,7 +792,7 @@ def test_matchups_compose_one_at_a_time_in_slate_order():
 
 
 def test_every_game_of_an_omitted_season_request_reads_one_snapshot():
-    """The capture and each game's compose share the request's one REPEATABLE READ scope."""
+    """The Slate, the capture and each game's compose share the request's one REPEATABLE READ scope."""
 
     from sqlalchemy import create_engine
 
@@ -801,10 +801,17 @@ def test_every_game_of_an_omitted_season_request_reads_one_snapshot():
             self.scopes.append(read_scope)
             return super().get_matchup_from_snapshot(**kwargs)
 
+    class ConnectedSlate(FakeSlate):
+        def get_slate(self, requested_date=None, *, neighbours=True, connection=None):
+            self.connections.append(connection)
+            return super().get_slate(requested_date)
+
     games, payloads = _two_games()
     composer = ScopedComposer(payloads)
     composer.scopes = []
     service = _cached_service(composer, None, games)
+    service.slates = ConnectedSlate(games)
+    service.slates.connections = []
     service._engine = create_engine("sqlite://")
 
     service.get_edges("2026-04-10")
@@ -812,6 +819,7 @@ def test_every_game_of_an_omitted_season_request_reads_one_snapshot():
     first, second = composer.scopes
     assert first is not None
     assert second is first
+    assert service.slates.connections == [first[0]]
 
 
 def test_an_edges_miss_composes_fresh_and_never_stacks_a_cached_matchup():

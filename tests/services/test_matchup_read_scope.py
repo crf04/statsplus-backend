@@ -78,3 +78,31 @@ def test_a_snapshot_compose_checks_out_one_connection(matchup):
 
     assert document["players"]
     assert len(checkouts) == 1
+
+
+def test_a_slate_read_on_a_request_connection_checks_out_none_of_its_own(tmp_path, dependencies):
+    from datetime import timedelta
+
+    from app.services.slate_service import SlateService
+    from tests.routes.test_games_board import LATER, STARTED
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'slate.sqlite3'}")
+    run_migrations(engine)
+    board = seed_board(engine, dependencies).service
+    slate = SlateService(
+        board.event_catalog,
+        settings=board.settings,
+        clock=lambda: NOW,
+        schedule_max_age=timedelta(hours=24),
+        player_pool=board.player_pool,
+    )
+    checkouts = []
+    sqlalchemy_event.listen(engine, "checkout", lambda *_arguments: checkouts.append(1))
+
+    with engine.connect() as connection:
+        checkouts.clear()
+        body = slate.get_slate("2026-01-15", connection=connection, neighbours=False)
+
+    assert [game["game_id"] for game in body["games"]] == [STARTED, LATER]
+    assert body["freshness"]["pool"]["state"] == "live"
+    assert checkouts == []
