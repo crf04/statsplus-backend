@@ -7100,13 +7100,23 @@ class PublicationService(_SessionService):
         """Validate exact accepted canonical-game evidence for a ledger write."""
         if not provenance:
             raise ControlPlaneError("ledger_provenance_required")
-        rows = list(
-            session.scalars(
-                select(CollectionObservation).where(
-                    CollectionObservation.observation_id.in_(tuple(provenance)),
-                )
+        # Only the evidence's identity is judged, never its payload.
+        rows = session.execute(
+            select(
+                CollectionObservation.observation_id,
+                CollectionObservation.manifest_id,
+                CollectionObservation.provider,
+                CollectionObservation.observation_type,
+                CollectionObservation.scope,
+                CollectionObservation.season,
+                CollectionObservation.cutoff,
+                CollectionObservation.schema_version,
+                CollectionObservation.retrieved_at,
+                CollectionObservation.accepted_at,
+            ).where(
+                CollectionObservation.observation_id.in_(tuple(provenance)),
             )
-        )
+        ).all()
         if {row.observation_id for row in rows} != set(provenance):
             raise ControlPlaneError("ledger_provenance_not_accepted")
         # Each game's evidence is judged by the manifest that accepted it:
