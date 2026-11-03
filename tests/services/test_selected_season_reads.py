@@ -398,6 +398,28 @@ def test_evidence_that_no_longer_matches_its_manifest_withdraws_a_candidate_alre
         selected.snapshot(KEYS, season=ReadSeason(OLD))
 
 
+def test_evidence_that_loses_its_recorded_game_withdraws_a_candidate_already_served(world):
+    logs, _defense = world.hold_ten_games()
+    selected = world.reader.for_season(NEW)
+    assert _reads(selected.snapshot(KEYS, season=ReadSeason(OLD)))[PLAYER_LOGS][3] == logs.publication_id
+    with world.engine.begin() as connection:
+        connection.execute(
+            CollectionObservation.__table__.update()
+            .where(CollectionObservation.observation_id == f"pbp:{FIRST_GAME}")
+            .values(scope=json.dumps({"surface": "canonical_game_ledger"}))
+        )
+        connection.execute(
+            text(
+                "UPDATE publication_observations SET slice_key = NULL"
+                " WHERE publication_id = :publication AND observation_id = :observation"
+            ),
+            {"publication": logs.publication_id, "observation": f"pbp:{FIRST_GAME}"},
+        )
+
+    with pytest.raises(SeasonUnavailable):
+        selected.snapshot(KEYS, season=ReadSeason(OLD))
+
+
 def test_candidates_on_the_same_games_under_different_manifests_are_judged_apart(world):
     logs, defense = world.hold_ten_games()
     # A second manifest of the same night whose Event Catalog, checksummed as
