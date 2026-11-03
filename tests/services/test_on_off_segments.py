@@ -1,0 +1,547 @@
+"""On/off splits from stored lineup segments (crf04/statsplus#410).
+
+The derivation rules on small hand-built games, the rotation job's write path
+and backfill on recorded BOS 2025-26 games, and ``OnOffService`` serving a
+covered season while an uncovered one keeps the PBP Stats path unchanged.
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+from datetime import UTC, datetime
+from types import SimpleNamespace
+
+import pytest
+from sqlalchemy import create_engine, insert, text
+
+from app.config.settings import CacheSettings, RuntimeSettings
+from app.migrations import run_migrations
+from app.models.event_catalog import EventCatalogEntry
+from app.services.injury_scenarios import _OnOffReads
+from app.services.lineup_segment_repository import (
+    LineupSegmentRepository,
+    RosterSlotsExhausted,
+    mask_of,
+    write_game,
+)
+from app.services.lineup_segments import GameSegments, Segment, derive_segments
+from app.services.on_off import OnOffService
+from app.services.rotation_collection import RotationCollectionService
+from app.services.rotation_repository import RotationRepository
+from scripts.lineup_segment_backfill import backfill
+from scripts.on_off_parity import load_games
+from tests.services.test_on_off import NOW, Clock, FakeProvider, FakeRedis
+
+BOS, DEN = 1610612738, 1610612743
+TATUM, BROWN = 1628369, 1627759
+WRITTEN_AT = datetime(2026, 11, 3, 12, 0, tzinfo=UTC)
+
+# -- the rules, on hand-built games -----------------------------------------------
+
+
+def _box():
+    def team(team_id, tricode, first):
+        return {
+            "teamId": team_id,
+            "teamTricode": tricode,
+            "players": [
+                {"personId": first + n, "name": f"{tricode} {n}", "starter": "1" if n < 5 else "0"}
+                for n in range(6)
+            ],
+        }
+
+    return {
+        "game": {"gameId": "0022500001", "homeTeam": team(BOS, "BOS", 1), "awayTeam": team(DEN, "DEN", 11)}
+    }
+
+
+def _game(*actions):
+    """Play-by-play of one period: a start, ``actions`` (``(type, clock, fields)``), an end."""
+
+    rows = [
+        ("period", "PT12M00.00S", {"subType": "start"}),
+        *actions,
+        ("period", "PT00M00.00S", {"subType": "end"}),
+    ]
+    return {
+        "game": {
+            "gameId": "0022500001",
+            "actions": [
+                {"actionNumber": number, "actionType": kind, "period": 1, "clock": clock, **fields}
+                for number, (kind, clock, fields) in enumerate(rows, start=1)
+            ],
+        }
+    }
+
+
+def _bos(segments, *, holding=None):
+    """BOS segments, or the one whose lineup holds player ``holding``."""
+
+    rows = [segment for segment in segments.segments if segment.team_id == BOS]
+    return rows if holding is None else [segment for segment in rows if holding in segment.players]
+
+
+def test_free_throws_after_a_substitution_count_for_the_lineup_at_the_foul():
+    play_by_play = _game(
+        ("foul", "PT05M00.00S", {"teamId": DEN, "personId": 11, "subType": "personal"}),
+        ("substitution", "PT05M00.00S", {"teamId": BOS, "personId": 2, "subType": "out"}),
+        ("substitution", "PT05M00.00S", {"teamId": BOS, "personId": 6, "subType": "in"}),
+        (
+            "freethrow",
+            "PT05M00.00S",
+            {"teamId": BOS, "personId": 1, "subType": "1 of 2", "shotResult": "Made"},
+        ),
+        (
+            "freethrow",
+            "PT05M00.00S",
+            {"teamId": BOS, "personId": 1, "subType": "2 of 2", "shotResult": "Made"},
+        ),
+    )
+
+    segments = derive_segments(_box(), play_by_play, "2025-26")
+
+    [at_foul] = _bos(segments, holding=2)
+    [after_sub] = _bos(segments, holding=6)
+    assert (at_foul.duration_cs, after_sub.duration_cs) == (42000, 30000)
+    assert (at_foul.counts[1]["fta"], at_foul.counts[1]["pts"], at_foul.team_fta) == (2, 2, 2)
+    assert (after_sub.counts[1]["fta"], after_sub.counts[1]["pts"], after_sub.team_fta) == (0, 0, 0)
+    # The possession the last free throw ends is the foul lineup's too.
+    assert (at_foul.off_poss, after_sub.off_poss) == (1, 0)
+
+
+def test_an_and_one_keeps_the_possession_until_its_free_throw():
+    play_by_play = _game(
+        ("2pt", "PT06M00.00S", {"teamId": BOS, "personId": 1, "shotResult": "Made"}),
+        ("foul", "PT06M00.00S", {"teamId": DEN, "personId": 11, "subType": "personal"}),
+        (
+            "freethrow",
+            "PT06M00.00S",
+            {"teamId": BOS, "personId": 1, "subType": "1 of 1", "shotResult": "Made"},
+        ),
+    )
+
+    [segment] = _bos(derive_segments(_box(), play_by_play, "2025-26"))
+
+    assert (segment.counts[1]["pts"], segment.off_poss) == (3, 1)
+
+
+def test_a_technical_free_throw_does_not_end_the_possession():
+    play_by_play = _game(
+        ("foul", "PT06M00.00S", {"teamId": DEN, "personId": 11, "subType": "technical"}),
+        (
+            "freethrow",
+            "PT06M00.00S",
+            {
+                "teamId": BOS,
+                "personId": 1,
+                "subType": "1 of 1",
+                "shotResult": "Made",
+                "description": "BOS 1 Free Throw Technical (1 PTS)",
+            },
+        ),
+        ("2pt", "PT05M40.00S", {"teamId": BOS, "personId": 2, "shotResult": "Made"}),
+    )
+
+    [segment] = _bos(derive_segments(_box(), play_by_play, "2025-26"))
+
+    assert (segment.counts[1]["fta"], segment.counts[1]["pts"], segment.off_poss) == (1, 1, 1)
+
+
+@pytest.mark.parametrize(
+    ("season", "shooter", "team_fga", "team_heaves"),
+    [("2026-27", (1, 1), 1, 0), ("2025-26", (0, 0), 0, 1)],
+)
+def test_from_2026_27_a_heave_is_its_shooters_missed_three(season, shooter, team_fga, team_heaves):
+    play_by_play = _game(("heave", "PT00M01.00S", {"teamId": BOS, "personId": 1}))
+
+    [segment] = _bos(derive_segments(_box(), play_by_play, season))
+
+    assert (segment.counts[1]["fga"], segment.counts[1]["fg3a"]) == shooter
+    assert (segment.team_fga, segment.team_heaves) == (team_fga, team_heaves)
+
+
+def test_a_heave_with_no_shooter_is_a_player_less_heave_in_every_season():
+    play_by_play = _game(("heave", "PT00M01.00S", {"teamId": BOS}))
+
+    [segment] = _bos(derive_segments(_box(), play_by_play, "2026-27"))
+
+    assert (segment.team_fga, segment.team_heaves, segment.counts[1]["fga"]) == (0, 1, 0)
+
+
+# -- writes ---------------------------------------------------------------------
+
+
+def _engine(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'segments.db'}")
+    run_migrations(engine)
+    return engine
+
+
+def _dump(engine):
+    with engine.connect() as connection:
+        return {
+            table: sorted(tuple(row) for row in connection.execute(text(f"SELECT * FROM {table}")))
+            for table in ("lineup_roster_slots", "lineup_segment_games", "lineup_segment_players")
+        }
+
+
+@pytest.fixture(scope="module")
+def bos_games():
+    return load_games("bos_2025_26")
+
+
+class FakeLiveData:
+    def __init__(self, games):
+        self.games = games
+        self.fetched = []
+
+    def fetch_game_stats(self, game_id, season):
+        self.fetched.append(game_id)
+        return copy.deepcopy(self.games[game_id]["box"])
+
+    def fetch_play_by_play(self, game_id):
+        return copy.deepcopy(self.games[game_id]["pbp"])
+
+
+def _collection(engine, games, events=()):
+    return RotationCollectionService(
+        FakeLiveData(games), RotationRepository(engine), lambda season: list(events), clock=lambda: WRITTEN_AT
+    )
+
+
+def _rejected(games, game_id):
+    """A copy of ``game_id`` whose first substitution is lost, so its lineups break."""
+
+    broken = copy.deepcopy(games[game_id])
+    actions = broken["pbp"]["game"]["actions"]
+    actions.remove(next(action for action in actions if action["actionType"] == "substitution"))
+    return broken
+
+
+def test_a_rerun_of_the_rotation_job_leaves_identical_segment_rows(tmp_path, bos_games):
+    engine = _engine(tmp_path)
+    game_ids = sorted(bos_games)[:2]
+    collection = _collection(engine, bos_games)
+
+    collection.collect("2025-26", game_ids=game_ids)
+    first = _dump(engine)
+    collection.collect("2025-26", game_ids=game_ids)
+
+    assert _dump(engine) == first
+    assert len(first["lineup_segment_games"]) == 2
+    assert len(first["lineup_segment_players"]) == 5 * sum(
+        len(derive_segments(bos_games[g]["box"], bos_games[g]["pbp"], "2025-26").segments) for g in game_ids
+    )
+
+
+def test_a_rejected_game_gets_no_segments_and_no_rotation(tmp_path, bos_games):
+    engine = _engine(tmp_path)
+    game_id = sorted(bos_games)[0]
+
+    result = _collection(engine, {game_id: _rejected(bos_games, game_id)}).collect(
+        "2025-26", game_ids=[game_id]
+    )
+
+    assert [item["game_id"] for item in result["rejected"]] == [game_id]
+    dump = _dump(engine)
+    assert dump["lineup_segment_players"] == []
+    assert [(row[0], row[5] is not None) for row in dump["lineup_segment_games"]] == [(game_id, True)]
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT COUNT(*) FROM rotation_stints")).scalar() == 0
+
+
+def test_segments_roll_back_with_the_stints_when_a_team_season_runs_out_of_slots(tmp_path, bos_games):
+    engine = _engine(tmp_path)
+    game_id = sorted(bos_games)[0]
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO lineup_roster_slots (season, team_id, player_id, slot, player_name) "
+                "VALUES " + ", ".join(f"('2025-26', {BOS}, {9000 + slot}, {slot}, 'x')" for slot in range(64))
+            )
+        )
+
+    with pytest.raises(RosterSlotsExhausted):
+        _collection(engine, bos_games).collect("2025-26", game_ids=[game_id])
+
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT COUNT(*) FROM rotation_stints")).scalar() == 0
+        assert connection.execute(text("SELECT COUNT(*) FROM lineup_segment_players")).scalar() == 0
+
+
+def test_the_mask_is_a_signed_64_bit_integer_and_slot_63_still_selects(tmp_path):
+    assert (mask_of([0, 2]), mask_of([63]), mask_of(range(64))) == (5, -(1 << 63), -1)
+    engine = _engine(tmp_path)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO lineup_roster_slots (season, team_id, player_id, slot, player_name) "
+                "VALUES " + ", ".join(f"('2025-26', {BOS}, {9000 + slot}, {slot}, 'x')" for slot in range(59))
+            )
+        )
+        lineup = (1, 2, 3, 4, 5)
+        counts = {
+            player: dict.fromkeys(("pts", "reb", "ast", "fg3m", "fga", "fg3a", "tov", "fta"), 0)
+            for player in lineup
+        }
+        write_game(
+            connection,
+            "2025-26",
+            GameSegments(
+                game_id="0022500001",
+                home_team_id=BOS,
+                away_team_id=DEN,
+                names={player: f"P{player}" for player in lineup},
+                segments=(Segment(BOS, 0, lineup, 6000, counts, 0, 0, 0, 0, 0),),
+            ),
+            WRITTEN_AT,
+        )
+    repository = LineupSegmentRepository(engine)
+    repository.record_coverage("2025-26", WRITTEN_AT)
+
+    on_63 = repository.read_split("2025-26", BOS, on=[5], off=[])
+    off_63 = repository.read_split("2025-26", BOS, on=[1], off=[5])
+
+    assert sorted(row["player_id"] for row in on_63.rows) == [1, 2, 3, 4, 5]
+    assert off_63.rows == ()
+
+
+# -- backfill -----------------------------------------------------------------------
+
+
+def _event(game_id, scheduled_at, home=("HOU", 1610612745), away=("DET", 1610612765)):
+    return {
+        "nba_game_id": game_id,
+        "season": "2025-26",
+        "home_team_id": home[1],
+        "home_team_name": home[0],
+        "home_team_tricode": home[0],
+        "away_team_id": away[1],
+        "away_team_name": away[0],
+        "away_team_tricode": away[0],
+        "scheduled_at": scheduled_at,
+        "status_text": "Final",
+        "status_code": 3,
+        "postponed_status": None,
+        "postponement_evidence": None,
+        "classification": "Regular Season",
+        "first_seen_at": scheduled_at,
+        "first_observed_started_at": scheduled_at,
+        "last_seen_at": scheduled_at,
+    }
+
+
+def test_the_backfill_resumes_skips_written_games_and_records_coverage_when_done(tmp_path, bos_games):
+    engine = _engine(tmp_path)
+    game_ids = sorted(bos_games)[:3]
+    events = [
+        _event(game_id, datetime(2025, 11, 1 + n, 23, 0, tzinfo=UTC)) for n, game_id in enumerate(game_ids)
+    ]
+    collection = _collection(engine, bos_games, events)
+    segments = LineupSegmentRepository(engine)
+
+    first = backfill(collection, segments, "2025-26", max_games=2, throttle_seconds=0)
+    assert (first["attempted"], first["stored"], first["remaining"], first["covered"]) == (2, 2, 1, False)
+    assert not segments.covered("2025-26")
+
+    second = backfill(collection, segments, "2025-26", max_games=2, throttle_seconds=0)
+    assert (second["attempted"], second["remaining"], second["covered"]) == (1, 0, True)
+    assert collection.provider.fetched == game_ids
+
+    third = backfill(collection, segments, "2025-26", throttle_seconds=0)
+    assert (third["attempted"], third["covered"]) == (0, True)
+    assert collection.provider.fetched == game_ids
+    assert segments.covered("2025-26")
+
+
+def test_the_backfill_refuses_seasons_before_2025_26(tmp_path):
+    engine = _engine(tmp_path)
+    with pytest.raises(ValueError, match="2024-25 keeps PBP Stats"):
+        backfill(_collection(engine, {}), LineupSegmentRepository(engine), "2024-25")
+
+
+# -- reads ----------------------------------------------------------------------
+
+
+def _settings():
+    return RuntimeSettings(environment="testing", cache=CacheSettings(on_off_min_interval_seconds=2))
+
+
+@pytest.fixture
+def covered(tmp_path, bos_games):
+    """BOS 2025-26: two games stored, one rejected, the season covered."""
+
+    engine = _engine(tmp_path)
+    stored, rejected = sorted(bos_games)[:2], sorted(bos_games)[2]
+    games = {**{game_id: bos_games[game_id] for game_id in stored}, rejected: _rejected(bos_games, rejected)}
+    _collection(engine, games).collect("2025-26", game_ids=[*stored, rejected])
+    with engine.begin() as connection:
+        connection.execute(
+            insert(EventCatalogEntry.__table__).values(
+                # 00:30 UTC on 2025-11-15 is the evening of 2025-11-14 in New York.
+                _event(
+                    rejected,
+                    datetime(2025, 11, 15, 0, 30, tzinfo=UTC),
+                    home=("BOS", BOS),
+                    away=("DET", 1610612765),
+                )
+            )
+        )
+    LineupSegmentRepository(engine).record_coverage("2025-26", WRITTEN_AT)
+    return SimpleNamespace(engine=engine, stored=stored, rejected=rejected)
+
+
+@pytest.fixture
+def provider():
+    return FakeProvider()
+
+
+def _service(provider, engine=None, redis=None):
+    redis = redis or FakeRedis()
+    return OnOffService(
+        provider,
+        _settings(),
+        redis_client=redis,
+        segments=None if engine is None else LineupSegmentRepository(engine),
+        clock=Clock(),
+        sleep=redis.sleep,
+    )
+
+
+def test_a_covered_season_is_served_from_segments_without_pbp_stats_or_redis(covered, provider):
+    redis = FakeRedis()
+    service = _service(provider, covered.engine, redis)
+
+    body = service.get("BOS", "2025-26", off=[TATUM], user_id="u1", deadline=0.0)
+
+    assert provider.calls == []
+    assert (redis.data, redis.slots, redis.counters) == ({}, {}, {})
+    assert (body["status"], body["source"], body["stale"]) == ("ok", "statsplus", False)
+    assert body["cached_at"] == "2026-11-03T12:00:00+00:00"
+    assert list(body) == [
+        "status",
+        "source",
+        "team",
+        "season",
+        "on",
+        "off",
+        "cached_at",
+        "stale",
+        "players",
+        "games_missing",
+    ]
+    assert set(body["players"][0]) == {
+        "player_id",
+        "name",
+        "minutes",
+        "possessions",
+        "usage",
+        "totals",
+        "per36",
+    }
+    assert service.get_cached("BOS", "2025-26", off=[TATUM]) == body
+
+
+def test_games_missing_names_each_rejected_game_by_its_eastern_date_and_teams(covered, provider):
+    body = _service(provider, covered.engine).get("BOS", "2025-26", on=[TATUM])
+
+    assert body["games_missing"] == [
+        {"game_id": covered.rejected, "game_date": "2025-11-14", "matchup": "DET @ BOS"}
+    ]
+
+
+def test_an_on_player_who_never_played_for_the_team_has_an_empty_split(covered, provider):
+    body = _service(provider, covered.engine).get("BOS", "2025-26", on=[203999])
+
+    assert (body["status"], body["source"], body["players"]) == ("ok", "statsplus", [])
+    assert provider.calls == []
+
+
+def test_an_uncovered_season_keeps_the_pbp_stats_path_byte_for_byte(tmp_path, bos_games):
+    engine = _engine(tmp_path)
+    _collection(engine, bos_games).collect("2025-26", game_ids=sorted(bos_games)[:1])
+    with_segments, plain = FakeProvider(), FakeProvider()
+    segment_service = _service(with_segments, engine)
+    pbp_service = _service(plain)
+
+    for service in (segment_service, pbp_service):
+        service.get("DEN", "2025-26", off=[203999], user_id="u1")
+    responses = [
+        json.dumps(service.get("DEN", "2025-26", off=[203999]))
+        + json.dumps(service.get_cached("DEN", "2025-26", off=[203999]))
+        for service in (segment_service, pbp_service)
+    ]
+
+    assert responses[0] == responses[1]
+    assert '"source": "pbpstats"' in responses[0] and "games_missing" not in responses[0]
+    assert with_segments.calls == plain.calls == [(DEN, "2025-26", (), (203999,))]
+    assert not segment_service.serves_from_segments("2025-26")
+
+
+def test_injury_scenarios_read_a_covered_season_from_segments_on_both_paths(covered, provider):
+    service = _service(provider, covered.engine)
+    for fetch in (True, False):
+        request = SimpleNamespace(
+            fetch_on_off=fetch, user_id="u1", on_off_deadline=service.request_deadline() if fetch else None
+        )
+        reads = _OnOffReads(service, "BOS", TATUM, request)
+
+        for side in ("on", "off"):
+            assert reads.get("2025-26", side)["source"] == "statsplus"
+    assert provider.calls == []
+
+
+def test_the_warm_skips_a_covered_season(covered, provider):
+    from scripts.on_off_warm import warm
+
+    class Listing:
+        def list_injuries(self, requested_date, team):
+            return {"injuries": [{"player_id": TATUM, "team": "BOS", "status": "Out"}]}
+
+    result = warm(Listing(), _service(provider, covered.engine), "2025-26", NOW.date())
+
+    assert result == {"state": "served_from_segments", "requests": 0, "segment_seasons": ["2025-26"]}
+    assert provider.calls == []
+
+
+def test_the_route_serves_a_covered_season(app, dependencies, authenticate, covered, provider):
+    dependencies.on_off_service = _service(provider, covered.engine)
+
+    body = (
+        app.test_client()
+        .get(f"/api/on_off?team=BOS&season=2025-26&on[]={BROWN}", headers=authenticate())
+        .get_json()
+    )
+
+    assert (body["source"], body["games_missing"][0]["matchup"]) == ("statsplus", "DET @ BOS")
+    assert body["players"][0]["player_id"] == BROWN
+    assert provider.calls == []
+
+
+def test_segment_minutes_round_half_up_like_pbp_stats():
+    from app.services.on_off import segment_row
+
+    sums = {
+        "player_id": 1,
+        "name": "P",
+        "off_poss": 10,
+        **dict.fromkeys(("pts", "reb", "ast", "fg3m", "fga", "fg3a", "tov", "fta"), 0),
+        **dict.fromkeys(("team_fga", "team_fta", "team_tov", "team_heaves"), 0),
+    }
+    minutes = [segment_row({**sums, "duration_cs": cs}).minutes for cs in (8010_00 - 1, 8010_00, 8040_00)]
+    assert minutes == [133, 134, 134]
+    usage = segment_row(
+        {
+            **sums,
+            "duration_cs": 6000,
+            "fga": 10,
+            "fta": 5,
+            "tov": 2,
+            "team_fga": 40,
+            "team_heaves": 1,
+            "team_fta": 10,
+            "team_tov": 6,
+        }
+    ).usage
+    assert usage == pytest.approx(100 * (10 + 0.44 * 5 + 2) / (40 + 1 + 0.44 * 10 + 6))

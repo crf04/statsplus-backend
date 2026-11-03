@@ -63,9 +63,9 @@ def test_the_migration_creates_the_tables_and_reruns_as_a_noop(tmp_path):
         "seg",
         "player_id",
     ]
-    assert {index["name"]: index["column_names"] for index in inspector.get_indexes("lineup_segment_players")} == {
-        "ix_lineup_segment_players_team_season": ["team_id", "season"]
-    }
+    assert {
+        index["name"]: index["column_names"] for index in inspector.get_indexes("lineup_segment_players")
+    } == {"ix_lineup_segment_players_team_season": ["team_id", "season"]}
     assert inspector.get_pk_constraint("lineup_roster_slots")["constrained_columns"] == [
         "season",
         "team_id",
