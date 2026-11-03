@@ -318,6 +318,9 @@ class _SnapshotRecorder:
 
     def __getattr__(self, name):
         method = getattr(self._target, name)
+        if name == "request_governance":
+            # Binds governance reads to the request; it reads nothing itself.
+            return method
 
         def read(*args, publication_snapshot=None, **kwargs):
             self._seen.append((name, publication_snapshot))
@@ -353,6 +356,34 @@ def test_unscheduled_matchup_reads_one_publication_snapshot(tmp_path):
     ]
     assert all(snapshot is generation for _name, snapshot in seen)
     assert response.get_json()["provenance"] == {"generation": [], "sources": {}}
+
+
+def test_a_matchups_two_windows_read_their_governing_manifest_once(tmp_path):
+    from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
+    from app.services.team_matchup_query import TEAM_MATCHUP_PUBLICATION_STREAMS, TeamMatchupQueryService
+    from tests.services.test_ledger_runtime import record_manifest_reads, seed_governed_manifest
+    from tests.support.publication_stubs import RETRIEVED_AT, StubReader, read
+
+    client, service = _fixture_client(tmp_path, with_service=True)
+    repository = service.team_matchups.repository
+    with repository.engine.begin() as connection:
+        seed_governed_manifest(
+            connection, "manifest", "0022500001", created_at=RETRIEVED_AT, cutoff=RETRIEVED_AT
+        )
+    # The Season and Last-15 zone publications share one governing manifest.
+    zone_streams = [TEAM_MATCHUP_PUBLICATION_STREAMS[window]["shot_zones"] for window in ("season", "l15")]
+    service.team_matchups = TeamMatchupQueryService(
+        repository,
+        clock=lambda: NOW,
+        publication_reader=StubReader({stream: read(stream, ()) for stream in zone_streams}),
+        l15_expectation_resolver=ActiveManifestLedgerGovernanceReader(repository.engine),
+    )
+    manifest_reads = record_manifest_reads(repository.engine)
+
+    response = client.get(f"{UNSCHEDULED}?team=LAL&opponent=BOS")
+
+    assert response.status_code == 200
+    assert len(manifest_reads) == 1
 
 
 def test_unscheduled_scores_equal_the_game_matchup_scores(tmp_path):
