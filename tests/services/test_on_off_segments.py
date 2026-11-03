@@ -232,6 +232,83 @@ def test_a_technical_whose_free_throw_was_never_shot_claims_no_later_free_throw(
     ]
 
 
+def test_a_pending_technical_leaves_a_two_shot_trip_to_its_shooting_foul():
+    """A technical's free throw is a 1-of-1, so the trip's 1-of-2 and 2-of-2
+    stay with the lineup at the shooting foul even while the technical waits."""
+
+    play_by_play = _game(
+        (
+            "foul",
+            "PT05M00.00S",
+            {"teamId": DEN, "personId": 11, "subType": "personal", "descriptor": "shooting"},
+        ),
+        ("substitution", "PT05M00.00S", {"teamId": BOS, "personId": 2, "subType": "out"}),
+        ("substitution", "PT05M00.00S", {"teamId": BOS, "personId": 6, "subType": "in"}),
+        ("foul", "PT05M00.00S", {"teamId": DEN, "personId": 12, "subType": "technical"}),
+        (
+            "freethrow",
+            "PT05M00.00S",
+            {"teamId": BOS, "personId": 1, "subType": "1 of 2", "shotResult": "Made"},
+        ),
+        (
+            "freethrow",
+            "PT05M00.00S",
+            {"teamId": BOS, "personId": 1, "subType": "2 of 2", "shotResult": "Made"},
+        ),
+        (
+            "freethrow",
+            "PT05M00.00S",
+            {"teamId": BOS, "personId": 3, "subType": "1 of 1", "shotResult": "Made"},
+        ),
+    )
+
+    segments = derive_segments(_box(), play_by_play, "2026-27")
+
+    assert [
+        (segment.players, segment.counts[1]["fta"], segment.counts[3]["fta"]) for segment in _bos(segments)
+    ] == [
+        ((1, 2, 3, 4, 5), 2, 0),
+        ((1, 3, 4, 5, 6), 0, 1),
+    ]
+
+
+def test_a_technical_answered_once_leaves_the_next_1_of_1_to_the_and_one():
+    """One technical has one free throw: the second 1-of-1 at that clock is
+    the and-one, with the lineup at the shooting foul."""
+
+    play_by_play = _game(
+        ("2pt", "PT05M00.00S", {"teamId": BOS, "personId": 1, "shotResult": "Made"}),
+        (
+            "foul",
+            "PT05M00.00S",
+            {"teamId": DEN, "personId": 11, "subType": "personal", "descriptor": "shooting"},
+        ),
+        ("substitution", "PT05M00.00S", {"teamId": BOS, "personId": 2, "subType": "out"}),
+        ("substitution", "PT05M00.00S", {"teamId": BOS, "personId": 6, "subType": "in"}),
+        ("foul", "PT05M00.00S", {"teamId": DEN, "personId": 12, "subType": "technical"}),
+        (
+            "freethrow",
+            "PT05M00.00S",
+            {"teamId": BOS, "personId": 3, "subType": "1 of 1", "shotResult": "Made"},
+        ),
+        (
+            "freethrow",
+            "PT05M00.00S",
+            {"teamId": BOS, "personId": 1, "subType": "1 of 1", "shotResult": "Made"},
+        ),
+    )
+
+    segments = derive_segments(_box(), play_by_play, "2026-27")
+
+    assert [
+        (segment.players, segment.counts[1]["fta"], segment.counts[1]["pts"], segment.counts[3]["fta"])
+        for segment in _bos(segments)
+    ] == [
+        ((1, 2, 3, 4, 5), 1, 3, 0),
+        ((1, 3, 4, 5, 6), 0, 0, 1),
+    ]
+
+
 def test_offsetting_double_technicals_leave_a_missed_and_one_and_its_putback_one_possession():
     """Recorded DEN game 0022600140, Q3 1:04: a NOP layup, a shooting foul, the
     and-one missed, an offensive rebound and a putback.  Double technicals at
@@ -305,13 +382,17 @@ def test_a_technical_free_throw_does_not_end_the_possession():
         ({"subType": "technical"}, 1, 1),
         ({"subType": "personal", "descriptor": "flagrant-type-1"}, 2, 1),
         ({"subType": "personal", "descriptor": "away-from-play"}, 1, 1),
+        ({"subType": "personal", "descriptor": "clear-path"}, 2, 1),
+        ({"subType": "personal", "descriptor": "clear path"}, 2, 1),
+        ({"subType": "personal", "descriptor": "inbound"}, 1, 1),
         ({"subType": "personal", "descriptor": "shooting"}, 1, 2),
     ],
 )
 def test_2026_27_free_throws_keep_the_ball_by_their_foul_not_their_description(foul, trip, bos_possessions):
     """2026-27 descriptions read ``Free Throw 1 of 1`` whatever the foul, so the
-    foul decides: technical, flagrant and away-from-play trips end nothing and
-    the made shot after them ends BOS's possession; a shooting foul's trip ends it."""
+    foul decides: technical, flagrant, away-from-play, clear-path and inbound
+    trips end nothing and the made shot after them ends BOS's possession; a
+    shooting foul's trip ends it."""
 
     play_by_play = _game(
         ("foul", "PT06M00.00S", {"teamId": DEN, "personId": 11, **foul}),
