@@ -3629,9 +3629,7 @@ def _patch_opponent_shot_endpoints(monkeypatch, *, tracking_gp, box_score):
     monkeypatch.setattr(endpoints, "LeagueDashTeamStats", TeamStats)
 
 
-def test_tracking_behind_the_box_score_defers_the_team_without_failing_the_run(
-    tmp_path: Path, monkeypatch
-):
+def test_tracking_behind_the_box_score_defers_the_team_without_failing_the_run(tmp_path: Path, monkeypatch):
     # NBA tracking dropped LAC @ OKC on 10/25 for a day: tracking counts six
     # LAC games where the box score counts seven.
     _patch_opponent_shot_endpoints(
