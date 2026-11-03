@@ -64,7 +64,12 @@ The process uses these stable outcomes:
 | `20` | `non_retryable` — auth, schema, identity, invariant, conflict, or hard-limit failure | Stop and alert an operator |
 
 `synergy:l15` is represented as `provider_window_unsupported` and is never
-attempted. Playoffs, Play-In, and cross-phase responses are rejected before
+attempted. A scope whose NBA tracking counts fewer games than the box score
+for the same window fails as `provider_window_unverified`. Tracking trails the
+box score for hours after a game, so this is not a contract break: the run
+still exits `0`, names the code in its `failures` and terminal status, and
+later runs within the manifest collect the scope once tracking catches up. A
+malformed response keeps `provider_schema_changed` and exits `20`. Playoffs, Play-In, and cross-phase responses are rejected before
 spooling. Provider timeouts/schema drift, wrong environment, revoked/expired
 tokens, duplicate checksum conflicts, and disk-limit failures are stable safe
 codes; player facts and provider response bodies do not enter diagnostics.
