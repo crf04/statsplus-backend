@@ -1254,6 +1254,54 @@ def test_games_composed_for_one_request_read_each_slate_dates_windows_once():
     ]
 
 
+def test_games_sharing_a_team_compose_together_as_each_composes_alone():
+    # LAL @ BOS three times: started today, pending tonight, and two days ago,
+    # whose Defense Sheet windows differ from today's.
+    started = {**_event(), "nba_game_id": "0022500585", "scheduled_at": "2026-01-15T11:00:00+00:00"}
+    earlier = {**_event(), "nba_game_id": "0022500586", "scheduled_at": "2026-01-14T00:30:00+00:00"}
+    earlier_traditional = (
+        ("traditional", "OPP_TOV", "OPP_TOV", 20.0),
+        ("traditional", "OPP_STL", "OPP_STL", 9.0),
+        ("traditional", "OPP_BLK", "OPP_BLK", 3.0),
+    )
+
+    class DatedWindows(RecordedTeamWindows):
+        def get_latest_window(self, season, *, window_games=None, as_of=None):
+            self.calls.append((season, window_games, as_of, False))
+            return _window(
+                last_15=window_games is not None,
+                traditional_metrics=earlier_traditional if as_of == date(2026, 1, 13) else None,
+            )
+
+    def service():
+        built = _service(events=RecordedEvents(events=[started, _event(), earlier]))
+        built.team_matchups = DatedWindows(None, None)
+        return built
+
+    game_ids = ("0022500585", GAME_ID, "0022500586")
+    together = service()
+    compose_cache = MatchupComposeCache()
+    composed = [
+        together.get_matchup_from_snapshot(
+            game_id=game_id, publication_snapshot=None, injuries=None, compose_cache=compose_cache
+        )
+        for game_id in game_ids
+    ]
+    alone = [
+        service().get_matchup_from_snapshot(game_id=game_id, publication_snapshot=None, injuries=None)
+        for game_id in game_ids
+    ]
+
+    assert [json.dumps(document, sort_keys=True) for document in composed] == [
+        json.dumps(document, sort_keys=True) for document in alone
+    ]
+    tov = [
+        next(row for row in document["league"]["defense_sheet"]["traditional"] if row["key"] == "OPP_TOV")
+        for document in composed
+    ]
+    assert [row["season"]["average_allowed_per_48"] for row in tov] == [13.0, 13.0, 20.0]
+
+
 def test_games_composed_for_one_request_read_the_schedule_refresh_once():
     class CountedEvents(RecordedEvents):
         freshness_calls = 0
