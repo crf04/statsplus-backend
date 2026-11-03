@@ -761,6 +761,29 @@ def test_matchups_compose_one_at_a_time_in_slate_order():
     assert [game["game_id"] for game in edges["games"]] == [f"G{i}" for i in range(6)]
 
 
+def test_every_game_of_an_omitted_season_request_reads_one_snapshot():
+    """The capture and each game's compose share the request's one REPEATABLE READ scope."""
+
+    from sqlalchemy import create_engine
+
+    class ScopedComposer(SnapshotComposer):
+        def get_matchup_from_snapshot(self, *, read_scope=None, **kwargs):
+            self.scopes.append(read_scope)
+            return super().get_matchup_from_snapshot(**kwargs)
+
+    games, payloads = _two_games()
+    composer = ScopedComposer(payloads)
+    composer.scopes = []
+    service = _cached_service(composer, None, games)
+    service._engine = create_engine("sqlite://")
+
+    service.get_edges("2026-04-10")
+
+    first, second = composer.scopes
+    assert first is not None
+    assert second is first
+
+
 def test_an_edges_miss_composes_fresh_and_never_stacks_a_cached_matchup():
     """A Matchup cached at t=0 must not be re-cached by an edges miss at t=299."""
 
