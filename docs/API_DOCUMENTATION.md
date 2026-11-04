@@ -6012,12 +6012,13 @@ Matchup's own order (Season scoring descending, canonical id breaking ties).
   stat catalogue key, computed as the Backtest computes a season value, so a
   fit can show whichever stat its Target is graded by. A value is `null`
   without a season log. A client reading an older response with neither field
-  shows `season_scoring`. The log is the Evidence season the Matchup rows were
-  composed in (the selected `season`), not `as_of.season`, which names the
-  Published Season.
+  shows `season_scoring`. The log, like each `position`, is the Evidence season
+  the Matchup rows were composed in (the selected `season`), not `as_of.season`,
+  which names the Published Season, and it is read from the same capture as the
+  game's Matchup: a past game of an Unpublished Season reads as of its tip.
 - `lines` and `line_prices` (crf04/statsplus#423) are the Matchup row's own
   `lines` and `line_prices` cut to the market the grading stat is posted in
-  (`3PA` is posted as `FG3A`), every provider kept: a client picks the majority
+  (`3PA` is posted as `FG3A`, `SB` as `STKS`), every provider kept: a client picks the majority
   line and the best price as the Matchup's posted-line picker does. Both are
   `{}` when no provider posts that market, including any `/36` or `%` grading
   stat.

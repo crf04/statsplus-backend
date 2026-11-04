@@ -318,7 +318,13 @@ class TargetResolutionService:
             filtered_side,
             read_matchups[game_id],
             slate_date,
-            snapshot=getattr(matchups, "snapshot", None),
+            # The game's own capture: a past game of an Unpublished Season
+            # composed as of its tip, so its fits' logs read as of it too.
+            snapshot=(
+                matchups.game_snapshot(game)
+                if isinstance(matchups, SnapshotMatchups)
+                else getattr(matchups, "snapshot", None)
+            ),
             evidence_season=getattr(matchups, "season", None),
             positions=positions,
         )
@@ -429,12 +435,11 @@ class TargetResolutionService:
                     qualifiers,
                     matchup["players"],
                     opponent_team_id,
-                    season=published_season,
-                    # ``as_of.season`` names the Published Season; the rows'
-                    # own logs are the Evidence season the reader composed
-                    # them in, 2026-27 for a selection before its cutover
-                    # (crf04/statsplus#423).
-                    log_season=evidence_season or published_season,
+                    # ``as_of.season`` names the Published Season; the rows are
+                    # the Evidence season the reader composed them in, 2026-27
+                    # for a selection before its cutover (crf04/statsplus#423),
+                    # so Positions and season logs are read in it too.
+                    season=evidence_season or published_season,
                     snapshot=snapshot,
                     positions=positions,
                     graded_stat=_graded_stat(target),
@@ -534,7 +539,6 @@ class TargetResolutionService:
         opponent_team_id: int,
         *,
         season: str | None,
-        log_season: str | None,
         snapshot: Any | None,
         positions: dict[str, Mapping[int, str]],
         graded_stat: str,
@@ -551,7 +555,7 @@ class TargetResolutionService:
 
         opposing = [player for player in players if int(player["team_id"]) != opponent_team_id]
         listed = self._positions(season, positions)
-        summaries = self._summaries(opposing, log_season, snapshot)
+        summaries = self._summaries(opposing, season, snapshot)
         fits = []
         for player in opposing:
             canonical_id = int(player["canonical_id"])

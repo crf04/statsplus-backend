@@ -98,8 +98,9 @@ def target_stat_columns(
     return tuple(columns) or _PLAYER_RULE_DEFAULTS
 
 
-#: ``3PA`` is the Target display spelling for the governed ``FG3A`` market.
-TARGET_MARKET_ALIASES = {"3PA": "FG3A"}
+#: Target display spellings of governed markets: ``3PA`` is ``FG3A`` and
+#: ``SB`` (steals + blocks) is posted as ``STKS``.
+TARGET_MARKET_ALIASES = {"3PA": "FG3A", "SB": "STKS"}
 
 
 def target_stat_market(stat: str) -> str:

@@ -2634,11 +2634,15 @@ def test_a_fit_with_no_season_log_has_null_stats(targets, resolve_rules):
 
 SNIPER_LINES = {
     "prizepicks": {"PTS": 20.5, "REB": 6.5},
-    "underdog": {"REB": 7.5, "FG3A": 6.5},
+    "underdog": {"REB": 7.5, "FG3A": 6.5, "STKS": 2.5},
     "novig": {"PTS": 21.5},
 }
 SNIPER_PRICES = {
-    "underdog": {"REB": {"over": -110, "under": -120}, "FG3A": {"over": 105, "under": -135}},
+    "underdog": {
+        "REB": {"over": -110, "under": -120},
+        "FG3A": {"over": 105, "under": -135},
+        "STKS": {"over": -125, "under": -105},
+    },
     "novig": {"PTS": {"over": -111, "under": -106}},
 }
 #: Corner Sniper's Regular Season rebounds by January day, oldest first.
@@ -2654,7 +2658,7 @@ def _graded_fit(targets, *, graded_by, historical=False):
         OWNER,
         opponent="OKC",
         qualifiers=[CORNER_THREE],
-        stat_preferences={"columns": ["PTS", "REB", "3PA", "PTS/36"], "graded_by": graded_by},
+        stat_preferences={"columns": ["PTS", "REB", "3PA", "PTS/36", "SB"], "graded_by": graded_by},
     )
     rows = [
         bt._row(
@@ -2728,3 +2732,61 @@ def test_a_completed_games_fit_withholds_its_last_five_as_the_matchup_does(targe
     fit = _graded_fit(targets, graded_by="REB", historical=True)
 
     assert fit["last_five_games"] == []
+
+
+def test_a_fit_graded_by_sb_carries_the_stks_line(targets):
+    fit = _graded_fit(targets, graded_by="SB")
+
+    assert fit["lines"] == {"underdog": {"STKS": 2.5}}
+    assert fit["line_prices"] == {"underdog": {"STKS": {"over": -125, "under": -105}}}
+
+
+def test_a_fits_last_five_and_average_leave_out_playoff_games_in_the_real_log_reader(targets, target_engine):
+    from dataclasses import replace
+    from datetime import date, timedelta
+
+    from app.services.player_game_log_repository import PlayerGameLogRepository
+    from app.services.statistic_catalog import StatisticCatalog
+    from tests import test_target_backtest as bt
+
+    logs = PlayerGameLogRepository(
+        target_engine,
+        statistic_catalog=StatisticCatalog.load_default(),
+        stats_surface_season="2025-26",
+        clock=lambda: datetime(2026, 5, 1, tzinfo=UTC),
+        stats_surface_max_age=timedelta(hours=30),
+    )
+    regular = [
+        bt._row(1, game_id=f"00225000{day:02d}", game_date=date(2026, 1, day), rebounds=rebounds)
+        for day, rebounds in SNIPER_REBOUNDS
+    ]
+    # A later playoff game with 20 rebounds, newer than every Regular Season game.
+    playoff = replace(
+        bt._row(1, game_id="0042500001", game_date=date(2026, 4, 20), rebounds=20), season_type="Playoffs"
+    )
+    logs.publish(
+        "2025-26",
+        [*regular, playoff],
+        retrieved_at=datetime(2026, 5, 1, tzinfo=UTC),
+        source_provider="nba_stats",
+        source_row_count=7,
+    )
+    targets.create_target(
+        OWNER,
+        opponent="OKC",
+        qualifiers=[CORNER_THREE],
+        stat_preferences={"columns": ["REB"], "graded_by": "REB"},
+    )
+    matchup = _matchup(players=[_player(1, "Corner Sniper", shot_zones=_zone_diet(0.4, 0.2))])
+    matchup["as_of"] = {"season": "2025-26"}
+
+    (entry,) = TargetResolutionService(
+        targets=targets,
+        slates=FakeSlate(),
+        matchups=FakeMatchups({GAME_ID: matchup}),
+        player_logs=logs,
+    ).resolve(OWNER, requested_date=SLATE_DATE)["targets"]
+
+    (fit,) = entry["players"]
+    assert [game["value"] for game in fit["last_five_games"]] == [10.0, 6.0, 7.0, 4.0, 9.0]
+    assert fit["season_averages"]["REB"] == 6.5

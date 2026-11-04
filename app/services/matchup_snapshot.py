@@ -263,6 +263,16 @@ class SnapshotMatchups:
         with opener() as read_scope:
             yield read_scope
 
+    def game_snapshot(self, game: Mapping[str, Any]) -> Any:
+        """The capture ``game``'s Matchup reads its evidence from, memoized per tip time.
+
+        A past game of an Unpublished Season reads as of its tip, so a caller
+        reading more of the same evidence (Target resolution's season logs)
+        reads this capture, not the request's own.
+        """
+
+        return self._game_snapshot(game)
+
     def _game_snapshot(self, game: Mapping[str, Any]) -> Any:
         """The capture ``game`` reads: ``self.snapshot``, or as of its tip for a past game."""
 
