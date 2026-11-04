@@ -856,6 +856,7 @@ def build_dependencies(
         # catalog and the Regular Season logs, never from a provider.
         player_logs=player_game_log_repository,
         athlete_catalog=athlete_catalog_reader,
+        engine=engine,
     )
     # The home page's slate edges compose the same two documents under the same
     # promises: one Publication snapshot, stored-only injuries, no provider.

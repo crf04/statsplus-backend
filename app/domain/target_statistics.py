@@ -98,6 +98,17 @@ def target_stat_columns(
     return tuple(columns) or _PLAYER_RULE_DEFAULTS
 
 
+#: Target display spellings of governed markets: ``3PA`` is ``FG3A`` and
+#: ``SB`` (steals + blocks) is posted as ``STKS``.
+TARGET_MARKET_ALIASES = {"3PA": "FG3A", "SB": "STKS"}
+
+
+def target_stat_market(stat: str) -> str:
+    """The posted-line market a Target stat column is quoted in."""
+
+    return TARGET_MARKET_ALIASES.get(stat, stat)
+
+
 #: The box-score totals a season stat is read from, by the names the Backtest's
 #: ``season_totals`` carries.
 _COMBINATIONS = {

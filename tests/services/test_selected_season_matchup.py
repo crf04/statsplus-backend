@@ -916,3 +916,167 @@ def test_slate_edges_prove_one_shared_ledger_lineage_once_without_evidence_paylo
     assert proved == ["manifest-new"]
     # Evidence is judged by its identity; no read loads an observation's payload.
     assert [statement for statement in statements if "collection_observations.payload" in statement] == []
+
+
+# --- Target resolution (crf04/statsplus#423) ---------------------------------
+
+
+@pytest.fixture
+def resolving(served, dependencies, runtime_settings):
+    """The caller's one Target against BOS, resolved over the world's own reads."""
+
+    from datetime import UTC, datetime
+
+    from app.models.user import User
+    from app.services.target_resolution import TargetResolutionService
+    from app.services.user_service import UserService
+
+    with served.engine.begin() as connection:
+        connection.execute(
+            User.__table__.insert(),
+            {
+                "firebase_uid": "test-uid",
+                "email": "user@example.com",
+                "display_name": "Test User",
+                "photo_url": None,
+                "created_at": datetime(2026, 8, 1, tzinfo=UTC),
+                "last_login": datetime(2026, 8, 1, tzinfo=UTC),
+                "is_active": True,
+            },
+        )
+    served.targets = UserService(served.engine, settings=runtime_settings)
+    served.targets.create_target(
+        "test-uid",
+        opponent=TRICODES[BOS],
+        qualifiers=[{"base": "season_average", "stat": "PTS", "comparator": "at_or_above", "threshold": 0}],
+        stat_preferences={"columns": ["PTS"], "graded_by": "PTS"},
+    )
+    dependencies.target_resolution_service = TargetResolutionService(
+        targets=served.targets,
+        slates=served.slates,
+        matchups=served.service,
+        publication_reader=served.reader,
+        injuries=_StoredInjuries(),
+        settings=served.service.settings,
+        player_logs=served.logs,
+        athlete_catalog=_SeasonCatalog({NEW: {PLAYER_ID: "Big"}}),
+        engine=served.engine,
+    )
+    return served
+
+
+class _SeasonCatalog:
+    """The athlete catalog's Position column, by season."""
+
+    def __init__(self, positions):
+        self.positions = positions
+
+    def get_catalog(self, season, *, active_only=False):
+        return [
+            {"player_id": player_id, "position": group}
+            for player_id, group in self.positions.get(season, {}).items()
+        ]
+
+
+def _fit(body):
+    (target,) = body["targets"]
+    (fit,) = target["players"]
+    return fit
+
+
+def test_a_selected_2026_27_resolve_reads_each_fits_average_and_last_five_from_2026_27(
+    resolving, client, authenticate
+):
+    resolving.hold_opening_week()
+    headers = authenticate()
+
+    published = client.get(f"/api/user/targets/resolve?date={SLATE_DATE}", headers=headers).get_json()
+    selected = client.get(
+        f"/api/user/targets/resolve?date={SLATE_DATE}&season={NEW}", headers=headers
+    ).get_json()
+
+    # Player 0 scored 30 a game in 2025-26 and 12 in 2026-27's one game.
+    assert selected["season_context"] == CONTEXT
+    assert _fit(selected)["season_averages"]["PTS"] == 12.0
+    assert _fit(selected)["last_five_games"] == [
+        {"game_id": "0022600001", "game_date": "2026-10-24", "value": 12.0}
+    ]
+    # Omitted, the resolve reads the Published Season as before.
+    assert "season_context" not in published
+    assert _fit(published)["season_averages"]["PTS"] == 30.0
+    assert _fit(published)["last_five_games"] == [
+        {"game_id": "0022500001", "game_date": "2026-04-13", "value": 30.0}
+    ]
+
+
+def test_a_resolve_selecting_an_unoffered_season_is_refused(resolving, client, authenticate):
+    response = client.get(f"/api/user/targets/resolve?date={SLATE_DATE}&season={NEW}", headers=authenticate())
+
+    assert _refusal(response) == (503, "season_unavailable", CONTEXT)
+
+
+def test_a_selected_2026_27_resolve_reads_positions_from_the_2026_27_catalog(resolving, client, authenticate):
+    resolving.hold_opening_week()
+    # Player 0 is listed only in the 2026-27 catalog, as a rookie would be.
+    resolving.targets.create_target(
+        "test-uid", opponent=TRICODES[BOS], qualifiers=[{"base": "position", "groups": ["Big"]}]
+    )
+    headers = authenticate()
+
+    def big_fits(path):
+        body = client.get(path, headers=headers).get_json()
+        (target,) = [t for t in body["targets"] if t["target"]["qualifiers"][0]["base"] == "position"]
+        return [(fit["name"], fit["position"]) for fit in target["players"]]
+
+    assert big_fits(f"/api/user/targets/resolve?date={SLATE_DATE}&season={NEW}") == [("Player 0", "Big")]
+    assert big_fits(f"/api/user/targets/resolve?date={SLATE_DATE}") == []
+
+
+def test_a_selected_past_games_fits_read_their_logs_as_of_its_tip(monkeypatch, tmp_path):
+    """A past 2026-27 game composes as of its tip; its fits' averages and chips do too."""
+
+    from types import SimpleNamespace
+
+    from app.services.target_resolution import TargetResolutionService
+    from tests.services.test_unpublished_as_of_reads import (
+        AFTER_THE_OPENING_WEEK,
+        _game_at,
+        _hold_a_week_then_ten_games,
+        season_in_progress,
+    )
+
+    season_in_progress(monkeypatch)
+    world = SelectedWorld(tmp_path)
+    try:
+        _hold_a_week_then_ten_games(world)
+        _game_at(world, AFTER_THE_OPENING_WEEK)
+        matchup = season_scoped(world.service, NEW).get_matchup(game_id=GAME_ID)
+        slate = {**world.slates.get_slate(SLATE_DATE), "slate_date": "2026-10-23", "games": [matchup["game"]]}
+        target = {
+            "opponent": TRICODES[BOS],
+            "qualifiers": [
+                {"base": "season_average", "stat": "PTS", "comparator": "at_or_above", "threshold": 0}
+            ],
+            "stat_preferences": {"columns": ["PTS"], "graded_by": "PTS"},
+        }
+        resolver = TargetResolutionService(
+            targets=SimpleNamespace(list_targets=lambda uid: [target]),
+            slates=SimpleNamespace(get_slate=lambda *args, **kwargs: slate),
+            matchups=world.service,
+            publication_reader=world.reader,
+            injuries=_StoredInjuries(),
+            settings=world.service.settings,
+            player_logs=world.logs,
+            engine=world.engine,
+        )
+
+        body = season_scoped(resolver, NEW).resolve("test-uid", requested_date="2026-10-23")
+    finally:
+        world.engine.dispose()
+
+    (fit,) = body["targets"][0]["players"]
+    # The opening week's logs, 12 points, as the Matchup scored him -- not the
+    # ten-game correction to 20 published after the tip.
+    assert matchup["players"][0]["season_scoring"] == 12.0
+    assert fit["season_averages"]["PTS"] == 12.0
+    assert fit["last_five_games"] == [{"game_id": "0022600001", "game_date": "2026-10-24", "value": 12.0}]

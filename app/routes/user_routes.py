@@ -28,6 +28,7 @@ from app.utils.auth import (
     require_auth_optional,
 )
 
+from ._selected_season import season_argument, season_refusals, selected
 from ._service_proxy import CurrentAppService
 
 # Initialize blueprint
@@ -416,6 +417,9 @@ def resolve_targets():
             against the previous (or, for ``next_game_day``, the next game
             date, else the previous one).  Any other value, or ``date`` with it, is
             ``400 invalid_input``.
+        season: the Evidence season, as on the Slate and Matchup
+            (crf04/statsplus#330); absent reads the Published Season.  One
+            not offered is ``503 season_unavailable``.
 
     Live Targets come first, then idle ones.  A malformed date is refused by
     the slate's own rule, as ``400 invalid_input``.
@@ -423,11 +427,13 @@ def resolve_targets():
     Returns:
         JSON response with the slate date and the resolved targets
     """
-    resolved = target_resolution_service.resolve(
-        _authenticated_uid(),
-        requested_date=request.args.get("date"),
-        fallback=request.args.get("fallback"),
-    )
+    service = selected(target_resolution_service, "target_resolution", season_argument())
+    with season_refusals():
+        resolved = service.resolve(
+            _authenticated_uid(),
+            requested_date=request.args.get("date"),
+            fallback=request.args.get("fallback"),
+        )
     return jsonify({"success": True, **resolved})
 
 

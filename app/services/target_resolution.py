@@ -30,8 +30,14 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
 from app.config.settings import RuntimeSettings
+from app.domain.nba_events import season_for_game_id
 from app.domain.player_diet_taxonomy import PLAYER_DIET_SLICE_LABELS
-from app.domain.target_statistics import TARGET_STAT_KEYS, season_average_value, target_stat_columns
+from app.domain.target_statistics import (
+    TARGET_STAT_KEYS,
+    season_average_value,
+    target_stat_columns,
+    target_stat_market,
+)
 from app.models.target import (
     POSITION_QUALIFIER_BASE,
     SEASON_AVERAGE_QUALIFIER_BASE,
@@ -44,6 +50,8 @@ from app.services.matchup_snapshot import (
     read_game_matchup,
     request_matchups,
 )
+from app.services.request_reads import request_read_scope
+from app.services.research_season import refuse_evidence_after_game, season_context, selected_season
 from app.services.response_provenance import (
     matchup_generation,
     provenance_block,
@@ -106,6 +114,7 @@ class TargetResolutionService:
         matchup_cache: ComposedMatchupCache | None = None,
         player_logs: SeasonSummaryReader | None = None,
         athlete_catalog: CatalogReader | None = None,
+        engine: Any | None = None,
     ) -> None:
         # Both optional readers serve the player rules Diet shares do not:
         # a Position comes from the athlete catalog and a season average from
@@ -129,6 +138,9 @@ class TargetResolutionService:
         # live generation holds, and composed Matchups shared through Redis.
         self.snapshot_reuse = snapshot_reuse
         self.matchup_cache = matchup_cache
+        # A selected season's capture and every game's reads share one
+        # repeatable-read scope, as the slate edges' do (crf04/statsplus#423).
+        self._engine = engine
 
     def resolve(
         self,
@@ -147,27 +159,36 @@ class TargetResolutionService:
         """
 
         slate = read_slate(self.slates.get_slate, requested_date, fallback)
+        # A selected Evidence season (``season_scoped``) after the Slate
+        # games' own season is refused: a game's schedule facts are its own
+        # season's (crf04/statsplus#330 AC9).
+        for game in slate["games"]:
+            refuse_evidence_after_game(self.publication_reader, season_for_game_id(game["game_id"]))
         games = self._games_by_tricode(slate["games"])
         read_matchups: dict[str, Mapping[str, Any]] = {}
         positions: dict[str, Mapping[int, str]] = {}
-        matchups = self._request_matchups()
+        engine = None if selected_season(self.publication_reader) is None else self._engine
 
         live: list[dict[str, Any]] = []
         idle: list[dict[str, Any]] = []
-        for target in self.targets.list_targets(firebase_uid):
-            resolved = self._resolve_target(
-                target,
-                games,
-                read_matchups,
-                matchups=matchups,
-                positions=positions,
-                slate_date=slate["slate_date"],
-                pool=(slate.get("freshness") or {}).get("pool"),
-                schedule=(slate.get("freshness") or {}).get("schedule"),
-            )
-            (idle if resolved["game"] is None else live).append(resolved)
+        with request_read_scope(engine, repeatable_read=True) as read_scope:
+            matchups = self._request_matchups(read_scope=None if engine is None else read_scope)
+            for target in self.targets.list_targets(firebase_uid):
+                resolved = self._resolve_target(
+                    target,
+                    games,
+                    read_matchups,
+                    matchups=matchups,
+                    positions=positions,
+                    slate_date=slate["slate_date"],
+                    pool=(slate.get("freshness") or {}).get("pool"),
+                    schedule=(slate.get("freshness") or {}).get("schedule"),
+                )
+                (idle if resolved["game"] is None else live).append(resolved)
         shared = bool(read_matchups) and isinstance(matchups, SnapshotMatchups)
+        context = season_context(self.publication_reader, getattr(matchups, "snapshot", None), lambda: None)
         return {
+            **({} if context is None else {"season_context": context}),
             "slate_date": slate["slate_date"],
             "targets": live + idle,
             # The one generation every composed Matchup read, with any
@@ -180,7 +201,7 @@ class TargetResolutionService:
             ),
         }
 
-    def _request_matchups(self) -> MatchupReader:
+    def _request_matchups(self, *, read_scope: tuple[Any, Any] | None = None) -> MatchupReader:
         """One reader for this whole resolve, reading no provider.
 
         A distinct game a Target names is already composed at most once
@@ -201,6 +222,7 @@ class TargetResolutionService:
             settings=self.settings,
             snapshot_reuse=self.snapshot_reuse,
             cache=self.matchup_cache,
+            read_scope=read_scope,
         )
 
     def today(
@@ -296,7 +318,14 @@ class TargetResolutionService:
             filtered_side,
             read_matchups[game_id],
             slate_date,
-            snapshot=getattr(matchups, "snapshot", None),
+            # The game's own capture: a past game of an Unpublished Season
+            # composed as of its tip, so its fits' logs read as of it too.
+            snapshot=(
+                matchups.game_snapshot(game)
+                if isinstance(matchups, SnapshotMatchups)
+                else getattr(matchups, "snapshot", None)
+            ),
+            evidence_season=getattr(matchups, "season", None),
             positions=positions,
         )
 
@@ -349,6 +378,7 @@ class TargetResolutionService:
         slate_date: str,
         *,
         snapshot: Any | None,
+        evidence_season: str | None,
         positions: dict[str, Mapping[int, str]],
     ) -> dict[str, Any]:
         opponent_team_id = int(game[opponent_side]["team_id"])
@@ -359,6 +389,7 @@ class TargetResolutionService:
         availability = self._participant_availability(matchup)
         qualifiers = list(target["qualifiers"])
         stat_columns = _stat_columns(target)
+        published_season = (matchup.get("as_of") or {}).get("season")
         conditions = target.get("conditions")
         condition_kept = date_is_kept(conditions, slate_date)
         defender = conditions.get("defender") if conditions else None
@@ -404,9 +435,15 @@ class TargetResolutionService:
                     qualifiers,
                     matchup["players"],
                     opponent_team_id,
-                    season=(matchup.get("as_of") or {}).get("season"),
+                    # ``as_of.season`` names the Published Season; the rows are
+                    # the Evidence season the reader composed them in, 2026-27
+                    # for a selection before its cutover (crf04/statsplus#423),
+                    # so Positions and season logs are read in it too.
+                    season=evidence_season or published_season,
                     snapshot=snapshot,
                     positions=positions,
+                    graded_stat=_graded_stat(target),
+                    historical=matchup["experience"]["mode"] == "historical",
                 )
             ),
         }
@@ -504,6 +541,8 @@ class TargetResolutionService:
         season: str | None,
         snapshot: Any | None,
         positions: dict[str, Mapping[int, str]],
+        graded_stat: str,
+        historical: bool,
     ) -> list[dict[str, Any]]:
         """Name the opposing participants meeting every Qualifier.
 
@@ -520,7 +559,14 @@ class TargetResolutionService:
         fits = []
         for player in opposing:
             canonical_id = int(player["canonical_id"])
-            fit = self._fit(qualifiers, player, listed.get(canonical_id), summaries.get(canonical_id))
+            fit = self._fit(
+                qualifiers,
+                player,
+                listed.get(canonical_id),
+                summaries.get(canonical_id),
+                graded_stat=graded_stat,
+                historical=historical,
+            )
             if fit is not None:
                 fits.append(fit)
         return fits
@@ -560,6 +606,9 @@ class TargetResolutionService:
         player: Mapping[str, Any],
         position: str | None,
         summary: Any | None,
+        *,
+        graded_stat: str,
+        historical: bool,
     ) -> dict[str, Any] | None:
         shares = []
         thin = False
@@ -625,9 +674,56 @@ class TargetResolutionService:
                 )
                 for column in sorted(TARGET_STAT_KEYS)
             },
+            # The graded stat's posted lines and Over/Under prices, in the
+            # Matchup row's own shape, every provider kept: the web app picks
+            # the majority line and the best price as its posted-line picker
+            # does.  Empty for a stat no line is posted in (a /36 or % column).
+            **_graded_lines(player, target_stat_market(graded_stat)),
+            # The graded stat in the same Regular Season games as the
+            # averages, newest first.  A completed game's Matchup withholds
+            # its rows' recent games, so a fit of one does too.
+            "last_five_games": [] if historical else _last_five(graded_stat, summary),
             "thin": thin,
             "shares": shares,
         }
+
+
+def _graded_stat(target: Mapping[str, Any]) -> str:
+    """The stat a Target is graded by: the saved choice, else its first column."""
+
+    preferences = target.get("stat_preferences")
+    if preferences and preferences.get("graded_by"):
+        return str(preferences["graded_by"])
+    return _stat_columns(target)[0]
+
+
+def _graded_lines(player: Mapping[str, Any], market: str) -> dict[str, Any]:
+    """``lines`` and ``line_prices`` of one Matchup row, cut to one market."""
+
+    return {
+        key: {
+            provider: {market: markets[market]}
+            for provider, markets in player[key].items()
+            if market in markets
+        }
+        for key in ("lines", "line_prices")
+    }
+
+
+def _last_five(stat: str, summary: Any | None) -> list[dict[str, Any]]:
+    """The stat in a player's last five Regular Season games, newest first."""
+
+    if summary is None or summary.season_rate is None:
+        return []
+    newest = sorted(summary.rate_rows, key=lambda record: (record.game_date, record.game_id), reverse=True)
+    return [
+        {
+            "game_id": str(record.game_id),
+            "game_date": record.game_date.isoformat(),
+            "value": season_average_value(stat, (record,)),
+        }
+        for record in newest[:5]
+    ]
 
 
 def _stat_columns(target: Mapping[str, Any]) -> list[str]:
