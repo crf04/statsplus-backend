@@ -193,8 +193,9 @@ PROXY_NOTE = (
 #: older code shape wrote, and the constant is part of every key (v3: every
 #: player row carries its Position, and a Target may hold Position and Average
 #: Qualifiers; v4: a thin Diet falls back to the previous season's, and every
-#: share names its ``diet_season``).
-TARGET_BACKTEST_CACHE_SCHEMA = 4
+#: share names its ``diet_season``; v5: shot-zone and shot-type defaults lead
+#: with the slice's own stat, statsplus#418).
+TARGET_BACKTEST_CACHE_SCHEMA = 5
 
 #: Raw threshold precision in the key: the six-decimal ``qualifier_signature``
 #: folds 0.4000001 and 0.4000004 onto one line, but those two Targets are

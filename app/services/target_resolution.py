@@ -31,7 +31,7 @@ from typing import Any, Protocol
 
 from app.config.settings import RuntimeSettings
 from app.domain.player_diet_taxonomy import PLAYER_DIET_SLICE_LABELS
-from app.domain.target_statistics import season_average_value
+from app.domain.target_statistics import TARGET_STAT_KEYS, season_average_value, target_stat_columns
 from app.models.target import (
     POSITION_QUALIFIER_BASE,
     SEASON_AVERAGE_QUALIFIER_BASE,
@@ -333,6 +333,7 @@ class TargetResolutionService:
         return {
             "target": dict(target),
             "game": None,
+            "stat_columns": _stat_columns(target),
             "context": [],
             "availability": dict(_IDLE),
             "players": [],
@@ -357,6 +358,7 @@ class TargetResolutionService:
         league = matchup["league"]
         availability = self._participant_availability(matchup)
         qualifiers = list(target["qualifiers"])
+        stat_columns = _stat_columns(target)
         conditions = target.get("conditions")
         condition_kept = date_is_kept(conditions, slate_date)
         defender = conditions.get("defender") if conditions else None
@@ -385,6 +387,7 @@ class TargetResolutionService:
                 "away": self._team(game["away_team"]),
                 "home": self._team(game["home_team"]),
             },
+            "stat_columns": stat_columns,
             # One entry per Qualifier; Position and Average name no slice, so
             # theirs carry nulls for the defense-sheet fields.
             "context": [
@@ -513,7 +516,7 @@ class TargetResolutionService:
 
         opposing = [player for player in players if int(player["team_id"]) != opponent_team_id]
         listed = self._positions(season, positions)
-        summaries = self._summaries(qualifiers, opposing, season, snapshot)
+        summaries = self._summaries(opposing, season, snapshot)
         fits = []
         for player in opposing:
             canonical_id = int(player["canonical_id"])
@@ -537,19 +540,13 @@ class TargetResolutionService:
 
     def _summaries(
         self,
-        qualifiers: Sequence[Mapping[str, Any]],
         players: Sequence[Mapping[str, Any]],
         season: str | None,
         snapshot: Any | None,
     ) -> Mapping[int, Any]:
-        """The players' Regular Season logs, read only for an Average Qualifier."""
+        """The players' Regular Season logs, for Average Qualifiers and stat columns."""
 
-        if (
-            season is None
-            or self.player_logs is None
-            or not players
-            or not any(qualifier["base"] == SEASON_AVERAGE_QUALIFIER_BASE for qualifier in qualifiers)
-        ):
+        if season is None or self.player_logs is None or not players:
             return {}
         return self.player_logs.get_player_summaries(
             season,
@@ -617,9 +614,29 @@ class TargetResolutionService:
             "posted_markets": list(player["posted_markets"]),
             "injury_badge_ref": player["injury_badge_ref"],
             "season_scoring": player["season_scoring"],
+            # Every catalogue stat, so a fit shows whichever one its Target is
+            # graded by, including a column added after this read; null
+            # without a Regular Season log.
+            "season_averages": {
+                column: (
+                    None
+                    if summary is None or summary.season_rate is None
+                    else season_average_value(column, summary.rate_rows)
+                )
+                for column in sorted(TARGET_STAT_KEYS)
+            },
             "thin": thin,
             "shares": shares,
         }
+
+
+def _stat_columns(target: Mapping[str, Any]) -> list[str]:
+    """The Target's stat columns: the saved choice, else the Backtest's defaults."""
+
+    preferences = target.get("stat_preferences")
+    if preferences:
+        return list(preferences["columns"])
+    return list(target_stat_columns(target["qualifiers"]))
 
 
 __all__ = ["TargetResolutionService"]

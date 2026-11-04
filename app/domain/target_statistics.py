@@ -20,11 +20,13 @@ TARGET_STAT_KEYS = frozenset(
 # Target defaults are display choices for the backtest, rather than the
 # Defense Sheet's complete market mapping.  In particular, a shot-zone
 # qualifier chooses the attempts that describe that zone, while the Matchup
-# continues to publish every governed row and market it owns.
+# continues to publish every governed row and market it owns.  The first
+# column is what an unsaved Target is graded by, so a shot slice's own stat
+# leads; a play type is graded by the points it produces.
 _PLAY_TYPE_DEFAULTS = ("PTS", "FGA", "PTS/36", "FGA/36")
-_TWO_POINT_ZONE_DEFAULTS = ("PTS", "PTS/36", "FG2A", "FG2A/36")
-_THREE_POINT_ZONE_DEFAULTS = ("PTS", "PTS/36", "3PA", "3PA/36")
-_SHOT_TYPE_DEFAULTS = ("PTS", "PTS/36", "FGA", "FGA/36")
+_TWO_POINT_ZONE_DEFAULTS = ("FG2A", "FG2A/36", "PTS", "PTS/36")
+_THREE_POINT_ZONE_DEFAULTS = ("3PA", "3PA/36", "PTS", "PTS/36")
+_SHOT_TYPE_DEFAULTS = ("FGA", "FGA/36", "PTS", "PTS/36")
 _ASSIST_LOCATION_DEFAULTS = ("AST", "AST/36")
 #: What a Target shows when no Qualifier names a Diet slice to describe, so a
 #: Position-only or Average-only Target still has columns to read.

@@ -102,7 +102,7 @@ SHOT_ZONES = (
     "Above the Break 3",
 )
 #: The approved default display columns for a Corner 3 Target.
-CORNER_THREE_COLUMNS = ["PTS", "PTS/36", "3PA", "3PA/36"]
+CORNER_THREE_COLUMNS = ["3PA", "3PA/36", "PTS", "PTS/36"]
 
 MARKET_PER_GAME = {
     "PTS": 25.0,
@@ -840,10 +840,10 @@ def test_stat_columns_union_every_qualifier_default_in_order(targets, backtest):
     payload = backtest(created["id"], logs=logs, diets=diets)
 
     assert payload["stat_columns"] == [
-        "PTS",
-        "PTS/36",
         "3PA",
         "3PA/36",
+        "PTS",
+        "PTS/36",
         "FGA",
         "FGA/36",
     ]
@@ -855,10 +855,10 @@ def test_stat_columns_union_every_qualifier_default_in_order(targets, backtest):
 @pytest.mark.parametrize(
     ("base", "slice_key", "expected"),
     [
-        ("shot_zones", "Corner 3", ["PTS", "PTS/36", "3PA", "3PA/36"]),
-        ("shot_zones", "Restricted Area", ["PTS", "PTS/36", "FG2A", "FG2A/36"]),
+        ("shot_zones", "Corner 3", ["3PA", "3PA/36", "PTS", "PTS/36"]),
+        ("shot_zones", "Restricted Area", ["FG2A", "FG2A/36", "PTS", "PTS/36"]),
         ("play_types", "Transition", ["PTS", "FGA", "PTS/36", "FGA/36"]),
-        ("shot_types", "Catch and Shoot", ["PTS", "PTS/36", "FGA", "FGA/36"]),
+        ("shot_types", "Catch and Shoot", ["FGA", "FGA/36", "PTS", "PTS/36"]),
         ("assist_locations", "Corner3Assists", ["AST", "AST/36"]),
     ],
 )
@@ -889,13 +889,13 @@ def test_every_qualifier_slice_preserves_its_default_order(base, slice_key):
     if base == "assist_locations":
         expected = ("AST", "AST/36")
     elif base == "shot_zones" and slice_key in THREE_POINT_SHOT_ZONES:
-        expected = ("PTS", "PTS/36", "3PA", "3PA/36")
+        expected = ("3PA", "3PA/36", "PTS", "PTS/36")
     elif base == "shot_zones":
-        expected = ("PTS", "PTS/36", "FG2A", "FG2A/36")
+        expected = ("FG2A", "FG2A/36", "PTS", "PTS/36")
     elif base == "play_types":
         expected = ("PTS", "FGA", "PTS/36", "FGA/36")
     else:
-        expected = ("PTS", "PTS/36", "FGA", "FGA/36")
+        expected = ("FGA", "FGA/36", "PTS", "PTS/36")
     assert columns == expected
 
 
@@ -945,7 +945,7 @@ def test_two_point_attempts_are_derived_and_season_per36_uses_total_minutes(targ
         diets=FakeDiets(zones={LEBRON: _zone_diet(0.2, 0.2)}),
     )
 
-    assert payload["stat_columns"] == ["PTS", "PTS/36", "FG2A", "FG2A/36"]
+    assert payload["stat_columns"] == ["FG2A", "FG2A/36", "PTS", "PTS/36"]
     player = payload["players"][0]
     assert player["games"][0]["stats"] == {
         "PTS": 18.0,
@@ -2443,7 +2443,7 @@ def test_a_miss_files_its_field_under_the_generation_key(targets, build_backtest
     assert [player["canonical_id"] for player in payload["players"]] == [LEBRON]
     assert len(client.sets) == 1
     cache_key, ttl = client.sets[0]
-    assert cache_key.startswith("targets:backtest:v4:")
+    assert cache_key.startswith("targets:backtest:v5:")
     assert cache_key in client.gets
     assert ttl == 86400
     evidence = json.loads(zlib.decompress(client.store[cache_key]).decode("utf-8"))
@@ -2634,7 +2634,7 @@ def test_a_schema_bump_changes_the_key(monkeypatch):
             matchup_scores=MatchupScoreSettings(),
         ),
     )
-    monkeypatch.setattr("app.services.target_backtest.TARGET_BACKTEST_CACHE_SCHEMA", 5)
+    monkeypatch.setattr("app.services.target_backtest.TARGET_BACKTEST_CACHE_SCHEMA", 6)
     bumped = backtest_cache_key(
         {"id": 1, "opponent": "OKC", "qualifiers": [CORNER_THREE], "conditions": None},
         _frozen_generation(),
@@ -2648,8 +2648,8 @@ def test_a_schema_bump_changes_the_key(monkeypatch):
     assert bumped != original
     # One version knob: the schema constant is the namespace, so bumping it
     # is not just a payload change but a different key prefix entirely.
-    assert original.startswith("targets:backtest:v4:")
-    assert bumped.startswith("targets:backtest:v5:")
+    assert original.startswith("targets:backtest:v5:")
+    assert bumped.startswith("targets:backtest:v6:")
 
 
 def test_a_note_only_edit_still_hits_with_the_new_note(targets, build_backtest):
@@ -3620,7 +3620,7 @@ def test_position_average_and_diet_qualifiers_must_all_hold(targets, backtest):
         ([_average("3PA", 0.3)], ["3PA"]),
         ([_average("3PA/36", 2)], ["3PA/36"]),
         ([_average("TS%", 55)], ["PTS", "PTS/36"]),
-        ([BIG, CORNER_THREE, _average("AST", 3)], ["PTS", "PTS/36", "3PA", "3PA/36", "AST"]),
+        ([BIG, CORNER_THREE, _average("AST", 3)], ["3PA", "3PA/36", "PTS", "PTS/36", "AST"]),
         ([CORNER_THREE], CORNER_THREE_COLUMNS),
     ],
 )

@@ -70,7 +70,7 @@ def test_a_target_saves_and_backtests_on_each_shooting_stat(
 
     assert target["qualifiers"][1]["stat"] == stat
     assert target["stat_preferences"] == {"columns": [stat], "graded_by": stat}
-    assert body["stat_columns"] == ["PTS", "PTS/36", "3PA", "3PA/36", stat]
+    assert body["stat_columns"] == ["3PA", "3PA/36", "PTS", "PTS/36", stat]
     (player,) = body["players"]
     assert player["canonical_id"] == bt.LEBRON
     assert player["season_averages"][stat] == season_average
