@@ -66,6 +66,7 @@ from app.domain.target_statistics import (
     BOX_FIELD_ATTRIBUTES,
     season_average_value,
     target_stat_columns,
+    target_stat_market,
 )
 from app.domain.utc import parse_utc_iso
 from app.errors import AppError, InvalidInputError, SeasonUnavailableError, isolated_error_body
@@ -120,9 +121,6 @@ logger = getLogger(__name__)
 
 _WIRE_PRECISION = 6
 _BOX_FIELDS = BOX_FIELD_ATTRIBUTES
-
-# ``3PA`` is the Target display spelling for the governed ``FG3A`` market.
-_TARGET_MARKET_ALIASES = {"3PA": "FG3A"}
 
 #: Every stream this read composes.  The Diet and the game logs are resolved
 #: from one snapshot so a response cannot mix generations.
@@ -1583,13 +1581,11 @@ class TargetBacktestService:
         """Read governed game values and add Target's minute-based rates."""
 
         display_bases = {market: market[:-3] if market.endswith("/36") else market for market in markets}
-        governed_markets = tuple(
-            dict.fromkeys(_TARGET_MARKET_ALIASES.get(base, base) for base in display_bases.values())
-        )
+        governed_markets = tuple(dict.fromkeys(target_stat_market(base) for base in display_bases.values()))
         values = selected_player_game_log_market_values(record, governed_markets, self._statistics)
         stats: dict[str, float | None] = {}
         for market, base in display_bases.items():
-            value = values[_TARGET_MARKET_ALIASES.get(base, base)]
+            value = values[target_stat_market(base)]
             if market.endswith("/36"):
                 minutes = getattr(record, "minutes", None)
                 if minutes is None:

@@ -5593,6 +5593,7 @@ DELETE /api/user/targets/<id>
 GET    /api/user/targets/resolve?date=<YYYY-MM-DD>
 GET    /api/user/targets/resolve?fallback=previous_game_day
 GET    /api/user/targets/resolve?fallback=next_game_day
+GET    /api/user/targets/resolve?date=<YYYY-MM-DD>&season=<YYYY-YY>
 GET    /api/user/targets/<id>/backtest
 GET    /api/user/targets/backtests
 POST   /api/user/targets/preview
@@ -5759,6 +5760,13 @@ Returns every Target the account holds, evaluated against one ET Slate Date.
 is not `YYYY-MM-DD` is `400 invalid_input` with that route's message. The
 optional `fallback=previous_game_day` or `fallback=next_game_day` (only without
 `date`) resolves the day through the same rules as Get Slate; the response is otherwise unchanged. The
+optional `season` selects the Evidence season every composed Matchup reads, as
+on [Get Matchup](#get-matchup) and [Get Slate](#get-slate)
+(crf04/statsplus#330): the Slate passes its own, so a Target fit under a Slate
+game reads the same Matchup that game opens. Absent, the Published Season is
+read as before. A season that is not offered is `503 season_unavailable`, one
+after a Slate game's own season is `400 season_after_game`, and a selection
+adds `season_context` (`{selected_season, published_season}`). The
 response echoes the resolved `slate_date`. Each composed Matchup comes from the
 shared Matchup cache described under [Get Slate Edges](#get-slate-edges).
 It also carries one shared [`provenance`](#response-provenance) block for
@@ -5877,6 +5885,12 @@ game's players.
           "injury_badge_ref": "nba_official:2026-01-02:SAS@LAL:lebronjames",
           "season_scoring": 25.4,
           "season_averages": { "3PA": 6.1, "3PA/36": 6.3, "PTS": 25.4, "PTS/36": 26.4, "...": null },
+          "lines": { "prizepicks": { "FG3A": 5.5 }, "underdog": { "FG3A": 6.5 } },
+          "line_prices": { "underdog": { "FG3A": { "over": 105, "under": -135 } } },
+          "last_five_games": [
+            { "game_id": "0022500570", "game_date": "2026-01-14", "value": 7.0 },
+            { "game_id": "0022500551", "game_date": "2026-01-12", "value": 4.0 }
+          ],
           "thin": false,
           "shares": [
             {
@@ -5998,7 +6012,21 @@ Matchup's own order (Season scoring descending, canonical id breaking ties).
   stat catalogue key, computed as the Backtest computes a season value, so a
   fit can show whichever stat its Target is graded by. A value is `null`
   without a season log. A client reading an older response with neither field
-  shows `season_scoring`.
+  shows `season_scoring`. The log is the Evidence season the Matchup rows were
+  composed in (the selected `season`), not `as_of.season`, which names the
+  Published Season.
+- `lines` and `line_prices` (crf04/statsplus#423) are the Matchup row's own
+  `lines` and `line_prices` cut to the market the grading stat is posted in
+  (`3PA` is posted as `FG3A`), every provider kept: a client picks the majority
+  line and the best price as the Matchup's posted-line picker does. Both are
+  `{}` when no provider posts that market, including any `/36` or `%` grading
+  stat.
+- `last_five_games` is the grading stat in the player's last five Regular
+  Season games of the same log as `season_averages`, newest first, each
+  `{game_id, game_date, value}`; `value` is `null` where the stat has nothing
+  to divide by. It is `[]` without a season log and for a completed game,
+  whose Matchup withholds its rows' recent games. A client reading an older
+  response without these three fields shows no line and no games.
 - `posted_markets`, `injury_badge_ref`, and `season_scoring` are the Matchup's
   values for the same player, so the two surfaces agree. A game-log
   participant has no posted markets, so `posted_markets` is `[]` and

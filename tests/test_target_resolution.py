@@ -179,6 +179,8 @@ def _player(
     posted_markets=("PTS",),
     injury_badge_ref=None,
     player_source="player_pool",
+    lines=None,
+    line_prices=None,
 ):
     return {
         "canonical_id": canonical_id,
@@ -190,6 +192,8 @@ def _player(
         "focal_game_line": None,
         "posted_markets": list(posted_markets),
         "provenance": {},
+        "lines": lines or {},
+        "line_prices": line_prices or {},
         "season_scoring": season_scoring,
         "last_10_minutes": [],
         "diet_shares": {
@@ -523,6 +527,10 @@ def test_a_live_target_lists_the_opposing_pool_members_meeting_the_qualifier(tar
         "season_scoring": 20.0,
         # This resolver has no season-log reader, so no stat has a value.
         "season_averages": dict.fromkeys(sorted(TARGET_STAT_KEYS)),
+        # No line is posted and there is no season log to read games from.
+        "lines": {},
+        "line_prices": {},
+        "last_five_games": [],
         "thin": False,
         "shares": [
             {
@@ -2490,6 +2498,13 @@ def test_each_fit_carries_its_position_and_a_diet_only_fit_is_otherwise_unchange
         "posted_markets": ["PTS"],
         "injury_badge_ref": None,
         "season_scoring": 22.0,
+        "lines": {},
+        "line_prices": {},
+        # Graded by 3PA, the Corner 3 default: his two 8-attempt games.
+        "last_five_games": [
+            {"game_id": "1-1", "game_date": "2026-01-16", "value": 8.0},
+            {"game_id": "1-0", "game_date": "2026-01-16", "value": 8.0},
+        ],
         "thin": False,
         "shares": [
             {"base": "shot_zones", "slice_key": "Corner 3", "share": 0.4, "league_average_share": 0.2}
@@ -2613,3 +2628,103 @@ def test_a_fit_with_no_season_log_has_null_stats(targets, resolve_rules):
     entry = resolve_rules(with_logs=False)[created["title"]]
 
     assert [set(p["season_averages"].values()) for p in entry["players"]] == [{None}, {None}]
+
+
+# --- The graded stat's line and last five on each fit (crf04/statsplus#423) --
+
+SNIPER_LINES = {
+    "prizepicks": {"PTS": 20.5, "REB": 6.5},
+    "underdog": {"REB": 7.5, "FG3A": 6.5},
+    "novig": {"PTS": 21.5},
+}
+SNIPER_PRICES = {
+    "underdog": {"REB": {"over": -110, "under": -120}, "FG3A": {"over": 105, "under": -135}},
+    "novig": {"PTS": {"over": -111, "under": -106}},
+}
+#: Corner Sniper's Regular Season rebounds by January day, oldest first.
+SNIPER_REBOUNDS = [(1, 3), (2, 9), (3, 4), (4, 7), (5, 6), (6, 10)]
+
+
+def _graded_fit(targets, *, graded_by, historical=False):
+    from datetime import date
+
+    from tests import test_target_backtest as bt
+
+    targets.create_target(
+        OWNER,
+        opponent="OKC",
+        qualifiers=[CORNER_THREE],
+        stat_preferences={"columns": ["PTS", "REB", "3PA", "PTS/36"], "graded_by": graded_by},
+    )
+    rows = [
+        bt._row(
+            1, game_id=f"g{day}", game_date=date(2026, 1, day), rebounds=rebounds, opponent_team_id=BOS_ID
+        )
+        for day, rebounds in SNIPER_REBOUNDS
+    ] + [
+        bt._row(1, game_id="p1", game_date=date(2026, 4, 20), rebounds=20, season_type="Playoffs"),
+    ]
+    matchup = _matchup(
+        players=[
+            _player(
+                1,
+                "Corner Sniper",
+                shot_zones=_zone_diet(0.4, 0.2),
+                lines=SNIPER_LINES,
+                line_prices=SNIPER_PRICES,
+            )
+        ],
+        historical=historical,
+    )
+    matchup["as_of"] = {"season": "2025-26"}
+    (entry,) = TargetResolutionService(
+        targets=targets,
+        slates=FakeSlate(),
+        matchups=FakeMatchups({GAME_ID: matchup}),
+        player_logs=bt.FakeLogs(rows=rows),
+    ).resolve(OWNER, requested_date=SLATE_DATE)["targets"]
+    (fit,) = entry["players"]
+    return fit
+
+
+def test_a_fit_carries_every_providers_line_and_price_in_the_graded_stat_only(targets):
+    fit = _graded_fit(targets, graded_by="REB")
+
+    assert fit["lines"] == {"prizepicks": {"REB": 6.5}, "underdog": {"REB": 7.5}}
+    assert fit["line_prices"] == {"underdog": {"REB": {"over": -110, "under": -120}}}
+
+
+def test_a_fit_graded_by_3pa_carries_the_fg3a_line(targets):
+    fit = _graded_fit(targets, graded_by="3PA")
+
+    assert fit["lines"] == {"underdog": {"FG3A": 6.5}}
+    assert fit["line_prices"] == {"underdog": {"FG3A": {"over": 105, "under": -135}}}
+
+
+def test_a_fit_carries_its_last_five_regular_season_games_in_the_graded_stat_newest_first(targets):
+    fit = _graded_fit(targets, graded_by="REB")
+
+    assert fit["last_five_games"] == [
+        {"game_id": "g6", "game_date": "2026-01-06", "value": 10.0},
+        {"game_id": "g5", "game_date": "2026-01-05", "value": 6.0},
+        {"game_id": "g4", "game_date": "2026-01-04", "value": 7.0},
+        {"game_id": "g3", "game_date": "2026-01-03", "value": 4.0},
+        {"game_id": "g2", "game_date": "2026-01-02", "value": 9.0},
+    ]
+    # The average is over the same six Regular Season games.
+    assert fit["season_averages"]["REB"] == 6.5
+
+
+def test_a_fit_graded_by_a_stat_no_line_is_posted_in_has_no_line_but_keeps_its_last_five(targets):
+    fit = _graded_fit(targets, graded_by="PTS/36")
+
+    assert fit["lines"] == {}
+    assert fit["line_prices"] == {}
+    # 30 points in 34 minutes, per 36.
+    assert [round(game["value"], 4) for game in fit["last_five_games"]] == [31.7647] * 5
+
+
+def test_a_completed_games_fit_withholds_its_last_five_as_the_matchup_does(targets):
+    fit = _graded_fit(targets, graded_by="REB", historical=True)
+
+    assert fit["last_five_games"] == []

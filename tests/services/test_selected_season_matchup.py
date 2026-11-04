@@ -916,3 +916,86 @@ def test_slate_edges_prove_one_shared_ledger_lineage_once_without_evidence_paylo
     assert proved == ["manifest-new"]
     # Evidence is judged by its identity; no read loads an observation's payload.
     assert [statement for statement in statements if "collection_observations.payload" in statement] == []
+
+
+# --- Target resolution (crf04/statsplus#423) ---------------------------------
+
+
+@pytest.fixture
+def resolving(served, dependencies, runtime_settings):
+    """The caller's one Target against BOS, resolved over the world's own reads."""
+
+    from datetime import UTC, datetime
+
+    from app.models.user import User
+    from app.services.target_resolution import TargetResolutionService
+    from app.services.user_service import UserService
+
+    with served.engine.begin() as connection:
+        connection.execute(
+            User.__table__.insert(),
+            {
+                "firebase_uid": "test-uid",
+                "email": "user@example.com",
+                "display_name": "Test User",
+                "photo_url": None,
+                "created_at": datetime(2026, 8, 1, tzinfo=UTC),
+                "last_login": datetime(2026, 8, 1, tzinfo=UTC),
+                "is_active": True,
+            },
+        )
+    targets = UserService(served.engine, settings=runtime_settings)
+    targets.create_target(
+        "test-uid",
+        opponent=TRICODES[BOS],
+        qualifiers=[{"base": "season_average", "stat": "PTS", "comparator": "at_or_above", "threshold": 0}],
+        stat_preferences={"columns": ["PTS"], "graded_by": "PTS"},
+    )
+    dependencies.target_resolution_service = TargetResolutionService(
+        targets=targets,
+        slates=served.slates,
+        matchups=served.service,
+        publication_reader=served.reader,
+        injuries=_StoredInjuries(),
+        settings=served.service.settings,
+        player_logs=served.logs,
+        engine=served.engine,
+    )
+    return served
+
+
+def _fit(body):
+    (target,) = body["targets"]
+    (fit,) = target["players"]
+    return fit
+
+
+def test_a_selected_2026_27_resolve_reads_each_fits_average_and_last_five_from_2026_27(
+    resolving, client, authenticate
+):
+    resolving.hold_opening_week()
+    headers = authenticate()
+
+    published = client.get(f"/api/user/targets/resolve?date={SLATE_DATE}", headers=headers).get_json()
+    selected = client.get(
+        f"/api/user/targets/resolve?date={SLATE_DATE}&season={NEW}", headers=headers
+    ).get_json()
+
+    # Player 0 scored 30 a game in 2025-26 and 12 in 2026-27's one game.
+    assert selected["season_context"] == CONTEXT
+    assert _fit(selected)["season_averages"]["PTS"] == 12.0
+    assert _fit(selected)["last_five_games"] == [
+        {"game_id": "0022600001", "game_date": "2026-10-24", "value": 12.0}
+    ]
+    # Omitted, the resolve reads the Published Season as before.
+    assert "season_context" not in published
+    assert _fit(published)["season_averages"]["PTS"] == 30.0
+    assert _fit(published)["last_five_games"] == [
+        {"game_id": "0022500001", "game_date": "2026-04-13", "value": 30.0}
+    ]
+
+
+def test_a_resolve_selecting_an_unoffered_season_is_refused(resolving, client, authenticate):
+    response = client.get(f"/api/user/targets/resolve?date={SLATE_DATE}&season={NEW}", headers=authenticate())
+
+    assert _refusal(response) == (503, "season_unavailable", CONTEXT)
