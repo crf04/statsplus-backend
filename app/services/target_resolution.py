@@ -31,7 +31,7 @@ from typing import Any, Protocol
 
 from app.config.settings import RuntimeSettings
 from app.domain.player_diet_taxonomy import PLAYER_DIET_SLICE_LABELS
-from app.domain.target_statistics import season_average_value, target_stat_columns
+from app.domain.target_statistics import TARGET_STAT_KEYS, season_average_value, target_stat_columns
 from app.models.target import (
     POSITION_QUALIFIER_BASE,
     SEASON_AVERAGE_QUALIFIER_BASE,
@@ -402,7 +402,6 @@ class TargetResolutionService:
                 if availability["status"] != "available" or not condition_kept
                 else self._players(
                     qualifiers,
-                    stat_columns,
                     matchup["players"],
                     opponent_team_id,
                     season=(matchup.get("as_of") or {}).get("season"),
@@ -499,7 +498,6 @@ class TargetResolutionService:
     def _players(
         self,
         qualifiers: Sequence[Mapping[str, Any]],
-        stat_columns: Sequence[str],
         players: Sequence[Mapping[str, Any]],
         opponent_team_id: int,
         *,
@@ -522,13 +520,7 @@ class TargetResolutionService:
         fits = []
         for player in opposing:
             canonical_id = int(player["canonical_id"])
-            fit = self._fit(
-                qualifiers,
-                stat_columns,
-                player,
-                listed.get(canonical_id),
-                summaries.get(canonical_id),
-            )
+            fit = self._fit(qualifiers, player, listed.get(canonical_id), summaries.get(canonical_id))
             if fit is not None:
                 fits.append(fit)
         return fits
@@ -565,7 +557,6 @@ class TargetResolutionService:
     def _fit(
         self,
         qualifiers: Sequence[Mapping[str, Any]],
-        stat_columns: Sequence[str],
         player: Mapping[str, Any],
         position: str | None,
         summary: Any | None,
@@ -623,15 +614,16 @@ class TargetResolutionService:
             "posted_markets": list(player["posted_markets"]),
             "injury_badge_ref": player["injury_badge_ref"],
             "season_scoring": player["season_scoring"],
-            # The Target's own stats, so a fit shows what the Target aims at
-            # rather than points; null without a Regular Season log.
+            # Every catalogue stat, so a fit shows whichever one its Target is
+            # graded by, including a column added after this read; null
+            # without a Regular Season log.
             "season_averages": {
                 column: (
                     None
                     if summary is None or summary.season_rate is None
                     else season_average_value(column, summary.rate_rows)
                 )
-                for column in stat_columns
+                for column in sorted(TARGET_STAT_KEYS)
             },
             "thin": thin,
             "shares": shares,

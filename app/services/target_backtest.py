@@ -187,8 +187,9 @@ PROXY_NOTE = (
 #: body changes (#279; v2 added the opponent, statsplus#123): a different schema must never be served from a cached value the
 #: older code shape wrote, and the constant is part of every key (v3: every
 #: player row carries its Position, and a Target may hold Position and Average
-#: Qualifiers).
-TARGET_BACKTEST_CACHE_SCHEMA = 3
+#: Qualifiers; v4: shot-zone and shot-type defaults lead with the slice's own
+#: stat, statsplus#418).
+TARGET_BACKTEST_CACHE_SCHEMA = 4
 
 #: Raw threshold precision in the key: the six-decimal ``qualifier_signature``
 #: folds 0.4000001 and 0.4000004 onto one line, but those two Targets are

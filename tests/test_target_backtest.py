@@ -2441,7 +2441,7 @@ def test_a_miss_files_its_field_under_the_generation_key(targets, build_backtest
     assert [player["canonical_id"] for player in payload["players"]] == [LEBRON]
     assert len(client.sets) == 1
     cache_key, ttl = client.sets[0]
-    assert cache_key.startswith("targets:backtest:v3:")
+    assert cache_key.startswith("targets:backtest:v4:")
     assert cache_key in client.gets
     assert ttl == 86400
     evidence = json.loads(zlib.decompress(client.store[cache_key]).decode("utf-8"))
@@ -2632,7 +2632,7 @@ def test_a_schema_bump_changes_the_key(monkeypatch):
             matchup_scores=MatchupScoreSettings(),
         ),
     )
-    monkeypatch.setattr("app.services.target_backtest.TARGET_BACKTEST_CACHE_SCHEMA", 4)
+    monkeypatch.setattr("app.services.target_backtest.TARGET_BACKTEST_CACHE_SCHEMA", 5)
     bumped = backtest_cache_key(
         {"id": 1, "opponent": "OKC", "qualifiers": [CORNER_THREE], "conditions": None},
         _frozen_generation(),
@@ -2646,8 +2646,8 @@ def test_a_schema_bump_changes_the_key(monkeypatch):
     assert bumped != original
     # One version knob: the schema constant is the namespace, so bumping it
     # is not just a payload change but a different key prefix entirely.
-    assert original.startswith("targets:backtest:v3:")
-    assert bumped.startswith("targets:backtest:v4:")
+    assert original.startswith("targets:backtest:v4:")
+    assert bumped.startswith("targets:backtest:v5:")
 
 
 def test_a_note_only_edit_still_hits_with_the_new_note(targets, build_backtest):

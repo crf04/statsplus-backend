@@ -19,6 +19,7 @@ from sqlalchemy import create_engine
 
 import tests.services.test_matchup_service as matchup_doubles
 from app.config.settings import NBASeasonSettings, RuntimeSettings
+from app.domain.target_statistics import TARGET_STAT_KEYS
 from app.errors import InvalidInputError, ProviderUnavailableError
 from app.migrations import run_migrations
 from app.models.user import User
@@ -521,7 +522,7 @@ def test_a_live_target_lists_the_opposing_pool_members_meeting_the_qualifier(tar
         "injury_badge_ref": None,
         "season_scoring": 20.0,
         # This resolver has no season-log reader, so no stat has a value.
-        "season_averages": {"PTS": None, "PTS/36": None, "3PA": None, "3PA/36": None},
+        "season_averages": dict.fromkeys(sorted(TARGET_STAT_KEYS)),
         "thin": False,
         "shares": [
             {
@@ -2471,6 +2472,15 @@ def test_each_fit_carries_its_position_and_a_diet_only_fit_is_otherwise_unchange
         ("Corner Sniper", "Wing"),
         ("Unlisted Guy", None),
     ]
+    averages = players[0].pop("season_averages")
+    assert {stat: averages[stat] for stat in ("PTS", "PTS/36", "3PA", "3PA/36", "REB", "3P%")} == {
+        "PTS": 30.0,
+        "PTS/36": pytest.approx(31.7647, abs=1e-4),
+        "3PA": 8.0,
+        "3PA/36": pytest.approx(8.4706, abs=1e-4),
+        "REB": 8.0,
+        "3P%": 50.0,
+    }
     assert players[0] == {
         "canonical_id": 1,
         "name": "Corner Sniper",
@@ -2480,12 +2490,6 @@ def test_each_fit_carries_its_position_and_a_diet_only_fit_is_otherwise_unchange
         "posted_markets": ["PTS"],
         "injury_badge_ref": None,
         "season_scoring": 22.0,
-        "season_averages": {
-            "PTS": 30.0,
-            "PTS/36": pytest.approx(31.7647, abs=1e-4),
-            "3PA": 8.0,
-            "3PA/36": pytest.approx(8.4706, abs=1e-4),
-        },
         "thin": False,
         "shares": [
             {"base": "shot_zones", "slice_key": "Corner 3", "share": 0.4, "league_average_share": 0.2}
@@ -2586,10 +2590,21 @@ def test_a_saved_stat_choice_names_the_columns_each_fit_carries(targets, resolve
     entry = resolve_rules()[created["title"]]
 
     assert entry["stat_columns"] == ["AST", "3PA"]
-    assert [p["season_averages"] for p in entry["players"]] == [
-        {"AST": 9.0, "3PA": 8.0},
-        {"AST": 9.0, "3PA": 9.0},
+    assert [(p["season_averages"]["AST"], p["season_averages"]["3PA"]) for p in entry["players"]] == [
+        (9.0, 8.0),
+        (9.0, 9.0),
     ]
+
+
+def test_a_fit_carries_every_catalogue_stat_so_a_newly_added_column_has_a_value(targets, resolve_rules):
+    created = _create(targets, qualifiers=[CORNER_THREE])
+
+    players = resolve_rules()[created["title"]]["players"]
+
+    # REB is in no default column, yet a card that adds and grades by it
+    # still has the value to show.
+    assert set(players[0]["season_averages"]) == set(TARGET_STAT_KEYS)
+    assert [p["season_averages"]["REB"] for p in players] == [8.0, 8.0]
 
 
 def test_a_fit_with_no_season_log_has_null_stats(targets, resolve_rules):
@@ -2597,7 +2612,4 @@ def test_a_fit_with_no_season_log_has_null_stats(targets, resolve_rules):
 
     entry = resolve_rules(with_logs=False)[created["title"]]
 
-    assert [p["season_averages"] for p in entry["players"]] == [
-        {"PTS": None, "PTS/36": None, "3PA": None, "3PA/36": None},
-        {"PTS": None, "PTS/36": None, "3PA": None, "3PA/36": None},
-    ]
+    assert [set(p["season_averages"].values()) for p in entry["players"]] == [{None}, {None}]

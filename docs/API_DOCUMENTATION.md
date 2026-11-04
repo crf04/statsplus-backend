@@ -5824,6 +5824,7 @@ game's players.
           "name": "Oklahoma City Thunder"
         }
       },
+      "stat_columns": ["3PA", "3PA/36", "PTS", "PTS/36"],
       "context": [
         {
           "base": "shot_zones",
@@ -5875,6 +5876,7 @@ game's players.
           "posted_markets": ["PTS", "3PM"],
           "injury_badge_ref": "nba_official:2026-01-02:SAS@LAL:lebronjames",
           "season_scoring": 25.4,
+          "season_averages": { "3PA": 6.1, "3PA/36": 6.3, "PTS": 25.4, "PTS/36": 26.4, "...": null },
           "thin": false,
           "shares": [
             {
@@ -5988,6 +5990,15 @@ Matchup's own order (Season scoring descending, canonical id breaking ties).
   [Get Matchup](#get-matchup) for what makes a Base thin. A thin player is
   flagged, never removed, so this list never disagrees with the Matchup about
   who is in the game.
+- `stat_columns` (on every Target, live or idle) is the Target's saved
+  `stat_preferences.columns`, else the [Backtest](#backtest-one-target-over-the-season-to-date)
+  default `stat_columns`; its grading stat is the saved `graded_by`, else the
+  first column.
+- `season_averages` holds the player's Regular Season average for every Target
+  stat catalogue key, computed as the Backtest computes a season value, so a
+  fit can show whichever stat its Target is graded by. A value is `null`
+  without a season log. A client reading an older response with neither field
+  shows `season_scoring`.
 - `posted_markets`, `injury_badge_ref`, and `season_scoring` are the Matchup's
   values for the same player, so the two surfaces agree. A game-log
   participant has no posted markets, so `posted_markets` is `[]` and
@@ -6198,7 +6209,8 @@ Qualifier adds its own stat when the Backtest can read it per game (the box
 score markets and their `/36` rates); a Target with no column that way
 (a Position-only Target, or an Average on `FG%`) shows `PTS` and `PTS/36`.
 `season_averages` and every game's `stats` carry exactly these columns, in this
-order.
+order. The first column is what a Target with no saved `stat_preferences` is
+graded by, so a shot slice's own attempts lead; a play type leads with points.
 
 The defaults are selected by Qualifier family. Season `/36` values use the
 player's all-season totals divided by total minutes, multiplied by 36. A
@@ -6210,9 +6222,9 @@ derived from `FGA - 3PA`, `FG2M` the two-point makes, derived from
 
 | Qualifier base | Default columns | Example |
 | --- | --- | --- |
-| `shot_zones` | the zone's attempts | two-point -> `PTS`, `PTS/36`, `FG2A`, `FG2A/36`; three-point -> `PTS`, `PTS/36`, `3PA`, `3PA/36` |
+| `shot_zones` | the zone's attempts | two-point -> `FG2A`, `FG2A/36`, `PTS`, `PTS/36`; three-point -> `3PA`, `3PA/36`, `PTS`, `PTS/36` |
 | `play_types` | the play's box score | `Transition` -> `PTS`, `FGA`, `PTS/36`, `FGA/36` |
-| `shot_types` | the shot type's attempts | `Catch and Shoot` -> `PTS`, `PTS/36`, `FGA`, `FGA/36` |
+| `shot_types` | the shot type's attempts | `Catch and Shoot` -> `FGA`, `FGA/36`, `PTS`, `PTS/36` |
 | `assist_locations` | the slice's assists | `Corner3Assists` -> `AST`, `AST/36` |
 | `season_average` | the averaged stat itself, where readable per game | `3PA` -> `3PA`; `3PA/36` -> `3PA/36` |
 | `position` | none | `PTS`, `PTS/36` when no other Qualifier names columns |
