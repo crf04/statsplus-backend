@@ -27,6 +27,7 @@ SAFE_CODES = frozenset(
         "identity_unresolved",
         "scope_not_registered",
         "provider_window_unsupported",
+        "provider_window_unverified",
         "invalid_token",
         "token_expired",
         "environment_mismatch",

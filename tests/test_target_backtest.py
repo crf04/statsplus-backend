@@ -493,6 +493,7 @@ def test_a_qualifying_player_reports_shares_averages_and_every_game(targets, bac
                     "slice_key": "Corner 3",
                     "share": 0.42,
                     "league_average_share": 0.2,
+                    "diet_season": SEASON,
                 }
             ],
             "season_averages": {
@@ -575,6 +576,7 @@ def test_a_published_shot_type_diet_fits_targets_and_builds_display_baselines(
             "slice_key": "Catch and Shoot",
             "share": 0.18,
             "league_average_share": 0.3,
+            "diet_season": SEASON,
         }
     ]
 
@@ -2441,7 +2443,7 @@ def test_a_miss_files_its_field_under_the_generation_key(targets, build_backtest
     assert [player["canonical_id"] for player in payload["players"]] == [LEBRON]
     assert len(client.sets) == 1
     cache_key, ttl = client.sets[0]
-    assert cache_key.startswith("targets:backtest:v4:")
+    assert cache_key.startswith("targets:backtest:v5:")
     assert cache_key in client.gets
     assert ttl == 86400
     evidence = json.loads(zlib.decompress(client.store[cache_key]).decode("utf-8"))
@@ -2632,7 +2634,7 @@ def test_a_schema_bump_changes_the_key(monkeypatch):
             matchup_scores=MatchupScoreSettings(),
         ),
     )
-    monkeypatch.setattr("app.services.target_backtest.TARGET_BACKTEST_CACHE_SCHEMA", 5)
+    monkeypatch.setattr("app.services.target_backtest.TARGET_BACKTEST_CACHE_SCHEMA", 6)
     bumped = backtest_cache_key(
         {"id": 1, "opponent": "OKC", "qualifiers": [CORNER_THREE], "conditions": None},
         _frozen_generation(),
@@ -2646,8 +2648,8 @@ def test_a_schema_bump_changes_the_key(monkeypatch):
     assert bumped != original
     # One version knob: the schema constant is the namespace, so bumping it
     # is not just a payload change but a different key prefix entirely.
-    assert original.startswith("targets:backtest:v4:")
-    assert bumped.startswith("targets:backtest:v5:")
+    assert original.startswith("targets:backtest:v5:")
+    assert bumped.startswith("targets:backtest:v6:")
 
 
 def test_a_note_only_edit_still_hits_with_the_new_note(targets, build_backtest):
@@ -3587,9 +3589,27 @@ def test_position_average_and_diet_qualifiers_must_all_hold(targets, backtest):
     assert payload["summary"]["players_without_position"] == 1
     # One entry per Qualifier of every kind, in order; only the Diet one has numbers.
     assert payload["players"][0]["shares"] == [
-        {"base": "position", "slice_key": None, "share": None, "league_average_share": None},
-        {"base": "season_average", "slice_key": None, "share": None, "league_average_share": None},
-        {"base": "shot_zones", "slice_key": "Corner 3", "share": 0.45, "league_average_share": 0.2},
+        {
+            "base": "position",
+            "slice_key": None,
+            "share": None,
+            "league_average_share": None,
+            "diet_season": None,
+        },
+        {
+            "base": "season_average",
+            "slice_key": None,
+            "share": None,
+            "league_average_share": None,
+            "diet_season": None,
+        },
+        {
+            "base": "shot_zones",
+            "slice_key": "Corner 3",
+            "share": 0.45,
+            "league_average_share": 0.2,
+            "diet_season": SEASON,
+        },
     ]
 
 

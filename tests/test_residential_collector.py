@@ -417,12 +417,12 @@ def test_player_zone_normalizer_refuses_reads_of_different_populations():
 
     totals = _zone_result_set("totals")
     totals["resultSets"]["rowSet"] = totals["resultSets"]["rowSet"][:-1]
-    with pytest.raises(ProviderContractError, match="provider_window_unverified"):
+    with pytest.raises(ProviderContractError, match="value_invariant_failed"):
         _normalized_zones(totals_response=totals)
 
     games = _zone_result_set("games")
     games["resultSets"]["rowSet"] = games["resultSets"]["rowSet"][:-1]
-    with pytest.raises(ProviderContractError, match="provider_window_unverified"):
+    with pytest.raises(ProviderContractError, match="value_invariant_failed"):
         _normalized_zones(games_response=games)
 
 
@@ -726,7 +726,7 @@ def test_production_opponent_shot_frames_preserve_registered_raw_taxonomy():
             cutoff=NOW,
             team_id=1610612737,
         )
-    with pytest.raises(ProviderContractError, match="provider_window_unverified"):
+    with pytest.raises(ProviderContractError, match="provider_schema_changed"):
         normalize_opponent_zone_response(
             pd.DataFrame(
                 [[values[0], *values[2:], 21, 43]],
@@ -1668,10 +1668,14 @@ def test_player_diet_job_retries_only_when_a_new_observation_is_accepted(tmp_pat
     assert state == ("succeeded", None, 1, 2)
     assert publication_id is not None
 
-    # A later accepted observation leaves a succeeded job and its publication alone.
+    # A later accepted observation recomposes a succeeded job; it is new
+    # input, not a retry, so the attempt count stays.
     deliver(rows(50), suffix="-retry")
-    assert _compose_queued_slice(engine) == 0
-    assert _composition_job(engine, "grouped_shot_types") == (("succeeded", None, 1, 2), publication_id)
+    assert _composition_job(engine, "grouped_shot_types") == (("queued", None, 1, 3), publication_id)
+    assert _compose_queued_slice(engine) == 1
+    (state, recomposed_id) = _composition_job(engine, "grouped_shot_types")
+    assert state == ("succeeded", None, 1, 3)
+    assert recomposed_id not in {None, publication_id}
 
 
 def test_player_shot_type_composer_refuses_a_missing_category_centrally(
@@ -2333,10 +2337,10 @@ def test_synergy_window_binds_team_minutes_and_tolerates_partial_play_type_games
     assert "WINDOW_GP" not in bound.columns
 
     # More Synergy games than the team played proves the wrong window.
-    with pytest.raises(ProviderContractError, match="provider_window_unverified"):
+    with pytest.raises(ProviderContractError, match="value_invariant_failed"):
         _StandaloneNBAProvider._bind_synergy_window(synergy.assign(GP=[83, 80]), minutes)
     # A team missing from the minutes evidence cannot be bound.
-    with pytest.raises(ProviderContractError, match="provider_window_unverified"):
+    with pytest.raises(ProviderContractError, match="value_invariant_failed"):
         _StandaloneNBAProvider._bind_synergy_window(synergy, minutes.iloc[:1])
 
 
@@ -3564,6 +3568,379 @@ def test_runner_provider_schema_failure_is_non_retryable(tmp_path: Path):
     assert result.disposition is RunDisposition.NON_RETRYABLE
     assert result.exit_code == EXIT_NON_RETRYABLE
     assert result.failures
+    outbox.close()
+
+
+LAC = 1610612746
+OKC = 1610612760
+
+
+def _opponent_discovery(scope, *parameters):
+    return {
+        "environment": "testing",
+        "bootstrap_requests": [],
+        "manifests": [
+            {
+                "manifest_id": "m-opponent-shots",
+                "season": "2026-27",
+                "cutoff": NOW.isoformat(),
+                "collect_before": (NOW + timedelta(hours=1)).isoformat(),
+                "accepted_versions": [2],
+                "scopes": [scope],
+                "scope_descriptors": [{"scope": scope, "parameters": item} for item in parameters],
+            }
+        ],
+    }
+
+
+def _opponent_shot_discovery(*team_ids):
+    return _opponent_discovery(
+        "shot_types_opponent", *({"window": "season", "team_id": team_id} for team_id in team_ids)
+    )
+
+
+def _patch_opponent_shot_endpoints(monkeypatch, *, tracking_gp, box_score, change=lambda frame: frame):
+    """Serve NBA tracking and box-score frames at the nba_api boundary."""
+
+    from nba_api.stats import endpoints
+
+    class OppPtShot:
+        def __init__(self, *, general_range_nullable, team_id_nullable, **_kwargs):
+            self.category = general_range_nullable
+            self.team_id = team_id_nullable
+
+        def get_data_frames(self):
+            return [
+                change(
+                    pd.DataFrame(
+                        [
+                            {
+                                "TEAM_ID": self.team_id,
+                                "GP": tracking_gp[self.team_id],
+                                "FG2M": 10,
+                                "FG2A": 20,
+                                "FG3M": 5,
+                                "FG3A": 15,
+                            }
+                        ]
+                    )
+                )
+            ]
+
+    class TeamStats:
+        def __init__(self, *, team_id_nullable, **_kwargs):
+            self.team_id = team_id_nullable
+
+        def get_data_frames(self):
+            return [box_score(self.team_id)]
+
+    monkeypatch.setattr(endpoints, "LeagueDashOppPtShot", OppPtShot)
+    monkeypatch.setattr(endpoints, "LeagueDashTeamStats", TeamStats)
+
+
+def test_tracking_behind_the_box_score_defers_the_team_without_failing_the_run(tmp_path: Path, monkeypatch):
+    # NBA tracking dropped LAC @ OKC on 10/25 for a day: tracking counts six
+    # LAC games where the box score counts seven.
+    _patch_opponent_shot_endpoints(
+        monkeypatch,
+        tracking_gp={LAC: 6, OKC: 7},
+        box_score=lambda team_id: pd.DataFrame([{"TEAM_ID": team_id, "GP": 7, "MIN": 1691.0}]),
+    )
+    collector, transport, outbox = _collector(
+        tmp_path,
+        discovery=_opponent_shot_discovery(LAC, OKC),
+        provider=_StandaloneNBAProvider(),
+        release_checksum="a" * 64,
+    )
+
+    result = collector.run()
+
+    assert result.exit_code == 0
+    assert result.disposition is RunDisposition.COMPLETE
+    assert result.failures == ("provider_window_unverified",)
+    assert result.spooled == 3
+    assert result.uploaded == 3
+    terminal = [call[4] for call in transport.calls if call[1].endswith("/api/collector/status")][-1]
+    assert (terminal["state"], terminal["reason"]) == ("complete", "provider_window_unverified")
+    outbox.close()
+
+
+BOX_SCORE_7 = {"GP": 7, "MIN": 1691.0}
+LAC_BOX_SCORE_7 = {"TEAM_ID": LAC, **BOX_SCORE_7}
+
+
+@pytest.mark.parametrize(
+    ("tracking_gp", "box_score_rows", "failure"),
+    [
+        (7, [{"TEAM_ID": LAC, "GAMES": 7, "MIN": 1691.0}], "provider_schema_changed"),
+        (7, [{"TEAM_ID": LAC, "GP": 7, "MIN": 0.0}], "value_invariant_failed"),
+        (7, [{"TEAM_ID": LAC, "GP": 7, "MIN": float("nan")}], "value_invariant_failed"),
+        (7, [{"TEAM_ID": LAC, "GP": -7, "MIN": 1691.0}], "value_invariant_failed"),
+        (7, [LAC_BOX_SCORE_7, LAC_BOX_SCORE_7], "value_invariant_failed"),
+        (7, [{"TEAM_ID": OKC, **BOX_SCORE_7}], "value_invariant_failed"),
+        ("garbage", [LAC_BOX_SCORE_7], "provider_schema_changed"),
+        (-1, [LAC_BOX_SCORE_7], "value_invariant_failed"),
+        (6.5, [LAC_BOX_SCORE_7], "value_invariant_failed"),
+        # Tracking cannot count a game the box score has not: a wrong window.
+        (8, [LAC_BOX_SCORE_7], "value_invariant_failed"),
+    ],
+)
+def test_a_malformed_or_impossible_window_still_fails_the_run(
+    tmp_path: Path, monkeypatch, tracking_gp, box_score_rows, failure
+):
+    _patch_opponent_shot_endpoints(
+        monkeypatch,
+        tracking_gp={LAC: tracking_gp},
+        box_score=lambda _team_id: pd.DataFrame(box_score_rows),
+    )
+    collector, transport, outbox = _collector(
+        tmp_path,
+        discovery=_opponent_shot_discovery(LAC),
+        provider=_StandaloneNBAProvider(),
+        release_checksum="a" * 64,
+    )
+
+    result = collector.run()
+
+    assert result.exit_code == 20
+    assert result.disposition is RunDisposition.NON_RETRYABLE
+    assert result.failures == (failure,)
+    terminal = [call[4] for call in transport.calls if call[1].endswith("/api/collector/status")][-1]
+    assert (terminal["state"], terminal["reason"]) == ("non_retryable", failure)
+    outbox.close()
+
+
+def _patch_synergy_endpoints(monkeypatch, *, synergy_gp, team_stats):
+    from nba_api.stats import endpoints
+
+    class SynergyPlayTypes:
+        def __init__(self, *, play_type_nullable, **_kwargs):
+            self.play_type = play_type_nullable
+
+        def get_data_frames(self):
+            return [
+                pd.DataFrame(
+                    [{"TEAM_ID": LAC, "PLAY_TYPE": self.play_type, "GP": synergy_gp, "POSS": 10, "PTS": 12}]
+                )
+            ]
+
+    class TeamStats:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_data_frames(self):
+            return [pd.DataFrame(team_stats)]
+
+    monkeypatch.setattr(endpoints, "SynergyPlayTypes", SynergyPlayTypes)
+    monkeypatch.setattr(endpoints, "LeagueDashTeamStats", TeamStats)
+
+
+SYNERGY_DISCOVERY = _opponent_discovery(
+    "synergy_opponent",
+    {
+        "window": "season",
+        "subject_code": "T",
+        "type_grouping": "Defensive",
+        "per_mode": "Totals",
+        "value_mode": "totals_with_minutes",
+    },
+)
+
+
+@pytest.mark.parametrize(
+    ("synergy_gp", "team_stats", "exit_code", "failures"),
+    [
+        # Synergy counts only games with a possession of the play type.
+        (6, [{"TEAM_ID": LAC, "GP": 7, "MIN": 1691.0}], 0, ()),
+        (8, [{"TEAM_ID": LAC, "GP": 7, "MIN": 1691.0}], 20, ("value_invariant_failed",)),
+        (6, [{"TEAM_ID": LAC, "GP": 7, "MIN": float("nan")}], 20, ("value_invariant_failed",)),
+        (6, [{"TEAM_ID": OKC, "GP": 7, "MIN": 1691.0}], 20, ("value_invariant_failed",)),
+        (6, [{"TEAM_ID": LAC, "GP": 7}], 20, ("provider_schema_changed",)),
+    ],
+)
+def test_synergy_window_failures_are_never_deferred(
+    tmp_path: Path, monkeypatch, synergy_gp, team_stats, exit_code, failures
+):
+    _patch_synergy_endpoints(monkeypatch, synergy_gp=synergy_gp, team_stats=team_stats)
+    collector, _transport, outbox = _collector(
+        tmp_path, discovery=SYNERGY_DISCOVERY, provider=_StandaloneNBAProvider()
+    )
+
+    result = collector.run()
+
+    assert (result.exit_code, result.failures) == (exit_code, failures)
+    assert result.uploaded == (11 if exit_code == 0 else 0)
+    outbox.close()
+
+
+@pytest.mark.parametrize("tracking_gp", [6, 7])
+@pytest.mark.parametrize(
+    ("change", "failure"),
+    [
+        (lambda frame: frame.assign(FG2M=-1), "value_invariant_failed"),
+        (lambda frame: frame.assign(FG2M=100), "value_invariant_failed"),
+        (lambda frame: pd.concat([frame, frame], ignore_index=True), "provider_schema_changed"),
+    ],
+    ids=["negative makes", "makes exceed attempts", "duplicate tracking rows"],
+)
+def test_a_tracking_shortfall_never_masks_a_malformed_shot_response(
+    tmp_path: Path, monkeypatch, tracking_gp, change, failure
+):
+    # Whether tracking trails the box score or not, a malformed response
+    # fails the run exactly as it does on master.
+    _patch_opponent_shot_endpoints(
+        monkeypatch,
+        tracking_gp={LAC: tracking_gp},
+        box_score=lambda team_id: pd.DataFrame([{"TEAM_ID": team_id, **BOX_SCORE_7}]),
+        change=change,
+    )
+    collector, transport, outbox = _collector(
+        tmp_path,
+        discovery=_opponent_shot_discovery(LAC),
+        provider=_StandaloneNBAProvider(),
+        release_checksum="a" * 64,
+    )
+
+    result = collector.run()
+
+    assert (result.exit_code, result.failures, result.uploaded) == (20, (failure,), 0)
+    terminal = [call[4] for call in transport.calls if call[1].endswith("/api/collector/status")][-1]
+    assert (terminal["state"], terminal["reason"]) == ("non_retryable", failure)
+    outbox.close()
+
+
+@pytest.mark.parametrize("tracking_gp", [6, 7])
+def test_a_tracking_shortfall_never_masks_an_incomplete_category(tmp_path: Path, monkeypatch, tracking_gp):
+    # Catch and Shoot is asked for and Pullups comes back: incomplete on equal
+    # games, so incomplete when tracking trails too.
+    _patch_opponent_shot_endpoints(
+        monkeypatch,
+        tracking_gp={LAC: tracking_gp},
+        box_score=lambda team_id: pd.DataFrame([{"TEAM_ID": team_id, **BOX_SCORE_7}]),
+        change=lambda frame: frame.assign(GENERAL_RANGE="Pullups"),
+    )
+    collector, transport, outbox = _collector(
+        tmp_path,
+        discovery=_opponent_discovery(
+            "shot_types_opponent", {"window": "season", "team_id": LAC, "category": "Catch and Shoot"}
+        ),
+        provider=_StandaloneNBAProvider(),
+        release_checksum="a" * 64,
+    )
+
+    result = collector.run()
+
+    assert (result.exit_code, result.failures, result.uploaded) == (20, ("incomplete_observation",), 0)
+    terminal = [call[4] for call in transport.calls if call[1].endswith("/api/collector/status")][-1]
+    assert (terminal["state"], terminal["reason"]) == ("non_retryable", "incomplete_observation")
+    outbox.close()
+
+
+def _patch_opponent_zone_endpoints(monkeypatch, *, zone_gp, opponent_totals, change=lambda row: row):
+    """Serve a complete opponent zone row and its TeamStats evidence."""
+
+    from nba_api.stats import endpoints
+
+    class TeamShotLocations:
+        def __init__(self, *, team_id_nullable, **_kwargs):
+            self.team_id = team_id_nullable
+
+        def get_data_frames(self):
+            row = {"TEAM_ID": self.team_id, "GP": zone_gp}
+            for zone in ("Restricted Area", "In The Paint (Non-RA)", "Mid-Range", "Above the Break 3"):
+                row.update({f"{zone}_OPP_FGM": 4, f"{zone}_OPP_FGA": 8})
+            for zone in ("Left Corner 3", "Right Corner 3"):
+                row.update({f"{zone}_OPP_FGM": 2, f"{zone}_OPP_FGA": 4})
+            row.update({"Backcourt_OPP_FGM": 1, "Backcourt_OPP_FGA": 3})
+            return [pd.DataFrame([change(row)])]
+
+    class TeamStats:
+        def __init__(self, *, team_id_nullable, **_kwargs):
+            self.team_id = team_id_nullable
+
+        def get_data_frames(self):
+            return [pd.DataFrame([{"TEAM_ID": self.team_id, **BOX_SCORE_7, **opponent_totals}])]
+
+    monkeypatch.setattr(endpoints, "LeagueDashTeamShotLocations", TeamShotLocations)
+    monkeypatch.setattr(endpoints, "LeagueDashTeamStats", TeamStats)
+
+
+ZONE_DISCOVERY = _opponent_discovery(
+    "shot_zones_opponent",
+    {"window": "season", "team_id": LAC, "per_mode": "Totals", "value_mode": "totals_with_minutes"},
+)
+ZONE_TOTALS = {"OPP_FGM": 21, "OPP_FGA": 43}
+
+
+@pytest.mark.parametrize(
+    ("zone_gp", "exit_code", "failures", "uploaded"),
+    [
+        (6, 0, ("provider_window_unverified",), 0),
+        (7, 0, (), 1),
+    ],
+)
+def test_opponent_zone_window_defers_a_valid_tracking_shortfall(
+    tmp_path: Path, monkeypatch, zone_gp, exit_code, failures, uploaded
+):
+    _patch_opponent_zone_endpoints(monkeypatch, zone_gp=zone_gp, opponent_totals=ZONE_TOTALS)
+    collector, _transport, outbox = _collector(
+        tmp_path, discovery=ZONE_DISCOVERY, provider=_StandaloneNBAProvider()
+    )
+
+    result = collector.run()
+
+    assert (result.exit_code, result.failures, result.uploaded) == (exit_code, failures, uploaded)
+    outbox.close()
+
+
+@pytest.mark.parametrize("zone_gp", [6, 7])
+@pytest.mark.parametrize(
+    ("change", "failure"),
+    [
+        (
+            lambda row: {key: value for key, value in row.items() if key != "Mid-Range_OPP_FGA"},
+            "provider_schema_changed",
+        ),
+        (lambda row: {**row, "Mid-Range_OPP_FGM": -4}, "value_invariant_failed"),
+        (lambda row: {**row, "Mid-Range_OPP_FGM": 5}, "value_invariant_failed"),
+    ],
+    ids=["missing zone attempts", "negative zone makes", "zones off the opponent totals"],
+)
+def test_a_tracking_shortfall_never_masks_a_malformed_zone_row(
+    tmp_path: Path, monkeypatch, zone_gp, change, failure
+):
+    _patch_opponent_zone_endpoints(monkeypatch, zone_gp=zone_gp, opponent_totals=ZONE_TOTALS, change=change)
+    collector, _transport, outbox = _collector(
+        tmp_path, discovery=ZONE_DISCOVERY, provider=_StandaloneNBAProvider()
+    )
+
+    result = collector.run()
+
+    assert (result.exit_code, result.failures, result.uploaded) == (20, (failure,), 0)
+    outbox.close()
+
+
+@pytest.mark.parametrize("zone_gp", [6, 7])
+@pytest.mark.parametrize(
+    ("opponent_totals", "failure"),
+    [
+        ({"OPP_FGA": 43}, "provider_schema_changed"),
+        ({"OPP_FGM": -1, "OPP_FGA": 43}, "value_invariant_failed"),
+        ({"OPP_FGM": 21, "OPP_FGA": float("nan")}, "value_invariant_failed"),
+    ],
+    ids=["missing OPP_FGM", "negative OPP_FGM", "NaN OPP_FGA"],
+)
+def test_a_tracking_shortfall_never_masks_malformed_zone_evidence(
+    tmp_path: Path, monkeypatch, zone_gp, opponent_totals, failure
+):
+    _patch_opponent_zone_endpoints(monkeypatch, zone_gp=zone_gp, opponent_totals=opponent_totals)
+    collector, _transport, outbox = _collector(
+        tmp_path, discovery=ZONE_DISCOVERY, provider=_StandaloneNBAProvider()
+    )
+
+    result = collector.run()
+
+    assert (result.exit_code, result.failures, result.uploaded) == (20, (failure,), 0)
     outbox.close()
 
 

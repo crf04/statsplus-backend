@@ -116,6 +116,18 @@ class BacktestSeasons:
         )
         return self.choose(published, live, requested)
 
+    def fallback(self, choice: BacktestSeason, *, session: Any | None = None) -> BacktestSeason | None:
+        """The season a thin Diet of ``choice`` is judged on instead (crf04/statsplus#417).
+
+        The season before ``choice.season`` when a Backtest may read it, else
+        ``None``: a 2025-26 Backtest has no fallback.
+        """
+
+        prior = previous_season(choice.season)
+        if prior not in BACKTEST_SEASONS:
+            return None
+        return self.resolve(prior, session=session)
+
     @staticmethod
     def choose(published: str, live: Any, requested: Any = None, *, diets: Any = None) -> BacktestSeason:
         """Apply a request to a live capture taken in the published season.
