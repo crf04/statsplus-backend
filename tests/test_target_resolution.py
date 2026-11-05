@@ -2877,3 +2877,85 @@ def test_a_fits_last_five_and_average_leave_out_playoff_games_in_the_real_log_re
     (fit,) = entry["players"]
     assert [game["value"] for game in fit["last_five_games"]] == [10.0, 6.0, 7.0, 4.0, 9.0]
     assert fit["season_averages"]["REB"] == 6.5
+
+
+class _NamedPools:
+    """A pool reader recording each read; a game's slice is its own id."""
+
+    def __init__(self):
+        self.reads = []
+
+    def read_games(self, *, season, game_ids):
+        self.reads.append((season, frozenset(game_ids)))
+        return SimpleNamespace(
+            season=season,
+            game_ids=tuple(sorted(game_ids)),
+            event=lambda game_id: None,
+            pool=lambda ids=None: tuple(ids),
+        )
+
+
+def test_resolve_reads_the_pool_of_every_game_a_target_names_once_and_no_other(targets):
+    okc_game_id, mia_game_id, idle_game_id = "0022500900", "0022500901", "0022500902"
+    okc_game = _game(
+        game_id=okc_game_id,
+        away=(LAL, "LAL", "Los Angeles Lakers"),
+        home=(OKC, "OKC", "Oklahoma City Thunder"),
+    )
+    mia_game = _game(
+        game_id=mia_game_id,
+        away=(MIA, "MIA", "Miami Heat"),
+        home=(DEN, "DEN", "Denver Nuggets"),
+    )
+    idle_game = _game(
+        game_id=idle_game_id,
+        away=(1610612738, "BOS", "Boston Celtics"),
+        home=(1610612756, "PHX", "Phoenix Suns"),
+    )
+    _create(targets, opponent="OKC", qualifiers=(CORNER_THREE,))
+    _create(targets, opponent="MIA", qualifiers=(LOW_RIM,))
+    _create(targets, opponent="DEN", qualifiers=(TRANSITION,))
+
+    class Composer(_RecordedSnapshotMatchups):
+        def get_matchup_from_snapshot(self, *, game_id, pool_read=None, **kwargs):
+            self.pools = [*getattr(self, "pools", []), pool_read.pool((game_id,))]
+            return super().get_matchup_from_snapshot(
+                game_id=game_id,
+                publication_snapshot=kwargs["publication_snapshot"],
+                injuries=kwargs["injuries"],
+            )
+
+    composer = Composer({okc_game_id: _matchup(game=okc_game), mia_game_id: _matchup(game=mia_game)})
+    pools = _NamedPools()
+    service = TargetResolutionService(
+        targets=targets,
+        slates=FakeSlate(games=[okc_game, mia_game, idle_game]),
+        matchups=composer,
+        publication_reader=_AdvancingPublicationReader(),
+        injuries=object(),
+        settings=_resolution_settings(),
+        player_pool=pools,
+    )
+
+    service.resolve(OWNER, requested_date=SLATE_DATE)
+
+    assert pools.reads == [(matchup_doubles.SEASON, frozenset({okc_game_id, mia_game_id}))]
+    assert sorted(composer.pools) == [(okc_game_id,), (mia_game_id,)]
+
+
+def test_resolve_reads_no_pool_when_no_target_plays(targets):
+    _create(targets, opponent="OKC", qualifiers=(CORNER_THREE,))
+    pools = _NamedPools()
+    service = TargetResolutionService(
+        targets=targets,
+        slates=FakeSlate(games=[]),
+        matchups=_RecordedSnapshotMatchups({}),
+        publication_reader=_AdvancingPublicationReader(),
+        injuries=object(),
+        settings=_resolution_settings(),
+        player_pool=pools,
+    )
+
+    service.resolve(OWNER, requested_date=SLATE_DATE)
+
+    assert pools.reads == []

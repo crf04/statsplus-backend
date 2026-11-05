@@ -857,6 +857,7 @@ def build_dependencies(
         player_logs=player_game_log_repository,
         athlete_catalog=athlete_catalog_reader,
         engine=engine,
+        player_pool=projection_player_pool_reader,
     )
     # The home page's slate edges compose the same two documents under the same
     # promises: one Publication snapshot, stored-only injuries, no provider.
