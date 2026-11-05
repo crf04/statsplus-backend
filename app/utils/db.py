@@ -8,6 +8,7 @@ without code changes elsewhere.
 from __future__ import annotations
 
 import sqlite3
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -17,12 +18,14 @@ from typing import Any, Final
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine, make_url
-from sqlalchemy.exc import ArgumentError
+from sqlalchemy.exc import ArgumentError, InvalidatePoolError
 
 from app.config.settings import DatabaseSettings, RuntimeSettings, get_runtime_settings
 
 DEFAULT_SQLITE_PATH: Final[str] = "sqlite:///nba_play_types.db"
 DEMO_DATABASE_PATH: Final[Path] = Path(__file__).resolve().parents[2] / "nba_play_types.db"
+#: A pooled connection whose previous checkout began this recently is served without a ping.
+PING_AFTER_IDLE_SECONDS: Final[float] = 1.0
 
 
 @event.listens_for(Engine, "connect")
@@ -162,6 +165,34 @@ def _apply_statement_timeout_scope(engine: Engine, limit_ms: int) -> None:
         connection_record.info["statement_timeout_ms"] = wanted
 
 
+def _ping_idle_connections(engine: Engine) -> None:
+    """Ping a pooled connection on checkout only after it sat idle.
+
+    ``pool_pre_ping`` pings every checkout, and psycopg2's ping toggles
+    autocommit, which after any ``REPEATABLE READ`` read also sends ``SET
+    default_transaction_isolation TO DEFAULT``: two round trips before each
+    read's own ``BEGIN``.  A connection whose previous checkout began within
+    ``PING_AFTER_IDLE_SECONDS`` is served as is; timing from the checkout,
+    not the return, keeps a connection held past the window from counting as
+    recent.  A failed ping invalidates the pool, as a failed pre-ping does,
+    and the pool checks out a new connection in its place.
+    """
+
+    @event.listens_for(engine, "checkout")
+    def _ping(dbapi_connection: Any, connection_record: Any, _proxy: Any) -> None:
+        now = time.monotonic()
+        previous = connection_record.info.get("checked_out_at")
+        connection_record.info["checked_out_at"] = now
+        if previous is None or now - previous < PING_AFTER_IDLE_SECONDS:
+            return
+        try:
+            engine.dialect.do_ping(dbapi_connection)
+        except engine.dialect.loaded_dbapi.Error as error:
+            if not engine.dialect.is_disconnect(error, dbapi_connection, None):
+                raise
+            raise InvalidatePoolError() from error
+
+
 @lru_cache(maxsize=8)
 def _create_engine(database_url: str, pool: DatabaseSettings | None = None) -> Engine:
     """Create and cache an engine for one normalized URL and pool config.
@@ -178,12 +209,12 @@ def _create_engine(database_url: str, pool: DatabaseSettings | None = None) -> E
         connect_args["options"] = f"-c statement_timeout={pool.statement_timeout_ms}"
     engine = create_engine(
         database_url,
-        pool_pre_ping=True,
         pool_size=pool.pool_size,
         max_overflow=pool.max_overflow,
         pool_recycle=pool.pool_recycle_seconds,
         connect_args=connect_args,
     )
+    _ping_idle_connections(engine)
     if pool.statement_timeout_ms is not None:
         _apply_statement_timeout_scope(engine, pool.statement_timeout_ms)
     return engine
@@ -196,7 +227,7 @@ def get_engine(settings: RuntimeSettings | None = None) -> Engine:
     bundled SQLite database remains the safe local default, and engines are
     memoized by normalized URL and pool configuration so imports across
     modules share a pool. Postgres engines apply the configured connection
-    pool (pre-ping, size, overflow, recycle, and connect timeout); SQLite
+    pool (idle ping, size, overflow, recycle, and connect timeout); SQLite
     engines are built exactly as before, with no extra keyword arguments.
 
     Returns

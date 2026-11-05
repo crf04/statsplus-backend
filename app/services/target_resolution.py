@@ -50,6 +50,7 @@ from app.services.matchup_snapshot import (
     read_game_matchup,
     request_matchups,
 )
+from app.services.publication_snapshot_calls import accepts_keyword
 from app.services.request_reads import request_read_scope
 from app.services.research_season import refuse_evidence_after_game, season_context, selected_season
 from app.services.response_provenance import (
@@ -95,7 +96,7 @@ class SeasonSummaryReader(Protocol):
 
 
 class CatalogReader(Protocol):
-    def get_catalog(self, season: str, *, active_only: bool = False) -> Sequence[Mapping[str, Any]]: ...
+    def get_positions(self, season: str) -> Mapping[int, str]: ...
 
 
 class TargetResolutionService:
@@ -158,7 +159,7 @@ class TargetResolutionService:
         Slate reads it (``slate_fallback.read_slate``).
         """
 
-        slate = read_slate(self.slates.get_slate, requested_date, fallback)
+        slate = read_slate(self._slate, requested_date, fallback)
         # A selected Evidence season (``season_scoped``) after the Slate
         # games' own season is refused: a game's schedule facts are its own
         # season's (crf04/statsplus#330 AC9).
@@ -200,6 +201,20 @@ class TargetResolutionService:
                 also=matchup_generation(read_matchups.values()) if shared else (),
             ),
         }
+
+    def _slate(self, requested_date: str | None) -> Mapping[str, Any]:
+        """The Slate of ``requested_date``, its neighbouring dates read only for a day without games.
+
+        A Targets answer never shows them, and ``read_slate`` falls back on
+        them only when the day lists no game.
+        """
+
+        if not accepts_keyword(self.slates.get_slate, "neighbours"):
+            return self.slates.get_slate(requested_date)
+        slate = self.slates.get_slate(requested_date, neighbours=False)
+        # The reread names the day the first read resolved, so a request
+        # spanning ET midnight cannot answer for the next day.
+        return slate if slate["games"] else self.slates.get_slate(slate["slate_date"])
 
     def _request_matchups(self, *, read_scope: tuple[Any, Any] | None = None) -> MatchupReader:
         """One reader for this whole resolve, reading no provider.
@@ -578,9 +593,9 @@ class TargetResolutionService:
             return {}
         if season not in memo:
             memo[season] = {
-                int(row["player_id"]): row["position"]
-                for row in self.athlete_catalog.get_catalog(season, active_only=False)
-                if row.get("position")
+                player_id: position
+                for player_id, position in self.athlete_catalog.get_positions(season).items()
+                if position
             }
         return memo[season]
 
