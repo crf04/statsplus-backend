@@ -241,7 +241,7 @@ def test_every_paid_poll_logs_its_cost_and_the_remaining_quota(world):
 
     assert (
         logging.INFO,
-        "Odds API poll region=us_dfs game=0022600001 kind=hourly cost=5 "
+        "Odds API poll region=us_dfs game=0022600001 kind=day cost=5 "
         "remaining=19995 quotes=10 unresolved_players=2",
     ) in messages
     assert (
@@ -643,7 +643,7 @@ def test_a_resolver_fault_does_not_retire_lines_the_response_still_carries(world
     assert dict(_players(closing)[LEBRON].lines["prizepicks"]) == PP_LEBRON
 
 
-def test_a_quota_fault_after_the_purchase_still_costs_fourteen_calls_a_game(world):
+def test_a_quota_fault_after_the_purchase_still_costs_the_games_sixteen_calls(world):
     from app.services.odds_collection import run_once
 
     client = _dfs_client()
@@ -658,16 +658,18 @@ def test_a_quota_fault_after_the_purchase_still_costs_fourteen_calls_a_game(worl
         return save(quota, now=now)
 
     coordinator._save_quota = fail_once
-    now = TIP - timedelta(hours=13)
+    # From 20:30 ET the night before a 20:30 ET tip: one night poll, hourly
+    # 10:00-17:00, every 30 minutes 17:30-20:00, and the closing (#430).
+    now = TIP - timedelta(hours=24)
     while now < TIP:
         world.clock[0] = now
         run_once(coordinator)
         now += timedelta(minutes=5)
 
     assert failed
-    assert len(client.event_calls) == 14
-    assert 20000 - client.remaining == 70  # what the vendor charged
-    assert sum(poll["cost"] for poll in _rows(world, OddsApiPoll)) == 70  # what the ledger says
+    assert len(client.event_calls) == 1 + 8 + 6 + 1
+    assert 20000 - client.remaining == 80  # what the vendor charged
+    assert sum(poll["cost"] for poll in _rows(world, OddsApiPoll)) == 80  # what the ledger says
 
 
 def test_a_worker_superseded_just_before_the_archive_write_publishes_nothing(world):
