@@ -55,22 +55,26 @@ def kinds(now, tip=TIP, *, last=None, populated=None, tier=Tier.NORMAL):
     return [c.kind for c in plan(now, [event], tier=tier, evaluated=now).calls]
 
 
-def walk(tip, start, tier=Tier.NORMAL, *, posted=lambda now: True, remaining=20000):
+def walk(tip, start, tier=Tier.NORMAL, *, posted=lambda now: True, remaining=20000, delays=(0,), needs=None):
     """Calls made for one game, beat by beat from ``start`` until an hour
     after tip, as (New York time, kind); ``posted`` says whether a response at
-    that instant carries props."""
+    that instant carries props.  Beat ``i`` starts ``delays[i % len(delays)]``
+    minutes late; ``needs`` collects (calls so far, normal ``budget_needs``)
+    at each beat."""
 
     last = populated = None
     closing_done, made = False, []
-    now = start.astimezone(UTC)  # New York-aware arithmetic would follow the wall clock
-    while now < tip + timedelta(hours=1):
+    beat = start.astimezone(UTC)  # New York-aware arithmetic would follow the wall clock
+    for i in range(int((tip + timedelta(hours=1) - beat) / BEAT)):
+        now = beat + i * BEAT + timedelta(minutes=delays[i % len(delays)])
+        if needs is not None:
+            needs.append((len(made), budget_needs(now, [GameClock(tip, closing_done, populated)])[0]))
         event = EventState("e1", tip, last, closing_done, populated)
         for call in plan(now, [event], tier=tier, evaluated=now, remaining=remaining).calls:
             made.append((f"{now.astimezone(EASTERN):%d %H:%M}", call.kind))
             last = now
             populated = now if posted(now) else populated
             closing_done = closing_done or call.kind == "closing"
-        now += BEAT
     return made
 
 
@@ -94,6 +98,27 @@ def test_a_7pm_tip_polls_once_the_night_before_then_hourly_from_10_then_every_30
         ("05 18:30", "final"),
         ("05 18:50", "closing"),
     ]
+
+
+def test_late_and_early_beats_serve_each_30_minute_slot_once():
+    # Beats start 0-4 minutes late.  Chaining each poll off the last one let
+    # 16:00, 16:28, 16:56, ... 18:48 through: seven final polls for six slots.
+    needs = []
+    made = walk(TIP, NIGHT_BEFORE, delays=(0, 1, 3, 0, 0, 2, 4), needs=needs)
+
+    # The 16:00, 16:30, ... 18:30 slots, each served 2 minutes early to 4 late.
+    assert [when for when, kind in made if kind == "final"] == [
+        "05 16:00",
+        "05 16:28",
+        "05 17:03",
+        "05 17:31",
+        "05 17:59",
+        "05 18:34",
+    ]
+    assert len(made) == 14
+    assert needs[0] == (0, 14 * CALL_COST)
+    # From every beat on, the guard's projection covers what is spent.
+    assert all(need >= CALL_COST * (len(made) - before) for before, need in needs)
 
 
 def test_empty_night_polls_repeat_hourly_until_one_is_populated():
@@ -267,13 +292,7 @@ def test_budget_needs_is_what_the_planner_spends_from_that_instant(tip):
 
     start = tip.astimezone(UTC) - timedelta(hours=24)
     while start < tip:
-        need, spent = budget_needs(start, [GameClock(tip)]), spend(start)
-        if start.minute == 0:
-            assert need == spent, start
-        else:
-            # Starting off the hour shifts the polls, which can save one call
-            # where the day's spacing meets the final window's.
-            assert all(0 <= n - s <= CALL_COST for n, s in zip(need, spent, strict=True)), start
+        assert budget_needs(start, [GameClock(tip)]) == spend(start), start
         start += BEAT
 
 

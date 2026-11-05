@@ -28,8 +28,8 @@ FINAL_OPENS = timedelta(hours=3)
 HOURLY = timedelta(hours=1)
 #: The night and pause windows follow the league's wall clock, DST included.
 EASTERN = ZoneInfo("America/New_York")
-#: Beats are five minutes apart; a poll is due a little early so latency
-#: jitter never pushes an hourly poll a whole beat late.
+#: Beats are five minutes apart; a slot may be served a little early so
+#: latency jitter never pushes an hourly poll a whole beat late.
 CADENCE_SLACK = timedelta(minutes=2)
 TIER_REEVALUATION = timedelta(hours=1)
 #: No call may leave fewer credits than this: ``x-requests-remaining`` never
@@ -61,7 +61,8 @@ class Window:
     kind: str
     opens: Callable[[datetime], datetime]
     closes: Callable[[datetime], datetime]
-    #: Spacing between polls by tier; a tier missing here makes no call.
+    #: Spacing of the window's slots by tier, from where the window opens; a
+    #: tier missing here makes no call.
     cadence: Mapping[Tier, timedelta]
     #: One populated (paid) poll ends the window for the game; empty answers
     #: are free and repeat at the cadence.
@@ -134,6 +135,19 @@ def _populated_in(span: Span, last_populated_at: datetime | None) -> bool:
     return span.window.once and last_populated_at is not None and last_populated_at >= span.opens
 
 
+def _slots(span: Span, cadence: timedelta) -> int:
+    """How many slots ``span.opens + k * cadence`` lie before the span closes."""
+
+    return math.ceil((span.closes - span.opens) / cadence)
+
+
+def _slot(span: Span, cadence: timedelta, now: datetime) -> int:
+    """Index of the latest slot ``now`` may serve; negative before the first.
+    Slack lets a slot be served early, never adds one."""
+
+    return min((now + CADENCE_SLACK - span.opens) // cadence, _slots(span, cadence) - 1)
+
+
 @dataclass(frozen=True, slots=True)
 class GameClock:
     """A scheduled game as the budget sees it."""
@@ -188,21 +202,20 @@ def next_reset(now: datetime, reset_day: int) -> datetime:
 
 def _paid_calls(game: GameClock, now: datetime, tier: Tier) -> int:
     """Calls the planner makes for ``game`` from ``now`` to tip if every
-    response is populated.  Exact from the hour; started off the hour, where
-    the day's spacing meets the final window's it may count one high."""
+    response is populated: each slot not yet past, the one ``now`` may serve
+    included (it may already be served, so this can count one high)."""
 
     if game.closing_done:
         return 0
     calls = 0
     for span in _spans(game.commence_time):
         cadence = span.window.cadence.get(tier)
-        start = max(span.opens, now)
-        if cadence is None or start >= span.closes:
+        if cadence is None or max(span.opens, now) >= span.closes:
             continue
         if span.window.once:
             calls += 0 if _populated_in(span, game.last_populated_at) else 1
         else:
-            calls += math.ceil((span.closes - start) / cadence)
+            calls += _slots(span, cadence) - max(_slot(span, cadence, now), 0)
     return calls
 
 
@@ -310,10 +323,14 @@ def plan_cycle(
     for event in events:
         span = None if event.closing_done else window_at(event.commence_time, now)
         cadence = None if span is None else span.window.cadence.get(tier)
+        if cadence is None or _populated_in(span, event.last_populated_at):
+            continue
+        # A slot is served by any poll from CADENCE_SLACK before it, so each
+        # slot is polled once however the beats drift.
         if (
-            cadence is not None
-            and not _populated_in(span, event.last_populated_at)
-            and (event.last_poll_at is None or event.last_poll_at + cadence - CADENCE_SLACK <= now)
+            not cadence
+            or event.last_poll_at is None
+            or event.last_poll_at < span.opens + _slot(span, cadence, now) * cadence - CADENCE_SLACK
         ):
             due.append((event, span.window.kind))
     due.sort(key=lambda item: (item[1] != "closing", item[0].commence_time, item[0].odds_event_id))

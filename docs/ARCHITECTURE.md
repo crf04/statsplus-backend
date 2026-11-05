@@ -5071,9 +5071,11 @@ later adds half a day pull (a 6pm tip takes 13, a 10pm tip 17), a noon tip takes
 the purchase does not add a call (see above). A typical month of 222 games
 tipping 6pm to 9:30pm ET therefore costs 16,390 credits (about 16,000 for 230
 games), and a peak month of 250 games 18,775, under the 19,000 spendable above
-the 1,000-credit reserve. `budget_needs` projects each tier's spend from the same
-windows, so the guard sees what the planner will schedule (one call high at
-most per game when a game's polls run off the hour). The bound has three
+the 1,000-credit reserve. Each repeating window's polls are slots on a grid
+from where the window opens (hourly from 10:00 ET, every 30 minutes from tip
+minus 3 h); a beat may serve a slot up to two minutes early, but late or early
+beats never add one. `budget_needs` counts the same slots, so the guard sees
+what the planner will schedule. The bound has three
 exceptions, each of which restarts one game's polling and so adds at most one
 game's calls: a process killed while the request itself
 is in flight (the vendor may have charged it and nothing was written), a
