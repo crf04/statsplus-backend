@@ -2389,6 +2389,19 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
             for pair_index in range(15)
         ],
     }
+    if evidence_mode == "backdated_synergy":
+        # Mid-season: a game still to play keeps Synergy's season totals
+        # mutable, so a later collection cannot speak for this cutoff.
+        event_payload["events"].append(
+            {
+                "nba_game_id": "game-unplayed",
+                "home_team_id": team_ids[0],
+                "away_team_id": team_ids[1],
+                "phase": "Regular Season",
+                "status": "Scheduled",
+                "scheduled_at": (NOW + timedelta(days=1)).isoformat(),
+            }
+        )
     event_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
     event_publication = control.publish_catalog(event_request.request_id, event_payload, version="event-v1")
     assert event_publication.complete
