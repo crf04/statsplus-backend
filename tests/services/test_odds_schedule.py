@@ -471,6 +471,18 @@ def test_an_empty_night_costs_nothing():
     assert result["tiers"] == {Tier.NORMAL}
 
 
+def test_a_peak_month_of_250_games_stays_at_normal_cadence_above_the_reserve():
+    # 30 days of 8 and one of 10, whose 22:00 and 22:30 ET tips take 17 and 18.
+    tips = month_of_games([8] * 30 + [10])
+    assert len(tips) == 250
+
+    result = replay(tips)
+
+    assert result["spent"] == (30 * 120 + 120 + 17 + 18) * CALL_COST == 18775
+    assert result["lowest"] == 20000 - 18775
+    assert result["tiers"] == {Tier.NORMAL}
+
+
 def test_ceiling_load_of_15_games_a_day_degrades_and_stays_under_the_plan():
     tips = month_of_games([15] * 31)
     assert len(tips) == 465
