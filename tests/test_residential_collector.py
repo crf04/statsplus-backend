@@ -1639,6 +1639,23 @@ def test_player_shot_types_short_of_a_game_tracking_keeps_still_lag(tmp_path, mo
     assert (composed, job, versions) == (0, ("failed", "provider_window_lagging"), [])
 
 
+def test_player_shot_types_without_a_shooter_whose_only_game_tracking_omits_are_published(tmp_path, monkeypatch):
+    # 1630174 has one box-score game and 7 attempts through 10/24.  When that
+    # game is the one tracking omits, tracking has no Overall record for the
+    # player at all, and the Diet publishes without them.
+    monkeypatch.setattr(tracking_omissions, "TRACKING_OMITTED_GAMES", (DEN_NOP_1024,))
+    composed, job, versions = _collect_player_shot_types_on_1025(
+        tmp_path,
+        _NBAOnTheMorningOf1025(tracking="10/24/2026", untracked={1630174}),
+        ledger_players=[("0022600110", 1630174, DEN)],
+    )
+
+    assert (composed, job) == (1, ("succeeded", None))
+    (version,) = versions
+    player_ids = {row["player_id"] for row in json.loads(version["payload"])["rows"]}
+    assert (len(player_ids), 1630174 in player_ids) == (370, False)
+
+
 def test_player_shot_types_missing_a_box_score_shooter_are_not_published(tmp_path):
     # Tracking through 10/24 with Jokic (2 games, 42 box-score attempts) absent
     # from all of it, Overall included: every row present agrees with the box
