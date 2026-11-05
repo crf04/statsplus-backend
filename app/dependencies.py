@@ -190,7 +190,7 @@ def build_dependencies(
         PublicationSnapshotReuse,
     )
     from app.services.matchup_selection import MatchupSelectionService
-    from app.services.matchup_snapshot import capture_matchup_snapshot
+    from app.services.matchup_snapshot import capture_matchup_labels
     from app.services.nl_service import NLService
     from app.services.on_off import OnOffService
     from app.services.player_archetype_repository import PlayerArchetypeRepository
@@ -698,7 +698,7 @@ def build_dependencies(
         injuries=matchup_injury_service,
         injury_counts=injury_listing_service,
         publication_reader=research_publications,
-        matchup_snapshot=lambda reader: capture_matchup_snapshot(settings, reader, snapshot_reuse),
+        matchup_snapshot=lambda reader: capture_matchup_labels(settings, reader, snapshot_reuse),
     )
     from app.services.game_logs_source import (
         StoredGameLogsSource,

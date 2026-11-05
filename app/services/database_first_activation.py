@@ -1283,6 +1283,7 @@ class DatabaseFirstPublicationReader:
         require_active: bool = True,
         projection_only_keys: frozenset[str] = frozenset(),
         decoded_only_keys: frozenset[str] = frozenset(),
+        label_only_keys: frozenset[str] = frozenset(),
         session: Session | None = None,
     ) -> PublicationReadSnapshot:
         """Capture all requested pointers, payloads, and decoded facts once.
@@ -1295,6 +1296,9 @@ class DatabaseFirstPublicationReader:
         rendered payload at all: on a decode-cache hit the payload column is
         never selected, and the read serves the cached decoded facts alone.
         Every other call still loads and returns the payload.
+
+        ``label_only_keys`` names the streams a caller reads for their labels
+        alone: every check up to the payload's runs, and no payload is read.
         """
 
         return self._snapshot(
@@ -1303,6 +1307,7 @@ class DatabaseFirstPublicationReader:
             require_active=require_active,
             projection_only_keys=projection_only_keys,
             decoded_only_keys=decoded_only_keys,
+            label_only_keys=label_only_keys,
             session=session,
         )
 

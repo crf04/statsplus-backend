@@ -29,7 +29,7 @@ from app.services.matchup import (
 )
 from app.services.matchup_reuse import ComposedMatchupCache, PublicationSnapshotReuse
 from app.services.publication_snapshot_calls import accepts_keyword, call_with_read_scope
-from app.services.research_season import event_season, published_capture
+from app.services.research_season import event_season, published_capture, selected_season
 
 
 def capture_publication_snapshot(
@@ -38,6 +38,7 @@ def capture_publication_snapshot(
     *,
     projection_only_keys: Any,
     decoded_only_keys: Any = frozenset(),
+    label_only_keys: Any = frozenset(),
     season: str,
     session: Any = None,
 ) -> Any:
@@ -61,6 +62,8 @@ def capture_publication_snapshot(
         keyword["projection_only_keys"] = projection_only_keys
     if accepts_keyword(snapshot, "decoded_only_keys"):
         keyword["decoded_only_keys"] = decoded_only_keys
+    if label_only_keys and accepts_keyword(snapshot, "label_only_keys"):
+        keyword["label_only_keys"] = label_only_keys
     if session is not None and accepts_keyword(snapshot, "session"):
         keyword["session"] = session
     return snapshot(stream_keys, season=season, **keyword)
@@ -486,9 +489,41 @@ def capture_matchup_snapshot(
     return snapshot_reuse.capture(settings, publication_reader, MATCHUP_PUBLICATION_STREAM_KEYS, capture)
 
 
+def capture_matchup_labels(
+    settings: RuntimeSettings,
+    publication_reader: Any,
+    snapshot_reuse: PublicationSnapshotReuse | None = None,
+) -> tuple[str, Any]:
+    """``capture_matchup_snapshot`` for a caller that reads each read's labels, never a fact.
+
+    The Slate prints the Published Season and each read's season and status
+    (``trailing``).  An explicit selection is never reused, so it captures
+    without a payload: every check before the payload's runs, an Unpublished
+    candidate's ledger lineage included, and no payload is read, checksummed
+    or decoded.  Without one, ``snapshot_reuse`` holds the live generation's
+    full capture that Target resolution and the slate edges share, which one
+    statement checks.
+    """
+
+    if snapshot_reuse is not None and selected_season(publication_reader) is None:
+        return capture_matchup_snapshot(settings, publication_reader, snapshot_reuse)
+
+    def capture(season: Any) -> Any:
+        return capture_publication_snapshot(
+            publication_reader,
+            MATCHUP_PUBLICATION_STREAM_KEYS,
+            projection_only_keys=MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
+            label_only_keys=frozenset(MATCHUP_PUBLICATION_STREAM_KEYS) - MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
+            season=season,
+        )
+
+    return published_capture(settings, publication_reader, capture)
+
+
 __all__ = [
     "SnapshotMatchupComposer",
     "SnapshotMatchups",
+    "capture_matchup_labels",
     "capture_matchup_snapshot",
     "capture_publication_snapshot",
     "read_game_matchup",
