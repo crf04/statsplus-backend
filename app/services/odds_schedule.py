@@ -203,7 +203,9 @@ def next_reset(now: datetime, reset_day: int) -> datetime:
 def _paid_calls(game: GameClock, now: datetime, tier: Tier) -> int:
     """Calls the planner makes for ``game`` from ``now`` to tip if every
     response is populated: each slot not yet past, the one ``now`` may serve
-    included (it may already be served, so this can count one high)."""
+    included.  ``GameClock`` cannot see which slots were already served, so
+    this can count high (a late poll can serve the next window's first slot
+    too), never low."""
 
     if game.closing_done:
         return 0
