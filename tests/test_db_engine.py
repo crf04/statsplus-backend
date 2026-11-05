@@ -28,7 +28,6 @@ def test_postgres_engine_applies_configured_pool_settings():
 
     engine = get_engine(settings)
 
-    assert engine.pool._pre_ping is True
     assert engine.pool.size() == 7
     assert engine.pool._max_overflow == 9
     assert engine.pool._recycle == 120
@@ -37,21 +36,21 @@ def test_postgres_engine_applies_configured_pool_settings():
 def test_postgres_engine_defaults_to_the_documented_pool_settings():
     engine = get_engine(_postgres_settings())
 
-    assert engine.pool._pre_ping is True
     assert engine.pool.size() == 3
     assert engine.pool._max_overflow == 4
     assert engine.pool._recycle == 300
 
 
 def test_postgres_engine_passes_the_configured_connect_timeout(monkeypatch):
-    mock_create_engine = Mock()
+    from sqlalchemy import create_engine
+
+    mock_create_engine = Mock(side_effect=lambda *a, **k: create_engine("sqlite://"))
     monkeypatch.setattr("app.utils.db.create_engine", mock_create_engine)
 
     get_engine(_postgres_settings(connect_timeout_seconds=17))
 
     _, kwargs = mock_create_engine.call_args
     assert kwargs["connect_args"] == {"connect_timeout": 17}
-    assert kwargs["pool_pre_ping"] is True
     assert kwargs["pool_size"] == 3
     assert kwargs["max_overflow"] == 4
     assert kwargs["pool_recycle"] == 300

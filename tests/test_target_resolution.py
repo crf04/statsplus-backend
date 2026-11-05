@@ -1155,6 +1155,71 @@ def test_the_requested_date_is_the_slates_own_date(targets, resolve):
     assert payload["slate_date"] == "2026-02-01"
 
 
+class _NeighbourSlate(FakeSlate):
+    """A Slate naming its next game date only when its neighbours are read."""
+
+    def __init__(self, games_by_day, next_day):
+        super().__init__([])
+        self.games_by_day = games_by_day
+        self.next_day = next_day
+
+    def get_slate(self, requested_date=None, *, neighbours=True):
+        day = requested_date or SLATE_DATE
+        self.calls.append((day, neighbours))
+        return {
+            "slate_date": day,
+            "freshness": {"schedule": {"status": "fresh"}, "pool": {}},
+            "provenance": {"generation": [], "sources": dict(SLATE_SOURCES)},
+            "games": self.games_by_day.get(day, []),
+            "previous_game_date": None,
+            "next_game_date": self.next_day if neighbours and day == SLATE_DATE else None,
+        }
+
+
+def test_a_day_with_games_never_reads_its_neighbouring_dates(targets, resolve):
+    _create(targets)
+    slate = _NeighbourSlate({SLATE_DATE: [_game()]}, next_day="2026-01-17")
+
+    payload = resolve(slate=slate)
+
+    assert slate.calls == [(SLATE_DATE, False)]
+    assert [entry["game"]["game_id"] for entry in payload["targets"]] == [GAME_ID]
+
+
+def test_next_game_day_from_a_day_without_games_resolves_the_next_slate(targets):
+    _create(targets)
+    slate = _NeighbourSlate({"2026-01-17": [_game()]}, next_day="2026-01-17")
+
+    payload = TargetResolutionService(targets=targets, slates=slate, matchups=FakeMatchups()).resolve(
+        OWNER, fallback="next_game_day"
+    )
+
+    assert payload["slate_date"] == "2026-01-17"
+    assert [entry["game"]["game_id"] for entry in payload["targets"]] == [GAME_ID]
+
+
+class _MidnightSlate(_NeighbourSlate):
+    """A Slate whose current ET date turns over after its first read."""
+
+    def __init__(self):
+        super().__init__({"2026-01-17": [_game()]}, next_day="2026-01-17")
+        self.today = iter([SLATE_DATE, "2026-01-17"])
+
+    def get_slate(self, requested_date=None, *, neighbours=True):
+        return super().get_slate(requested_date or next(self.today), neighbours=neighbours)
+
+
+def test_a_day_without_games_answers_for_that_day_when_et_midnight_passes_mid_request(targets, resolve):
+    _create(targets)
+    slate = _MidnightSlate()
+
+    payload = resolve(slate=slate, date=None)
+
+    assert payload["slate_date"] == SLATE_DATE
+    assert payload["targets"][0]["game"] is None
+    assert slate.calls == [(SLATE_DATE, False), (SLATE_DATE, True)]
+
+
 def test_a_malformed_date_is_refused_by_the_slates_own_rule(targets, resolve):
     _create(targets)
     slate = FakeSlate(error=InvalidInputError("The slate date must use YYYY-MM-DD."))
@@ -2416,6 +2481,7 @@ def resolve_rules(targets, runtime_settings):
         game_counts=None,
         with_logs=True,
         with_catalog=True,
+        catalog=None,
     ):
         positions = {1: "Wing", 2: "Big", 3: None} if positions is None else positions
         attempts = {1: [8, 8], 2: [1, 1], 3: [9, 9]} if three_attempts is None else three_attempts
@@ -2429,7 +2495,7 @@ def resolve_rules(targets, runtime_settings):
             matchups=FakeMatchups({GAME_ID: _rules_matchup()}),
             settings=runtime_settings,
             player_logs=logs if with_logs else None,
-            athlete_catalog=bt.FakeCatalog(positions) if with_catalog else None,
+            athlete_catalog=catalog or (bt.FakeCatalog(positions) if with_catalog else None),
         )
         resolved = service.resolve(OWNER, requested_date=SLATE_DATE)["targets"]
         return {entry["target"]["title"]: entry for entry in resolved}
@@ -2510,6 +2576,27 @@ def test_each_fit_carries_its_position_and_a_diet_only_fit_is_otherwise_unchange
             {"base": "shot_zones", "slice_key": "Corner 3", "share": 0.4, "league_average_share": 0.2}
         ],
     }
+
+
+class _StoredPositions:
+    """Positions as the catalog reader returns them: every stored value, an empty one included."""
+
+    def __init__(self, positions):
+        self.positions = positions
+
+    def get_positions(self, season):
+        return dict(self.positions)
+
+
+def test_an_empty_stored_position_leaves_the_player_unlisted(targets, resolve_rules):
+    created = _create(targets, qualifiers=[CORNER_THREE])
+
+    resolved = resolve_rules(catalog=_StoredPositions({1: "Wing", 2: "Big", 3: ""}))
+
+    assert [(player["name"], player["position"]) for player in resolved[created["title"]]["players"]] == [
+        ("Corner Sniper", "Wing"),
+        ("Unlisted Guy", None),
+    ]
 
 
 def test_every_qualifier_kind_has_a_share_and_a_context_entry_with_nulls_for_diet_only_fields(

@@ -971,11 +971,8 @@ class _SeasonCatalog:
     def __init__(self, positions):
         self.positions = positions
 
-    def get_catalog(self, season, *, active_only=False):
-        return [
-            {"player_id": player_id, "position": group}
-            for player_id, group in self.positions.get(season, {}).items()
-        ]
+    def get_positions(self, season):
+        return dict(self.positions.get(season, {}))
 
 
 def _fit(body):
