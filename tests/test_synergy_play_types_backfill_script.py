@@ -29,6 +29,7 @@ from app.models.collection_control import (
     ActiveSeason,
     CollectionManifest,
     CollectionObservation,
+    CompositionJob,
     PublicationPointer,
     PublicationVersion,
 )
@@ -266,6 +267,10 @@ def build_production(url, engine):
             )
         )
     control.activate_season("2026-27", actor="operator")
+    # Another season's waiting work, which the backfill must leave alone.
+    PublicationService(engine).enqueue(
+        "player_game_logs", season="2026-27", cutoff=datetime(2026, 11, 5, 8, 0, tzinfo=UTC)
+    )
     return url, engine, manifest
 
 
@@ -336,6 +341,16 @@ def _state(engine):
             ),
             "observations": connection.scalar(select(func.count()).select_from(CollectionObservation)),
             "versions": connection.scalar(select(func.count()).select_from(PublicationVersion)),
+            "jobs": sorted(
+                connection.execute(
+                    select(
+                        CompositionJob.stream_key,
+                        CompositionJob.season,
+                        CompositionJob.status,
+                        CompositionJob.generation,
+                    )
+                ).all()
+            ),
             "pointers": sorted(
                 connection.execute(
                     select(
@@ -350,6 +365,26 @@ def _state(engine):
 
 def _run(url, *arguments, provider=None):
     return backfill.main(["--database-url", url, *arguments], provider=provider or SynergyProvider())
+
+
+class ChangedProvider(SynergyProvider):
+    """One response the composition could not publish counts from."""
+
+    def __init__(self, defect):
+        super().__init__()
+        self.defect = defect
+
+    def fetch_synergy_play_types(self, category, **kwargs):
+        rows = super().fetch_synergy_play_types(category, **kwargs)
+        team = kwargs["player_or_team_abbreviation"] == "T"
+        if category == "Cut" and team == (self.defect != "player_rates"):
+            for row in rows:
+                if self.defect == "team_games":
+                    row["GP"] = 2
+                else:
+                    row.pop("TOV_POSS_PCT")
+                    row.pop("FT_POSS_PCT")
+        return rows
 
 
 def test_the_backfill_gives_2025_26_turnovers_and_trips_a_play_types_component(production, capsys):
@@ -379,6 +414,7 @@ def test_the_backfill_gives_2025_26_turnovers_and_trips_a_play_types_component(p
     assert after["seasons"] == before["seasons"] == {SEASON: "inactive", "2026-27": "active"}
     assert after["manifests"] == before["manifests"]
     assert after["observations"] == before["observations"] + 22
+    assert ("player_game_logs", "2026-27", "queued", 1) in after["jobs"]
     summary = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert summary["streams"][TEAM_STREAM]["teams"] == 30
     assert summary["streams"][TEAM_STREAM]["rows_by_play_type"] == {category: 30 for category in PLAY_TYPES}
@@ -496,3 +532,52 @@ def test_a_backfill_after_the_2026_27_cutover_is_refused_before_any_fetch(produc
     assert _state(engine) == before
     summary = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert summary["refused"] == "published_season_not_2025_26"
+
+
+@pytest.mark.parametrize(
+    ("defect", "refused"),
+    (
+        ("team_rates", "team_rates_missing"),
+        ("player_rates", "player_rates_missing"),
+        ("team_games", "games_played_mismatch"),
+    ),
+)
+def test_a_response_that_cannot_carry_the_counts_is_refused_before_any_write(
+    production, capsys, defect, refused
+):
+    url, engine, _manifest = production
+    before = _state(engine)
+
+    assert _run(url, provider=ChangedProvider(defect)) == 2
+
+    assert _state(engine) == before
+    summary = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert summary["refused"] == refused
+
+
+def test_a_rerun_recovers_a_composition_that_failed_after_acceptance(production):
+    url, engine, _manifest = production
+    from sqlalchemy.orm import Session
+
+    def failing_worker(season):
+        with Session(engine) as session, session.begin():
+            for job in session.scalars(select(CompositionJob).where(CompositionJob.season == season)):
+                job.status, job.last_error = "failed", "stale_composition"
+        return 0
+
+    status, _summary = backfill.run_backfill(
+        engine,
+        provider=SynergyProvider(),
+        compose_queued=lambda: failing_worker,
+        now=datetime.now(UTC),
+        dry_run=False,
+    )
+    assert status == 2
+    assert "play_types" not in _season_scores(engine)["TOV"]["season"]["components"]
+
+    assert _run(url) == 0
+
+    assert _season_scores(engine)["TOV"]["season"]["components"]["play_types"] == {
+        "value": 0.365804,
+        "thin": False,
+    }

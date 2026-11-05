@@ -22,7 +22,8 @@ a crash drains whatever the first run queued.  ``--dry-run`` fetches,
 validates and reports without writing.  Prints one JSON summary line; exits 0
 on success, 2 when refused or when a composition did not publish.
 
-NBA requests go through ``COLLECTOR_NBA_PROXY_URL`` when it is set.
+NBA requests go through the residential proxy in ``COLLECTOR_NBA_PROXY_URL``;
+without it the command refuses unless ``--no-proxy`` is passed.
 
     python scripts/synergy_play_types_backfill.py --database-url "$DATABASE_URL" --dry-run
 """
@@ -226,11 +227,12 @@ def _report(target: Target, envelopes: Sequence[ObservationEnvelope]) -> dict[st
             raise Refused("games_played_mismatch")
         report["teams"] = len({int(record["team_id"]) for _play_type, record in records})
     else:
-        with_counts = [record for _play_type, record in records if "turnovers" in record]
-        if not with_counts:
+        # The Diet keeps a player's counts only when every row has them.
+        if any(
+            "turnovers" not in record or "free_throw_trips" not in record for _play_type, record in records
+        ):
             raise Refused("player_rates_missing")
         report["players"] = len({int(record["player_id"]) for _play_type, record in records})
-        report["rows_with_counts"] = len(with_counts)
     return report
 
 
@@ -286,6 +288,23 @@ def _accept(
     )
 
 
+def _retry_failed(session: Session, publications: PublicationService, target: Target) -> int:
+    """Requeue the stream's failed job, so a rerun recovers a failed composition."""
+
+    job = session.scalar(
+        select(CompositionJob).where(
+            CompositionJob.stream_key == target.stream_key,
+            CompositionJob.season == SEASON,
+            CompositionJob.cutoff == target.cutoff,
+            CompositionJob.status == "failed",
+        )
+    )
+    if job is None:
+        return 0
+    publications.retry(job.job_id, reason="statsplus#416 2025-26 backfill", session=session)
+    return 1
+
+
 def _published(engine, target: Target) -> dict[str, Any]:
     with Session(engine) as session:
         job = session.scalar(
@@ -312,7 +331,9 @@ def _published(engine, target: Target) -> dict[str, Any]:
                 for stat in ("TOV", "FTT")
             )
         else:
-            carries_counts = any("turnovers" in row for row in rows)
+            carries_counts = bool(rows) and all(
+                "turnovers" in row and "free_throw_trips" in row for row in rows
+            )
         return {
             "job_status": job.status if job is not None else None,
             "last_error": job.last_error if job is not None else None,
@@ -329,7 +350,7 @@ def run_backfill(
     engine,
     *,
     provider: Any,
-    compose_queued: Callable[[str], int],
+    compose_queued: Callable[[], Callable[[str], int]],
     now: datetime,
     dry_run: bool,
 ) -> tuple[int, dict[str, Any]]:
@@ -354,54 +375,100 @@ def run_backfill(
         for target in targets:
             new = _new(session, fetched[target.stream_key])
             summary["streams"][target.stream_key]["new_observations"] = len(new)
-            if new and not dry_run:
+            if dry_run:
+                continue
+            if new:
                 _accept(session, publications, target, new, now)
+            summary["streams"][target.stream_key]["retried_jobs"] = _retry_failed(
+                session, publications, target
+            )
     if dry_run:
         return EXIT_OK, summary
-    summary["composed_jobs"] = compose_queued(SEASON)
+    summary["composed_jobs"] = compose_queued()(SEASON)
     for target in targets:
         summary["streams"][target.stream_key]["published"] = _published(engine, target)
     failed = any(not stream["published"]["carries_counts"] for stream in summary["streams"].values())
     return (EXIT_REFUSED if failed else EXIT_OK), summary
 
 
+def _composer(engine) -> Callable[[str], int]:
+    """The ledger worker's queued composition, without the app's startup work.
+
+    Only the two Synergy jobs can be queued for 2025-26 here (``_targets``
+    refuses otherwise), and they need publication and matchup surfaces only.
+    """
+
+    from app.services.canonical_game_ledger import (
+        CanonicalGameLedgerRepository,
+        record_schema_drift,
+    )
+    from app.services.database_first_activation import (
+        DatabaseFirstPublicationReader,
+        LegacyWriteFence,
+    )
+    from app.services.ledger_matchup_materialization import LedgerMatchupMaterializationService
+    from app.services.ledger_materialization import LedgerCorrectionQueue
+    from app.services.ledger_runtime import LedgerRuntime
+    from app.services.team_matchup_repository import TeamMatchupRepository
+
+    governance = ActiveManifestLedgerGovernanceReader(engine)
+    publications = PublicationService(engine, l15_expectation_resolver=governance)
+    repository = CanonicalGameLedgerRepository(
+        engine,
+        correction_sink=LedgerCorrectionQueue(require_governance=True),
+        schema_drift_sink=record_schema_drift,
+    )
+    matchups = LedgerMatchupMaterializationService(
+        repository,
+        TeamMatchupRepository(
+            engine,
+            write_fence=LegacyWriteFence(engine),
+            publication_write_capability=publications.governed_publication_write_capability(),
+        ),
+        publication_reader=DatabaseFirstPublicationReader(engine, season_candidates=publications),
+        l15_expectation_resolver=governance,
+    )
+    return LedgerRuntime(
+        backfill=None,
+        repository=repository,
+        materialization=None,
+        governance=governance,
+        matchup_materialization=matchups,
+        publication_service=publications,
+    ).compose_queued
+
+
 def main(argv: Sequence[str] | None = None, *, provider: Any | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL", ""))
     parser.add_argument("--dry-run", action="store_true", help="fetch, validate and report without writing")
+    parser.add_argument(
+        "--no-proxy",
+        action="store_true",
+        help="call stats.nba.com directly when COLLECTOR_NBA_PROXY_URL is not set",
+    )
     args = parser.parse_args(argv)
     if not args.database_url.strip():
         parser.error("--database-url or DATABASE_URL is required")
+    proxy = os.environ.get("COLLECTOR_NBA_PROXY_URL") or None
+    if provider is None and proxy is None and not args.no_proxy:
+        parser.error("COLLECTOR_NBA_PROXY_URL is not set; pass --no-proxy to call stats.nba.com directly")
+
+    from sqlalchemy import create_engine
 
     from app.collector.provider import NBAStatsProviderAdapter
-    from app.config.settings import RuntimeSettings
-    from app.dependencies import build_dependencies
-    from app.services.ledger_runtime import LedgerRuntime
 
-    settings = RuntimeSettings(
-        environment="development",
-        database={"url": args.database_url},
-        auth={"firebase_admin_disabled": True},
-    )
-    dependencies = build_dependencies(settings)
-    runtime = LedgerRuntime(
-        backfill=dependencies.ledger_backfill_service,
-        repository=dependencies.canonical_game_ledger_repository,
-        materialization=dependencies.ledger_materialization_service,
-        governance=ActiveManifestLedgerGovernanceReader(dependencies.engine),
-        matchup_materialization=dependencies.ledger_matchup_materialization_service,
-    )
+    engine = create_engine(args.database_url)
     try:
         status, summary = run_backfill(
-            dependencies.engine,
-            provider=provider
-            or NBAStatsProviderAdapter(proxy=os.environ.get("COLLECTOR_NBA_PROXY_URL") or None),
-            compose_queued=runtime.compose_queued,
+            engine,
+            provider=provider or NBAStatsProviderAdapter(proxy=proxy),
+            compose_queued=lambda: _composer(engine),
             now=datetime.now(UTC),
             dry_run=args.dry_run,
         )
     finally:
-        dependencies.engine.dispose()
+        engine.dispose()
     print(json.dumps(summary, sort_keys=True, default=str), flush=True)
     return status
 
