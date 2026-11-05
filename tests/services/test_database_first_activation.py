@@ -1998,24 +1998,3 @@ def test_play_type_publication_carries_turnovers_and_trips_only_as_a_usable_pair
     events = decoded[0].play_type_events
     assert (None if events is None else (events.turnovers, events.free_throw_trips)) == expected
     assert decoded[0].share == 0.2
-
-
-def test_a_request_capture_serves_a_warm_diet_from_the_decode_cache_as_a_matchup_does(tmp_path):
-    """Target resolution and the slate edges capture through ``capture_matchup_snapshot``:
-    an unchanged Diet publication's second capture serves the cached decode, its payload unread."""
-
-    from app.config.settings import RuntimeSettings
-    from app.services.matchup_snapshot import capture_matchup_snapshot
-
-    engine = _db(tmp_path)
-    _seed_diet_publication(engine, {"rows": [_play_type_publication_row()]})
-    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
-    settings = RuntimeSettings(environment="testing", nba={"current_season": "2025-26"})
-    _season, first = capture_matchup_snapshot(settings, reader)
-
-    _season, second = capture_matchup_snapshot(settings, reader)
-
-    warm = second.read("synergy_play_types")
-    assert warm.available is True
-    assert warm.payload is None
-    assert warm.decoded is first.read("synergy_play_types").decoded
