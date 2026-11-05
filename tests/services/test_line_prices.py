@@ -169,9 +169,10 @@ def _recorded_giddey_threes_at(over, under):
     return _prices("dabble", _recorded_dabble_sides("Josh Giddey", "three-made", detail))
 
 
-def test_a_dabble_line_with_a_multiplier_keeps_its_own_price_on_each_side():
-    # Myles Turner threes 1.5, 2026-10-23: over 1.70, under 2.45.
-    assert _prices("dabble", _recorded_dabble_sides("Myles Turner", "three-made")) == (-143, 145)
+def test_an_uneven_dabble_line_has_no_price_on_either_side():
+    # Myles Turner threes 1.5, 2026-10-23: over 1.70, under 2.45.  The feed's
+    # decimals are fair odds, not Dabble's badges (crf04/statsplus#435).
+    assert _prices("dabble", _recorded_dabble_sides("Myles Turner", "three-made")) == (None, None)
 
 
 def test_a_near_even_dabble_line_pays_the_flat_six_x_default_on_both_sides():
@@ -186,9 +187,9 @@ def test_a_near_even_dabble_line_pays_the_flat_six_x_default_on_both_sides():
     [
         (2.08, 1.926, (-122, -122)),
         (1.88, 1.88, (-122, -122)),
-        (1.879, 2.2, (-114, 120)),
-        (1.83, 2.2, (-120, 120)),
-        (2.08, None, (108, None)),
+        (1.879, 2.2, (None, None)),
+        (1.83, 2.2, (None, None)),
+        (2.08, None, (None, None)),
     ],
 )
 def test_a_dabble_line_is_near_even_only_when_both_sides_are_priced_at_one_eighty_eight_or_more(
