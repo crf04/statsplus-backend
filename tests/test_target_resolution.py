@@ -1161,6 +1161,49 @@ def test_the_requested_date_is_the_slates_own_date(targets, resolve):
     assert payload["slate_date"] == "2026-02-01"
 
 
+class _NeighbourSlate(FakeSlate):
+    """A Slate naming its next game date only when its neighbours are read."""
+
+    def __init__(self, games_by_day, next_day):
+        super().__init__([])
+        self.games_by_day = games_by_day
+        self.next_day = next_day
+
+    def get_slate(self, requested_date=None, *, neighbours=True):
+        day = requested_date or SLATE_DATE
+        self.calls.append((day, neighbours))
+        return {
+            "slate_date": day,
+            "freshness": {"schedule": {"status": "fresh"}, "pool": {}},
+            "provenance": {"generation": [], "sources": dict(SLATE_SOURCES)},
+            "games": self.games_by_day.get(day, []),
+            "previous_game_date": None,
+            "next_game_date": self.next_day if neighbours and day == SLATE_DATE else None,
+        }
+
+
+def test_a_day_with_games_never_reads_its_neighbouring_dates(targets, resolve):
+    _create(targets)
+    slate = _NeighbourSlate({SLATE_DATE: [_game()]}, next_day="2026-01-17")
+
+    payload = resolve(slate=slate)
+
+    assert slate.calls == [(SLATE_DATE, False)]
+    assert [entry["game"]["game_id"] for entry in payload["targets"]] == [GAME_ID]
+
+
+def test_next_game_day_from_a_day_without_games_resolves_the_next_slate(targets):
+    _create(targets)
+    slate = _NeighbourSlate({"2026-01-17": [_game()]}, next_day="2026-01-17")
+
+    payload = TargetResolutionService(targets=targets, slates=slate, matchups=FakeMatchups()).resolve(
+        OWNER, fallback="next_game_day"
+    )
+
+    assert payload["slate_date"] == "2026-01-17"
+    assert [entry["game"]["game_id"] for entry in payload["targets"]] == [GAME_ID]
+
+
 def test_a_malformed_date_is_refused_by_the_slates_own_rule(targets, resolve):
     _create(targets)
     slate = FakeSlate(error=InvalidInputError("The slate date must use YYYY-MM-DD."))
