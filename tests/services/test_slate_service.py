@@ -7,7 +7,7 @@ import pytest
 from app.config.settings import NBASeasonSettings, RuntimeSettings
 from app.errors import InvalidInputError, ProviderUnavailableError, ResourceNotFoundError
 from app.services.matchup_injuries import MatchupInjuryResult
-from app.services.player_pool import PlayerPool, PoolPlayer, PoolRoster, RosterPlayer
+from app.services.player_pool import FullPoolRosterReader, PlayerPool, PoolPlayer, PoolRoster, RosterPlayer
 from app.services.slate_service import SlateService
 
 
@@ -366,7 +366,7 @@ def test_slate_uses_live_pool_counts_and_provider_freshness():
     pool = RecordedPlayerPool(expected)
     service = _service(
         [_event("0022500001", "2026-01-03T00:00:00+00:00")],
-        player_pool=pool,
+        player_pool=FullPoolRosterReader(pool),
     )
 
     payload = service.get_slate("2026-01-02")
@@ -401,7 +401,7 @@ def test_slate_exposes_each_database_projection_state_without_recomputing_it():
             _event("0022500001", "2026-01-03T00:00:00+00:00"),
             _event("0022500002", "2026-01-03T01:00:00+00:00"),
         ],
-        player_pool=pool,
+        player_pool=FullPoolRosterReader(pool),
     )
 
     games = service.get_slate("2026-01-02")["games"]
@@ -422,7 +422,7 @@ def test_slate_targetable_counts_apply_the_same_stored_out_override_as_matchup()
     injuries = RecordedStoredInjuries({10})
     service = _service(
         [_event("0022500001", "2026-01-03T00:00:00+00:00")],
-        player_pool=pool,
+        player_pool=FullPoolRosterReader(pool),
         injuries=injuries,
     )
 
@@ -517,7 +517,7 @@ def test_slate_reads_every_events_stored_injuries_with_one_call():
             _event("0022500002", "2026-01-03T01:00:00+00:00"),
             _event("0022500003", "2026-01-03T02:00:00+00:00"),
         ],
-        player_pool=pool,
+        player_pool=FullPoolRosterReader(pool),
         injuries=injuries,
     )
 
@@ -717,7 +717,7 @@ def test_an_unpinned_slate_reads_a_past_date_from_its_own_season_after_rollover(
     )
     pool = RecordedPlayerPool(PlayerPool(players=(), team_counts={}, freshness={}))
     injuries = RecordedStoredInjuries(())
-    service = _rollover_service(catalog, player_pool=pool, injuries=injuries)
+    service = _rollover_service(catalog, player_pool=FullPoolRosterReader(pool), injuries=injuries)
 
     payload = service.get_slate("2026-04-10")
 
@@ -734,7 +734,7 @@ def test_an_unpinned_slate_for_an_uncollected_season_is_empty_not_unavailable():
         }
     )
     pool = RecordedPlayerPool(PlayerPool(players=(), team_counts={}, freshness={}))
-    service = _rollover_service(catalog, player_pool=pool)
+    service = _rollover_service(catalog, player_pool=FullPoolRosterReader(pool))
 
     payload = service.get_slate()
 

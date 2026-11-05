@@ -33,7 +33,7 @@ from app.errors import (
     ResourceNotFoundError,
 )
 from app.services.matchup_injuries import MatchupInjuryResult
-from app.services.player_pool import PlayerPool, PlayerPoolReader, PoolRoster, PoolRosterReader, RosterPlayer
+from app.services.player_pool import PlayerPool, PoolRosterReader, RosterPlayer
 from app.services.research_season import (
     game_capture,
     refuse_evidence_after_game,
@@ -79,7 +79,7 @@ class SlateService:
         settings: RuntimeSettings | None = None,
         clock: Callable[[], datetime] | None = None,
         schedule_max_age: timedelta | None = None,
-        player_pool: PoolRosterReader | PlayerPoolReader | None = None,
+        player_pool: PoolRosterReader | None = None,
         injuries: StoredInjuryOverrideReader | None = None,
         injury_counts: InjuryCountReader | None = None,
         publication_reader: Any | None = None,
@@ -187,7 +187,9 @@ class SlateService:
         pool_freshness = PlayerPool.unavailable_freshness()
         injury_freshness = UNAVAILABLE_SOURCE
         if self.player_pool is not None:
-            pool = self._pool_roster(season, {game["game_id"] for game in games})
+            pool = self.player_pool.get_pool_roster(
+                season=season, game_ids={game["game_id"] for game in games}
+            )
             pool_freshness = dict(pool.freshness)
             removed_player_ids: set[int] = set()
             if self.injuries is not None:
@@ -272,14 +274,6 @@ class SlateService:
                 else []
             ),
         }
-
-    def _pool_roster(self, season: str, game_ids: set[str]) -> PoolRoster:
-        """Who the games' pool lists: the Slate counts players and never reads a line or price."""
-
-        get_pool_roster = getattr(self.player_pool, "get_pool_roster", None)
-        if callable(get_pool_roster):
-            return get_pool_roster(season=season, game_ids=game_ids)
-        return PoolRoster.of(self.player_pool.get_pool(season=season, game_ids=game_ids))
 
     def game_slate_date(self, game_id: str) -> str:
         """The ET Slate Date (``YYYY-MM-DD``) of one stored game.

@@ -198,6 +198,16 @@ class PoolRosterReader(Protocol):
     def get_pool_roster(self, *, season: str, game_ids: Iterable[str]) -> PoolRoster: ...
 
 
+@dataclass(frozen=True, slots=True)
+class FullPoolRosterReader:
+    """A ``PoolRosterReader`` over a full pool reader: it reads every line and price, then drops them."""
+
+    pool: PlayerPoolReader
+
+    def get_pool_roster(self, *, season: str, game_ids: Iterable[str]) -> PoolRoster:
+        return PoolRoster.of(self.pool.get_pool(season=season, game_ids=game_ids))
+
+
 class SingleGamePlayerPoolReader(Protocol):
     """Read one game's governed Player Pool without prescribing storage."""
 
@@ -682,6 +692,7 @@ class PlayerPoolService:
 
 __all__ = [
     "DFSBoardReader",
+    "FullPoolRosterReader",
     "PlayerPool",
     "PlayerPoolReader",
     "PlayerPoolService",
