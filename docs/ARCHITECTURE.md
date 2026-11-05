@@ -4924,9 +4924,9 @@ PrizePicks feed has its own steps below):
    config-as-code path) (cron `*/5 * * * *`, start command
    `python scripts/collect_odds.py`). Give it `DATABASE_URL`, `SENTRY_DSN`,
    `ODDS_API_KEY`, `ODDS_API_RESET_DAY=<day>`, `ODDS_API_ENABLED=true`
-   (optional: `ODDS_API_PLAN_CREDITS`, `ODDS_API_RESERVE_CREDITS`,
-   `ODDS_API_ASSUMED_LEAD_HOURS`), plus the variables the collector needs to
-   build the app. The key goes on this service only.
+   (optional: `ODDS_API_PLAN_CREDITS`, `ODDS_API_RESERVE_CREDITS`), plus the
+   variables the collector needs to build the app. The key goes on this
+   service only.
 3. On the **web** service set `ODDS_API_ENABLED=true` only (never the key).
    With the flag off the Matchup serves `"book_lines": {}` even if quotes are
    stored.

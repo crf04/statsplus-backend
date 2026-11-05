@@ -11,7 +11,7 @@ def test_defaults_leave_collection_off_without_a_key():
     odds = load_settings(overrides={"DATABASE_URL": "sqlite:///x.db"}).odds_api
 
     assert (odds.enabled, odds.api_key, odds.reset_day, odds.plan_credits) == (False, None, 1, 20000)
-    assert (odds.reserve_credits, odds.assumed_lead_hours) == (1000, 10)
+    assert odds.reserve_credits == 1000
     assert odds.regions == "us_dfs"  # PrizePicks only; the sportsbook region stays off
     assert OddsApiSettings().regions == "us_dfs"
 
