@@ -3980,8 +3980,50 @@ def test_a_pool_roster_of_a_started_game_counts_its_closing_set_beside_live_game
     _ingest_live_game(slate)
     games = (GAME_ID, slate.live_game_id)
 
-    roster = slate.reader.get_pool_roster(season=SEASON, game_ids=games)
+    roster, line_reads = _line_reads(
+        slate.archive.engine, lambda: slate.reader.get_pool_roster(season=SEASON, game_ids=games)
+    )
 
+    assert line_reads == []
     assert roster.players == (RosterPlayer(2544, 1610612747), RosterPlayer(201939, 1610612744))
     assert roster.team_counts == {1610612747: 1, 1610612744: 1}
+    assert roster == PoolRoster.of(slate.reader.get_pool(season=SEASON, game_ids=games))
+
+
+def test_a_pool_roster_keeps_the_live_games_team_for_a_player_both_games_list(tmp_path):
+    slate = _catalog_stale_slate(tmp_path, "roster-both.sqlite3")
+    ProjectionRecordingService(
+        slate.archive,
+        ProjectionArchiveReadScope(provider="dabble", query=slate.query),
+    ).freeze_closing_projection_sets(
+        events=(slate.stale_event,),
+        query=slate.query,
+        created_at=slate.tip + timedelta(minutes=5),
+    )
+    live_at = slate.now - timedelta(minutes=1)
+    source = _closing_snapshot(slate.catalog, live_at, "30.5")
+    traded = AthleteEvidence(
+        canonical_id=2544, name="LeBron James", team=TeamEvidence(canonical_id=1610612744)
+    )
+    slate.archive.ingest_complete_snapshot(
+        replace(
+            source,
+            markets=(
+                replace(
+                    source.markets[0],
+                    market_id="live-market",
+                    athlete=traded,
+                    team=traded.team,
+                    event=EventEvidence(canonical_id=slate.live_game_id),
+                ),
+            ),
+        ),
+        query=slate.query,
+        accepted_at=live_at,
+    )
+    games = (GAME_ID, slate.live_game_id)
+
+    roster = slate.reader.get_pool_roster(season=SEASON, game_ids=games)
+
+    assert roster.players == (RosterPlayer(2544, 1610612744),)
     assert roster == PoolRoster.of(slate.reader.get_pool(season=SEASON, game_ids=games))

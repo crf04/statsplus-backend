@@ -567,22 +567,36 @@ def _pool_row_columns(observation_table: Any) -> tuple[Any, ...]:
 
 
 def _closing_member_rows(
-    connection: Any, closing_set_ids: list[str], player_id: int | None = None
+    connection: Any, closing_set_ids: list[str], player_id: int | None = None, *, roster: bool = False
 ) -> tuple[Any, ...]:
-    """The targetable observations these closing sets name, by provider, player and market."""
+    """The targetable observations these closing sets name, by provider, player and market.
+
+    ``roster`` reads only the columns a ``PoolRoster`` is built from.
+    """
 
     if not closing_set_ids:
         return ()
     membership_table = ClosingProjectionMembership.__table__
     observation_table = ProjectionObservation.__table__
+    columns = (
+        (
+            observation_table.c.provider,
+            observation_table.c.canonical_game_id,
+            observation_table.c.canonical_player_id,
+            observation_table.c.canonical_team_id,
+            observation_table.c.observed_at.label("confirmed_at"),
+        )
+        if roster
+        else (
+            membership_table.c.closing_set_id,
+            membership_table.c.market_reference,
+            membership_table.c.generation_id,
+            *_pool_row_columns(observation_table),
+        )
+    )
     return tuple(
         connection.execute(
-            select(
-                membership_table.c.closing_set_id,
-                membership_table.c.market_reference,
-                membership_table.c.generation_id,
-                *_pool_row_columns(observation_table),
-            )
+            select(*columns)
             .select_from(
                 membership_table.join(
                     observation_table,
@@ -3389,7 +3403,7 @@ class LatestProjectionPlayerPoolReader:
     def get_pool_roster(
         self, *, season: str, game_ids: Iterable[str], connection: Connection | None = None
     ) -> PoolRoster:
-        """``PoolRoster.of(get_pool(...))``; before any game starts, only its identity columns are read."""
+        """``PoolRoster.of(get_pool(...))``, read from the rows' identity columns alone."""
 
         if season != self.scope.query.season:
             return self._for_season(season).get_pool_roster(
@@ -3397,19 +3411,13 @@ class LatestProjectionPlayerPoolReader:
             )
         requested_games = tuple(sorted({str(game_id) for game_id in game_ids}))
         if not requested_games:
-            return PoolRoster.of(self.get_pool(season=season, game_ids=(), connection=connection))
-        started_games = self._started_games(season, requested_games, connection)
-        if started_games:
-            return PoolRoster.of(
-                self._get_pool_with_closing_sets(
-                    season=season,
-                    requested_games=requested_games,
-                    started_games=started_games,
-                    connection=connection,
-                )
-            )
-        return self._get_live_pool(
-            season=season, requested_games=requested_games, connection=connection, roster=True
+            return PoolRoster((), {}, PlayerPool.missing_projection_freshness(), {})
+        return self._pool_for_requested_games(
+            season=season,
+            requested_games=requested_games,
+            started_games=self._started_games(season, requested_games, connection),
+            connection=connection,
+            roster=True,
         )
 
     def _pool_for_requested_games(
@@ -3419,15 +3427,19 @@ class LatestProjectionPlayerPoolReader:
         requested_games: tuple[str, ...],
         started_games: dict[str, datetime],
         connection: Connection | None = None,
-    ) -> PlayerPool:
+        roster: bool = False,
+    ) -> PlayerPool | PoolRoster:
         if started_games:
             return self._get_pool_with_closing_sets(
                 season=season,
                 requested_games=requested_games,
                 started_games=started_games,
                 connection=connection,
+                roster=roster,
             )
-        return self._get_live_pool(season=season, requested_games=requested_games, connection=connection)
+        return self._get_live_pool(
+            season=season, requested_games=requested_games, connection=connection, roster=roster
+        )
 
     def _get_live_pool(
         self,
@@ -3505,10 +3517,13 @@ class LatestProjectionPlayerPoolReader:
         requested_games: tuple[str, ...],
         started_games: dict[str, datetime],
         connection: Connection | None = None,
-    ) -> PlayerPool:
+        roster: bool = False,
+    ) -> PlayerPool | PoolRoster:
         live_games = tuple(game for game in requested_games if game not in started_games)
         live_pool = (
-            self._get_live_pool(season=season, requested_games=live_games, connection=connection)
+            self._get_live_pool(
+                season=season, requested_games=live_games, connection=connection, roster=roster
+            )
             if live_games
             else None
         )
@@ -3516,9 +3531,12 @@ class LatestProjectionPlayerPoolReader:
             season=season,
             requested_games=tuple(started_games),
             connection=connection,
+            roster=roster,
         )
         if live_pool is None:
             return closing_pool
+        if roster:
+            return self._combine_rosters(live_pool, closing_pool)
         return self._combine_pools(live_pool, closing_pool)
 
     @staticmethod
@@ -3581,6 +3599,34 @@ class LatestProjectionPlayerPoolReader:
         )
         for player in players:
             team_counts[player.team_id] = team_counts.get(player.team_id, 0) + 1
+        return PlayerPool(
+            players,
+            team_counts,
+            LatestProjectionPlayerPoolReader._combined_freshness(freshnesses),
+            game_states,
+        )
+
+    @staticmethod
+    def _combine_rosters(*rosters: PoolRoster) -> PoolRoster:
+        """``PoolRoster.of(_combine_pools(...))`` of the rosters' pools."""
+
+        teams: dict[int, int] = {}
+        game_states: dict[str, Mapping[str, Any]] = {}
+        for roster in rosters:
+            game_states.update(roster.game_states)
+            for player in roster.players:
+                teams.setdefault(player.canonical_player_id, player.team_id)
+        players = tuple(RosterPlayer(player_id, team_id) for player_id, team_id in sorted(teams.items()))
+        team_counts: dict[int, int] = {}
+        for player in players:
+            team_counts[player.team_id] = team_counts.get(player.team_id, 0) + 1
+        freshness = LatestProjectionPlayerPoolReader._combined_freshness(
+            [roster.freshness for roster in rosters]
+        )
+        return PoolRoster(players, team_counts, freshness, game_states)
+
+    @staticmethod
+    def _combined_freshness(freshnesses: list[Mapping[str, Any]]) -> dict[str, Any]:
         states = {freshness.get("state") for freshness in freshnesses}
         if "live" in states:
             state = "live"
@@ -3620,11 +3666,16 @@ class LatestProjectionPlayerPoolReader:
             statuses = [value["status"] for value in authoritative if "status" in value]
             if statuses and len(set(statuses)) == 1:
                 freshness["status"] = statuses[0]
-        return PlayerPool(players, team_counts, freshness, game_states)
+        return freshness
 
     def _read_closing_pool(
-        self, *, season: str, requested_games: tuple[str, ...], connection: Connection | None = None
-    ) -> PlayerPool:
+        self,
+        *,
+        season: str,
+        requested_games: tuple[str, ...],
+        connection: Connection | None = None,
+        roster: bool = False,
+    ) -> PlayerPool | PoolRoster:
         providers = tuple(scope.provider for scope in self.scopes)
         closing_sets = ClosingProjectionSet.__table__
         with self._pool_snapshot(connection) as connection:
@@ -3641,7 +3692,7 @@ class LatestProjectionPlayerPoolReader:
                     )
                 ).scalars()
             ]
-            rows = _closing_member_rows(connection, closing_set_ids)
+            rows = _closing_member_rows(connection, closing_set_ids, roster=roster)
         game_states: dict[str, dict[str, Any]] = {}
         rows_by_game: dict[str, list[Any]] = {}
         for row in rows:
@@ -3661,7 +3712,7 @@ class LatestProjectionPlayerPoolReader:
             freshness["providers"] = {
                 provider: {"status": "missing", "retrieved_at": None} for provider in sorted(providers)
             }
-            return PlayerPool((), {}, freshness, game_states)
+            return (PoolRoster if roster else PlayerPool)((), {}, freshness, game_states)
         observed = self._oldest_confirmation(rows).isoformat()
         freshness = {
             "state": "closing",
@@ -3679,11 +3730,11 @@ class LatestProjectionPlayerPoolReader:
                     else None
                 ),
             }
-        players = self._players_from_rows(list(rows))
+        players = self._roster_from_rows(list(rows)) if roster else self._players_from_rows(list(rows))
         team_counts: dict[int, int] = {}
         for player in players:
             team_counts[player.team_id] = team_counts.get(player.team_id, 0) + 1
-        return PlayerPool(players, team_counts, freshness, game_states)
+        return (PoolRoster if roster else PlayerPool)(players, team_counts, freshness, game_states)
 
     def _empty_pool(
         self,
