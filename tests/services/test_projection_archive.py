@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
-from sqlalchemy import create_engine, event, func, select
+from sqlalchemy import create_engine, event, func, select, text
 
 from app.domain.comparisons import market_reference
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
@@ -4027,3 +4027,55 @@ def test_a_pool_roster_keeps_the_live_games_team_for_a_player_both_games_list(tm
 
     assert roster.players == (RosterPlayer(2544, 1610612744),)
     assert roster == PoolRoster.of(slate.reader.get_pool(season=SEASON, game_ids=games))
+
+
+def test_a_pool_roster_counts_only_its_own_providers_rows(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'roster-providers.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    _service, query, record = _dabble_recording(engine, catalog)
+    record((("pts-29.5", "points", "29.5"),), OBSERVED_AT, complete=True)
+    curry = AthleteEvidence(
+        canonical_id=201939, name="Stephen Curry", team=TeamEvidence(canonical_id=1610612744)
+    )
+    market = _line_market(
+        catalog, provider="underdog", market_id="curry-pts", statistic_id="points", threshold="24.5"
+    )
+    competing = ProviderSnapshot(
+        provider="underdog",
+        status=SnapshotStatus.COMPLETE,
+        markets=(replace(market, athlete=curry, team=curry.team),),
+        coverage=CoverageEvidence(
+            fetched_count=1, eligible_count=1, normalized_count=1, fanout_complete=True
+        ),
+        retrieved_at=OBSERVED_AT,
+    )
+    ProjectionRecordingService(
+        ProjectionArchive(engine, catalog), ProjectionArchiveReadScope(provider="underdog", query=query)
+    ).record_snapshot(competing, query=query, accepted_at=OBSERVED_AT)
+    reader = _dabble_reader_at(engine, query, OBSERVED_AT + timedelta(minutes=1))
+
+    roster = reader.get_pool_roster(season=SEASON, game_ids=(GAME_ID,))
+
+    assert roster.players == (RosterPlayer(2544, 1610612747),)
+    assert roster == PoolRoster.of(reader.get_pool(season=SEASON, game_ids=(GAME_ID,)))
+
+
+def test_a_pool_roster_ages_each_line_from_its_confirmation_not_its_first_observation(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'roster-confirmed.sqlite3'}")
+    run_migrations(engine)
+    _service, query, record = _dabble_recording(engine, StatisticCatalog.load_default())
+    confirmed_at = OBSERVED_AT + timedelta(hours=2)
+    record((("pts-29.5", "points", "29.5"),), confirmed_at, complete=True)
+    # Recording keeps the two equal; the read contract still ages a line from its confirmation.
+    with engine.begin() as connection:
+        connection.execute(
+            text("UPDATE latest_player_projections SET observed_at = :at"), {"at": OBSERVED_AT}
+        )
+    # Seven hours after the line was first observed, five after it was confirmed.
+    reader = _dabble_reader_at(engine, query, confirmed_at + timedelta(hours=5))
+
+    roster = reader.get_pool_roster(season=SEASON, game_ids=(GAME_ID,))
+
+    assert roster.players == (RosterPlayer(2544, 1610612747),)
+    assert roster == PoolRoster.of(reader.get_pool(season=SEASON, game_ids=(GAME_ID,)))

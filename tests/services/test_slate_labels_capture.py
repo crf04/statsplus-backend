@@ -191,3 +191,32 @@ def test_a_selected_slate_still_lists_a_family_whose_payload_only_its_decoder_re
     assert [family["family"] for family in full["trailing"]] == ["player_diets"]
     assert [family["family"] for family in labelled["trailing"]] == ["player_diets", "last_15"]
     assert {**labelled, "trailing": full["trailing"]} == full
+
+
+def _hold_new(world):
+    world.hold_opening_week()
+
+
+def _cut_over_to_new(world):
+    world.opening_week_cutover()
+
+
+@pytest.mark.parametrize(
+    ("prepare", "selected"),
+    [(_hold_new, NEW), (_hold_new, OLD), (_cut_over_to_new, OLD)],
+    ids=("unpublished", "published", "retained"),
+)
+def test_each_selected_capture_refuses_a_corrupt_payload_as_a_full_capture_does(world, prepare, selected):
+    prepare(world)
+    with world.engine.begin() as connection:
+        _corrupt_payload(connection, world.live(L15_STREAM))
+    reader = world.reader.for_season(selected)
+
+    _season, full = capture_matchup_snapshot(settings(), reader)
+    _season, labelled = capture_matchup_labels(settings(), reader)
+
+    assert _labels(labelled)[L15_STREAM] == _labels(full)[L15_STREAM]
+    assert (labelled.reads[L15_STREAM].status, labelled.reads[L15_STREAM].unavailable_reason) == (
+        "unavailable",
+        "publication_checksum_mismatch",
+    )
