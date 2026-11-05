@@ -61,7 +61,6 @@ from app.services.response_provenance import (
 from app.services.slate_fallback import read_slate
 from app.services.target_backtest import rule_share
 from app.services.target_conditions import date_is_kept, minutes_are_kept
-from app.utils.db import request_connection
 
 _WINDOW_NAMES = ("season", "last_15")
 
@@ -160,10 +159,6 @@ class TargetResolutionService:
         Slate reads it (``slate_fallback.read_slate``).
         """
 
-        with request_connection(self._engine):
-            return self._resolve(firebase_uid, requested_date, fallback)
-
-    def _resolve(self, firebase_uid: str, requested_date: str | None, fallback: str | None) -> dict[str, Any]:
         slate = read_slate(self._slate, requested_date, fallback)
         # A selected Evidence season (``season_scoped``) after the Slate
         # games' own season is refused: a game's schedule facts are its own
@@ -175,36 +170,22 @@ class TargetResolutionService:
         positions: dict[str, Mapping[int, str]] = {}
         engine = None if selected_season(self.publication_reader) is None else self._engine
 
-        pool = (slate.get("freshness") or {}).get("pool")
-        schedule = (slate.get("freshness") or {}).get("schedule")
-        targets = self.targets.list_targets(firebase_uid)
-        with request_read_scope(engine, repeatable_read=True) as read_scope:
-            matchups = self._request_matchups(read_scope=None if engine is None else read_scope)
-            # Every game composes, and takes its capture, inside the scope; the
-            # Targets are judged after it closes, so the reads judging them
-            # (Positions, season logs) never wait for a second connection.
-            for target in targets:
-                scheduled = games.get(target["opponent"])
-                if scheduled is None or scheduled[0]["game_id"] in read_matchups:
-                    continue
-                game = scheduled[0]
-                read_matchups[game["game_id"]] = read_game_matchup(matchups, game, pool, schedule)
-                if isinstance(matchups, SnapshotMatchups):
-                    matchups.game_snapshot(game)
         live: list[dict[str, Any]] = []
         idle: list[dict[str, Any]] = []
-        for target in targets:
-            resolved = self._resolve_target(
-                target,
-                games,
-                read_matchups,
-                matchups=matchups,
-                positions=positions,
-                slate_date=slate["slate_date"],
-                pool=pool,
-                schedule=schedule,
-            )
-            (idle if resolved["game"] is None else live).append(resolved)
+        with request_read_scope(engine, repeatable_read=True) as read_scope:
+            matchups = self._request_matchups(read_scope=None if engine is None else read_scope)
+            for target in self.targets.list_targets(firebase_uid):
+                resolved = self._resolve_target(
+                    target,
+                    games,
+                    read_matchups,
+                    matchups=matchups,
+                    positions=positions,
+                    slate_date=slate["slate_date"],
+                    pool=(slate.get("freshness") or {}).get("pool"),
+                    schedule=(slate.get("freshness") or {}).get("schedule"),
+                )
+                (idle if resolved["game"] is None else live).append(resolved)
         shared = bool(read_matchups) and isinstance(matchups, SnapshotMatchups)
         context = season_context(self.publication_reader, getattr(matchups, "snapshot", None), lambda: None)
         return {

@@ -18,7 +18,6 @@ from typing import Any, Final
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import ArgumentError
-from sqlalchemy.pool import QueuePool
 
 from app.config.settings import DatabaseSettings, RuntimeSettings, get_runtime_settings
 
@@ -141,99 +140,6 @@ def lift_statement_timeout_for_blueprint(blueprint: Any) -> None:
             _statement_timeout_lifted.reset(token)
 
 
-class _Lease:
-    """One pooled connection lent, one read at a time, to a request's reads."""
-
-    def __init__(self, pool: RequestPool) -> None:
-        self.pool = pool
-        self.fairy: Any | None = None
-        self.lent = False
-
-    def borrow(self) -> Any:
-        if self.lent:
-            # A read opened inside another read's transaction would join it,
-            # so it checks out its own connection, as it did before the lease.
-            return QueuePool.connect(self.pool)
-        if self.fairy is None:
-            self.fairy = QueuePool.connect(self.pool)
-        self.lent = True
-        return _Borrowed(self, self.fairy)
-
-    def release(self, fairy: Any) -> None:
-        self.lent = False
-        dbapi_connection = fairy.dbapi_connection
-        if dbapi_connection is None:
-            self.fairy = None
-            return
-        dbapi_connection.rollback()
-        # The characteristics a read set (its isolation level) return to the
-        # engine's defaults, as a checkin would reset them.
-        finalizers = fairy._connection_record.finalize_callback
-        while finalizers:
-            finalizers.pop()(dbapi_connection)
-
-    def invalidated(self) -> None:
-        self.lent = False
-        self.fairy = None
-
-    def close(self) -> None:
-        if self.fairy is not None:
-            self.fairy.close()
-        self.fairy = None
-
-
-class _Borrowed:
-    """One read's hold on the leased connection; closing it ends the read, not the lease."""
-
-    def __init__(self, lease: _Lease, fairy: Any) -> None:
-        self._lease = lease
-        self._fairy = fairy
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._fairy, name)
-
-    def close(self) -> None:
-        self._lease.release(self._fairy)
-
-    def _close_special(self, transaction_reset: bool = False) -> None:
-        self._lease.release(self._fairy)
-
-    def invalidate(self, e: BaseException | None = None, soft: bool = False) -> None:
-        self._fairy.invalidate(e, soft=soft)
-        if not soft:
-            self._lease.invalidated()
-
-
-_request_lease: ContextVar[_Lease | None] = ContextVar("request_lease", default=None)
-
-
-class RequestPool(QueuePool):
-    """A ``QueuePool`` that serves a leasing thread's checkouts from its one connection."""
-
-    def connect(self) -> Any:
-        lease = _request_lease.get()
-        if lease is None or lease.pool is not self:
-            return super().connect()
-        return lease.borrow()
-
-
-@contextmanager
-def request_connection(engine: Engine | None) -> Iterator[None]:
-    """Serve every read this thread opens on ``engine`` from one checked-out connection."""
-
-    pool = getattr(engine, "pool", None)
-    if not isinstance(pool, RequestPool) or _request_lease.get() is not None:
-        yield
-        return
-    lease = _Lease(pool)
-    token = _request_lease.set(lease)
-    try:
-        yield
-    finally:
-        _request_lease.reset(token)
-        lease.close()
-
-
 def _apply_statement_timeout_scope(engine: Engine, limit_ms: int) -> None:
     """Switch a pooled connection between the limit and none on checkout.
 
@@ -272,7 +178,6 @@ def _create_engine(database_url: str, pool: DatabaseSettings | None = None) -> E
         connect_args["options"] = f"-c statement_timeout={pool.statement_timeout_ms}"
     engine = create_engine(
         database_url,
-        poolclass=RequestPool,
         pool_pre_ping=True,
         pool_size=pool.pool_size,
         max_overflow=pool.max_overflow,
