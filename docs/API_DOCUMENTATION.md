@@ -1997,8 +1997,13 @@ share of the slice's made shots, each weighed by the market's stat weight
 falling back to his attempts on the same weights when he made none; FGA uses
 his attempt shares instead. A slice whose league allows no
 threes (Less Than 10 ft) reduces to the twos ratio, and a slice with no stored
-shooting split keeps the opponent-mix ratio. 3PM, FG2A and FG3A are single-stat
-and unchanged. In the PTS, FGM and FGA markets each window's `components.shot_types`
+shooting split keeps the opponent-mix ratio. The single-stat markets (3PM,
+FG2M, FG2A, FG3A) weigh each shot type by the player's own count of that stat
+there over his total, rather than his share of all attempts: 3PA for FG3A, 2PA
+for FG2A, makes for 3PM and FG2M (his attempts when he made none in any shot
+type). A shot type where he has none of the stat weighs nothing; when any shot
+type lacks a stored shooting split, or he has none of the stat, his overall
+shares stand (statsplus#436). In the PTS, FGM and FGA markets each window's `components.shot_types`
 cell also carries `slices`, one entry per slice the component used, in Player
 Diet order: `{"key": "Pullups", "percent_vs_league_average": 20.84}`, the
 slice's ratio minus one in percent (the Defense Sheet's units). A slice the
