@@ -717,19 +717,23 @@ CLOSING_TIP_TOLERANCE = timedelta(hours=1)
 
 
 def applicable_closing_polls(connection: Connection, game_ids: Iterable[str]) -> dict[str, int]:
-    """``{game id: poll id}`` of each game's close, the newest closing poll for its tip.
+    """``{game id: poll id}`` of each game's close: its newest quoted closing poll for its tip.
 
-    A closing poll counts when it answered (``complete`` or ``empty``; a
-    ``failed`` one stored nothing) and was taken for the game's current tip
-    within ``CLOSING_TIP_TOLERANCE``.  A game the Event Catalog does not hold
-    has no tip to match, so its newest closing poll is its close.  An empty
-    close is still the close: it carries no quotes, so the game has no lines.
+    A closing poll counts only when it stored at least one closing row in
+    ``sportsbook_prop_quotes`` and was taken for the game's current tip within
+    ``CLOSING_TIP_TOLERANCE``; a game the Event Catalog does not hold has no
+    tip to match, so its newest quoted closing poll is its close.  An empty or
+    failed poll never counts, nor does a poll of the DFS feed (its quotes go to
+    the projection archive): for the same tip an earlier quoted close is a
+    better closing line than a later empty answer, and a bought backfill
+    snapshot is never outranked by an empty live poll.
     """
 
     ids = sorted({str(game_id) for game_id in game_ids})
     if not ids:
         return {}
     polls = OddsApiPoll.__table__
+    quotes = SportsbookPropQuote.__table__
     events = EventCatalogEntry.__table__
     tips = {
         str(game_id): assume_utc(tip)
@@ -737,13 +741,17 @@ def applicable_closing_polls(connection: Connection, game_ids: Iterable[str]) ->
             select(events.c.nba_game_id, events.c.scheduled_at).where(events.c.nba_game_id.in_(ids))
         )
     }
+    quoted = (
+        select(quotes.c.poll_id)
+        .where(quotes.c.canonical_game_id.in_(ids), quotes.c.is_closing.is_(True))
+        .distinct()
+        .subquery()
+    )
     newest: dict[str, tuple[datetime, int]] = {}
     for game_id, poll_id, commence, completed in connection.execute(
-        select(polls.c.canonical_game_id, polls.c.poll_id, polls.c.commence_time, polls.c.completed_at).where(
-            polls.c.canonical_game_id.in_(ids),
-            polls.c.is_closing.is_(True),
-            polls.c.outcome.in_(("complete", "empty")),
-        )
+        select(polls.c.canonical_game_id, polls.c.poll_id, polls.c.commence_time, polls.c.completed_at)
+        .join(quoted, quoted.c.poll_id == polls.c.poll_id)
+        .where(polls.c.canonical_game_id.in_(ids), polls.c.is_closing.is_(True))
     ):
         tip = tips.get(str(game_id))
         if tip is not None and (commence is None or abs(assume_utc(commence) - tip) > CLOSING_TIP_TOLERANCE):
@@ -758,32 +766,21 @@ def applicable_closing_polls(connection: Connection, game_ids: Iterable[str]) ->
 
 
 def games_with_closing_quotes(engine: Engine, game_ids: Iterable[str]) -> set[str]:
-    """The games of ``game_ids`` whose close (``applicable_closing_polls``) stored a quote.
+    """The games of ``game_ids`` with a close (``applicable_closing_polls``) for their current tip.
 
-    A game whose only closing poll was for an earlier tip, or whose close was
-    empty, reads as no lines in the game logs, so it is not covered: the gap
-    check names it and the 2026-27 backfill buys it.
+    A game whose only quoted close was for an earlier tip, or whose only
+    closing poll for its tip was empty, reads as no lines in the game logs, so
+    it is not covered: the gap check names it and the 2026-27 backfill buys it.
     """
 
-    table = SportsbookPropQuote.__table__
     with engine.connect() as connection:
-        closes = applicable_closing_polls(connection, game_ids)
-        if not closes:
-            return set()
-        return {
-            str(game_id)
-            for (game_id,) in connection.execute(
-                select(table.c.canonical_game_id)
-                .where(table.c.poll_id.in_(sorted(closes.values())), table.c.is_closing.is_(True))
-                .distinct()
-            )
-        }
+        return set(applicable_closing_polls(connection, game_ids))
 
 
 def closing_quote_gaps(
     engine: Engine, events: Iterable[Mapping[str, Any]], *, now: datetime
 ) -> list[Mapping[str, Any]]:
-    """The started regular-season and playoff games with no closing quote.
+    """The started regular-season and playoff games with no close for their current tip.
 
     ``events`` are Event Catalog rows, kept in their order (the catalog lists
     them by tip); a postponed game has not started.  This is the gap check of

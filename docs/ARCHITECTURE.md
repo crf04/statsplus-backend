@@ -5287,10 +5287,10 @@ season=...)` picks the source by the requested season:
 ```text
 season >= LIVE_CLOSING_FIRST_SEASON ("2026-27")
   → applicable_closing_polls: per game, the newest odds_api_polls row with
-    is_closing and outcome complete or empty whose commence_time is within
-    CLOSING_TIP_TOLERANCE (1 h, the collector's "closing done" rule) of the
-    Event Catalog tip; a game the catalog does not hold takes its newest
-    closing poll
+    is_closing that stored at least one closing sportsbook_prop_quotes row and
+    whose commence_time is within CLOSING_TIP_TOLERANCE (1 h, the collector's
+    "closing done" rule) of the Event Catalog tip; a game the catalog does not
+    hold takes its newest quoted closing poll
   → sportsbook_prop_quotes WHERE poll_id IN those polls, is_closing, the
     player, the five markets, the allowlisted books
 earlier seasons
@@ -5299,9 +5299,14 @@ then per (game, market): the first book of closing_lines.BOOK_ORDER
 ```
 
 The close is chosen for the whole game before the player is looked at: a
-player the close did not carry has no line, an empty close (an `empty` poll,
-or a `complete` one that stored no quote) leaves the game with none, and a
-close taken for a tip a postponement moved is not the game's close. A storage
+player the close did not carry has no line, and a close taken for a tip a
+postponement moved is not the game's close. A closing poll that stored no
+sportsbook quote never counts: not an `empty` or `failed` poll, not a
+`complete` one with no quotes, and not a DFS-feed poll (its quotes go to the
+projection archive). So for the same tip an earlier quoted close stands over
+a later empty answer, and a backfilled snapshot (observed at its snapshot
+time) is never outranked by an empty live poll answered later. What this gives
+up: an empty re-poll for the same tip does not clear an earlier close. A storage
 fault on either source is logged and reads as `{}` on every row.
 A 2025-26 game is never read from the live store, so its rows are what #216
 served plus `closing_lines`.
@@ -5313,10 +5318,10 @@ delay, a key rotation) leaves a started game with no closing quotes.
 spend log) with three differences:
 
 * the targets are the season's started regular-season and playoff games (the
-  tip has passed, never a postponed game) less those whose applicable close
-  stored a quote (`games_with_closing_quotes`): exactly the games the gap
-  check names, including one whose current close was empty or that was closed
-  only for an earlier tip;
+  tip has passed, never a postponed game) less those with a quoted close for
+  their current tip (`games_with_closing_quotes`): exactly the games the gap
+  check names, including one whose only close for its tip was empty or that
+  was closed only for an earlier tip;
 * one call buys all five markets (`player_points`, `player_rebounds`,
   `player_assists`, `player_threes`, `player_points_rebounds_assists`) at the
   same last 5-minute mark before tip: 50 credits a game, recorded on one
@@ -5335,8 +5340,8 @@ would buy with their tips, the credit estimate, and the gap check; it makes no
 call and writes nothing. `--re-resolve` is refused for 2026-27.
 
 **Gap check.** `closing_lines.closing_quote_gaps(engine, events, now=...)` names
-every started regular-season or playoff game whose applicable close stored no
-quote, so every game it names reads as no lines. The hosted
+every started regular-season or playoff game with no quoted close for its
+current tip, so every game it names reads as no lines. The hosted
 nightly (`scripts/nightly_refresh.py --hosted-only`) runs it last for the
 season it ingests, when that season is 2026-27 or later, and prints any gap to
 stderr with the command that buys it; it reads only and never changes the exit

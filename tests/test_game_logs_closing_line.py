@@ -485,16 +485,75 @@ def test_a_player_the_new_close_omits_has_no_closing_lines(reclosed, client):
     assert _first_row(client) == ({}, None)
 
 
-def test_an_empty_new_close_leaves_the_game_with_no_closing_lines(reclosed, client):
+def test_an_empty_close_for_the_new_tip_does_not_bring_back_the_old_tips_lines(reclosed, client):
     _close(reclosed, NEW_GAMES[0], NEW_TIP, [], empty=True)
 
     assert _first_row(client) == ({}, None)
 
 
-def test_an_empty_quote_set_on_the_new_close_leaves_no_closing_lines(reclosed, client):
-    _close(reclosed, NEW_GAMES[0], NEW_TIP, [])
+@pytest.fixture
+def closed(dependencies, engine):
+    """NEW_GAMES[0] closed at its (unmoved) tip with LeBron's lines."""
 
-    assert _first_row(client) == ({}, None)
+    game = NEW_GAMES[0]
+    _catalog_tip(engine, game, FIRST_TIP)
+    _close(engine, game, FIRST_TIP, [(LEBRON, "PTS", "draftkings", 24.5)])
+    _serve_2026_27(dependencies, engine, reader=ClosingLineReader(engine))
+    return engine
+
+
+def _later_poll_for_the_same_tip(engine, *, outcome, quote_count=0):
+    """A closing poll after the quoted one that stored no sportsbook quote."""
+
+    from app.services.sportsbook_quotes import SportsbookQuoteStore
+
+    observed = FIRST_TIP - timedelta(minutes=3)
+    SportsbookQuoteStore(engine).record_unstored_poll(
+        odds_event_id=f"event-{NEW_GAMES[0]}",
+        game_id=NEW_GAMES[0],
+        started_at=observed - timedelta(minutes=3),
+        completed_at=observed,
+        outcome=outcome,
+        is_closing=True,
+        cost=0,
+        quote_count=quote_count,
+        commence_time=FIRST_TIP,
+    )
+
+
+def _covered(engine):
+    from app.services.closing_lines import games_with_closing_quotes
+
+    return games_with_closing_quotes(engine, [NEW_GAMES[0]])
+
+
+def test_a_later_empty_poll_for_the_same_tip_keeps_the_quoted_close(closed, client):
+    _later_poll_for_the_same_tip(closed, outcome="empty")
+
+    assert _first_row(client) == (
+        {"PTS": {"value": 24.5, "book": "draftkings"}},
+        {"value": 24.5, "book": "draftkings"},
+    )
+    assert _covered(closed) == {NEW_GAMES[0]}  # not a gap
+
+
+def test_a_later_close_that_stored_no_quote_for_the_same_tip_keeps_the_quoted_close(closed, client):
+    _close(closed, NEW_GAMES[0], FIRST_TIP + timedelta(minutes=4), [])
+
+    assert _first_row(client)[0] == {"PTS": {"value": 24.5, "book": "draftkings"}}
+    assert _covered(closed) == {NEW_GAMES[0]}
+
+
+def test_a_newer_dfs_closing_poll_does_not_hide_the_sportsbook_close(closed, client):
+    # The DFS feed records a complete closing poll whose quotes go to the
+    # projection archive, not to sportsbook_prop_quotes.
+    _later_poll_for_the_same_tip(closed, outcome="complete", quote_count=30)
+
+    assert _first_row(client) == (
+        {"PTS": {"value": 24.5, "book": "draftkings"}},
+        {"value": 24.5, "book": "draftkings"},
+    )
+    assert _covered(closed) == {NEW_GAMES[0]}
 
 
 def test_a_close_for_an_earlier_tip_is_not_the_games_close(reclosed, client):

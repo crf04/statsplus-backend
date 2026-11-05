@@ -408,3 +408,33 @@ def _covered(world):
     from app.services.closing_lines import games_with_closing_quotes
 
     return games_with_closing_quotes(world.engine, (DEN_LAL, GSW_LAC, BOS_NYK))
+
+
+def test_a_backfill_after_an_empty_live_close_is_served_and_clears_the_gap(world):
+    # The live closing request started before tip-5 and came back empty after
+    # the 00:25 snapshot the backfill buys.
+    answered = TIPS[DEN_LAL] - timedelta(minutes=3)
+    world.quotes.record_unstored_poll(
+        odds_event_id=DEN_LAL_EVENT,
+        game_id=DEN_LAL,
+        started_at=answered - timedelta(minutes=3),
+        completed_at=answered,
+        outcome="empty",
+        is_closing=True,
+        cost=0,
+        commence_time=TIPS[DEN_LAL],
+    )
+    assert _gaps(world) == [DEN_LAL]
+
+    summary = _backfill(world, _client(), covered=_covered(world)).run()
+
+    assert (summary.bought, summary.credits) == (1, 51)
+    assert _gaps(world) == []
+    lines = ClosingLineReader(world.engine).markets_for_player(LEBRON, [DEN_LAL], season=SEASON)
+    assert {market: value.book for market, value in lines[DEN_LAL].items()} == {
+        "3PM": "fanduel",
+        "AST": "draftkings",
+        "PRA": "draftkings",
+        "PTS": "draftkings",
+        "REB": "fanduel",
+    }
