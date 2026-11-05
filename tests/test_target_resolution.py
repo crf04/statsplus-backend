@@ -2877,3 +2877,170 @@ def test_a_fits_last_five_and_average_leave_out_playoff_games_in_the_real_log_re
     (fit,) = entry["players"]
     assert [game["value"] for game in fit["last_five_games"]] == [10.0, 6.0, 7.0, 4.0, 9.0]
     assert fit["season_averages"]["REB"] == 6.5
+
+
+class _NamedPools:
+    """A pool reader recording each read; a game's slice is its own id."""
+
+    def __init__(self):
+        self.reads = []
+        self.connections = []
+
+    def read_games(self, *, season, game_ids, connection=None):
+        self.reads.append((season, frozenset(game_ids)))
+        self.connections.append(connection)
+        return SimpleNamespace(
+            season=season,
+            game_ids=tuple(sorted(game_ids)),
+            event=lambda game_id: None,
+            pool=lambda ids=None: tuple(ids),
+        )
+
+
+class _SelectedSeasonPublications(_AdvancingPublicationReader):
+    selected_season = matchup_doubles.SEASON
+
+    def snapshot(self, stream_keys, *, season, projection_only_keys=None, **_):
+        return super().snapshot(stream_keys, season=season, projection_only_keys=projection_only_keys)
+
+
+@pytest.mark.parametrize("selected", (False, True), ids=("default season", "selected season"))
+def test_resolve_reads_the_pool_of_every_game_a_target_names_once_and_no_other(targets, selected):
+    """With a selected season, the read is on the connection every game composes on."""
+
+    okc_game_id, mia_game_id, idle_game_id = "0022500900", "0022500901", "0022500902"
+    okc_game = _game(
+        game_id=okc_game_id,
+        away=(LAL, "LAL", "Los Angeles Lakers"),
+        home=(OKC, "OKC", "Oklahoma City Thunder"),
+    )
+    mia_game = _game(
+        game_id=mia_game_id,
+        away=(MIA, "MIA", "Miami Heat"),
+        home=(DEN, "DEN", "Denver Nuggets"),
+    )
+    idle_game = _game(
+        game_id=idle_game_id,
+        away=(1610612738, "BOS", "Boston Celtics"),
+        home=(1610612756, "PHX", "Phoenix Suns"),
+    )
+    _create(targets, opponent="OKC", qualifiers=(CORNER_THREE,))
+    _create(targets, opponent="MIA", qualifiers=(LOW_RIM,))
+    _create(targets, opponent="DEN", qualifiers=(TRANSITION,))
+
+    class Composer(_RecordedSnapshotMatchups):
+        def get_matchup_from_snapshot(self, *, game_id, pool_read=None, read_scope=(None, None), **kwargs):
+            self.pools = [*getattr(self, "pools", []), (pool_read.pool((game_id,)), read_scope[0])]
+            return super().get_matchup_from_snapshot(
+                game_id=game_id,
+                publication_snapshot=kwargs["publication_snapshot"],
+                injuries=kwargs["injuries"],
+            )
+
+    composer = Composer({okc_game_id: _matchup(game=okc_game), mia_game_id: _matchup(game=mia_game)})
+    pools = _NamedPools()
+    service = TargetResolutionService(
+        targets=targets,
+        slates=FakeSlate(games=[okc_game, mia_game, idle_game]),
+        matchups=composer,
+        publication_reader=_SelectedSeasonPublications() if selected else _AdvancingPublicationReader(),
+        injuries=object(),
+        settings=_resolution_settings(),
+        player_pool=pools,
+        engine=create_engine("sqlite://"),
+    )
+
+    service.resolve(OWNER, requested_date=SLATE_DATE)
+
+    assert pools.reads == [(matchup_doubles.SEASON, frozenset({okc_game_id, mia_game_id}))]
+    (connection,) = pools.connections
+    assert sorted(composer.pools, key=str) == sorted(
+        [((okc_game_id,), connection), ((mia_game_id,), connection)], key=str
+    )
+    assert (connection is not None) is selected
+
+
+def test_resolve_reads_no_pool_when_no_target_plays(targets):
+    _create(targets, opponent="OKC", qualifiers=(CORNER_THREE,))
+    pools = _NamedPools()
+    service = TargetResolutionService(
+        targets=targets,
+        slates=FakeSlate(games=[]),
+        matchups=_RecordedSnapshotMatchups({}),
+        publication_reader=_AdvancingPublicationReader(),
+        injuries=object(),
+        settings=_resolution_settings(),
+        player_pool=pools,
+    )
+
+    service.resolve(OWNER, requested_date=SLATE_DATE)
+
+    assert pools.reads == []
+
+
+def test_resolve_reads_the_slates_roster_and_its_named_games_pool_once_each(targets, tmp_path, dependencies):
+    """Over the stored schedule and pool: the Slate reads every game's roster, then one full
+    read of the games a Target names serves their Matchups; nothing reads either again."""
+
+    from collections import Counter
+
+    from sqlalchemy import event as sqlalchemy_event
+
+    from app.services.slate_service import SlateService
+    from tests.routes.test_games_board import BOS, BROWN, BRUNSON, LATER, NOW, NYK, TATUM, WHITE, seed_board
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'board.sqlite3'}")
+    run_migrations(engine)
+    board = seed_board(engine, dependencies).service
+    statements = []
+    sqlalchemy_event.listen(
+        engine, "before_cursor_execute", lambda *arguments: statements.append(arguments[2])
+    )
+    _create(targets, opponent="BOS", qualifiers=(CORNER_THREE,))
+    later = _game(
+        game_id=LATER,
+        away=(BOS.canonical_id, "BOS", "Boston Celtics"),
+        home=(NYK.canonical_id, "NYK", "New York Knicks"),
+    )
+
+    pools = []
+
+    class Composer(_RecordedSnapshotMatchups):
+        def get_matchup_from_snapshot(self, *, game_id, pool_read=None, **kwargs):
+            pools.append(
+                (game_id, sorted(player.canonical_player_id for player in pool_read.pool((game_id,)).players))
+            )
+            return super().get_matchup_from_snapshot(
+                game_id=game_id,
+                publication_snapshot=kwargs["publication_snapshot"],
+                injuries=kwargs["injuries"],
+            )
+
+    service = TargetResolutionService(
+        targets=targets,
+        slates=SlateService(
+            board.event_catalog, settings=board.settings, clock=lambda: NOW, player_pool=board.player_pool
+        ),
+        matchups=Composer({LATER: _matchup(game=later)}),
+        publication_reader=_AdvancingPublicationReader(),
+        injuries=object(),
+        settings=_resolution_settings(),
+        player_pool=board.player_pool,
+    )
+
+    body = service.resolve(OWNER, requested_date="2026-01-15")
+
+    assert [target["game"]["game_id"] for target in body["targets"]] == [LATER]
+    assert pools == [(LATER, sorted(player[0] for player in (BROWN, BRUNSON, TATUM, WHITE)))]
+    reads = Counter(
+        name
+        for statement in statements
+        for name, shape in (
+            ("pool rows", "FROM latest_player_projections"),
+            ("closing sets", "FROM projection_closing_sets"),
+            ("events", "SELECT event_catalog.nba_game_id"),
+        )
+        if shape in statement
+    )
+    # The Slate: the day's events, then its roster's events and rows; the named game's full read.
+    assert reads == {"events": 3, "pool rows": 2, "closing sets": 1}

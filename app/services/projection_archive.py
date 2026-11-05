@@ -332,6 +332,52 @@ class _EligibleProjectionEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class PoolRead:
+    """Several games' Player Pool evidence from one read.
+
+    ``pool(game_ids)`` is the pool ``get_pool`` serves for any of those games
+    (``get_pool_roster``'s roster for a roster read), derived without reading
+    again.  ``events`` are the games' stored events, read for their start
+    fences.
+    """
+
+    reader: LatestProjectionPlayerPoolReader
+    season: str
+    game_ids: tuple[str, ...]
+    events: Mapping[str, Mapping[str, Any]]
+    started: Mapping[str, datetime]
+    live: _ProjectionPoolRead | None
+    closing_rows: tuple[Any, ...]
+    #: Read from the identity columns alone, so it derives only rosters.
+    narrow: bool = False
+
+    def event(self, game_id: str) -> Mapping[str, Any] | None:
+        return self.events.get(str(game_id))
+
+    def pool(self, game_ids: Iterable[str] | None = None) -> PlayerPool | PoolRoster:
+        """The pool of ``game_ids`` (every game read when omitted), each of which this read holds."""
+
+        return self._derive(game_ids, roster=self.narrow)
+
+    def roster(self, game_ids: Iterable[str] | None = None) -> PoolRoster:
+        """``PoolRoster.of(pool(game_ids))``, without building a player's lines and prices."""
+
+        return self._derive(game_ids, roster=True)
+
+    def _derive(self, game_ids: Iterable[str] | None, *, roster: bool) -> PlayerPool | PoolRoster:
+        requested = (
+            self.game_ids if game_ids is None else tuple(sorted({str(game_id) for game_id in game_ids}))
+        )
+        if not set(requested) <= set(self.game_ids):
+            raise ValueError("a pool read derives only the games it read")
+        if not requested:
+            return (PoolRoster if roster else PlayerPool)(
+                (), {}, PlayerPool.missing_projection_freshness(), {}
+            )
+        return self.reader._pool_from(self, requested, roster=roster)
+
+
+@dataclass(frozen=True, slots=True)
 class _ReplaySourceMarket:
     """One market decoded from an archived document for mapping replay.
 
@@ -3205,21 +3251,8 @@ class LatestProjectionPlayerPoolReader:
     def get_pool_for_game_with_closing_state(
         self, *, season: str, game_id: str, connection: Connection | None = None
     ) -> tuple[PlayerPool, bool]:
-        if season != self.scope.query.season:
-            return self._for_season(season).get_pool_for_game_with_closing_state(
-                season=season, game_id=game_id, connection=connection
-            )
-        requested_games = (str(game_id),)
-        started_games = self._started_games(season, requested_games, connection)
-        return (
-            self._pool_for_requested_games(
-                season=season,
-                requested_games=requested_games,
-                started_games=started_games,
-                connection=connection,
-            ),
-            bool(started_games),
-        )
+        read = self.read_games(season=season, game_ids=(game_id,), connection=connection)
+        return read.pool(), bool(read.started)
 
     def games_naming(self, *, game_ids: Iterable[str], player_id: int) -> frozenset[str]:
         """The games among ``game_ids`` whose pool could name ``player_id``.
@@ -3353,6 +3386,14 @@ class LatestProjectionPlayerPoolReader:
             yield connection
             return
         with self.engine.connect() as owned:
+            if self.engine.dialect.name == "sqlite":
+                # pysqlite opens no transaction for a SELECT on its own.
+                owned.exec_driver_sql("BEGIN")
+                try:
+                    yield owned
+                finally:
+                    owned.rollback()
+                return
             if self.engine.dialect.name == "postgresql":
                 owned = owned.execution_options(isolation_level="REPEATABLE READ")
             with owned.begin():
@@ -3387,71 +3428,100 @@ class LatestProjectionPlayerPoolReader:
     ) -> PlayerPool:
         """The games' pool; on ``connection`` its reads share the caller's snapshot."""
 
-        if season != self.scope.query.season:
-            return self._for_season(season).get_pool(season=season, game_ids=game_ids, connection=connection)
-        requested_games = tuple(sorted({str(game_id) for game_id in game_ids}))
-        if not requested_games:
-            return PlayerPool((), {}, PlayerPool.missing_projection_freshness(), {})
-        started_games = self._started_games(season, requested_games, connection)
-        return self._pool_for_requested_games(
-            season=season,
-            requested_games=requested_games,
-            started_games=started_games,
-            connection=connection,
-        )
+        return self.read_games(season=season, game_ids=game_ids, connection=connection).pool()
 
     def get_pool_roster(
         self, *, season: str, game_ids: Iterable[str], connection: Connection | None = None
     ) -> PoolRoster:
         """``PoolRoster.of(get_pool(...))``, read from the rows' identity columns alone."""
 
+        return self._read_games(season, game_ids, connection, roster=True).pool()
+
+    def read_games(
+        self, *, season: str, game_ids: Iterable[str], connection: Connection | None = None
+    ) -> PoolRead:
+        """Every listed game's pool evidence in one read, for a caller serving several of their pools."""
+
+        return self._read_games(season, game_ids, connection)
+
+    def _read_games(
+        self,
+        season: str,
+        game_ids: Iterable[str],
+        connection: Connection | None = None,
+        *,
+        roster: bool = False,
+    ) -> PoolRead:
+        """``roster`` reads only the columns a ``PoolRoster`` is built from.
+
+        The events and the pool rows are read in one snapshot, the caller's
+        on ``connection``, so a game's event and its rows always agree.
+        """
+
         if season != self.scope.query.season:
-            return self._for_season(season).get_pool_roster(
-                season=season, game_ids=game_ids, connection=connection
-            )
+            return self._for_season(season)._read_games(season, game_ids, connection, roster=roster)
         requested_games = tuple(sorted({str(game_id) for game_id in game_ids}))
-        if not requested_games:
-            return PoolRoster((), {}, PlayerPool.missing_projection_freshness(), {})
-        return self._pool_for_requested_games(
-            season=season,
-            requested_games=requested_games,
-            started_games=self._started_games(season, requested_games, connection),
-            connection=connection,
-            roster=True,
-        )
-
-    def _pool_for_requested_games(
-        self,
-        *,
-        season: str,
-        requested_games: tuple[str, ...],
-        started_games: dict[str, datetime],
-        connection: Connection | None = None,
-        roster: bool = False,
-    ) -> PlayerPool | PoolRoster:
-        if started_games:
-            return self._get_pool_with_closing_sets(
+        with self._pool_snapshot(connection) as connection:
+            events = self._requested_events(season, requested_games, connection) if requested_games else []
+            started = self._start_fences(events)
+            live_games = tuple(game for game in requested_games if game not in started)
+            return PoolRead(
+                reader=self,
                 season=season,
-                requested_games=requested_games,
-                started_games=started_games,
-                connection=connection,
-                roster=roster,
+                game_ids=requested_games,
+                events={str(event.get("nba_game_id", "")): event for event in events},
+                started=started,
+                live=(
+                    self._read_pool_state(season, live_games, connection, roster=roster)
+                    if live_games
+                    else None
+                ),
+                closing_rows=(
+                    self._read_closing_rows(season, tuple(started), connection, roster=roster)
+                    if started
+                    else ()
+                ),
+                narrow=roster,
             )
-        return self._get_live_pool(
-            season=season, requested_games=requested_games, connection=connection, roster=roster
-        )
 
-    def _get_live_pool(
-        self,
-        *,
-        season: str,
-        requested_games: tuple[str, ...],
-        connection: Connection | None = None,
-        roster: bool = False,
+    def _pool_from(
+        self, read: PoolRead, requested_games: tuple[str, ...], *, roster: bool
+    ) -> PlayerPool | PoolRoster:
+        """``requested_games``' pool from ``read``, which holds every one of them.
+
+        ``roster`` derives a ``PoolRoster``, from a full read too: every row
+        carries the identity columns a roster is built from.
+        """
+
+        started_games = tuple(game for game in read.started if game in requested_games)
+        live_games = tuple(game for game in requested_games if game not in read.started)
+        live_pool = None
+        if live_games:
+            rows = read.live.rows
+            if len(live_games) < len(read.game_ids) - len(read.started):
+                kept = frozenset(live_games)
+                rows = tuple(row for row in rows if str(row["canonical_game_id"]) in kept)
+            live_pool = self._live_pool(
+                _ProjectionPoolRead(rows=rows, polls=read.live.polls), live_games, roster=roster
+            )
+        if not started_games:
+            return live_pool
+        rows = read.closing_rows
+        if len(started_games) < len(read.started):
+            kept = frozenset(started_games)
+            rows = tuple(row for row in rows if str(row["canonical_game_id"]) in kept)
+        closing_pool = self._closing_pool(rows, started_games, roster=roster)
+        if live_pool is None:
+            return closing_pool
+        if roster:
+            return self._combine_rosters(live_pool, closing_pool)
+        return self._combine_pools(live_pool, closing_pool)
+
+    def _live_pool(
+        self, read: _ProjectionPoolRead, requested_games: tuple[str, ...], *, roster: bool = False
     ) -> PlayerPool | PoolRoster:
         """The live pool, or with ``roster`` its ``PoolRoster`` from the rows' identity columns alone."""
 
-        read = self._read_pool_state(season, requested_games, connection, roster=roster)
         poll_state = self._latest_provider_polls(read.polls)
         evidence = self._classify_eligible_evidence(
             read.rows,
@@ -3492,52 +3562,30 @@ class LatestProjectionPlayerPoolReader:
     def _started_games(
         self, season: str, requested_games: tuple[str, ...], connection: Connection | None = None
     ) -> dict[str, datetime]:
+        return self._start_fences(self._requested_events(season, requested_games, connection))
+
+    def _requested_events(
+        self, season: str, requested_games: tuple[str, ...], connection: Connection | None = None
+    ) -> list[Mapping[str, Any]]:
+        """The stored events of ``requested_games``; none without an event reader."""
+
         reader = self.event_reader
         if reader is None:
-            return {}
+            return []
         get_events_by_ids = getattr(reader, "get_events_by_ids", None)
         if not callable(get_events_by_ids):
-            return {}
+            return []
         events = call_with_read_scope(get_events_by_ids, season, requested_games, connection=connection)
+        return [event for event in events if str(event.get("nba_game_id", "")) in requested_games]
+
+    def _start_fences(self, events: Iterable[Mapping[str, Any]]) -> dict[str, datetime]:
         now = assume_utc(self.clock())
         started: dict[str, datetime] = {}
         for event in events:
-            game_id = str(event.get("nba_game_id", ""))
-            if game_id not in requested_games:
-                continue
             fence = _projection_closing_start_fence(event, now=now)
             if fence is not None:
-                started[game_id] = fence
+                started[str(event.get("nba_game_id", ""))] = fence
         return started
-
-    def _get_pool_with_closing_sets(
-        self,
-        *,
-        season: str,
-        requested_games: tuple[str, ...],
-        started_games: dict[str, datetime],
-        connection: Connection | None = None,
-        roster: bool = False,
-    ) -> PlayerPool | PoolRoster:
-        live_games = tuple(game for game in requested_games if game not in started_games)
-        live_pool = (
-            self._get_live_pool(
-                season=season, requested_games=live_games, connection=connection, roster=roster
-            )
-            if live_games
-            else None
-        )
-        closing_pool = self._read_closing_pool(
-            season=season,
-            requested_games=tuple(started_games),
-            connection=connection,
-            roster=roster,
-        )
-        if live_pool is None:
-            return closing_pool
-        if roster:
-            return self._combine_rosters(live_pool, closing_pool)
-        return self._combine_pools(live_pool, closing_pool)
 
     @staticmethod
     def _combine_pools(*pools: PlayerPool) -> PlayerPool:
@@ -3668,15 +3716,14 @@ class LatestProjectionPlayerPoolReader:
                 freshness["status"] = statuses[0]
         return freshness
 
-    def _read_closing_pool(
+    def _read_closing_rows(
         self,
-        *,
         season: str,
         requested_games: tuple[str, ...],
         connection: Connection | None = None,
+        *,
         roster: bool = False,
-    ) -> PlayerPool | PoolRoster:
-        providers = tuple(scope.provider for scope in self.scopes)
+    ) -> tuple[Any, ...]:
         closing_sets = ClosingProjectionSet.__table__
         with self._pool_snapshot(connection) as connection:
             # Every scope's closing sets for these games in one statement.
@@ -3692,7 +3739,12 @@ class LatestProjectionPlayerPoolReader:
                     )
                 ).scalars()
             ]
-            rows = _closing_member_rows(connection, closing_set_ids, roster=roster)
+            return _closing_member_rows(connection, closing_set_ids, roster=roster)
+
+    def _closing_pool(
+        self, rows: tuple[Any, ...], requested_games: tuple[str, ...], *, roster: bool = False
+    ) -> PlayerPool | PoolRoster:
+        providers = tuple(scope.provider for scope in self.scopes)
         game_states: dict[str, dict[str, Any]] = {}
         rows_by_game: dict[str, list[Any]] = {}
         for row in rows:

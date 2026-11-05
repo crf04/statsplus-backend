@@ -28,6 +28,7 @@ from app.services.matchup import (
     build_publication_metadata,
 )
 from app.services.matchup_reuse import ComposedMatchupCache, PublicationSnapshotReuse
+from app.services.player_pool import PoolRead
 from app.services.publication_snapshot_calls import accepts_keyword, call_with_read_scope
 from app.services.research_season import event_season, published_capture, selected_season
 
@@ -175,6 +176,7 @@ class SnapshotMatchups:
         settings: RuntimeSettings | None = None,
         cache_reads: bool = True,
         read_scope: tuple[Any, Any] | None = None,
+        pool_read: PoolRead | None = None,
     ) -> None:
         self.composer = composer
         self.snapshot = snapshot
@@ -197,6 +199,9 @@ class SnapshotMatchups:
         # ``(connection, session)`` every game composes on, the capture's own;
         # ``None`` lets each game open its own.
         self._read_scope = read_scope
+        # The request's one read of its Slate's pool, which each game it
+        # holds composes from.
+        self._pool_read = pool_read
 
     def get_matchup(
         self,
@@ -393,6 +398,8 @@ class SnapshotMatchups:
             kwargs["season"] = self.season
         if read_scope is not None:
             kwargs["read_scope"] = read_scope
+        if self._pool_read is not None:
+            kwargs["pool_read"] = self._pool_read
         return self.composer.get_matchup_from_snapshot(
             game_id=game_id,
             publication_snapshot=self.snapshot if snapshot is None else snapshot,
@@ -428,6 +435,7 @@ def request_matchups(
     cache: ComposedMatchupCache | None = None,
     cache_reads: bool = True,
     read_scope: tuple[Any, Any] | None = None,
+    pool_read: PoolRead | None = None,
 ) -> Any:
     """The one reader a request composing several Matchups uses, no provider read.
 
@@ -436,7 +444,8 @@ def request_matchups(
     Without a publication reader, settings, injuries or a snapshot composer the
     plain ``composer`` reads each game as before, live injuries included.
     ``read_scope`` is a caller's ``(connection, session)``: the capture and
-    every game's reads then share its transaction.
+    every game's reads then share its transaction.  ``pool_read`` is the
+    request's read of its Slate's pool, from the composer's own pool reader.
     """
 
     if (
@@ -459,6 +468,7 @@ def request_matchups(
         settings=settings,
         cache_reads=cache_reads,
         read_scope=read_scope,
+        pool_read=pool_read,
     )
 
 

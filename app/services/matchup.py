@@ -77,7 +77,7 @@ from app.services.player_game_log_repository import (
     PlayerSeasonLogSummary,
 )
 from app.services.player_game_log_values import player_game_log_focal_line
-from app.services.player_pool import PlayerPool, PoolPlayer, SingleGamePlayerPoolReader
+from app.services.player_pool import PlayerPool, PoolPlayer, PoolRead, SingleGamePlayerPoolReader
 from app.services.posted_lines import serialize_line_prices, serialize_lines
 from app.services.publication_snapshot_calls import (
     accepts_keyword,
@@ -782,6 +782,7 @@ class MatchupService:
         season: str | None = None,
         read_scope: tuple[Connection, Session] | None = None,
         stats_freshness: Mapping[str, Any] | None = None,
+        pool_read: PoolRead | None = None,
     ) -> dict[str, Any]:
         """Compose one Matchup over a generation the caller already holds.
 
@@ -800,6 +801,9 @@ class MatchupService:
         snapshot was captured on; omitted, the compose opens its own.
         ``stats_freshness`` is the ``freshness.stats`` block the caller read
         for this request (``stats_freshness_block``); omitted, it is read here.
+        ``pool_read`` is the request's read of its Slate's pool, from this
+        service's own pool reader: a game it holds takes its event and pool
+        from it instead of reading them again.
         """
 
         scope = nullcontext(read_scope) if read_scope is not None else self.open_read_scope()
@@ -814,6 +818,7 @@ class MatchupService:
                 season=season,
                 with_book_lines=False,
                 stats_freshness=stats_freshness,
+                pool_read=pool_read,
             )
 
     def get_unscheduled_matchup(
@@ -1095,6 +1100,7 @@ class MatchupService:
         season: str | None = None,
         with_book_lines: bool = True,
         stats_freshness: Mapping[str, Any] | None = None,
+        pool_read: PoolRead | None = None,
     ) -> dict[str, Any]:
         # Evidence (logs, Diets, windows) is the published season's; the
         # game's own schedule facts (event, pool, injuries) are its season's,
@@ -1109,8 +1115,17 @@ class MatchupService:
         elif season is None:
             season = research_season(self.settings, self.publication_reader)
         schedule_season = event_season(self.settings, game_id, season)
+        if pool_read is not None and (
+            pool_read.season != schedule_season or game_id not in pool_read.game_ids
+        ):
+            pool_read = None
         observed_at = assume_utc(self._clock())
-        event = self._event(schedule_season, game_id, connection=connection)
+        event = self._event(
+            schedule_season,
+            game_id,
+            connection=connection,
+            held=None if pool_read is None else pool_read.event(game_id),
+        )
         scheduled_at = parse_utc_iso(str(event["scheduled_at"]))
         publication_snapshot = game_capture(
             self.publication_reader, publication_snapshot, event["scheduled_at"], session=session
@@ -1125,7 +1140,9 @@ class MatchupService:
         )
 
         pool = (
-            None
+            pool_read.pool((game_id,))
+            if pool_read is not None
+            else None
             if self.player_pool is None
             else call_with_read_scope(
                 self.player_pool.get_pool_for_game,
@@ -1634,10 +1651,17 @@ class MatchupService:
         game_id: str,
         *,
         connection: Connection | None = None,
+        held: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
+        """``held`` is the game's event as the caller already read it."""
+
         if self.event_catalog is None:
             raise ProviderUnavailableError("The matchup schedule is currently unavailable.")
-        event = call_with_read_scope(self.event_catalog.get_event, season, game_id, connection=connection)
+        event = (
+            held
+            if held is not None
+            else call_with_read_scope(self.event_catalog.get_event, season, game_id, connection=connection)
+        )
         if event is not None:
             classification = resolve_stored_event_classification(
                 game_id,

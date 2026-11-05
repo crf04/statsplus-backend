@@ -114,6 +114,7 @@ class SlateService:
         fallback: str | None = None,
         season: str | None = None,
         neighbours: bool = True,
+        player_pool: PoolRosterReader | None = None,
     ) -> dict[str, Any]:
         """One ET Slate Date; ``fallback`` is the shared previous-game-day rule.
 
@@ -121,15 +122,23 @@ class SlateService:
         date's own (or the pinned) season: a game's preview card reads the
         season its game ID names.  ``neighbours=False`` leaves
         ``previous_game_date`` and ``next_game_date`` unread (``None``), for a
-        caller that never shows them.
+        caller that never shows them.  ``player_pool`` reads the pool in place
+        of the service's own, for a caller that keeps that read.
         """
 
         return read_slate(
-            lambda day: self._slate_for(day, season, neighbours=neighbours), requested_date, fallback
+            lambda day: self._slate_for(day, season, neighbours=neighbours, player_pool=player_pool),
+            requested_date,
+            fallback,
         )
 
     def _slate_for(
-        self, requested_date: str | None, season: str | None = None, *, neighbours: bool = True
+        self,
+        requested_date: str | None,
+        season: str | None = None,
+        *,
+        neighbours: bool = True,
+        player_pool: PoolRosterReader | None = None,
     ) -> dict[str, Any]:
         slate_date = self._parse_slate_date(requested_date)
         if self.event_catalog is None:
@@ -186,10 +195,9 @@ class SlateService:
 
         pool_freshness = PlayerPool.unavailable_freshness()
         injury_freshness = UNAVAILABLE_SOURCE
-        if self.player_pool is not None:
-            pool = self.player_pool.get_pool_roster(
-                season=season, game_ids={game["game_id"] for game in games}
-            )
+        player_pool = self.player_pool if player_pool is None or self.player_pool is None else player_pool
+        if player_pool is not None:
+            pool = player_pool.get_pool_roster(season=season, game_ids={game["game_id"] for game in games})
             pool_freshness = dict(pool.freshness)
             removed_player_ids: set[int] = set()
             if self.injuries is not None:
