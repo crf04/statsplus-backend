@@ -6,7 +6,11 @@ is parsed.  This module owns what is written and read:
 
 * ``choose_closing_lines`` picks one line per player by a fixed book order;
 * ``ClosingLineStore`` is the ledger and the line table the backfill writes;
-* ``ClosingLineReader`` serves ``/api/games/game_logs`` its ``closing_line``;
+* ``ClosingLineReader`` serves ``/api/games/game_logs`` its ``closing_line`` and
+  ``closing_lines`` (crf04/statsplus#429): from 2026-27 on, the live collector's
+  closing quotes in ``sportsbook_prop_quotes``; before, the ``closing_lines``
+  table;
+* ``closing_quote_gaps`` names the started games with no closing quote stored;
 * ``coverage_report`` measures how many players who played 20+ minutes have a
   line, by source book.
 
@@ -18,19 +22,22 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import delete, func, insert, select, text, update
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.domain.nba_events import is_started_event, player_game_log_season_type
 from app.domain.utc import assume_utc
 from app.models.closing_lines import ClosingLine, ClosingLinePurchase, ClosingLineSpend
+from app.models.event_catalog import EventCatalogEntry
 from app.models.player_game_log import PlayerGameLog
+from app.models.sportsbook_odds import OddsApiPoll, SportsbookPropQuote
 from app.providers.odds_api import BOOK_ALLOWLIST, MARKET_CATEGORIES, ParsedEventOdds
 
 logger = logging.getLogger(__name__)
@@ -39,6 +46,22 @@ logger = logging.getLogger(__name__)
 #: ``player_points_alternate``) and its Matchup category.
 ODDS_MARKET = "player_points"
 MARKET_CATEGORY = MARKET_CATEGORIES[ODDS_MARKET]
+
+#: The ledger key (``closing_line_purchases.market_category``) of a purchase of
+#: all five standard markets in one call: the 2026-27 gap backfill
+#: (crf04/statsplus#429), whose quotes become closing quotes in
+#: ``sportsbook_prop_quotes`` rather than rows of ``closing_lines``.
+ALL_MARKETS = "ALL"
+#: The categories each ledger key's purchase keeps.
+LEDGER_CATEGORIES: Mapping[str, tuple[str, ...]] = {
+    MARKET_CATEGORY: (MARKET_CATEGORY,),
+    ALL_MARKETS: tuple(MARKET_CATEGORIES.values()),
+}
+
+#: The first season served from the live collector's closing quotes
+#: (``sportsbook_prop_quotes.is_closing``); earlier seasons read the
+#: backfilled ``closing_lines`` table (crf04/statsplus#429).
+LIVE_CLOSING_FIRST_SEASON = "2026-27"
 
 #: Which book's line is kept when several posted the same player: DraftKings,
 #: then FanDuel (crf04/statsplus#216), then the remaining regulated ``us``
@@ -69,36 +92,90 @@ class RunRefused(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class PostedLine:
-    """One book's posted points line for a player name, as the response said it."""
+    """One book's posted line for a player name, as the response said it.
+
+    A points purchase keeps only the book, name and line; a five-market
+    purchase also keeps the category, prices and update time, so its quotes
+    are stored exactly as a live closing poll stores them.
+    """
 
     book: str
     player_name: str
     line: float
+    category: str = MARKET_CATEGORY
+    over: int | None = None
+    under: int | None = None
+    last_update: datetime | None = None
 
 
-def posted_lines(parsed: ParsedEventOdds) -> tuple[PostedLine, ...]:
-    """The points quotes of a parsed response, in a stable order."""
+def posted_lines(
+    parsed: ParsedEventOdds, categories: Sequence[str] = (MARKET_CATEGORY,)
+) -> tuple[PostedLine, ...]:
+    """The quotes of a parsed response in ``categories``, in a stable order."""
 
     return tuple(
         sorted(
             (
-                PostedLine(quote.book, quote.player_name, quote.line)
+                PostedLine(
+                    quote.book,
+                    quote.player_name,
+                    quote.line,
+                    quote.category,
+                    quote.over,
+                    quote.under,
+                    quote.last_update,
+                )
                 for quote in parsed.quotes
-                if quote.category == MARKET_CATEGORY
+                if quote.category in categories
             ),
-            key=lambda item: (item.book, item.player_name, item.line),
+            key=lambda item: (item.category, item.book, item.player_name, item.line),
         )
     )
 
 
-def encode_posted_lines(lines: Sequence[PostedLine]) -> str:
-    return json.dumps([[item.book, item.player_name, item.line] for item in lines], separators=(",", ":"))
+def encode_posted_lines(lines: Sequence[PostedLine], *, full: bool = False) -> str:
+    """Compact JSON: ``[book, name, line]``, or with ``full`` every field."""
+
+    if not full:
+        return json.dumps([[item.book, item.player_name, item.line] for item in lines], separators=(",", ":"))
+    return json.dumps(
+        [
+            [
+                item.book,
+                item.player_name,
+                item.line,
+                item.category,
+                item.over,
+                item.under,
+                None if item.last_update is None else assume_utc(item.last_update).isoformat(),
+            ]
+            for item in lines
+        ],
+        separators=(",", ":"),
+    )
 
 
 def decode_posted_lines(text_value: str | None) -> tuple[PostedLine, ...]:
     if not text_value:
         return ()
-    return tuple(PostedLine(book, name, float(line)) for book, name, line in json.loads(text_value))
+    decoded = []
+    for book, name, line, *rest in json.loads(text_value):
+        if not rest:
+            decoded.append(PostedLine(book, name, float(line)))
+            continue
+        category, over, under, updated = rest
+        decoded.append(
+            PostedLine(
+                book,
+                name,
+                float(line),
+                category,
+                over,
+                under,
+                None if updated is None else assume_utc(datetime.fromisoformat(updated)),
+            )
+        )
+    return tuple(decoded)
 
 
 def choose_closing_lines(
@@ -161,10 +238,19 @@ def _stored_purchase(row: Any) -> StoredPurchase:
 
 
 class ClosingLineStore:
-    """The purchase ledger, the spend log and the closing-line table."""
+    """The purchase ledger, the spend log and the closing-line table.
 
-    def __init__(self, engine: Engine, *, lock_runs: bool = True) -> None:
+    ``market`` is the ledger key the store reads and writes purchases under:
+    ``PTS`` for the 2025-26 points backfill, ``ALL`` for a five-market purchase.
+    The line table, ``complete`` and the re-resolve read are the points
+    backfill's only.
+    """
+
+    def __init__(self, engine: Engine, *, lock_runs: bool = True, market: str = MARKET_CATEGORY) -> None:
+        if market not in LEDGER_CATEGORIES:
+            raise ValueError(f"unknown ledger market {market!r}")
         self.engine = engine
+        self.market = market
         #: Only PostgreSQL can keep two processes from buying the same game.
         #: A test over SQLite, which has one process, opts out.
         self._lock_runs = lock_runs
@@ -219,27 +305,32 @@ class ClosingLineStore:
         with self.engine.connect() as connection:
             rows = connection.execute(
                 select(table.c.canonical_game_id, table.c.outcome).where(
-                    table.c.market_category == MARKET_CATEGORY
+                    table.c.market_category == self.market
                 )
             )
             return {game_id: outcome for game_id, outcome in rows}
 
-    def credits_recorded(self) -> int:
+    def credits_recorded(self, subjects: Collection[str] | None = None) -> int:
         """Credits the backfill has cost, over every run.
 
         The games' ledger credits plus the spend log: events lists, and calls
         that may have been charged without returning anything usable.
+        ``subjects`` limits the spend log to those game days and game ids, so
+        one season's campaign is not charged with another's event lists.
         """
 
         games = ClosingLinePurchase.__table__
         spend = ClosingLineSpend.__table__
+        logged_query = select(func.coalesce(func.sum(spend.c.credits), 0))
+        if subjects is not None:
+            logged_query = logged_query.where(spend.c.subject.in_(sorted(subjects)))
         with self.engine.connect() as connection:
             on_games = connection.execute(
                 select(func.coalesce(func.sum(games.c.credits), 0)).where(
-                    games.c.market_category == MARKET_CATEGORY
+                    games.c.market_category == self.market
                 )
             ).scalar()
-            logged = connection.execute(select(func.coalesce(func.sum(spend.c.credits), 0))).scalar()
+            logged = connection.execute(logged_query).scalar() if subjects is None or subjects else 0
         return int(on_games or 0) + int(logged or 0)
 
     def record_spend(
@@ -323,12 +414,12 @@ class ClosingLineStore:
             connection.execute(
                 delete(table).where(
                     table.c.canonical_game_id == game_id,
-                    table.c.market_category == MARKET_CATEGORY,
+                    table.c.market_category == self.market,
                     table.c.outcome == "failed",
                 )
             )
             connection.execute(
-                insert(table).values(canonical_game_id=game_id, market_category=MARKET_CATEGORY, **values)
+                insert(table).values(canonical_game_id=game_id, market_category=self.market, **values)
             )
 
     def store_quotes(
@@ -338,22 +429,22 @@ class ClosingLineStore:
         snapshot_at: datetime | None,
         parsed: ParsedEventOdds,
     ) -> tuple[PostedLine, ...]:
-        """Keep the parsed points quotes on the receipt (``received`` -> next)."""
+        """Keep the parsed quotes on the receipt (``received`` -> next)."""
 
-        lines = posted_lines(parsed)
+        lines = posted_lines(parsed, LEDGER_CATEGORIES[self.market])
         table = ClosingLinePurchase.__table__
         with self.engine.begin() as connection:
             connection.execute(
                 update(table)
                 .where(
                     table.c.canonical_game_id == game_id,
-                    table.c.market_category == MARKET_CATEGORY,
+                    table.c.market_category == self.market,
                     table.c.outcome == "received",
                 )
                 .values(
                     outcome="purchased" if parsed.bookmaker_count else "empty",
                     snapshot_at=snapshot_at,
-                    quotes=encode_posted_lines(lines),
+                    quotes=encode_posted_lines(lines, full=self.market != MARKET_CATEGORY),
                 )
             )
         return lines
@@ -372,12 +463,32 @@ class ClosingLineStore:
                     table.c.quotes,
                 )
                 .where(
-                    table.c.market_category == MARKET_CATEGORY,
+                    table.c.market_category == self.market,
                     table.c.outcome == "purchased",
                 )
                 .order_by(table.c.canonical_game_id)
             ).all()
         return [_stored_purchase(row) for row in rows]
+
+    def claim_completion(self, connection: Connection, game_id: str, *, unresolved: int) -> bool:
+        """Mark a ``purchased`` row ``complete`` inside the caller's transaction.
+
+        ``False`` when the row is not ``purchased`` (already complete, or never
+        bought): the caller then rolls back what it wrote with the claim, so a
+        purchase is written exactly once however often it is finished.
+        """
+
+        table = ClosingLinePurchase.__table__
+        result = connection.execute(
+            update(table)
+            .where(
+                table.c.canonical_game_id == game_id,
+                table.c.market_category == self.market,
+                table.c.outcome == "purchased",
+            )
+            .values(outcome="complete", unresolved_count=unresolved)
+        )
+        return result.rowcount == 1
 
     def recorded_games(self) -> list[RecordedGame]:
         """Every game whose quotes are stored, with the lines written for it.
@@ -481,11 +592,96 @@ class ClosingLineValue:
         return {"value": self.value, "book": self.book}
 
 
+def _best_by_book(rows: Iterable[tuple[Any, str, float]]) -> dict[Any, ClosingLineValue]:
+    """``{key: line}`` from ``(key, book, line)`` rows: the first book of ``BOOK_ORDER`` wins."""
+
+    rank = {book: position for position, book in enumerate(BOOK_ORDER)}
+    best: dict[Any, tuple[int, ClosingLineValue]] = {}
+    for key, book, line in rows:
+        position = rank.get(book, len(rank))
+        if key not in best or position < best[key][0]:
+            best[key] = (position, ClosingLineValue(float(line), book))
+    return {key: value for key, (_, value) in best.items()}
+
+
 class ClosingLineReader:
     """Reads stored closing lines for the game-log response."""
 
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
+
+    def markets_for_player(
+        self, player_id: int, game_ids: Sequence[str], *, season: str
+    ) -> dict[str, dict[str, ClosingLineValue]]:
+        """``{game id: {market: line}}``, one book per market, for ``closing_lines``.
+
+        From ``LIVE_CLOSING_FIRST_SEASON`` on the lines are the live collector's
+        closing quotes (``sportsbook_prop_quotes`` with ``is_closing``) in the
+        five standard markets; before it they are the backfilled
+        ``closing_lines`` table (2025-26: points only).  The book is the first
+        of ``BOOK_ORDER`` that posted the player in that market.  A game with no
+        line is absent, and a storage fault is logged and reads as "no lines".
+        """
+
+        ids = sorted({str(game_id) for game_id in game_ids})
+        if not ids:
+            return {}
+        try:
+            if season >= LIVE_CLOSING_FIRST_SEASON:
+                rows = self._closing_quotes(int(player_id), ids)
+            else:
+                table = ClosingLine.__table__
+                with self.engine.connect() as connection:
+                    rows = connection.execute(
+                        select(
+                            table.c.canonical_game_id, table.c.market_category, table.c.book, table.c.line
+                        ).where(
+                            table.c.canonical_player_id == int(player_id),
+                            table.c.canonical_game_id.in_(ids),
+                        )
+                    ).all()
+        except SQLAlchemyError:
+            logger.warning("Could not read closing lines for the game logs", exc_info=True)
+            return {}
+        chosen = _best_by_book(((game_id, market), book, line) for game_id, market, book, line in rows)
+        result: dict[str, dict[str, ClosingLineValue]] = {}
+        for (game_id, market), value in sorted(chosen.items()):
+            result.setdefault(game_id, {})[market] = value
+        return result
+
+    def _closing_quotes(self, player_id: int, game_ids: Sequence[str]) -> list[tuple[str, str, str, float]]:
+        """``(game, market, book, line)`` of the player's quotes in each game's close.
+
+        The close is the game's applicable closing poll (``applicable_closing_polls``),
+        chosen for the whole game before the player is looked at: a player, or a
+        book, that the newest close no longer carried has no line, and an empty
+        close leaves the game with none.
+        """
+
+        table = SportsbookPropQuote.__table__
+        with self.engine.connect() as connection:
+            closes = applicable_closing_polls(connection, game_ids)
+            if not closes:
+                return []
+            rows = connection.execute(
+                select(
+                    table.c.canonical_game_id,
+                    table.c.market_category,
+                    table.c.book,
+                    table.c.line,
+                ).where(
+                    table.c.canonical_player_id == player_id,
+                    table.c.poll_id.in_(sorted(closes.values())),
+                    table.c.is_closing.is_(True),
+                    table.c.market_category.in_(LEDGER_CATEGORIES[ALL_MARKETS]),
+                    table.c.book.in_(BOOK_ORDER),
+                )
+            ).all()
+        return [
+            (game_id, market, book, float(line))
+            for game_id, market, book, line in rows
+            if closes.get(game_id) is not None
+        ]
 
     def for_player(self, player_id: int, game_ids: Sequence[str]) -> dict[str, ClosingLineValue]:
         """``{game id: line}`` for the games that have one; best book wins.
@@ -510,13 +706,103 @@ class ClosingLineReader:
         except SQLAlchemyError:
             logger.warning("Could not read closing lines for the game logs", exc_info=True)
             return {}
-        rank = {book: position for position, book in enumerate(BOOK_ORDER)}
-        best: dict[str, tuple[int, ClosingLineValue]] = {}
-        for game_id, book, line in rows:
-            position = rank.get(book, len(rank))
-            if game_id not in best or position < best[game_id][0]:
-                best[game_id] = (position, ClosingLineValue(float(line), book))
-        return {game_id: value for game_id, (_, value) in best.items()}
+        return _best_by_book(rows)
+
+
+#: How far a closing poll's ``commence_time`` may sit from the Event Catalog's
+#: tip and still close that tip: the rule ``OddsCollectionCoordinator._upcoming``
+#: uses to decide a game's closing poll is done.  A postponement moves the tip
+#: further than this, so the old close stops applying.
+CLOSING_TIP_TOLERANCE = timedelta(hours=1)
+
+
+def applicable_closing_polls(connection: Connection, game_ids: Iterable[str]) -> dict[str, int]:
+    """``{game id: poll id}`` of each game's close: its newest quoted closing poll for its tip.
+
+    A closing poll counts only when it stored at least one closing row in
+    ``sportsbook_prop_quotes`` and was taken for the game's current tip within
+    ``CLOSING_TIP_TOLERANCE``; a game the Event Catalog does not hold has no
+    tip to match, so its newest quoted closing poll is its close.  An empty or
+    failed poll never counts, nor does a poll of the DFS feed (its quotes go to
+    the projection archive): for the same tip an earlier quoted close is a
+    better closing line than a later empty answer, and a bought backfill
+    snapshot is never outranked by an empty live poll.
+    """
+
+    ids = sorted({str(game_id) for game_id in game_ids})
+    if not ids:
+        return {}
+    polls = OddsApiPoll.__table__
+    quotes = SportsbookPropQuote.__table__
+    events = EventCatalogEntry.__table__
+    tips = {
+        str(game_id): assume_utc(tip)
+        for game_id, tip in connection.execute(
+            select(events.c.nba_game_id, events.c.scheduled_at).where(events.c.nba_game_id.in_(ids))
+        )
+    }
+    quoted = (
+        select(quotes.c.poll_id)
+        .where(quotes.c.canonical_game_id.in_(ids), quotes.c.is_closing.is_(True))
+        .distinct()
+        .subquery()
+    )
+    newest: dict[str, tuple[datetime, int]] = {}
+    for game_id, poll_id, commence, completed in connection.execute(
+        select(polls.c.canonical_game_id, polls.c.poll_id, polls.c.commence_time, polls.c.completed_at)
+        .join(quoted, quoted.c.poll_id == polls.c.poll_id)
+        .where(polls.c.canonical_game_id.in_(ids), polls.c.is_closing.is_(True))
+    ):
+        tip = tips.get(str(game_id))
+        if tip is not None and (commence is None or abs(assume_utc(commence) - tip) > CLOSING_TIP_TOLERANCE):
+            continue
+        key = (
+            assume_utc(completed) if completed is not None else datetime.min.replace(tzinfo=UTC),
+            int(poll_id),
+        )
+        if str(game_id) not in newest or key > newest[str(game_id)]:
+            newest[str(game_id)] = key
+    return {game_id: poll_id for game_id, (_, poll_id) in newest.items()}
+
+
+def games_with_closing_quotes(engine: Engine, game_ids: Iterable[str]) -> set[str]:
+    """The games of ``game_ids`` with a close (``applicable_closing_polls``) for their current tip.
+
+    A game whose only quoted close was for an earlier tip, or whose only
+    closing poll for its tip was empty, reads as no lines in the game logs, so
+    it is not covered: the gap check names it and the 2026-27 backfill buys it.
+    """
+
+    with engine.connect() as connection:
+        return set(applicable_closing_polls(connection, game_ids))
+
+
+def closing_quote_gaps(
+    engine: Engine, events: Iterable[Mapping[str, Any]], *, now: datetime
+) -> list[Mapping[str, Any]]:
+    """The started regular-season and playoff games with no close for their current tip.
+
+    ``events`` are Event Catalog rows, kept in their order (the catalog lists
+    them by tip); a postponed game has not started.  This is the gap check of
+    crf04/statsplus#429: every game it names is one the 2026-27 backfill buys.
+    """
+
+    started = [
+        event
+        for event in events
+        if player_game_log_season_type(event) is not None and is_started_event(event, now=now)
+    ]
+    covered = games_with_closing_quotes(engine, (event["nba_game_id"] for event in started))
+    return [event for event in started if str(event["nba_game_id"]) not in covered]
+
+
+def describe_gap(event: Mapping[str, Any]) -> str:
+    """``<game id> tip <UTC minute>``: how the gap check names a game."""
+
+    from app.services.event_resolver import stored_timestamp
+
+    tip = stored_timestamp(event.get("scheduled_at"))
+    return f"{event['nba_game_id']} tip {'unknown' if tip is None else tip.strftime('%Y-%m-%dT%H:%MZ')}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -612,8 +898,12 @@ def coverage_report(
 
 
 __all__ = [
+    "ALL_MARKETS",
     "BOOK_ORDER",
+    "CLOSING_TIP_TOLERANCE",
     "COVERAGE_MINUTES",
+    "LEDGER_CATEGORIES",
+    "LIVE_CLOSING_FIRST_SEASON",
     "MARKET_CATEGORY",
     "ODDS_MARKET",
     "ClosingLineReader",
@@ -624,9 +914,13 @@ __all__ = [
     "RecordedGame",
     "RunRefused",
     "StoredPurchase",
+    "applicable_closing_polls",
     "choose_closing_lines",
+    "closing_quote_gaps",
     "coverage_report",
     "decode_posted_lines",
+    "describe_gap",
     "encode_posted_lines",
+    "games_with_closing_quotes",
     "posted_lines",
 ]

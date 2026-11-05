@@ -4889,7 +4889,17 @@ Matchup read (only when ODDS_API_ENABLED): MatchupService._book_lines →
   SportsbookQuoteReader (savepoint)
 Board read (only when ODDS_API_ENABLED): SlateBoardService →
   SportsbookQuoteReader.latest_quotes (every slate game, one statement)
+Game-log read (2026-27 on, whatever ODDS_API_ENABLED says):
+  GameService._closing_lines_for → ClosingLineReader.markets_for_player
+  → sportsbook_prop_quotes rows with is_closing (see "Closing lines on Game Logs")
 ```
+
+Closing quotes are kept for good (crf04/statsplus#429): `SportsbookQuoteStore`
+only ever inserts `sportsbook_prop_quotes` rows (it updates and deletes only
+`sportsbook_prop_latest`), and no retention job touches the table.
+`tests/services/test_closing_quotes_kept.py` pins both: later polls leave a
+closing row exactly as written, and a new module that names the table fails the
+test until it is checked against this rule.
 
 Schedule: polling starts 13 hours before tip (an empty response costs
 nothing), hourly in the `normal` tier, with one closing fetch from tip-10
@@ -5207,10 +5217,13 @@ scripts/backfill_closing_lines.py   (operator, from a laptop; needs ODDS_API_KEY
   needs. `build_dependencies` registers publication streams and starts the
   refresh-job dispatcher, which a laptop run against production must not do,
   and `--dry-run` writes nothing at all.
-* **Read path.** `ClosingLineReader.for_player` serves
-  `GameService.get_filtered_logs`: one indexed read per request, the best book
-  per game, and a storage fault reads as "no lines" (logged) rather than
-  failing the game logs. The deployment builds it only when the table exists.
+* **Read path.** `ClosingLineReader.markets_for_player` serves
+  `GameService.get_filtered_logs` (see "Closing lines on Game Logs" below);
+  `ClosingLineReader.for_player`, the points line alone, serves the posted
+  line's started-game fallback. Each is one indexed read per player, the best
+  book per game, and a storage fault reads as "no lines" (logged) rather than
+  failing the game logs. The deployment builds the reader only when the table
+  exists.
 * **Coverage.** `coverage_report` is the share of players with 20+ minutes in a
   recorded game who have a line, by source book, with the first players
   without one.
@@ -5263,6 +5276,76 @@ The database needs migration 067 first (the web service's pre-deploy command
 applies it; the script refuses to run without it). A `received` ledger row
 means a paid response could not be used; it is not bought again, and deleting
 that row (10 credits) is the only way to buy the game again.
+
+### Closing lines on Game Logs (crf04/statsplus#429)
+
+`GET /api/games/game_logs` rows carry `closing_lines` (every market with a
+line) beside `closing_line` (points only, the MCP's #216 field, always equal to
+`closing_lines.PTS`). `ClosingLineReader.markets_for_player(player, games,
+season=...)` picks the source by the requested season:
+
+```text
+season >= LIVE_CLOSING_FIRST_SEASON ("2026-27")
+  → applicable_closing_polls: per game, the newest odds_api_polls row with
+    is_closing that stored at least one closing sportsbook_prop_quotes row and
+    whose commence_time is within CLOSING_TIP_TOLERANCE (1 h, the collector's
+    "closing done" rule) of the Event Catalog tip; a game the catalog does not
+    hold takes its newest quoted closing poll
+  → sportsbook_prop_quotes WHERE poll_id IN those polls, is_closing, the
+    player, the five markets, the allowlisted books
+earlier seasons
+  → closing_lines (2025-26: PTS only)
+then per (game, market): the first book of closing_lines.BOOK_ORDER
+```
+
+The close is chosen for the whole game before the player is looked at: a
+player the close did not carry has no line, and a close taken for a tip a
+postponement moved is not the game's close. A closing poll that stored no
+sportsbook quote never counts: not an `empty` or `failed` poll, not a
+`complete` one with no quotes, and not a DFS-feed poll (its quotes go to the
+projection archive). So for the same tip an earlier quoted close stands over
+a later empty answer, and a backfilled snapshot (observed at its snapshot
+time) is never outranked by an empty live poll answered later. What this gives
+up: an empty re-poll for the same tip does not clear an earlier close. A storage
+fault on either source is logged and reads as `{}` on every row.
+A 2025-26 game is never read from the live store, so its rows are what #216
+served plus `closing_lines`.
+
+**Gap backfill (2026-27).** A closing poll the collector missed (a Railway cron
+delay, a key rotation) leaves a started game with no closing quotes.
+`scripts/backfill_closing_lines.py --season 2026-27` reuses the #216 backfill
+(`ClosingLineBackfill`, `OddsApiClient`, `CreditGuard`, the ledger and the
+spend log) with three differences:
+
+* the targets are the season's started regular-season and playoff games (the
+  tip has passed, never a postponed game) less those with a quoted close for
+  their current tip (`games_with_closing_quotes`): exactly the games the gap
+  check names, including one whose only close for its tip was empty or that
+  was closed only for an earlier tip;
+* one call buys all five markets (`player_points`, `player_rebounds`,
+  `player_assists`, `player_threes`, `player_points_rebounds_assists`) at the
+  same last 5-minute mark before tip: 50 credits a game, recorded on one
+  ledger row under `market_category = 'ALL'` before parsing, with every
+  allowlisted quote and its prices kept on the row;
+* `ClosingQuoteWriter` stores them with `SportsbookQuoteStore.record_poll(...,
+  is_closing=True, commence_time=<tip>)`, observed at the snapshot's time, so
+  the game reads exactly as a live closing poll would. The ledger row turns
+  `complete` in the same transaction, and only from `purchased`, so a resumed
+  or repeated finish writes the game once. The poll row's cost stays on the
+  ledger, not repeated on `odds_api_polls`.
+
+The spend cap counts this season's campaign only: its ledger rows and the
+spend-log rows for its game days and game ids. `--dry-run` prints the games it
+would buy with their tips, the credit estimate, and the gap check; it makes no
+call and writes nothing. `--re-resolve` is refused for 2026-27.
+
+**Gap check.** `closing_lines.closing_quote_gaps(engine, events, now=...)` names
+every started regular-season or playoff game with no quoted close for its
+current tip, so every game it names reads as no lines. The hosted
+nightly (`scripts/nightly_refresh.py --hosted-only`) runs it last for the
+season it ingests, when that season is 2026-27 or later, and prints any gap to
+stderr with the command that buys it; it reads only and never changes the exit
+status. The backfill script prints the same check after a run.
 
 ### Collection control plane
 

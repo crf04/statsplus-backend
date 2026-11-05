@@ -154,3 +154,84 @@ def test_a_re_resolve_while_a_backfill_is_active_writes_nothing_but_a_dry_run_re
     # The lock goes with the run that held it.
     assert world.re_resolve().stop is None
     assert (GSW_LAC, PAYTON) in _stored_lines(world)
+
+
+def test_the_2026_27_gap_backfill_on_postgres_writes_a_closing_poll_once_and_the_game_logs_read_it(
+    url, tmp_path
+):
+    """crf04/statsplus#429 on real booleans, numerics and the advisory lock."""
+
+    from datetime import timedelta
+
+    from app.services.closing_line_backfill import ALL_ODDS_MARKETS, ClosingLineBackfill, ClosingQuoteWriter
+    from app.services.closing_lines import ALL_MARKETS, closing_quote_gaps
+    from app.services.sportsbook_quotes import ResolvedQuote, SportsbookQuoteStore
+    from tests.support.closing_lines_world import BOS_NYK, BOS_NYK_EVENT, CLOCK, DEN_LAL_EVENT, TATUM, TIPS
+    from tests.support.odds_world import load
+
+    season = "2026-27"
+    now = datetime(2026, 11, 5, 12, tzinfo=UTC)
+    world = build_world(tmp_path, database_url=url, season=season)
+    quotes = SportsbookQuoteStore(world.engine)
+    for game_id, event_id, player in ((GSW_LAC, GSW_LAC_EVENT, CURRY), (BOS_NYK, BOS_NYK_EVENT, TATUM)):
+        observed = TIPS[game_id] - timedelta(minutes=7)
+        quotes.record_poll(
+            odds_event_id=event_id,
+            game_id=game_id,
+            started_at=observed,
+            completed_at=observed,
+            cost=5,
+            remaining=90000,
+            is_closing=True,
+            quotes=[ResolvedQuote(player, "PTS", "draftkings", 27.5, -110, -110, observed)],
+            commence_time=TIPS[game_id],
+        )
+    store = ClosingLineStore(world.engine, market=ALL_MARKETS)  # the real advisory lock
+    events = world.catalog_service.get_events(season)
+
+    def run():
+        client = FakeHistoricalClient()
+        client.bodies[DEN_LAL_EVENT] = load("historical_event_odds_den_lal_five_markets")
+        ClosingLineBackfill(
+            store=store,
+            client=client,
+            event_mapper=world.event_mapper,
+            names=world.names,
+            events=events,
+            max_credits=60,
+            keep_remaining=5000,
+            clock=lambda: CLOCK,
+            season=season,
+            markets=ALL_ODDS_MARKETS,
+            writer=ClosingQuoteWriter(ledger=store, names=world.names, quotes=quotes),
+            started_by=now,
+            covered={GSW_LAC, BOS_NYK},
+        ).run()
+        return client
+
+    assert [event["nba_game_id"] for event in closing_quote_gaps(world.engine, events, now=now)] == [DEN_LAL]
+    first, second = run(), run()
+
+    assert (first.credits_spent, second.credits_spent, second.odds_calls) == (51, 0, [])
+    assert closing_quote_gaps(world.engine, events, now=now) == []
+    found = ClosingLineReader(world.engine).markets_for_player(LEBRON, [DEN_LAL], season=season)
+    assert {market: (line.value, line.book) for market, line in found[DEN_LAL].items()} == {
+        "3PM": (1.5, "fanduel"),
+        "AST": (7.5, "draftkings"),
+        "PRA": (39.5, "draftkings"),
+        "PTS": (24.5, "draftkings"),
+        "REB": (7.5, "fanduel"),
+    }
+    with world.engine.connect() as connection:
+        assert (
+            connection.execute(
+                text(
+                    "SELECT count(*) FROM sportsbook_prop_quotes WHERE canonical_game_id = :g AND is_closing"
+                ),
+                {"g": DEN_LAL},
+            ).scalar()
+            == 10
+        )
+        assert connection.execute(
+            text("SELECT outcome, credits FROM closing_line_purchases WHERE market_category = 'ALL'")
+        ).one() == ("complete", 50)
