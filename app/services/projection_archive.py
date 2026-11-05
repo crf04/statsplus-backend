@@ -348,7 +348,8 @@ class PoolRead:
     started: Mapping[str, datetime]
     live: _ProjectionPoolRead | None
     closing_rows: tuple[Any, ...]
-    roster: bool = False
+    #: Read from the identity columns alone, so it derives only rosters.
+    narrow: bool = False
 
     def event(self, game_id: str) -> Mapping[str, Any] | None:
         return self.events.get(str(game_id))
@@ -356,16 +357,24 @@ class PoolRead:
     def pool(self, game_ids: Iterable[str] | None = None) -> PlayerPool | PoolRoster:
         """The pool of ``game_ids`` (every game read when omitted), each of which this read holds."""
 
+        return self._derive(game_ids, roster=self.narrow)
+
+    def roster(self, game_ids: Iterable[str] | None = None) -> PoolRoster:
+        """``PoolRoster.of(pool(game_ids))``, without building a player's lines and prices."""
+
+        return self._derive(game_ids, roster=True)
+
+    def _derive(self, game_ids: Iterable[str] | None, *, roster: bool) -> PlayerPool | PoolRoster:
         requested = (
             self.game_ids if game_ids is None else tuple(sorted({str(game_id) for game_id in game_ids}))
         )
         if not set(requested) <= set(self.game_ids):
             raise ValueError("a pool read derives only the games it read")
         if not requested:
-            return (PoolRoster if self.roster else PlayerPool)(
+            return (PoolRoster if roster else PlayerPool)(
                 (), {}, PlayerPool.missing_projection_freshness(), {}
             )
-        return self.reader._pool_from(self, requested)
+        return self.reader._pool_from(self, requested, roster=roster)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3455,11 +3464,17 @@ class LatestProjectionPlayerPoolReader:
             closing_rows=(
                 self._read_closing_rows(season, tuple(started), connection, roster=roster) if started else ()
             ),
-            roster=roster,
+            narrow=roster,
         )
 
-    def _pool_from(self, read: PoolRead, requested_games: tuple[str, ...]) -> PlayerPool | PoolRoster:
-        """``requested_games``' pool from ``read``, which holds every one of them."""
+    def _pool_from(
+        self, read: PoolRead, requested_games: tuple[str, ...], *, roster: bool
+    ) -> PlayerPool | PoolRoster:
+        """``requested_games``' pool from ``read``, which holds every one of them.
+
+        ``roster`` derives a ``PoolRoster``, from a full read too: every row
+        carries the identity columns a roster is built from.
+        """
 
         started_games = tuple(game for game in read.started if game in requested_games)
         live_games = tuple(game for game in requested_games if game not in read.started)
@@ -3470,7 +3485,7 @@ class LatestProjectionPlayerPoolReader:
                 kept = frozenset(live_games)
                 rows = tuple(row for row in rows if str(row["canonical_game_id"]) in kept)
             live_pool = self._live_pool(
-                _ProjectionPoolRead(rows=rows, polls=read.live.polls), live_games, roster=read.roster
+                _ProjectionPoolRead(rows=rows, polls=read.live.polls), live_games, roster=roster
             )
         if not started_games:
             return live_pool
@@ -3478,10 +3493,10 @@ class LatestProjectionPlayerPoolReader:
         if len(started_games) < len(read.started):
             kept = frozenset(started_games)
             rows = tuple(row for row in rows if str(row["canonical_game_id"]) in kept)
-        closing_pool = self._closing_pool(rows, started_games, roster=read.roster)
+        closing_pool = self._closing_pool(rows, started_games, roster=roster)
         if live_pool is None:
             return closing_pool
-        if read.roster:
+        if roster:
             return self._combine_rosters(live_pool, closing_pool)
         return self._combine_pools(live_pool, closing_pool)
 

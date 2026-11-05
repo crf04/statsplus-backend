@@ -4127,7 +4127,9 @@ def test_a_pool_read_serves_each_game_the_pool_its_own_read_serves_without_readi
     assert [[player.canonical_player_id for player in pool.players] for pool in derived] == (
         [[], [201939], [201939]] if states == "two-live" else [[2544], [201939], [2544, 201939]]
     )
-    assert PoolRoster.of(read.pool()) == slate.reader.get_pool_roster(season=SEASON, game_ids=games)
+    assert read.roster() == PoolRoster.of(read.pool())
+    assert read.roster() == slate.reader.get_pool_roster(season=SEASON, game_ids=games)
+    assert read.roster((GAME_ID,)) == PoolRoster.of(derived[0])
     assert read.event(slate.live_game_id)["nba_game_id"] == slate.live_game_id
     with pytest.raises(ValueError):
         read.pool(("0022500999",))

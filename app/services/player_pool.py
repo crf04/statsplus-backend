@@ -218,6 +218,8 @@ class PoolRead(Protocol):
 
     def pool(self, game_ids: Iterable[str] | None = None) -> PlayerPool: ...
 
+    def roster(self, game_ids: Iterable[str] | None = None) -> PoolRoster: ...
+
 
 class PoolReadReader(Protocol):
     def read_games(self, *, season: str, game_ids: Iterable[str]) -> PoolRead: ...
@@ -237,7 +239,7 @@ class KeptPoolRead:
 
     def get_pool_roster(self, *, season: str, game_ids: Iterable[str]) -> PoolRoster:
         self.read = self._reader.read_games(season=season, game_ids=game_ids)
-        return PoolRoster.of(self.read.pool())
+        return self.read.roster()
 
 
 class SingleGamePlayerPoolReader(Protocol):

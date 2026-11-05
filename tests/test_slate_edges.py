@@ -1126,7 +1126,7 @@ def test_the_edges_and_their_matchups_write_what_the_previous_release_wrote():
 
 
 def test_the_slate_and_every_games_matchup_count_from_one_pool_read():
-    from app.services.player_pool import PlayerPool
+    from app.services.player_pool import PlayerPool, PoolRoster
 
     games, payloads = _two_games()
     pools = {
@@ -1142,7 +1142,10 @@ def test_the_slate_and_every_games_matchup_count_from_one_pool_read():
             return None
 
         def pool(self, game_ids=None):
-            return pools[next(iter(game_ids))] if game_ids else PlayerPool((), {}, {"status": "slate"})
+            return pools[next(iter(game_ids))]
+
+        def roster(self, game_ids=None):
+            return PoolRoster((), {}, {"status": "slate"})
 
     class Reader:
         reads: ClassVar = []
