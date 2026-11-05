@@ -1319,7 +1319,7 @@ filters) and `"omitted": {"book_only_unnamed": 1}`, and gives each game its
   "team": "BOS",
   "injury_status": "Questionable",
   "lines": {"dabble": 27.5, "prizepicks": 28.5},
-  "line_prices": {"dabble": {"over": -122, "under": -104}},
+  "line_prices": {"dabble": {"over": -122, "under": -122}},
   "book_lines": {
     "as_of": "2026-01-15T23:57:00Z",
     "closing": false,
@@ -1782,11 +1782,12 @@ always present: the Over and Under price of the pick behind each `lines` entry,
 
 - Provider keys are limited to `underdog`, `dabble`, `novig`, `polymarket` and
   `kalshi`, the sources whose price is on one pick. PrizePicks states a slip
-  payout (entry scope), so it never appears. Dabble's price is its own per-side
-  decimal price (crf04/statsplus#282), converted like any other; a side Dabble
-  states no price for is `null`. A near-even Dabble line, both sides priced at
-  1.88 or more, pays the flat default instead: 1.817 (a 3-pick 6x entry, −122)
-  on both sides (crf04/statsplus#317).
+  payout (entry scope), so it never appears. Dabble is priced only on a
+  near-even line, both sides priced at 1.88 or more in its feed: the flat
+  default, 1.817 (a 3-pick 6x entry, −122) on both sides (crf04/statsplus#317).
+  Dabble's feed decimals are fair odds, not the per-pick badge its app pays, so
+  every other Dabble line states only its 2-pick 3x entry, as PrizePicks does,
+  and appears in `lines` with no `line_prices` entry (crf04/statsplus#435).
 - A `line_prices[provider][market]` exists only when `lines[provider][market]`
   exists, and prices that line. A market `lines` omits (for example one posted
   at two distinct lines) is omitted here too, as is one the provider stated with
