@@ -141,13 +141,19 @@ def _build(database_url: str, relay: _Relay):
 
     url = make_url(database_url).set(host="127.0.0.1", port=relay.port)
 
-    @event.listens_for(Engine, "connect")
-    def _read_only(dbapi_connection, _record):
-        if dbapi_connection.__class__.__module__.startswith("psycopg2"):
-            cursor = dbapi_connection.cursor()
-            cursor.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
-            cursor.close()
-            dbapi_connection.commit()
+    from sqlalchemy.dialects.postgresql.psycopg2 import PGDialect_psycopg2
+
+    @event.listens_for(Engine, "do_connect")
+    def _read_only(_dialect, _record, _cargs, cparams):
+        # A startup option, not a SET: ``SET ... TO DEFAULT`` returns to it.
+        cparams["options"] = f"{cparams.get('options', '')} -c default_transaction_read_only=on".strip()
+
+    # SQLAlchemy ends a ``postgresql_readonly`` read by setting psycopg2's
+    # ``readonly`` to False, which begins every later transaction READ WRITE.
+    # None begins them plainly, so the read-only default above holds.
+    PGDialect_psycopg2.set_readonly = lambda _self, dbapi_connection, value: setattr(
+        dbapi_connection, "readonly", True if value else None
+    )
 
     settings = load_settings(
         {
