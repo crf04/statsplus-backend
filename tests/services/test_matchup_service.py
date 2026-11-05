@@ -3698,23 +3698,3 @@ def test_a_held_event_outside_the_regular_season_is_still_refused():
             injuries=None,
             pool_read=_HeldPool(SEASON, [preseason], service.player_pool.pool),
         )
-
-
-def test_a_compose_naming_score_cells_scores_only_those_as_the_full_compose_does():
-    full = _service().get_matchup_from_snapshot(game_id=GAME_ID, publication_snapshot=None, injuries=None)
-
-    narrow = _service().get_matchup_from_snapshot(
-        game_id=GAME_ID,
-        publication_snapshot=None,
-        injuries=None,
-        score_cells=frozenset({("PTS", "season")}),
-    )
-
-    assert [player["scores"] for player in narrow["players"]] == [
-        {"PTS": {"season": player["scores"]["PTS"]["season"]}} for player in full["players"]
-    ]
-    assert full["players"][0]["scores"]["PTS"]["season"]["blend"] is not None
-    assert len(full["players"][0]["scores"]) > 1
-    assert json.dumps(
-        {**narrow, "players": [{**row, "scores": None} for row in narrow["players"]]}, sort_keys=True
-    ) == json.dumps({**full, "players": [{**row, "scores": None} for row in full["players"]]}, sort_keys=True)

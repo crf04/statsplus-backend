@@ -783,7 +783,6 @@ class MatchupService:
         read_scope: tuple[Connection, Session] | None = None,
         stats_freshness: Mapping[str, Any] | None = None,
         pool_read: PoolRead | None = None,
-        score_cells: frozenset[tuple[str, str]] | None = None,
     ) -> dict[str, Any]:
         """Compose one Matchup over a generation the caller already holds.
 
@@ -804,9 +803,7 @@ class MatchupService:
         for this request (``stats_freshness_block``); omitted, it is read here.
         ``pool_read`` is the request's read of its Slate's pool, from this
         service's own pool reader: a game it holds takes its event and pool
-        from it instead of reading them again.  ``score_cells`` names the
-        ``(market, window)`` scores a caller reads; every other score is left
-        out, so the document is no longer the Matchup the route serves.
+        from it instead of reading them again.
         """
 
         scope = nullcontext(read_scope) if read_scope is not None else self.open_read_scope()
@@ -822,7 +819,6 @@ class MatchupService:
                 with_book_lines=False,
                 stats_freshness=stats_freshness,
                 pool_read=pool_read,
-                score_cells=score_cells,
             )
 
     def get_unscheduled_matchup(
@@ -1105,7 +1101,6 @@ class MatchupService:
         with_book_lines: bool = True,
         stats_freshness: Mapping[str, Any] | None = None,
         pool_read: PoolRead | None = None,
-        score_cells: frozenset[tuple[str, str]] | None = None,
     ) -> dict[str, Any]:
         # Evidence (logs, Diets, windows) is the published season's; the
         # game's own schedule facts (event, pool, injuries) are its season's,
@@ -1304,7 +1299,6 @@ class MatchupService:
                     {} if historical or not with_book_lines else self._book_lines(game_id, connection)
                 ),
                 historical=historical,
-                score_cells=score_cells,
             ),
             "injuries": dict(injury_result.block),
             "freshness": {
@@ -1964,7 +1958,6 @@ class MatchupService:
         book_lines: Mapping[int, Mapping[str, Any]] | None = None,
         *,
         historical: bool = False,
-        score_cells: frozenset[tuple[str, str]] | None = None,
     ) -> list[dict[str, Any]]:
         """Compose every player row, scored against ``opponent_of(player)``.
 
@@ -2048,7 +2041,6 @@ class MatchupService:
                 windows,
                 metric_indexes,
                 availability,
-                score_cells,
             )
             season_rate = None if historical or summary is None else summary.season_rate
             line_markets = [market for market in player.market_categories if market in self._line_statistics]
@@ -2140,17 +2132,9 @@ class MatchupService:
         windows: Mapping[str, TeamMatchupWindow | None],
         metric_indexes: Mapping[str, _WindowMetricIndex | None],
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
-        cells: frozenset[tuple[str, str]] | None = None,
     ) -> dict[str, Any]:
-        """Every posted market's score in every window; only ``cells`` when named."""
-
         memo: dict[tuple[str, str], dict[str, Any]] = {}
         withhold = player.source == GAME_LOG_SOURCE
-        markets = (
-            player.market_categories
-            if cells is None
-            else [market for market in player.market_categories if any(market == cell[0] for cell in cells)]
-        )
         return {
             market: {
                 window_name: self._presented_window(
@@ -2166,10 +2150,9 @@ class MatchupService:
                     ),
                     withhold,
                 )
-                for window_name in windows
-                if cells is None or (market, window_name) in cells
+                for window_name, window in windows.items()
             }
-            for market in markets
+            for market in player.market_categories
         }
 
     @staticmethod
