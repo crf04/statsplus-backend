@@ -238,7 +238,9 @@ class Catalog(NoNeighbourEvents):
 def real_slate(dependencies, monkeypatch):
     monkeypatch.setattr(
         "app.services.slate_service.neighbouring_game_dates",
-        lambda settings, catalog, date: (PREVIOUS, None) if date.isoformat() == TODAY else (None, TODAY),
+        lambda settings, catalog, date, counts=None: (PREVIOUS, None)
+        if date.isoformat() == TODAY
+        else (None, TODAY),
     )
     dependencies.slate_service = SlateService(
         Catalog(),
@@ -254,7 +256,7 @@ def opening_week(real_slate, monkeypatch):
 
     monkeypatch.setattr(
         "app.services.slate_service.neighbouring_game_dates",
-        lambda settings, catalog, date: (PREVIOUS, "2026-04-17")
+        lambda settings, catalog, date, counts=None: (PREVIOUS, "2026-04-17")
         if date.isoformat() == TODAY
         else (None, None),
     )

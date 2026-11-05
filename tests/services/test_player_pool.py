@@ -51,6 +51,7 @@ from app.services.event_resolver import (
 )
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_pool import (
+    FullPoolRosterReader,
     PlayerPool,
     PlayerPoolService,
     PoolPlayer,
@@ -1346,7 +1347,7 @@ def test_authenticated_slate_route_serves_real_governed_player_and_event_joins(c
             nba=NBASeasonSettings(current_season="2025-26"),
         ),
         clock=lambda: NOW,
-        player_pool=PlayerPoolService(RecordedBoardService(board), CATALOG),
+        player_pool=FullPoolRosterReader(PlayerPoolService(RecordedBoardService(board), CATALOG)),
         injuries=StoredInjuries(),
     )
 

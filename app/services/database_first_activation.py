@@ -28,7 +28,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, aliased, defer, sessionmaker
 
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
-from app.domain.publication_integrity import publication_payload_matches_checksum
+from app.domain.publication_integrity import (
+    publication_payload_checksum,
+    publication_payload_matches_checksum,
+)
 from app.domain.rebound_types import REBOUND_TYPE_WIRE_NAMES, REBOUND_TYPES_BASE
 from app.domain.slate_time import slate_date_for_instant
 from app.domain.team_matchup_taxonomy import (
@@ -993,6 +996,7 @@ class _CaptureShape(NamedTuple):
     projection_only_keys: frozenset[str]
     decoded_only_keys: frozenset[str]
     label_only_keys: frozenset[str]
+    checksum_only_keys: frozenset[str]
     require_active: bool
 
 
@@ -1289,6 +1293,7 @@ class DatabaseFirstPublicationReader:
         require_active: bool = True,
         projection_only_keys: frozenset[str] = frozenset(),
         decoded_only_keys: frozenset[str] = frozenset(),
+        checksum_only_keys: frozenset[str] = frozenset(),
         session: Session | None = None,
     ) -> PublicationReadSnapshot:
         """Capture all requested pointers, payloads, and decoded facts once.
@@ -1301,6 +1306,11 @@ class DatabaseFirstPublicationReader:
         rendered payload at all: on a decode-cache hit the payload column is
         never selected, and the read serves the cached decoded facts alone.
         Every other call still loads and returns the payload.
+
+        ``checksum_only_keys`` names the streams a caller reads for their
+        labels alone: every check a full read runs, the payload's checksum
+        included, except its decode.  The database hashes the stored payload,
+        so no payload is read.
         """
 
         return self._snapshot(
@@ -1309,6 +1319,7 @@ class DatabaseFirstPublicationReader:
             require_active=require_active,
             projection_only_keys=projection_only_keys,
             decoded_only_keys=decoded_only_keys,
+            checksum_only_keys=checksum_only_keys,
             session=session,
         )
 
@@ -1462,6 +1473,7 @@ class DatabaseFirstPublicationReader:
         projection_only_keys: frozenset[str] = frozenset(),
         decoded_only_keys: frozenset[str] = frozenset(),
         label_only_keys: frozenset[str] = frozenset(),
+        checksum_only_keys: frozenset[str] = frozenset(),
         session: Session | None = None,
     ) -> PublicationReadSnapshot:
         """Capture a past season from its retained Publications (#104).
@@ -1486,11 +1498,15 @@ class DatabaseFirstPublicationReader:
         projection_keys = frozenset(projection_only_keys).intersection(keys)
         decoded_keys = frozenset(decoded_only_keys).intersection(keys)
         label_keys = frozenset(label_only_keys).intersection(keys)
+        checksum_keys = frozenset(checksum_only_keys).intersection(keys)
         with ExitStack() as stack:
             if session is None:
                 session = stack.enter_context(self._session())
                 stack.enter_context(session.begin())
             rows = self._retained_rows(session, keys, season, projection_keys=projection_keys)
+            matching = self._checksums_matching(
+                session, (rows[key][2] for key in checksum_keys if key in rows)
+            )
             now = _utc(self.clock())
             reads = {}
             for key in keys:
@@ -1514,7 +1530,8 @@ class DatabaseFirstPublicationReader:
                     projection_ready=projection_ready,
                     hydrate_payload=key not in projection_keys,
                     decoded_only=key in decoded_keys,
-                    labels_only=key in label_keys,
+                    labels_only=key in label_keys or key in checksum_keys,
+                    matching_checksums=matching if key in checksum_keys else None,
                     season=season,
                     require_active=True,
                     now=now,
@@ -1603,12 +1620,15 @@ class DatabaseFirstPublicationReader:
         projection_only_keys: frozenset[str] = frozenset(),
         decoded_only_keys: frozenset[str] = frozenset(),
         label_only_keys: frozenset[str] = frozenset(),
+        checksum_only_keys: frozenset[str] = frozenset(),
         session: Session | None = None,
     ) -> PublicationReadSnapshot:
         """Capture one immutable generation through its selected read shape.
 
         ``label_only_keys`` names streams read for their labels alone: every
         check up to the payload's runs, and no payload is selected.
+        ``checksum_only_keys`` adds the payload's checksum, which the
+        database computes (``snapshot``).
         """
 
         if isinstance(season, ReadSeason):
@@ -1621,6 +1641,7 @@ class DatabaseFirstPublicationReader:
                     projection_only_keys=projection_only_keys,
                     decoded_only_keys=decoded_only_keys,
                     label_only_keys=label_only_keys,
+                    checksum_only_keys=checksum_only_keys,
                     session=session,
                 )
         published = season if isinstance(season, ReadSeason) else None
@@ -1637,7 +1658,8 @@ class DatabaseFirstPublicationReader:
         projection_keys = frozenset(projection_only_keys).intersection(keys)
         decoded_keys = frozenset(decoded_only_keys).intersection(keys)
         label_keys = frozenset(label_only_keys).intersection(keys)
-        narrowed_keys = projection_keys | decoded_keys | label_keys
+        checksum_keys = frozenset(checksum_only_keys).intersection(keys)
+        narrowed_keys = projection_keys | decoded_keys | label_keys | checksum_keys
         with ExitStack() as stack:
             if session is None:
                 session = stack.enter_context(self._session())
@@ -1759,6 +1781,9 @@ class DatabaseFirstPublicationReader:
                     )
                     for row in session.execute(statement).all()
                 }
+            matching = self._checksums_matching(
+                session, (snapshot[key].publication for key in checksum_keys if key in snapshot)
+            )
             now = _utc(self.clock())
             missing = _SnapshotRow(None, None, None)
             if published is not None:
@@ -1771,7 +1796,8 @@ class DatabaseFirstPublicationReader:
                     projection_ready=("player_game_logs" in projection_keys and row.projection_ready),
                     hydrate_payload="player_game_logs" not in projection_keys,
                     decoded_only="player_game_logs" in decoded_keys,
-                    labels_only="player_game_logs" in label_keys,
+                    labels_only="player_game_logs" in label_keys | checksum_keys,
+                    matching_checksums=matching if "player_game_logs" in checksum_keys else None,
                     payload_text=row.payload_text,
                     season=None,
                     require_active=require_active,
@@ -1806,7 +1832,8 @@ class DatabaseFirstPublicationReader:
                         ),
                         "hydrate_payload": key not in projection_keys,
                         "decoded_only": key in decoded_keys,
-                        "labels_only": key in label_keys,
+                        "labels_only": key in label_keys or key in checksum_keys,
+                        "matching_checksums": matching if key in checksum_keys else None,
                         "payload_text": snapshot.get(key, missing).payload_text,
                         "season": season,
                         "require_active": require_active,
@@ -1840,6 +1867,7 @@ class DatabaseFirstPublicationReader:
         projection_only_keys: frozenset[str],
         decoded_only_keys: frozenset[str],
         label_only_keys: frozenset[str],
+        checksum_only_keys: frozenset[str],
         session: Session | None,
     ) -> PublicationReadSnapshot:
         """Capture ``season`` by its relation to the Published Season.
@@ -1856,6 +1884,7 @@ class DatabaseFirstPublicationReader:
             "projection_only_keys": projection_only_keys,
             "decoded_only_keys": decoded_only_keys,
             "label_only_keys": label_only_keys,
+            "checksum_only_keys": checksum_only_keys,
         }
         with ExitStack() as stack:
             if session is None:
@@ -1936,6 +1965,7 @@ class DatabaseFirstPublicationReader:
         decoded_only_keys: frozenset[str],
         label_only_keys: frozenset[str],
         session: Session,
+        checksum_only_keys: frozenset[str] = frozenset(),
         as_of: datetime | None = None,
     ) -> PublicationReadSnapshot:
         """Read the next season as if its Season Cutover had just run, whatever its sample.
@@ -1980,6 +2010,14 @@ class DatabaseFirstPublicationReader:
                 )
             )
         )
+        checksum_keys = frozenset(checksum_only_keys).intersection(keys)
+        matching = self._checksums_matching(
+            session,
+            (
+                serving[key] if key in serving else live.get(key, (None, None, None))[2]
+                for key in checksum_keys
+            ),
+        )
         now = _utc(self.clock())
         reads = {
             key: self._unpublished_read(
@@ -1989,7 +2027,8 @@ class DatabaseFirstPublicationReader:
                 projection_ready=key == _PLAYER_LOGS and logs_projected,
                 hydrate_payload=key not in projection_keys,
                 decoded_only=key in decoded_only_keys,
-                labels_only=key in label_only_keys,
+                labels_only=key in label_only_keys or key in checksum_keys,
+                matching_checksums=matching if key in checksum_keys else None,
                 season=season,
                 require_active=require_active,
                 now=now,
@@ -2010,6 +2049,7 @@ class DatabaseFirstPublicationReader:
                 frozenset(projection_keys),
                 frozenset(decoded_only_keys),
                 frozenset(label_only_keys),
+                frozenset(checksum_only_keys),
                 require_active,
             ),
             as_of=as_of,
@@ -2053,6 +2093,7 @@ class DatabaseFirstPublicationReader:
                 projection_only_keys=latest.shape.projection_only_keys,
                 decoded_only_keys=latest.shape.decoded_only_keys,
                 label_only_keys=latest.shape.label_only_keys,
+                checksum_only_keys=latest.shape.checksum_only_keys,
                 session=session,
                 as_of=_utc(tip),
             )
@@ -2335,6 +2376,7 @@ class DatabaseFirstPublicationReader:
         unpublished: bool = False,
         candidate: bool = False,
         labels_only: bool = False,
+        matching_checksums: frozenset[str] | None = None,
     ) -> PublicationRead:
         """Label one stream's captured version, serving it only when sound.
 
@@ -2347,7 +2389,9 @@ class DatabaseFirstPublicationReader:
         ``unpublished`` widens that to Last 15 for an Unpublished Season read.
         ``candidate`` reads a held candidate an Unpublished Season read moves,
         labelled ``candidate`` after every other check below.  ``labels_only``
-        returns the served labels without reading the payload.
+        returns the served labels without reading the payload, refusing one
+        whose ID is not among ``matching_checksums`` when the caller had the
+        database verify them (``_checksums_matching``).
         """
         if stream is None:
             if stream_key == "synergy:l15":
@@ -2449,6 +2493,14 @@ class DatabaseFirstPublicationReader:
                     event_catalog_publication_id=(publication.event_catalog_publication_id),
                     event_catalog_checksum=publication.event_catalog_checksum,
                 )
+        if (
+            labels_only
+            and matching_checksums is not None
+            and publication.publication_id not in matching_checksums
+        ):
+            return self._checksum_mismatch(
+                stream_key, pointer, publication, freshness=freshness, age_seconds=age
+            )
         if labels_only:
             return PublicationRead(
                 stream_key=stream_key,
@@ -2560,19 +2612,8 @@ class DatabaseFirstPublicationReader:
             payload_text,
             publication.checksum,
         ):
-            return self._missing(
-                stream_key,
-                "unavailable",
-                reason="publication_checksum_mismatch",
-                fence=pointer.fence,
-                publication_id=publication.publication_id,
-                season=publication.season,
-                cutoff=_utc(publication.cutoff).isoformat(),
-                version=int(publication.version),
-                retrieved_at=retrieved_at,
-                checksum=publication.checksum,
-                freshness=freshness,
-                age_seconds=age,
+            return self._checksum_mismatch(
+                stream_key, pointer, publication, freshness=freshness, age_seconds=age
             )
         try:
             payload = json.loads(payload_text, object_pairs_hook=_reject_duplicate_json_keys)
@@ -2654,6 +2695,58 @@ class DatabaseFirstPublicationReader:
             manifest_id=publication.manifest_id,
             event_catalog_publication_id=(publication.event_catalog_publication_id),
             event_catalog_checksum=publication.event_catalog_checksum,
+        )
+
+    def _checksum_mismatch(
+        self,
+        stream_key: str,
+        pointer: Any,
+        publication: PublicationVersion,
+        *,
+        freshness: str,
+        age_seconds: int,
+    ) -> PublicationRead:
+        return self._missing(
+            stream_key,
+            "unavailable",
+            reason="publication_checksum_mismatch",
+            fence=pointer.fence,
+            publication_id=publication.publication_id,
+            season=publication.season,
+            cutoff=_utc(publication.cutoff).isoformat(),
+            version=int(publication.version),
+            retrieved_at=_utc(publication.created_at),
+            checksum=publication.checksum,
+            freshness=freshness,
+            age_seconds=age_seconds,
+        )
+
+    def _checksums_matching(self, session: Session, publications: Iterable[Any]) -> frozenset[str]:
+        """The IDs among ``publications`` whose stored payload hashes to its checksum.
+
+        The database hashes each payload where it is stored, so a caller that
+        reads labels refuses a corrupt Publication as a full read does
+        without one payload crossing the wire.
+        """
+
+        ids = sorted({publication.publication_id for publication in publications if publication is not None})
+        if not ids:
+            return frozenset()
+        payload = PublicationVersion.payload
+        if self.engine.dialect.name == "postgresql":
+            digest = func.encode(func.sha256(func.convert_to(payload, "UTF8")), "hex")
+        else:
+            # SQLite has no SHA-256; this connection hashes with the read path's own function.
+            session.connection().connection.driver_connection.create_function(
+                "publication_payload_checksum", 1, publication_payload_checksum, deterministic=True
+            )
+            digest = func.publication_payload_checksum(payload)
+        return frozenset(
+            session.scalars(
+                select(PublicationVersion.publication_id).where(
+                    PublicationVersion.publication_id.in_(ids), digest == PublicationVersion.checksum
+                )
+            )
         )
 
     def _diet_decoded(self, cache_key: tuple) -> tuple[Any, ...] | None:
