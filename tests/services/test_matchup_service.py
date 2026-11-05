@@ -3637,3 +3637,64 @@ def test_a_historical_row_serves_no_games_and_no_averages():
         assert player["season_scoring"] == 21.0
         assert player["last_five_games"] == []
         assert player["season_averages"] == {}
+
+
+class _HeldPool:
+    """A request's one pool read, holding ``events`` and serving ``pool`` for each."""
+
+    def __init__(self, season, events, pool):
+        self.season = season
+        self.game_ids = tuple(event["nba_game_id"] for event in events)
+        self._events = {event["nba_game_id"]: event for event in events}
+        self._pool = pool
+
+    def event(self, game_id):
+        return self._events.get(game_id)
+
+    def pool(self, game_ids=None):
+        return self._pool
+
+
+def test_a_game_the_requests_pool_read_holds_composes_from_it_without_reading_again():
+    alone = _service().get_matchup_from_snapshot(game_id=GAME_ID, publication_snapshot=None, injuries=None)
+    service = _service()
+
+    held = service.get_matchup_from_snapshot(
+        game_id=GAME_ID,
+        publication_snapshot=None,
+        injuries=None,
+        pool_read=_HeldPool(SEASON, [_event()], service.player_pool.pool),
+    )
+
+    assert json.dumps(held, sort_keys=True) == json.dumps(alone, sort_keys=True)
+    assert service.event_catalog.get_event_calls == 0
+    assert service.player_pool.calls == []
+
+
+@pytest.mark.parametrize("season, game_id", [("2024-25", GAME_ID), (SEASON, "0022500999")])
+def test_a_game_the_pool_read_does_not_hold_reads_its_own_event_and_pool(season, game_id):
+    service = _service()
+    empty = PlayerPool((), {}, PlayerPool.unavailable_freshness())
+
+    service.get_matchup_from_snapshot(
+        game_id=GAME_ID,
+        publication_snapshot=None,
+        injuries=None,
+        pool_read=_HeldPool(season, [{**_event(), "nba_game_id": game_id}], empty),
+    )
+
+    assert service.event_catalog.get_event_calls == 1
+    assert service.player_pool.calls == [(SEASON, GAME_ID)]
+
+
+def test_a_held_event_outside_the_regular_season_is_still_refused():
+    preseason = {**_event(), "nba_game_id": "0012500585", "classification": "Preseason"}
+    service = _service(events=RecordedEvents(events=[preseason]))
+
+    with pytest.raises(ResourceNotFoundError, match="outside the Regular Season"):
+        service.get_matchup_from_snapshot(
+            game_id="0012500585",
+            publication_snapshot=None,
+            injuries=None,
+            pool_read=_HeldPool(SEASON, [preseason], service.player_pool.pool),
+        )

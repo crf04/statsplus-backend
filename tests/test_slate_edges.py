@@ -1123,3 +1123,52 @@ def test_the_edges_and_their_matchups_write_what_the_previous_release_wrote():
             "85542ea8a3695da15ec4c69b0a37cc79b2a6b26a62c64788446e568f105c1552"
         ),
     }
+
+
+def test_the_slate_and_every_games_matchup_count_from_one_pool_read():
+    from app.services.player_pool import PlayerPool
+
+    games, payloads = _two_games()
+    pools = {
+        game_id: PlayerPool((), {}, {"status": game_id, "retrieved_at": None, "providers": {}})
+        for game_id in ("G1", "G2")
+    }
+
+    class Read:
+        season = "2025-26"
+        game_ids = ("G1", "G2")
+
+        def event(self, game_id):
+            return None
+
+        def pool(self, game_ids=None):
+            return pools[next(iter(game_ids))] if game_ids else PlayerPool((), {}, {"status": "slate"})
+
+    class Reader:
+        reads: ClassVar = []
+
+        def read_games(self, *, season, game_ids):
+            self.reads.append((season, tuple(game_ids)))
+            return Read()
+
+    class Slate(FakeSlate):
+        def get_slate(self, requested_date=None, *, neighbours=True, player_pool=None):
+            slate = super().get_slate(requested_date)
+            slate["roster"] = player_pool.get_pool_roster(season="2025-26", game_ids=("G1", "G2"))
+            return slate
+
+    class Composer(SnapshotComposer):
+        seen: ClassVar = []
+
+        def get_matchup_from_snapshot(self, *, game_id, pool_read=None, **kwargs):
+            self.seen.append(pool_read.pool((game_id,)).freshness["status"])
+            return super().get_matchup_from_snapshot(game_id=game_id, **kwargs)
+
+    service = _cached_service(Composer(payloads), None, games)
+    service.slates = Slate(games)
+    service.player_pool = Reader()
+
+    service.get_edges("2026-04-10")
+
+    assert Reader.reads == [("2025-26", ("G1", "G2"))]
+    assert Composer.seen == ["G1", "G2"]

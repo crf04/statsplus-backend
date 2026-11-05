@@ -208,6 +208,38 @@ class FullPoolRosterReader:
         return PoolRoster.of(self.pool.get_pool(season=season, game_ids=game_ids))
 
 
+class PoolRead(Protocol):
+    """Several games' pool evidence from one read; any of their pools derives from it."""
+
+    season: str
+    game_ids: tuple[str, ...]
+
+    def event(self, game_id: str) -> Mapping[str, Any] | None: ...
+
+    def pool(self, game_ids: Iterable[str] | None = None) -> PlayerPool: ...
+
+
+class PoolReadReader(Protocol):
+    def read_games(self, *, season: str, game_ids: Iterable[str]) -> PoolRead: ...
+
+
+class KeptPoolRead:
+    """A ``PoolRosterReader`` that keeps the full read it counted from.
+
+    A request that composes the Slate's games hands this to the Slate, then
+    each game its slice of ``read``, so the pool is read once, not once more
+    per game.
+    """
+
+    def __init__(self, reader: PoolReadReader) -> None:
+        self._reader = reader
+        self.read: PoolRead | None = None
+
+    def get_pool_roster(self, *, season: str, game_ids: Iterable[str]) -> PoolRoster:
+        self.read = self._reader.read_games(season=season, game_ids=game_ids)
+        return PoolRoster.of(self.read.pool())
+
+
 class SingleGamePlayerPoolReader(Protocol):
     """Read one game's governed Player Pool without prescribing storage."""
 

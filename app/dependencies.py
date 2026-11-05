@@ -870,6 +870,7 @@ def build_dependencies(
         snapshot_reuse=snapshot_reuse,
         matchup_cache=matchup_cache,
         engine=engine,
+        player_pool=projection_player_pool_reader,
     )
     # The backtest reaches past the Matchup because its question is not about
     # one game: it composes the league-wide game-log rows against the
