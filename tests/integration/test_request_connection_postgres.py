@@ -139,7 +139,7 @@ def test_another_thread_never_reads_on_the_requests_connection(engine):
     assert len(set(backends)) == 2
 
 
-def test_a_lost_connection_is_replaced_for_the_next_read(engine, writer):
+def test_a_lost_connection_is_replaced_for_the_next_reads(engine, writer, checkouts):
     with request_connection(engine):
         with engine.connect() as connection:
             lost = connection.execute(text("SELECT pg_backend_pid()")).scalar_one()
@@ -147,8 +147,12 @@ def test_a_lost_connection_is_replaced_for_the_next_read(engine, writer):
                 other.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": lost})
             with pytest.raises(DBAPIError):
                 connection.execute(text("SELECT 1"))
-        with engine.connect() as connection:
-            replacement = connection.execute(text("SELECT pg_backend_pid()")).scalar_one()
+        replacements = []
+        for _ in range(2):
+            with engine.connect() as connection:
+                replacements.append(connection.execute(text("SELECT pg_backend_pid()")).scalar_one())
 
-    assert replacement != lost
+    assert lost not in replacements
+    assert len(set(replacements)) == 1
+    assert len(checkouts) == 2
     assert engine.pool.checkedout() == 0

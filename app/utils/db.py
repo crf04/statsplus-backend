@@ -8,7 +8,6 @@ without code changes elsewhere.
 from __future__ import annotations
 
 import sqlite3
-import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -143,20 +142,17 @@ def lift_statement_timeout_for_blueprint(blueprint: Any) -> None:
 
 
 class _Lease:
-    """One pooled connection lent, one read at a time, to a request's thread."""
+    """One pooled connection lent, one read at a time, to a request's reads."""
 
     def __init__(self, pool: RequestPool) -> None:
         self.pool = pool
-        self.thread = threading.get_ident()
         self.fairy: Any | None = None
         self.lent = False
-        self.nested = 0
 
     def borrow(self) -> Any:
         if self.lent:
             # A read opened inside another read's transaction would join it,
             # so it checks out its own connection, as it did before the lease.
-            self.nested += 1
             return QueuePool.connect(self.pool)
         if self.fairy is None:
             self.fairy = QueuePool.connect(self.pool)
@@ -216,7 +212,7 @@ class RequestPool(QueuePool):
 
     def connect(self) -> Any:
         lease = _request_lease.get()
-        if lease is None or lease.pool is not self or lease.thread != threading.get_ident():
+        if lease is None or lease.pool is not self:
             return super().connect()
         return lease.borrow()
 
