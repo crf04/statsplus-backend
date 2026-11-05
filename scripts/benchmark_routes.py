@@ -382,7 +382,10 @@ def main() -> int:
     app, dependencies = _build(database_url, relay)
     if os.environ.get("BENCH_PATCH_FILE"):
         # A prototype patch applied in process only, to measure a candidate fix.
-        exec(compile(Path(os.environ["BENCH_PATCH_FILE"]).read_text(), os.environ["BENCH_PATCH_FILE"], "exec"), {})
+        exec(
+            compile(Path(os.environ["BENCH_PATCH_FILE"]).read_text(), os.environ["BENCH_PATCH_FILE"], "exec"),
+            {},
+        )
     from flask import g
 
     import app as app_package
