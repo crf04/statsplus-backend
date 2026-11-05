@@ -15,7 +15,7 @@ from typing import ClassVar
 from unittest.mock import Mock
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event, text
 
 import tests.services.test_matchup_service as matchup_doubles
 from app.config.settings import NBASeasonSettings, RuntimeSettings
@@ -45,6 +45,7 @@ from app.services.slate_service import SlateService
 from app.services.stats_freshness_repository import StatsFreshness
 from app.services.target_resolution import TargetResolutionService
 from app.services.user_service import UserService
+from app.utils.db import RequestPool
 from tests.support.slate_catalog import NoNeighbourEvents
 
 OWNER = "owner-uid"
@@ -434,11 +435,10 @@ def _matchup(
 # --- service ---------------------------------------------------------------
 
 
-@pytest.fixture
-def target_engine(tmp_path):
+def _owner_database(path, **pool):
     """A migrated application database holding the resolving account."""
 
-    engine = create_engine(f"sqlite:///{tmp_path / 'resolve.sqlite3'}")
+    engine = create_engine(f"sqlite:///{path}", **pool)
     run_migrations(engine)
     with engine.begin() as connection:
         connection.execute(
@@ -453,6 +453,12 @@ def target_engine(tmp_path):
                 "is_active": True,
             },
         )
+    return engine
+
+
+@pytest.fixture
+def target_engine(tmp_path):
+    engine = _owner_database(tmp_path / "resolve.sqlite3")
     yield engine
     engine.dispose()
 
@@ -2022,6 +2028,80 @@ def test_resolve_captures_exactly_one_publication_snapshot_across_games(targets)
     # injected stored-only injury reader -- never a second capture.
     assert {call[1].generation for call in composer.calls} == {"generation-1"}
     assert {call[2] for call in composer.calls} == {service.injuries}
+
+
+class _SelectedPublicationReader(_AdvancingPublicationReader):
+    selected_season = matchup_doubles.SEASON
+
+
+class _ScopedSnapshotMatchups(_RecordedSnapshotMatchups):
+    """Composes on the selected season's scope, reading through its connection."""
+
+    def get_matchup_from_snapshot(self, *, read_scope, season, **kwargs):
+        read_scope[0].execute(text("SELECT 1"))
+        return super().get_matchup_from_snapshot(**kwargs)
+
+
+class _EngineCatalog:
+    """An athlete catalog read on the request's engine, as ``_live`` reads Positions."""
+
+    def __init__(self, engine):
+        self.engine = engine
+        self.reads = 0
+
+    def get_catalog(self, season, *, active_only=True):
+        with self.engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        self.reads += 1
+        return []
+
+
+def test_a_selected_season_resolves_on_one_checked_out_connection(tmp_path, runtime_settings):
+    """#697: every read of a resolve borrows one connection, and a selected
+    season judges its Targets after its repeatable-read scope closes, so a
+    one-connection pool answers without waiting for a second."""
+
+    engine = _owner_database(
+        tmp_path / "one.sqlite3", poolclass=RequestPool, pool_size=1, max_overflow=0, pool_timeout=0.2
+    )
+    checkouts = []
+    event.listen(engine, "checkout", lambda *_: checkouts.append(1))
+    targets = UserService(engine, settings=runtime_settings)
+    okc_game_id = "0022500900"
+    okc_game = _game(
+        game_id=okc_game_id,
+        away=(LAL, "LAL", "Los Angeles Lakers"),
+        home=(OKC, "OKC", "Oklahoma City Thunder"),
+    )
+    _create(targets, opponent="OKC", qualifiers=(CORNER_THREE,))
+    _create(targets, opponent="MIA", qualifiers=(LOW_RIM,))
+    composer = _ScopedSnapshotMatchups({okc_game_id: _matchup(game=okc_game)})
+    catalog = _EngineCatalog(engine)
+    checkouts.clear()
+    try:
+        result = TargetResolutionService(
+            targets=targets,
+            slates=FakeSlate(games=[okc_game]),
+            matchups=composer,
+            publication_reader=_SelectedPublicationReader(),
+            injuries=object(),
+            settings=_resolution_settings(),
+            athlete_catalog=catalog,
+            engine=engine,
+        ).resolve(OWNER, requested_date=SLATE_DATE)
+    finally:
+        engine.dispose()
+
+    assert [
+        (entry["target"]["opponent"], entry["game"] and entry["game"]["game_id"])
+        for entry in result["targets"]
+    ] == [
+        ("OKC", okc_game_id),
+        ("MIA", None),
+    ]
+    assert [call[0] for call in composer.calls] == [okc_game_id]
+    assert catalog.reads == 1
+    assert len(checkouts) == 1
 
 
 def test_resolve_never_reaches_the_injury_provider(targets):
