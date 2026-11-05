@@ -952,12 +952,15 @@ class DabbleAdapter:
             SelectionDirection.HIGHER,
             SelectionDirection.LOWER,
         }
-        if not two_sided or any(selection.decimal_price is None for selection in selections):
+        if not two_sided or all(selection.decimal_price is None for selection in selections):
             return tuple(
                 replace(selection, decimal_price=None, price_kind=PriceKind.UNPRICED, price_value=None)
                 for selection in selections
             )
-        if all(selection.decimal_price >= _NEAR_EVEN_DECIMAL for selection in selections):
+        if all(
+            selection.decimal_price is not None and selection.decimal_price >= _NEAR_EVEN_DECIMAL
+            for selection in selections
+        ):
             return tuple(
                 replace(selection, decimal_price=_FLAT_PICK_DECIMAL, price_value=_FLAT_PICK_DECIMAL)
                 for selection in selections

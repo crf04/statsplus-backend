@@ -190,6 +190,7 @@ def test_a_near_even_dabble_line_pays_the_flat_six_x_default_on_both_sides():
         (1.879, 2.2, (None, None)),
         (1.83, 2.2, (None, None)),
         (2.08, None, (None, None)),
+        (None, None, (None, None)),
     ],
 )
 def test_a_dabble_line_is_near_even_only_when_both_sides_are_priced_at_one_eighty_eight_or_more(

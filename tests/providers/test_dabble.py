@@ -1034,7 +1034,7 @@ def test_recorded_three_made_line_is_served_as_full_game_3pm():
 
 _GIDDEY_THREES = "01a165f5-0cee-705d-b82a-3980f034fb1e"
 _GIDDEY_THREES_OVER = "01a165f5-1071-77db-bf5c-5bdd9d84b225"
-_UNPRICED_PAIR = [("higher", "unpriced", None, "selection"), ("lower", "unpriced", None, "selection")]
+_ENTRY_PAIR = [("higher", "multiplier", Decimal(3), "entry"), ("lower", "multiplier", Decimal(3), "entry")]
 
 
 def _giddey_threes_sides(detail):
@@ -1055,7 +1055,7 @@ def test_a_price_that_is_not_a_decimal_above_one_is_no_price(price):
         True,
         8,
     )
-    assert _giddey_threes_sides(detail) == _UNPRICED_PAIR
+    assert _giddey_threes_sides(detail) == _ENTRY_PAIR
 
 
 def test_a_repeated_price_row_that_agrees_is_one_price():
@@ -1080,7 +1080,7 @@ def test_two_prices_for_one_side_leave_that_side_unpriced_in_a_complete_snapshot
         True,
         8,
     )
-    assert _giddey_threes_sides(detail) == _UNPRICED_PAIR
+    assert _giddey_threes_sides(detail) == _ENTRY_PAIR
 
 
 @pytest.mark.parametrize("prices", [{"price": 1.82}, 1.82, "1.82"])
