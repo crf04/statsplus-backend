@@ -212,7 +212,9 @@ class TargetResolutionService:
         if not accepts_keyword(self.slates.get_slate, "neighbours"):
             return self.slates.get_slate(requested_date)
         slate = self.slates.get_slate(requested_date, neighbours=False)
-        return slate if slate["games"] else self.slates.get_slate(requested_date)
+        # The reread names the day the first read resolved, so a request
+        # spanning ET midnight cannot answer for the next day.
+        return slate if slate["games"] else self.slates.get_slate(slate["slate_date"])
 
     def _request_matchups(self, *, read_scope: tuple[Any, Any] | None = None) -> MatchupReader:
         """One reader for this whole resolve, reading no provider.

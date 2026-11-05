@@ -1198,6 +1198,28 @@ def test_next_game_day_from_a_day_without_games_resolves_the_next_slate(targets)
     assert [entry["game"]["game_id"] for entry in payload["targets"]] == [GAME_ID]
 
 
+class _MidnightSlate(_NeighbourSlate):
+    """A Slate whose current ET date turns over after its first read."""
+
+    def __init__(self):
+        super().__init__({"2026-01-17": [_game()]}, next_day="2026-01-17")
+        self.today = iter([SLATE_DATE, "2026-01-17"])
+
+    def get_slate(self, requested_date=None, *, neighbours=True):
+        return super().get_slate(requested_date or next(self.today), neighbours=neighbours)
+
+
+def test_a_day_without_games_answers_for_that_day_when_et_midnight_passes_mid_request(targets, resolve):
+    _create(targets)
+    slate = _MidnightSlate()
+
+    payload = resolve(slate=slate, date=None)
+
+    assert payload["slate_date"] == SLATE_DATE
+    assert payload["targets"][0]["game"] is None
+    assert slate.calls == [(SLATE_DATE, False), (SLATE_DATE, True)]
+
+
 def test_a_malformed_date_is_refused_by_the_slates_own_rule(targets, resolve):
     _create(targets)
     slate = FakeSlate(error=InvalidInputError("The slate date must use YYYY-MM-DD."))

@@ -24,7 +24,7 @@ from app.config.settings import DatabaseSettings, RuntimeSettings, get_runtime_s
 
 DEFAULT_SQLITE_PATH: Final[str] = "sqlite:///nba_play_types.db"
 DEMO_DATABASE_PATH: Final[Path] = Path(__file__).resolve().parents[2] / "nba_play_types.db"
-#: A pooled connection returned this recently is served without a ping.
+#: A pooled connection whose previous checkout began this recently is served without a ping.
 PING_AFTER_IDLE_SECONDS: Final[float] = 1.0
 
 
@@ -171,20 +171,19 @@ def _ping_idle_connections(engine: Engine) -> None:
     ``pool_pre_ping`` pings every checkout, and psycopg2's ping toggles
     autocommit, which after any ``REPEATABLE READ`` read also sends ``SET
     default_transaction_isolation TO DEFAULT``: two round trips before each
-    read's own ``BEGIN``.  A connection returned within
-    ``PING_AFTER_IDLE_SECONDS`` is served as is.  A failed ping invalidates
-    the pool, as a failed pre-ping does, and the pool checks out a new
-    connection in its place.
+    read's own ``BEGIN``.  A connection whose previous checkout began within
+    ``PING_AFTER_IDLE_SECONDS`` is served as is; timing from the checkout,
+    not the return, keeps a connection held past the window from counting as
+    recent.  A failed ping invalidates the pool, as a failed pre-ping does,
+    and the pool checks out a new connection in its place.
     """
-
-    @event.listens_for(engine, "checkin")
-    def _returned(_dbapi_connection: Any, connection_record: Any) -> None:
-        connection_record.info["returned_at"] = time.monotonic()
 
     @event.listens_for(engine, "checkout")
     def _ping(dbapi_connection: Any, connection_record: Any, _proxy: Any) -> None:
-        returned_at = connection_record.info.get("returned_at")
-        if returned_at is None or time.monotonic() - returned_at < PING_AFTER_IDLE_SECONDS:
+        now = time.monotonic()
+        previous = connection_record.info.get("checked_out_at")
+        connection_record.info["checked_out_at"] = now
+        if previous is None or now - previous < PING_AFTER_IDLE_SECONDS:
             return
         try:
             engine.dialect.do_ping(dbapi_connection)

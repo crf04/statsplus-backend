@@ -7,6 +7,7 @@ Round trips are counted by the benchmark's TCP relay. Skipped unless
 from __future__ import annotations
 
 import os
+import time
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -107,6 +108,36 @@ def test_a_connection_lost_moments_after_its_last_read_fails_one_read_and_the_ne
     assert raised.value.connection_invalidated
     assert _read(engine) == 7
     assert _read(engine, "SELECT pg_backend_pid()") != pid
+
+
+def test_a_connection_held_past_the_threshold_and_lost_before_its_return_is_replaced_before_the_next_read(
+    engine, admin, monkeypatch
+):
+    monkeypatch.setattr(db, "PING_AFTER_IDLE_SECONDS", 0.2)
+    with engine.connect() as connection:
+        pid = connection.execute(text("SELECT pg_backend_pid()")).scalar_one()
+        connection.rollback()
+        _terminate(admin, pid)
+        time.sleep(0.3)
+
+    assert _read(engine) == 7
+    assert _read(engine, "SELECT pg_backend_pid()") != pid
+
+
+def test_a_ping_failing_for_a_reason_other_than_a_lost_connection_fails_the_checkout(engine, monkeypatch):
+    _read(engine)
+    monkeypatch.setattr(db, "PING_AFTER_IDLE_SECONDS", 0.0)
+    refused = engine.dialect.loaded_dbapi.ProgrammingError("ping refused")
+
+    def _refuse(_dbapi_connection):
+        raise refused
+
+    monkeypatch.setattr(engine.dialect, "do_ping", _refuse)
+
+    with pytest.raises(DBAPIError) as raised:
+        _read(engine)
+    assert raised.value.orig is refused
+    assert not raised.value.connection_invalidated
 
 
 def test_a_read_only_repeatable_read_leaves_the_next_read_on_its_connection_writable_and_read_committed(
