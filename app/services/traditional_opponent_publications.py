@@ -9,8 +9,8 @@ already active.
 
 This module is the one place that knows:
 
-* which rendered formats of this family exist (:data:`TRADITIONAL_OPPONENT_V1`
-  and :data:`TRADITIONAL_OPPONENT_V2`), each with a stable in-code name and a
+* which rendered formats of this family exist (:data:`TRADITIONAL_OPPONENT_V1`,
+  :data:`TRADITIONAL_OPPONENT_V2` and :data:`TRADITIONAL_OPPONENT_V3`), each with a stable in-code name and a
   deterministic fingerprint over its exact metric taxonomy and invariants;
 * how to recognize a stored payload as exactly one of them, refusing arbitrary
   subsets and supersets rather than guessing;
@@ -37,7 +37,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from app.services.ledger_derivations import TEAM_METRICS, competition_ranks
+from app.services.ledger_derivations import TEAM_METRICS, TEAM_POSSESSIONS_METRIC, competition_ranks
 
 
 class TraditionalOpponentFormatError(ValueError):
@@ -76,6 +76,14 @@ REBOUND_SPLIT_METRICS = ("offensive_rebounds", "defensive_rebounds")
 
 #: The capability name a consumer asks about before rendering the split.
 REBOUND_SPLIT = "rebound_split"
+
+#: The capability v3 adds: the opponent's offensive possessions, so Defensive
+#: Rating is 100 x ``points`` / ``possessions`` (crf04/statsplus#433).
+POSSESSIONS = "possessions"
+
+#: The one count that is not an integer observation.  A team's possessions
+#: are its players' ``OffPoss`` over five, so a window total may be fractional.
+FRACTIONAL_COUNT_METRICS = frozenset({TEAM_POSSESSIONS_METRIC})
 
 #: Every mapping a published team row carries one entry per metric in.  A
 #: format is only recognized when *all* of them carry the identical taxonomy;
@@ -162,6 +170,16 @@ TRADITIONAL_OPPONENT_V2 = TraditionalOpponentFormat(
     invariants=("rebounds == offensive_rebounds + defensive_rebounds",),
 )
 
+#: The format that adds the opponent's offensive possessions.  A window
+#: composes it only when every opponent team-game carries possessions; one
+#: that does not is v2, so a missing possession count is never a zero.
+TRADITIONAL_OPPONENT_V3 = TraditionalOpponentFormat(
+    name="traditional_opponent.v3",
+    metrics=(*TRADITIONAL_OPPONENT_V2.metrics, TEAM_POSSESSIONS_METRIC),
+    capabilities=frozenset({REBOUND_SPLIT, POSSESSIONS}),
+    invariants=TRADITIONAL_OPPONENT_V2.invariants,
+)
+
 #: Every format this code can *name*.  v1 stays here after the compatibility
 #: window closed, because recognizing a stored payload as v1 is what lets the
 #: refusal say which format it refused, and because immutable v1 publications
@@ -170,19 +188,22 @@ TRADITIONAL_OPPONENT_V2 = TraditionalOpponentFormat(
 KNOWN_TRADITIONAL_OPPONENT_FORMATS = (
     TRADITIONAL_OPPONENT_V1,
     TRADITIONAL_OPPONENT_V2,
+    TRADITIONAL_OPPONENT_V3,
 )
 
-#: Exactly the formats this deployment accepts.  The compatibility window is
-#: closed: production is on v2 and this release reads nothing else.  Recovery
-#: to v1 is a code rollback to the retained dual-format release *first*, then
-#: an atomic family rollback -- never a family rollback under this code, which
-#: would activate a pair it cannot read.
-SUPPORTED_TRADITIONAL_OPPONENT_FORMATS = (TRADITIONAL_OPPONENT_V2,)
+#: Exactly the formats this deployment accepts.  v1 is closed: recovery to v1
+#: is a code rollback to the retained dual-format release *first*, then an
+#: atomic family rollback -- never a family rollback under this code, which
+#: would activate a pair it cannot read.  v2 stays readable: it is what
+#: production serves until the possessions backfill and rebuild, and what a
+#: window composes while any of its games lacks possessions.
+SUPPORTED_TRADITIONAL_OPPONENT_FORMATS = (TRADITIONAL_OPPONENT_V2, TRADITIONAL_OPPONENT_V3)
 
 #: The format this deployment composes.  A rebuild request never names a
 #: target: the deployed module owns it, so an operator cannot ask for a format
-#: this code cannot produce or validate.
-TRADITIONAL_OPPONENT_TARGET_FORMAT = TRADITIONAL_OPPONENT_V2
+#: this code cannot produce or validate.  A rebuild whose ledger facts still
+#: lack possessions composes v2 and fails as ``publication_format_unsupported``.
+TRADITIONAL_OPPONENT_TARGET_FORMAT = TRADITIONAL_OPPONENT_V3
 
 _SUPPORTED_FORMATS = frozenset(SUPPORTED_TRADITIONAL_OPPONENT_FORMATS)
 _FORMAT_BY_NAME = MappingProxyType(
@@ -529,7 +550,9 @@ def normalize_traditional_opponent_window(
 
 
 __all__ = [
+    "FRACTIONAL_COUNT_METRICS",
     "KNOWN_TRADITIONAL_OPPONENT_FORMATS",
+    "POSSESSIONS",
     "REBOUND_SPLIT",
     "REBOUND_SPLIT_METRICS",
     "SUPPORTED_TRADITIONAL_OPPONENT_FORMATS",
@@ -540,6 +563,7 @@ __all__ = [
     "TRADITIONAL_OPPONENT_TARGET_FORMAT",
     "TRADITIONAL_OPPONENT_V1",
     "TRADITIONAL_OPPONENT_V2",
+    "TRADITIONAL_OPPONENT_V3",
     "NormalizedTraditionalOpponentTeam",
     "NormalizedTraditionalOpponentWindow",
     "TraditionalOpponentFormat",

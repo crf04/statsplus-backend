@@ -29,6 +29,7 @@ from app.services.collection_control import NBA_TEAM_IDS, PublicationService
 from app.services.traditional_opponent_publications import (
     TRADITIONAL_OPPONENT_V1,
     TRADITIONAL_OPPONENT_V2,
+    TRADITIONAL_OPPONENT_V3,
 )
 
 UTC = UTC
@@ -58,6 +59,7 @@ COUNTS = {
     "personal_fouls": 19.0,
     "offensive_rebounds": 11.0,
     "defensive_rebounds": 33.0,
+    "possessions": 100.0,
 }
 
 
@@ -92,6 +94,10 @@ def payload(publication_format=TRADITIONAL_OPPONENT_V2, *, mutate=None):
 
 def v2_payload(**kwargs):
     return payload(TRADITIONAL_OPPONENT_V2, **kwargs)
+
+
+def v3_payload(**kwargs):
+    return payload(TRADITIONAL_OPPONENT_V3, **kwargs)
 
 
 def v1_payload(**kwargs):

@@ -182,3 +182,9 @@ def test_exhausted_attempts_raise_with_the_last_error():
 def test_the_schema_rejects_an_unknown_opponent_filter():
     with pytest.raises(ValueError):
         parsed_query(opponent_filters=[{"filter_type": "Vibes", "rank": 5}])
+
+
+def test_the_schema_accepts_defensive_rating():
+    parsed = parsed_query(opponent_filters=[{"filter_type": "DRTG", "rank": -10}])
+
+    assert parsed.opponent_filters[0].filter_type == "DRTG"

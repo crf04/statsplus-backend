@@ -2675,6 +2675,27 @@ def _add_ledger_player_usage_pct(connection: Connection) -> None:
     connection.execute(text(f"ALTER TABLE {preparer.quote(table)} ADD COLUMN usage_pct FLOAT"))
 
 
+def _add_ledger_offensive_possessions(connection: Connection) -> None:
+    """Add nullable ``offensive_possessions`` to the ledger player and team facts (#433).
+
+    NULL means "not derived yet": the migration invents no value, and
+    ``scripts/ledger_possessions_backfill.py`` fills both from the archived raw
+    rows.  Rerun-safe: a database created from the current model already has
+    them.
+    """
+
+    inspector = inspect(connection)
+    preparer = connection.dialect.identifier_preparer
+    for table in ("canonical_game_ledger_player_facts", "canonical_game_ledger_team_facts"):
+        if not inspector.has_table(table):
+            continue
+        if "offensive_possessions" in {column["name"] for column in inspector.get_columns(table)}:
+            continue
+        connection.execute(
+            text(f"ALTER TABLE {preparer.quote(table)} ADD COLUMN offensive_possessions FLOAT")
+        )
+
+
 #: The CHECK constraints that enumerate the player Diet bases.
 _PLAYER_DIET_BASE_CONSTRAINTS: Final[frozenset[str]] = frozenset(
     {
@@ -3538,6 +3559,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(82, "082_report_origin", _add_report_origin),
     Migration(83, "083_usage_report_published", _admit_report_published_usage_event),
     Migration(84, "084_lineup_segments", _create_lineup_segment_tables),
+    Migration(85, "085_ledger_offensive_possessions", _add_ledger_offensive_possessions),
 )
 
 
