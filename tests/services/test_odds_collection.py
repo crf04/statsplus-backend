@@ -495,6 +495,14 @@ def test_every_write_layer_refuses_a_stale_fence_even_with_the_same_owner_name(w
             quotes=[quote],
             fence=a._assert_lease,
         ),
+        "published poll": lambda: a.store.publish_poll(
+            1,
+            game_id=GAME_ID,
+            is_closing=False,
+            quotes=[quote],
+            unresolved_count=0,
+            fence=a._assert_lease,
+        ),
         "failure": lambda: a._failed(
             NOW,
             {"consecutive_failures": 0, "tier": "normal"},

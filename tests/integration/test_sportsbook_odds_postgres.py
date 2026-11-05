@@ -119,3 +119,42 @@ def test_a_write_ahead_poll_settles_by_id_on_postgres(engine):
             for r in connection.execute(select(OddsApiPoll.__table__)).mappings()
         }
     assert rows == {"evt-1": (10, 2, None), "evt-2": (0, 0, "unpublished")}
+
+
+def test_a_write_ahead_poll_takes_its_quotes_at_its_own_time_on_postgres(engine):
+    store, reader = SportsbookQuoteStore(engine), SportsbookQuoteReader(engine)
+    ahead = store.record_unstored_poll(
+        odds_event_id="evt",
+        game_id="0022600001",
+        started_at=T0,
+        completed_at=T0 + timedelta(seconds=2),
+        outcome="complete",
+        is_closing=True,
+        cost=5,
+        remaining=19995,
+        failure_reason="unpublished",
+    )
+
+    write = store.publish_poll(
+        ahead,
+        game_id="0022600001",
+        is_closing=True,
+        quotes=[ResolvedQuote(2544, "PTS", "draftkings", 27.5, -115, -105, None)],
+        unresolved_count=1,
+    )
+
+    assert (write.poll_id, write.history_rows, write.latest_rows) == (ahead, 1, 1)
+    (poll,) = _polls(engine)
+    assert (poll["outcome"], poll["quote_count"], poll["unresolved_count"], poll["failure_reason"]) == (
+        "complete",
+        1,
+        1,
+        None,
+    )
+    entry = reader.book_lines("0022600001")[2544]["PTS"]
+    assert (entry["closing"], entry["as_of"]) == (True, "2026-10-21T21:00:02Z")
+
+
+def _polls(engine):
+    with engine.connect() as connection:
+        return connection.execute(select(OddsApiPoll.__table__)).mappings().all()

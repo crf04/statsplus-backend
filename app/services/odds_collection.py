@@ -74,8 +74,8 @@ BACKOFF_MAX = timedelta(minutes=30)
 #: counts toward the hourly cadence, so this only spares the next beats a call
 #: that would meet the same fault.
 STORAGE_BACKOFF = BACKOFF_MAX
-#: ``odds_api_polls.failure_reason`` of a ``complete`` DFS poll whose lines have
-#: not (yet) reached the archive; cleared once they have.
+#: ``odds_api_polls.failure_reason`` of a ``complete`` poll whose quotes have
+#: not (yet) been stored; cleared once they have.
 UNPUBLISHED = "unpublished"
 _QUOTA_WARN_FRACTION = 0.25
 _QUOTA_ALERT_FRACTION = 0.10
@@ -314,8 +314,9 @@ class OddsCollectionCoordinator:
             credits += result.cost
             remaining = result.quota.remaining if result.quota.remaining is not None else remaining
             received = self.clock()
+            crossed = received >= tip
             ledger_id = None
-            if self.dfs_writer is not None and result.parsed.bookmaker_count > 0:
+            if crossed or result.parsed.bookmaker_count > 0:
                 # Write-ahead.  A populated response (an empty one is free and
                 # recorded below) is this game's poll for the cadence and the
                 # credit budget from the first durable write
@@ -323,8 +324,8 @@ class OddsCollectionCoordinator:
                 # publication, any of which can fail -- so a fault after the
                 # purchase never causes a second one.  The fence refuses a
                 # superseded worker here, and the row reads "unpublished"
-                # until the lines are in the archive.
-                crossed = received >= tip
+                # until the quotes are stored.  A response that crossed
+                # tip-off is in-play data: paid for, recorded, never stored.
                 ledger_id = self.store.record_unstored_poll(
                     odds_event_id=call.odds_event_id,
                     game_id=item.game_id,
@@ -341,23 +342,7 @@ class OddsCollectionCoordinator:
             self._save_quota(result.quota, now=received)
             self._warn_on_quota(state["remaining"], remaining)
             state["remaining"] = remaining
-            if received >= tip:
-                # Credits were spent, but a response that crossed tip-off is
-                # in-play data and is never stored.
-                if ledger_id is None:
-                    self.store.record_unstored_poll(
-                        odds_event_id=call.odds_event_id,
-                        game_id=item.game_id,
-                        started_at=started,
-                        completed_at=received,
-                        outcome="failed",
-                        is_closing=call.kind == "closing",
-                        cost=result.cost,
-                        remaining=remaining,
-                        failure_reason="received_after_tip",
-                        commence_time=tip,
-                        fence=self._assert_lease,
-                    )
+            if crossed:
                 status, reason = "partial", "received_after_tip"
                 continue
 
@@ -400,30 +385,39 @@ class OddsCollectionCoordinator:
                     commence_time=tip,
                     fence=self._assert_lease,
                 )
-            elif self.dfs_writer is not None:
+            else:
+                feed = "sportsbook quotes" if self.dfs_writer is None else "PrizePicks lines"
                 try:
-                    stored = self.dfs_writer.record(
-                        item,
-                        parsed.quotes,
-                        athletes,
-                        retrieved_at=received,
-                        accepted_at=self.clock(),
-                        poll_started_at=started,
-                        # Checked inside the archive's transaction: a worker
-                        # whose lease was taken over publishes nothing.
-                        fence=self._assert_lease,
-                    )
+                    if self.dfs_writer is None:
+                        self.store.publish_poll(
+                            ledger_id,
+                            game_id=item.game_id,
+                            is_closing=call.kind == "closing",
+                            quotes=quotes,
+                            unresolved_count=unresolved_names,
+                            fence=self._assert_lease,
+                        )
+                    else:
+                        stored = self.dfs_writer.record(
+                            item,
+                            parsed.quotes,
+                            athletes,
+                            retrieved_at=received,
+                            accepted_at=self.clock(),
+                            poll_started_at=started,
+                            # Checked inside the archive's transaction: a worker
+                            # whose lease was taken over publishes nothing.
+                            fence=self._assert_lease,
+                        )
                 except LeaseLost:
                     raise
                 except Exception as error:
                     logger.error(
-                        "Odds API could not record PrizePicks lines: %s",
+                        "Odds API could not record %s: %s",
+                        feed,
                         redact_public_value(f"{type(error).__name__}: {error}")[:300],
                     )
-                    self.notify(
-                        logging.ERROR,
-                        "Odds API could not record PrizePicks lines; backing off",
-                    )
+                    self.notify(logging.ERROR, f"Odds API could not record {feed}; backing off")
                     self._settle_poll(ledger_id, 0, unresolved_names, "storage_error")
                     outcome = self._backoff(
                         now,
@@ -442,21 +436,8 @@ class OddsCollectionCoordinator:
                         unresolved_players=players_unresolved,
                         remaining=remaining,
                     )
-                self._settle_poll(ledger_id, stored, unresolved_names, None)
-            else:
-                self.store.record_poll(
-                    odds_event_id=call.odds_event_id,
-                    game_id=item.game_id,
-                    started_at=started,
-                    completed_at=self.clock(),
-                    cost=result.cost,
-                    remaining=remaining,
-                    is_closing=call.kind == "closing",
-                    quotes=quotes,
-                    unresolved_count=unresolved_names,
-                    commence_time=tip,
-                    fence=self._assert_lease,
-                )
+                if self.dfs_writer is not None:
+                    self._settle_poll(ledger_id, stored, unresolved_names, None)
             self.notify(
                 logging.INFO,
                 f"Odds API poll region={self.settings.regions} game={item.game_id} "
