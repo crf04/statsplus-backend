@@ -1066,3 +1066,116 @@ def test_hosted_run_skips_projection_retention_until_a_manual_run(tmp_path, monk
     finally:
         engine.dispose()
     assert "projection archive retention failed" not in capsys.readouterr().err
+
+
+# -- the closing-quote gap check (crf04/statsplus#429) ------------------------
+
+
+def _closing_world(tmp_path, season="2026-27"):
+    from datetime import timedelta
+
+    from app.services.sportsbook_quotes import ResolvedQuote, SportsbookQuoteStore
+    from tests.support.closing_lines_world import (
+        BOS_NYK,
+        BOS_NYK_EVENT,
+        CURRY,
+        GSW_LAC,
+        GSW_LAC_EVENT,
+        TATUM,
+        TIPS,
+        build_world,
+    )
+
+    world = build_world(tmp_path, season=season)
+    store = SportsbookQuoteStore(world.engine)
+    for game_id, event_id, player in ((GSW_LAC, GSW_LAC_EVENT, CURRY), (BOS_NYK, BOS_NYK_EVENT, TATUM)):
+        observed = TIPS[game_id] - timedelta(minutes=7)
+        store.record_poll(
+            odds_event_id=event_id,
+            game_id=game_id,
+            started_at=observed,
+            completed_at=observed,
+            cost=5,
+            remaining=90000,
+            is_closing=True,
+            quotes=[ResolvedQuote(player, "PTS", "draftkings", 27.5, -110, -110, observed)],
+            commence_time=TIPS[game_id],
+        )
+    return world
+
+
+def test_the_nightly_gap_check_names_each_started_game_without_closing_quotes(tmp_path, capsys):
+    world = _closing_world(tmp_path)
+
+    assert nightly_refresh._check_closing_quotes(world.engine, "2026-27") is True
+
+    assert capsys.readouterr().err.splitlines() == [
+        "Nightly Refresh: 1 started 2026-27 game(s) have no closing quotes: 0022500101 tip "
+        "2025-11-05T00:30Z. Buy them with scripts/backfill_closing_lines.py --season 2026-27."
+    ]
+
+
+def test_the_nightly_gap_check_says_so_when_every_started_game_is_closed(tmp_path, capsys):
+    from datetime import timedelta
+
+    from app.services.sportsbook_quotes import ResolvedQuote, SportsbookQuoteStore
+    from tests.support.closing_lines_world import DEN_LAL, DEN_LAL_EVENT, LEBRON, TIPS
+
+    world = _closing_world(tmp_path)
+    observed = TIPS[DEN_LAL] - timedelta(minutes=7)
+    SportsbookQuoteStore(world.engine).record_poll(
+        odds_event_id=DEN_LAL_EVENT,
+        game_id=DEN_LAL,
+        started_at=observed,
+        completed_at=observed,
+        cost=5,
+        remaining=90000,
+        is_closing=True,
+        quotes=[ResolvedQuote(LEBRON, "PTS", "draftkings", 24.5, -110, -110, observed)],
+    )
+
+    assert nightly_refresh._check_closing_quotes(world.engine, "2026-27") is True
+
+    output = capsys.readouterr()
+    assert output.out == "Nightly Refresh: every started 2026-27 game has closing quotes.\n"
+    assert output.err == ""
+
+
+def test_the_nightly_gap_check_skips_seasons_the_live_collector_never_closed(tmp_path, capsys):
+    world = _closing_world(tmp_path, season="2025-26")
+
+    assert nightly_refresh._check_closing_quotes(world.engine, "2025-26") is True
+
+    assert capsys.readouterr() == ("", "")
+
+
+def test_a_failing_gap_check_never_changes_the_hosted_exit_status(capsys):
+    def check():
+        raise RuntimeError("database went away")
+
+    assert (
+        run_hosted_refresh(
+            refresh_metadata=lambda: True,
+            refresh_player_game_logs=lambda: object(),
+            check_closing_quotes=check,
+        )
+        == 0
+    )
+    diagnostics = capsys.readouterr().err
+    assert "closing-quote gap check could not run; the other steps are unaffected" in diagnostics
+    assert "database went away" not in diagnostics
+
+
+def test_the_hosted_run_checks_closing_quotes_for_the_season_it_ingests(tmp_path, monkeypatch):
+    database_url = _hosted_database(tmp_path)
+    calls = []
+    _install_hosted_boundaries(monkeypatch, calls)
+    _record_active_players(monkeypatch, [])
+    checked = []
+    monkeypatch.setattr(
+        nightly_refresh, "_check_closing_quotes", lambda engine, season: checked.append((list(calls), season))
+    )
+
+    assert nightly_refresh.main(["--database-url", database_url, "--hosted-only"]) == 0
+
+    assert checked == [([("player_game_logs", "2025-26")], "2025-26")]

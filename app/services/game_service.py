@@ -716,7 +716,7 @@ class GameService:
             season_averages = season_logs[average_columns].mean().round(2)
             season_average_rows = _records(season_averages.to_frame().T)
             season_average_rows[0].update(_tracking_averages(season_logs))
-        closing_lines = self._closing_lines_for(filtered_logs)
+        closing_lines = self._closing_lines_for(filtered_logs, query.season_filter)
         filtered_logs.drop(
             [
                 "PLAYER_NAME",
@@ -737,8 +737,11 @@ class GameService:
         filtered_logs["GAME_DATE"] = filtered_logs["GAME_DATE"].astype(str)
 
         game_log_rows = _records(filtered_logs)
-        for row, closing_line in zip(game_log_rows, closing_lines, strict=False):
-            row["closing_line"] = closing_line
+        for row, markets in zip(game_log_rows, closing_lines, strict=False):
+            # ``closing_line`` keeps its #216 contract (points only) for the
+            # MCP; ``closing_lines`` carries every market with a line (#429).
+            row["closing_line"] = markets.get("PTS")
+            row["closing_lines"] = markets
 
         result = GameLogResponse(
             game_logs=game_log_rows,
@@ -786,27 +789,25 @@ class GameService:
                 team_id = int(full_game_logs["TEAM_ID"].loc[days.idxmax()])
         return self.posted_lines.for_player(player_id, query.line_date, teams, team_id=team_id)
 
-    def _closing_lines_for(self, frame):
-        """Each row's closing points line as ``{"value", "book"}``, else ``None``."""
+    def _closing_lines_for(self, frame, season):
+        """Each row's closing lines as ``{market: {"value", "book"}}``, else ``{}``."""
 
         if frame.empty:
             return []
-        lines = [None] * len(frame)
         if self.closing_lines is None or not {"GAME_ID", "PLAYER_ID"} <= set(frame.columns):
-            return lines
+            return [{} for _ in range(len(frame))]
         stored = {
-            int(player_id): self.closing_lines.for_player(
+            int(player_id): self.closing_lines.markets_for_player(
                 int(player_id),
                 frame.loc[frame["PLAYER_ID"] == player_id, "GAME_ID"].astype(str).tolist(),
+                season=season,
             )
             for player_id in frame["PLAYER_ID"].unique()
         }
-        for index, (game_id, player_id) in enumerate(
-            zip(frame["GAME_ID"].astype(str), frame["PLAYER_ID"], strict=False)
-        ):
-            found = stored[int(player_id)].get(game_id)
-            lines[index] = found.as_response() if found is not None else None
-        return lines
+        return [
+            {market: value.as_response() for market, value in stored[int(player_id)].get(game_id, {}).items()}
+            for game_id, player_id in zip(frame["GAME_ID"].astype(str), frame["PLAYER_ID"], strict=False)
+        ]
 
     def _publication_snapshot(self, season, *, session=None):
         """Capture all immutable publications composed by this request.

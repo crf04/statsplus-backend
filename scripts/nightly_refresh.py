@@ -18,15 +18,18 @@ from sqlalchemy import create_engine
 
 from app.config.settings import load_settings
 from app.domain.freshness import time_window_timedelta
+from app.domain.utc import utc_now
 from app.migrations import run_migrations
 from app.providers.nba_stats import NBAStatsAdapter
 from app.providers.pbp_game_logs import PBPGameLogAdapter
 from app.providers.pbp_stats import PBPStatsAdapter
 from app.services.active_season import AmbiguousActiveSeason, active_season
 from app.services.athlete_catalog_service import AthleteCatalogService
+from app.services.closing_lines import LIVE_CLOSING_FIRST_SEASON, closing_quote_gaps, describe_gap
 from app.services.collection_control import PublicationService
 from app.services.data_service import DataService
 from app.services.database_first_activation import LegacyWriteFence
+from app.services.event_catalog_repository import EventCatalogRepository
 from app.services.event_catalog_service import EventCatalogService
 from app.services.player_diet import PlayerDietService
 from app.services.player_game_log_ingest import PlayerGameLogIngestService
@@ -69,12 +72,15 @@ def run_hosted_refresh(
     refresh_metadata: Callable[[], Any],
     refresh_player_game_logs: Callable[[], Any],
     prune_projection_archive: Callable[[], Any] | None = None,
+    check_closing_quotes: Callable[[], Any] | None = None,
 ) -> int:
     """Run the two hosted-owned steps independently, retrying each once.
 
     Projection archive retention runs last and once.  Its failure is logged
     and never changes the exit status: each of its batches rolls back on its
-    own, and the next night tries again.
+    own, and the next night tries again.  The closing-quote gap check
+    (crf04/statsplus#429) runs after it, reads only, and never changes the
+    exit status either.
     """
 
     status = _run_independent_refresh_steps(
@@ -88,7 +94,35 @@ def run_hosted_refresh(
             "Nightly Refresh projection archive retention failed; " "the other steps are unaffected.",
             file=sys.stderr,
         )
+    if check_closing_quotes is not None and not _refresh_succeeded(check_closing_quotes):
+        print(
+            "Nightly Refresh closing-quote gap check could not run; the other steps are unaffected.",
+            file=sys.stderr,
+        )
     return status
+
+
+def _check_closing_quotes(engine, season: str, *, now=None) -> bool:
+    """Name every started game of ``season`` without closing quotes (crf04/statsplus#429).
+
+    Only seasons the live odds collector closes are checked.  A gap is printed
+    to stderr with the command that buys it; the check itself succeeds.
+    """
+
+    if season < LIVE_CLOSING_FIRST_SEASON:
+        return True
+    events = EventCatalogRepository(engine).list_events(season)
+    missing = closing_quote_gaps(engine, events, now=now or utc_now())
+    if not missing:
+        print(f"Nightly Refresh: every started {season} game has closing quotes.")
+        return True
+    print(
+        f"Nightly Refresh: {len(missing)} started {season} game(s) have no closing quotes: "
+        + ", ".join(describe_gap(event) for event in missing)
+        + f". Buy them with scripts/backfill_closing_lines.py --season {season}.",
+        file=sys.stderr,
+    )
+    return True
 
 
 def _prune_projection_archive(engine, event_reader) -> bool:
@@ -297,6 +331,7 @@ def _run(database_url: str, *, hosted_only: bool = False, season: str | None = N
                 refresh_metadata=lambda: _run_hosted_metadata(engine, settings),
                 refresh_player_game_logs=lambda: player_game_log_ingest_service.refresh(refresh_season),
                 prune_projection_archive=lambda: _prune_projection_archive(engine, event_service),
+                check_closing_quotes=lambda: _check_closing_quotes(engine, refresh_season),
             )
 
         pbp_provider = PBPStatsAdapter(settings=settings)

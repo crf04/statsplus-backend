@@ -2915,7 +2915,7 @@ Every successful response also carries the shared
 
 ```json
 {
-  "game_logs": [{ "GAME_DATE": "2026-01-15", "PTS": 31, "closing_line": null }],
+  "game_logs": [{ "GAME_DATE": "2026-01-15", "PTS": 31, "closing_line": null, "closing_lines": {} }],
   "averages": [{ "PTS": 31.0 }],
   "season_averages": [{ "PTS": 27.4 }],
   "season_game_count": 71,
@@ -3018,15 +3018,39 @@ Closing line (crf04/statsplus#216): every `game_logs` row carries
   `draftkings`, `fanduel`, `betmgm`, `williamhill_us` (Caesars), `betrivers`
   or `fanatics`. One line is stored per player per game: DraftKings'
   where it posted him, else FanDuel's, then the others in that order.
-* It is the last snapshot The Odds API held before tip (snapshots are about 5
-  minutes apart), bought once by `scripts/backfill_closing_lines.py` and never
-  refreshed. Only 2025-26 games are backfilled, so every other season, a game
-  the backfill has not reached, a player no regulated book posted and a name
-  that did not match a rostered player carry `null`. A storage fault also
-  reads as `null`; the rest of the response is unaffected.
+* For 2025-26 it is the last snapshot The Odds API held before tip (snapshots
+  are about 5 minutes apart), bought once by `scripts/backfill_closing_lines.py`
+  and never refreshed. From 2026-27 on it is the live odds collector's closing
+  poll, taken 5 to 10 minutes before tip (a game it missed is bought at the
+  last snapshot before tip by the same script, `--season 2026-27`). Earlier
+  seasons, a game with no stored close, a player no regulated book posted and
+  a name that did not match a rostered player carry `null`. A storage fault
+  also reads as `null`; the rest of the response is unaffected.
 * The field is additive and always present. No filter, average or `provenance`
   entry depends on it, and a filter does not change it: each kept row carries
   its own game's line. Counting games against it is the caller's job.
+* It is always `closing_lines.PTS` (below), or `null` when that is absent.
+
+Closing lines by market (crf04/statsplus#429): every `game_logs` row also
+carries `closing_lines`, the player's closing line in each market that has one
+for that game, keyed by market, or `{}`:
+
+```json
+{ "GAME_DATE": "2026-11-01", "REB": 9, "closing_line": { "value": 24.5, "book": "draftkings" },
+  "closing_lines": { "PTS": { "value": 24.5, "book": "draftkings" }, "REB": { "value": 7.5, "book": "fanduel" } } }
+```
+
+* Markets are `PTS`, `REB`, `AST`, `3PM` and `PRA`; a market without a line is
+  absent, never `null`. Each entry is `{value, book}` exactly as `closing_line`
+  is, one book per market by the same order (DraftKings, FanDuel, BetMGM,
+  Caesars, BetRivers, Fanatics: the first that posted him in that market).
+* 2026-27 onward: the closing quotes the live collector stored for that game,
+  player and market (all five markets). A postponed game closed twice reads
+  its later close. 2025-26: the backfilled table, which holds points only, so
+  a 2025-26 row carries `PTS` or nothing. Earlier seasons carry `{}`.
+* Additive, always present, unaffected by filters, averages and `provenance`,
+  like `closing_line`. A storage fault reads as `{}` on every row; the rest of
+  the response is unaffected.
 
 Posted line (crf04/statsplus#238): the response carries `posted_line`, the
 player's lines for his team's game on the **line day**, or `null`. The optional
