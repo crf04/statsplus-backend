@@ -7,7 +7,7 @@ import pytest
 from app.config.settings import NBASeasonSettings, RuntimeSettings
 from app.errors import InvalidInputError, ProviderUnavailableError, ResourceNotFoundError
 from app.services.matchup_injuries import MatchupInjuryResult
-from app.services.player_pool import PlayerPool, PoolPlayer
+from app.services.player_pool import PlayerPool, PoolPlayer, PoolRoster, RosterPlayer
 from app.services.slate_service import SlateService
 
 
@@ -431,6 +431,41 @@ def test_slate_targetable_counts_apply_the_same_stored_out_override_as_matchup()
     assert payload["games"][0]["away_team"]["targetable_player_count"] == 1
     assert payload["games"][0]["home_team"]["targetable_player_count"] == 1
     assert injuries.calls[0][0:2] == (("0022500001",), "2025-26")
+
+
+class RosterOnlyPool:
+    """A reader whose pool with lines must not be read: the Slate counts players."""
+
+    def __init__(self, roster):
+        self.roster = roster
+
+    def get_pool(self, *, season, game_ids):
+        raise AssertionError("the Slate read lines and prices it never shows")
+
+    def get_pool_roster(self, *, season, game_ids):
+        return self.roster
+
+
+def test_slate_counts_a_readers_pool_roster_without_reading_its_lines():
+    roster = PoolRoster(
+        (RosterPlayer(10, 1), RosterPlayer(11, 1), RosterPlayer(20, 2)),
+        {1: 2, 2: 1},
+        {"status": "fresh"},
+        {"0022500001": {"state": "live", "observed_at": "2026-01-02T12:00:00+00:00"}},
+    )
+    service = _service(
+        [_event("0022500001", "2026-01-03T00:00:00+00:00")],
+        player_pool=RosterOnlyPool(roster),
+        injuries=RecordedStoredInjuries({10}),
+    )
+
+    game = service.get_slate("2026-01-02")["games"][0]
+
+    assert (game["away_team"]["targetable_player_count"], game["home_team"]["targetable_player_count"]) == (
+        1,
+        1,
+    )
+    assert game["projection_state"] == {"state": "live", "observed_at": "2026-01-02T12:00:00+00:00"}
 
 
 def test_slate_reads_every_events_stored_injuries_with_one_call():
