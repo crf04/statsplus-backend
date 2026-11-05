@@ -3386,6 +3386,14 @@ class LatestProjectionPlayerPoolReader:
             yield connection
             return
         with self.engine.connect() as owned:
+            if self.engine.dialect.name == "sqlite":
+                # pysqlite opens no transaction for a SELECT on its own.
+                owned.exec_driver_sql("BEGIN")
+                try:
+                    yield owned
+                finally:
+                    owned.rollback()
+                return
             if self.engine.dialect.name == "postgresql":
                 owned = owned.execution_options(isolation_level="REPEATABLE READ")
             with owned.begin():
