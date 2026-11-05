@@ -69,7 +69,11 @@ for the same window fails as `provider_window_unverified`. Tracking trails the
 box score for hours after a game, so this is not a contract break: the run
 still exits `0`, names the code in its `failures` and terminal status, and
 later runs within the manifest collect the scope once tracking catches up.
-Only that shortfall is deferred, and only as the last decision: the response
+A game tracking leaves out for good is listed in
+`app/domain/tracking_omissions.py`; the manifest names its date on each
+playing team's season shot-type request (`untracked_dates`), and the collector
+subtracts that date's box-score games and minutes before comparing
+(crf04/statsplus-backend#712). Only that shortfall is deferred, and only as the last decision: the response
 must first pass every check the scope applies when the counts agree, from its
 values and rows to the box-score evidence and the normalizer's own checks.
 Those include whole, non-negative game counts, finite positive box-score

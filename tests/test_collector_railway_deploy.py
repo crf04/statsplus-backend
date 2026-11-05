@@ -301,7 +301,7 @@ def _run_with_nba_failure(tmp_path, monkeypatch, capsys, caplog, failure, expect
                 "collect_before": (live + timedelta(hours=1)).isoformat(),
                 "accepted_versions": [2],
                 "scopes": sorted(scopes),
-                "scope_descriptors": _collector_scope_descriptors(scopes, live),
+                "scope_descriptors": _collector_scope_descriptors(scopes, live, season="2026-27"),
             }
         ],
     }

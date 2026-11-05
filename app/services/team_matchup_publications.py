@@ -25,6 +25,7 @@ from app.domain.team_matchup_taxonomy import (
     nba_publication_taxonomies,
     publication_metric_identity,
 )
+from app.domain.tracking_omissions import tracked_game_ids_by_team
 from app.domain.utc import parse_utc_iso
 
 
@@ -109,10 +110,18 @@ def validate_publication_rows(
     if expected_game_ids_by_team is not None:
         if window not in NBA_PUBLICATION_WINDOWS:
             raise PublicationValidationError("publication_game_set_mismatch")
+        # A season shot-type row composed before tracking dropped a game for
+        # good still claims it; one composed since claims the games tracking
+        # covers.  Both answer for the governed window.
+        accepted = (
+            (expected_game_ids_by_team, tracked_game_ids_by_team(expected_game_ids_by_team))
+            if base == "shot_types" and window == "season"
+            else (expected_game_ids_by_team,)
+        )
         if {row.team_id for row in rows} != set(expected_game_ids_by_team) or any(
             len(row.game_ids) != len(set(row.game_ids))
             or (window == "l15" and len(row.game_ids) != 15)
-            or set(row.game_ids) != set(expected_game_ids_by_team[row.team_id])
+            or all(set(row.game_ids) != set(game_ids[row.team_id]) for game_ids in accepted)
             for row in rows
         ):
             raise PublicationValidationError("publication_game_set_mismatch")

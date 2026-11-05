@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -45,11 +45,15 @@ from app.collector.runner import (
     ResidentialCollector,
     RunDisposition,
 )
+from app.domain import tracking_omissions
+from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.slate_time import slate_date_for_instant
 from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_STREAMS,
 )
+from app.domain.tracking_omissions import TrackingOmittedGame
 from app.migrations import run_migrations
+from app.models.canonical_game_ledger import CanonicalGameLedgerPlayerFact
 from app.models.collection_control import (
     CollectionObservation,
     CompositionJob,
@@ -519,7 +523,7 @@ def test_player_zone_scope_reads_per_game_totals_and_games_for_one_window():
 
 
 def test_authorized_player_zone_descriptor_binds_the_manifest_date_bound():
-    descriptors = _collector_scope_descriptors({"exact_shot_zones"}, NOW)
+    descriptors = _collector_scope_descriptors({"exact_shot_zones"}, NOW, season="2025-26")
     assert [item["parameters"] for item in descriptors] == [
         {
             "window": "season",
@@ -884,6 +888,7 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
             "shot_zones_opponent",
         },
         NOW,
+        season="2025-26",
         l15_date_from_by_team=l15_boundaries,
     )
     opponent = [item for item in descriptors if item["parameters"].get("subject") == "opponent"]
@@ -920,6 +925,7 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
     l15_only = _collector_scope_descriptors(
         {"grouped_shot_types_opponent_l15"},
         NOW,
+        season="2025-26",
         l15_date_from_by_team=l15_boundaries,
     )
     assert {item["parameters"]["window"] for item in l15_only} == {"l15"}
@@ -929,6 +935,7 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
     prior_slate = _collector_scope_descriptors(
         {"shot_zones_opponent"},
         utc_evening,
+        season="2025-26",
         l15_date_from_by_team={int(team_id): "10/15/2025" for team_id in NBA_TEAM_IDS},
     )
     assert {
@@ -1451,8 +1458,12 @@ class _NBAOnTheMorningOf1025:
         return _SHOT_TYPE_FRESHNESS["team_games"][self.box]
 
 
-def _collect_player_shot_types_on_1025(tmp_path, nba):
-    """Run the manifest's player shot-type work against ``nba`` and drain the queue."""
+def _collect_player_shot_types_on_1025(tmp_path, nba, *, ledger_players=()):
+    """Run the manifest's player shot-type work against ``nba`` and drain the queue.
+
+    ``ledger_players`` are ``(game_id, player_id, team_id)`` box-score
+    participations stored in the Canonical Game Ledger first.
+    """
 
     cutoff = datetime.fromisoformat(_SHOT_TYPE_FRESHNESS["cutoff"])
     engine, manifest, _publications, deliver = _grouped_shot_type_control_plane(
@@ -1462,10 +1473,23 @@ def _collect_player_shot_types_on_1025(tmp_path, nba):
         now=cutoff,
         events=_SHOT_TYPE_FRESHNESS["events"],
     )
+    with Session(engine) as session, session.begin():
+        session.add_all(
+            CanonicalGameLedgerPlayerFact(
+                game_id=game_id,
+                player_id=player_id,
+                team_id=team_id,
+                player_name=str(player_id),
+                team_tricode=NBA_TEAM_ID_TO_TRICODE[team_id],
+                minutes=30.0,
+                **{column: 0 for column in _LEDGER_PLAYER_COUNTS},
+            )
+            for game_id, player_id, team_id in ledger_players
+        )
     executor = ResidentialScopeExecutor(nba, clock=lambda: cutoff)
     observations = [
         observation
-        for descriptor in _collector_scope_descriptors({"grouped_shot_types"}, cutoff)
+        for descriptor in _collector_scope_descriptors({"grouped_shot_types"}, cutoff, season="2026-27")
         for observation in executor.iter_scope(
             ScopeWork(
                 scope=descriptor["scope"],
@@ -1556,6 +1580,82 @@ def test_player_shot_types_short_of_a_players_box_score_games_are_not_published(
     assert composed == 0
     assert job == ("failed", "provider_window_lagging")
     assert versions == []
+
+
+DEN = 1610612743
+NOP = 1610612740
+#: DEN vs NOP on 10/24, the second of Jokic's two games through 10/24.
+DEN_NOP_1024 = TrackingOmittedGame("0022600110", "2026-27", date(2026, 10, 24), frozenset({DEN, NOP}))
+_LEDGER_PLAYER_COUNTS = (
+    "points",
+    "field_goals_made",
+    "field_goals_attempted",
+    "two_pointers_made",
+    "two_pointers_attempted",
+    "three_pointers_made",
+    "three_pointers_attempted",
+    "free_throws_made",
+    "free_throws_attempted",
+    "offensive_rebounds",
+    "defensive_rebounds",
+    "rebounds",
+    "assists",
+    "turnovers",
+    "steals",
+    "blocks",
+    "personal_fouls",
+)
+
+
+def test_player_shot_types_short_only_by_a_game_tracking_omits_are_published(tmp_path, monkeypatch):
+    # The 2026-11-03 refusal (crf04/statsplus-backend#712): tracking left one
+    # game out for good, and every player the ledger has in that game counts
+    # one game fewer in tracking than in the box score.
+    monkeypatch.setattr(tracking_omissions, "TRACKING_OMITTED_GAMES", (DEN_NOP_1024,))
+    composed, job, versions = _collect_player_shot_types_on_1025(
+        tmp_path,
+        _NBAOnTheMorningOf1025(tracking="10/24/2026", one_game_short={203999}),
+        ledger_players=[("0022600110", 203999, DEN)],
+    )
+
+    assert (composed, job) == (1, ("succeeded", None))
+    (version,) = versions
+    rows = json.loads(version["payload"])["rows"]
+    assert (len(rows), len({row["player_id"] for row in rows})) == (908, 371)
+    jokic = {row["slice_key"]: row["games_played"] for row in rows if row["player_id"] == 203999}
+    assert jokic == {"catch_and_shoot": 1, "less_than_10_ft": 1, "pullups": 1}
+
+
+def test_player_shot_types_short_of_a_game_tracking_keeps_still_lag(tmp_path, monkeypatch):
+    # Tracking omits DEN vs NOP, which the ledger says only Jokic played.  A
+    # player tracking counts a game short who did not play it is a lag.
+    monkeypatch.setattr(tracking_omissions, "TRACKING_OMITTED_GAMES", (DEN_NOP_1024,))
+    composed, job, versions = _collect_player_shot_types_on_1025(
+        tmp_path,
+        _NBAOnTheMorningOf1025(tracking="10/24/2026", one_game_short={203999, 1630598}),
+        ledger_players=[("0022600110", 203999, DEN)],
+    )
+
+    assert (composed, job, versions) == (0, ("failed", "provider_window_lagging"), [])
+
+
+def test_player_shot_types_without_a_shooter_whose_only_game_tracking_omits_are_published(
+    tmp_path, monkeypatch
+):
+    # 1630174 has one box-score game and 7 attempts through 10/24.  When that
+    # game is the one tracking omits, tracking has no Overall record for the
+    # player at all, and the Diet publishes without them.
+    monkeypatch.setattr(tracking_omissions, "TRACKING_OMITTED_GAMES", (DEN_NOP_1024,))
+    composed, job, versions = _collect_player_shot_types_on_1025(
+        tmp_path,
+        _NBAOnTheMorningOf1025(tracking="10/24/2026", untracked={1630174}),
+        ledger_players=[("0022600110", 1630174, DEN)],
+    )
+
+    assert (composed, job) == (1, ("succeeded", None))
+    (version,) = versions
+    player_ids = {row["player_id"] for row in json.loads(version["payload"])["rows"]}
+    assert (len(player_ids), 1630174 in player_ids) == (370, False)
 
 
 def test_player_shot_types_missing_a_box_score_shooter_are_not_published(tmp_path):
@@ -2360,6 +2460,7 @@ def test_synergy_window_binds_team_minutes_and_tolerates_partial_play_type_games
         ("backdated_synergy", 4),
         ("l15_boundary_mismatch", 4),
         ("late_teams", 2),
+        ("tracking_omitted", 5),
     ),
 )
 def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows(
@@ -2389,6 +2490,21 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
             for pair_index in range(15)
         ],
     }
+    if evidence_mode == "tracking_omitted":
+        # Tracking leaves the first two teams' fourth game out for good.
+        (omitted,) = (event for event in event_payload["events"] if event["nba_game_id"] == "game-3-0")
+        monkeypatch.setattr(
+            tracking_omissions,
+            "TRACKING_OMITTED_GAMES",
+            (
+                TrackingOmittedGame(
+                    "game-3-0",
+                    "2025-26",
+                    slate_date_for_instant(datetime.fromisoformat(omitted["scheduled_at"])),
+                    frozenset({int(team_ids[0]), int(team_ids[1])}),
+                ),
+            ),
+        )
     event_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
     event_publication = control.publish_catalog(event_request.request_id, event_payload, version="event-v1")
     assert event_publication.complete
@@ -2435,6 +2551,7 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
     descriptors = _collector_scope_descriptors(
         manifest_scopes,
         cutoff,
+        season="2025-26",
         l15_date_from_by_team={int(team_id): l15_date_from for team_id in team_ids},
     )
     discovery = {
@@ -2475,12 +2592,16 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
             assert kwargs["per_mode_simple"] == "Totals"
             assert kwargs["date_to"] == cutoff.strftime("%m/%d/%Y")
             assert _date_from == (l15_date_from if kwargs["last_n_games"] == 15 else None)
+            # The standalone provider takes each untracked game's own box
+            # score out of the window; here that game lasted 48 minutes.
+            untracked = len(kwargs.get("untracked_dates", ()))
             return [
                 {
                     "team_id": kwargs["team_id"],
                     "category": category,
-                    "GP": 14 if evidence_mode == "gp14" and kwargs["last_n_games"] == 15 else 15,
-                    "MIN": 725,
+                    "GP": (14 if evidence_mode == "gp14" and kwargs["last_n_games"] == 15 else 15)
+                    - untracked,
+                    "MIN": 725 - 48 * untracked,
                     "FG2M": 40,
                     "FG2A": 80,
                     "FG3M": 20,
@@ -3008,12 +3129,20 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
                 40 * 48 / 725,
             )
         }
+    if evidence_mode == "tracking_omitted":
+        # The season shot types answer for the games tracking covers: the
+        # omitted game leaves both teams' rows, and its minutes with it.
+        read = reader.read("grouped_shot_types_opponent_season", season="2025-26")
+        games = {row.team_id: row.game_ids for row in read.decoded}
+        assert [len(games[int(team_id)]) for team_id in team_ids[:3]] == [14, 14, 15]
+        assert "game-3-0" not in {*games[int(team_ids[0])], *games[int(team_ids[1])]}
+        expected_values["grouped_shot_types_opponent_season"] = ("catch_and_shoot_FG2M", 40 * 48 / 677)
     for stream_key, (metric, expected) in expected_values.items():
         read = reader.read(stream_key, season="2025-26")
         assert read.available and len(read.decoded or ()) == 30
         assert (read.decoded or ())[0].per48[metric] == pytest.approx(expected)
         assert read.payload["source_observations"]
-    if evidence_mode in {"complete", "projection_failure"}:
+    if evidence_mode in {"complete", "projection_failure", "tracking_omitted"}:
         season_snapshot = matchup_repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", cutoff.date()))
         l15_snapshot = matchup_repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", cutoff.date(), 15))
         assert {fact.base for fact in season_snapshot.facts} >= {
@@ -3663,6 +3792,83 @@ def test_tracking_behind_the_box_score_defers_the_team_without_failing_the_run(t
     terminal = [call[4] for call in transport.calls if call[1].endswith("/api/collector/status")][-1]
     assert (terminal["state"], terminal["reason"]) == ("complete", "provider_window_unverified")
     outbox.close()
+
+
+def test_a_game_tracking_omits_leaves_the_window_and_any_other_shortfall_still_defers(
+    tmp_path: Path, monkeypatch
+):
+    # Tracking left LAC @ OKC on 10/25 out for good (crf04/statsplus-backend#712).
+    # The manifest names that date for LAC only, so LAC's window is its other
+    # six games and their minutes; OKC, a game short with no date named, is
+    # still a lag and waits.
+    _patch_opponent_shot_endpoints(monkeypatch, tracking_gp={LAC: 6, OKC: 6}, box_score=None)
+    from nba_api.stats import endpoints
+
+    class TeamStats:
+        def __init__(self, *, team_id_nullable, date_from_nullable, date_to_nullable, **_kwargs):
+            one_game = date_from_nullable == date_to_nullable == "10/25/2026"
+            self.row = {"TEAM_ID": team_id_nullable, "GP": 1 if one_game else 7}
+            self.row["MIN"] = 53.0 if one_game else 1691.0
+
+        def get_data_frames(self):
+            return [pd.DataFrame([self.row])]
+
+    monkeypatch.setattr(endpoints, "LeagueDashTeamStats", TeamStats)
+    window = {"window": "season", "date_from": None, "date_to": "11/05/2026"}
+    collector, transport, outbox = _collector(
+        tmp_path,
+        discovery=_opponent_discovery(
+            "shot_types_opponent",
+            {**window, "team_id": LAC, "untracked_dates": ["10/25/2026"]},
+            {**window, "team_id": OKC},
+        ),
+        provider=_StandaloneNBAProvider(),
+        release_checksum="a" * 64,
+    )
+
+    result = collector.run()
+
+    assert (result.exit_code, result.failures) == (0, ("provider_window_unverified",))
+    uploaded = [
+        json.loads(gzip.decompress(call[3]))
+        for call in transport.calls
+        if "/api/collector/observations" in call[1]
+    ]
+    assert (
+        sorted(
+            (record["team_id"], record["games_played"], record["minutes"])
+            for document in uploaded
+            for record in document["payload"]["records"]
+        )
+        == [(LAC, 6, 1638.0)] * 3
+    )
+    outbox.close()
+
+
+def test_the_manifest_names_each_teams_games_tracking_omits():
+    from app.services.collection_control import NBA_TEAM_IDS, _collector_scope_descriptors
+
+    def untracked(cutoff, season="2026-27"):
+        return {
+            (item["parameters"]["team_id"], item["parameters"]["window"]): item["parameters"][
+                "untracked_dates"
+            ]
+            for item in _collector_scope_descriptors(
+                {"grouped_shot_types_opponent_season", "grouped_shot_types_opponent_l15"},
+                cutoff,
+                season=season,
+                l15_date_from_by_team={int(team_id): "10/21/2026" for team_id in NBA_TEAM_IDS},
+            )
+            if "untracked_dates" in item["parameters"]
+        }
+
+    assert untracked(datetime(2026, 11, 5, 9, 45, tzinfo=UTC)) == {
+        (LAC, "season"): ["10/25/2026"],
+        (OKC, "season"): ["10/25/2026"],
+    }
+    # Not yet played at the 10/25 cutoff, and not in the next season's window.
+    assert untracked(datetime(2026, 10, 25, 9, 45, tzinfo=UTC)) == {}
+    assert untracked(datetime(2027, 11, 5, 9, 45, tzinfo=UTC), season="2027-28") == {}
 
 
 BOX_SCORE_7 = {"GP": 7, "MIN": 1691.0}
@@ -4415,7 +4621,7 @@ def test_operator_enable_unblocks_the_first_collection_of_an_nba_stream(tmp_path
         collect_before=NOW + timedelta(hours=1),
     )
     manifest_scopes = set(json.loads(manifest.scopes))
-    descriptors = _collector_scope_descriptors(manifest_scopes, cutoff)
+    descriptors = _collector_scope_descriptors(manifest_scopes, cutoff, season="2025-26")
     discovery = {
         "environment": "testing",
         "bootstrap_requests": [],
@@ -4648,7 +4854,7 @@ def test_a_persistent_zone_mismatch_reports_its_residual_to_the_operator(tmp_pat
     # A real manifest freezes the stream key beside the observation type it
     # authorizes; the runner matches descriptors against the latter.
     manifest_scopes = {"exact_shot_zones_opponent_season", "shot_zones_opponent"}
-    descriptors = _collector_scope_descriptors(manifest_scopes, NOW)
+    descriptors = _collector_scope_descriptors(manifest_scopes, NOW, season="2025-26")
     discovery = {
         "environment": "testing",
         "bootstrap_requests": [],
@@ -4738,7 +4944,7 @@ def test_run_once_writes_the_zone_diagnostic_to_the_configured_log(
                 "collect_before": (live + timedelta(hours=1)).isoformat(),
                 "accepted_versions": [2],
                 "scopes": sorted(manifest_scopes),
-                "scope_descriptors": _collector_scope_descriptors(manifest_scopes, live),
+                "scope_descriptors": _collector_scope_descriptors(manifest_scopes, live, season="2025-26"),
             }
         ],
     }
@@ -5052,6 +5258,7 @@ def test_l15_nba_release_transition_publishes_after_the_last_team_reaches_15(
     descriptors = _collector_scope_descriptors(
         scopes,
         cutoff_one,
+        season="2025-26",
         l15_date_from_by_team=_manifest_l15_date_from_by_team(engine, manifest_one),
     )
     assert not any(descriptor["parameters"].get("window") == "l15" for descriptor in descriptors)
@@ -5102,6 +5309,7 @@ def test_l15_nba_release_transition_publishes_after_the_last_team_reaches_15(
     descriptors = _collector_scope_descriptors(
         scopes,
         cutoff_two,
+        season="2025-26",
         l15_date_from_by_team=boundaries,
     )
     l15_descriptors = [

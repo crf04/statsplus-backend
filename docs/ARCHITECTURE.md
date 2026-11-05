@@ -5407,7 +5407,13 @@ many games in `Overall` as in the box score. The three types do not cover
 every shot (a floater from 12 feet is none of them), so a fully tracked player
 whose attempts all fall outside them is absent from the Diet; requiring each
 shooter in a category refused the 2026-10-28 collection over one such
-attempt (crf04/statsplus#386). An observation without the bound or the
+attempt (crf04/statsplus#386). A game tracking leaves out for good is listed
+in `app/domain/tracking_omissions.py` (crf04/statsplus-backend#712): each
+player is expected to be short by the listed games the Canonical Game Ledger
+has him playing, and any other shortfall still refuses. The season opponent
+shot types are composed for the governed games minus listed ones, and
+`validate_publication_rows` accepts either set, so a Publication composed
+before the game was listed still reads. An observation without the bound or the
 evidence is `provider_window_unverified`. The refused job is retried by the next upload
 inside the collection window, so the publication moves as soon as NBA catches
 up and never to a lagging candidate. The version binds the same manifest and Event Catalog
