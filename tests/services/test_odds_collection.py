@@ -6,7 +6,7 @@ import logging
 from datetime import UTC, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from app.models.athlete_mapping import ProviderAthleteMapping
 from app.models.sportsbook_odds import (
@@ -16,7 +16,7 @@ from app.models.sportsbook_odds import (
     SportsbookPropQuote,
 )
 from app.providers.odds_api import OddsApiError, OddsQuota
-from app.services.odds_collection import LeaseLost
+from app.services.odds_collection import LeaseLost, run_once
 from app.services.odds_schedule import Tier
 from app.services.sportsbook_quotes import ResolvedQuote, SportsbookQuoteReader
 from tests.support.odds_world import (
@@ -495,6 +495,14 @@ def test_every_write_layer_refuses_a_stale_fence_even_with_the_same_owner_name(w
             quotes=[quote],
             fence=a._assert_lease,
         ),
+        "published poll": lambda: a.store.publish_poll(
+            1,
+            game_id=GAME_ID,
+            is_closing=False,
+            quotes=[quote],
+            unresolved_count=0,
+            fence=a._assert_lease,
+        ),
         "failure": lambda: a._failed(
             NOW,
             {"consecutive_failures": 0, "tier": "normal"},
@@ -623,3 +631,78 @@ def test_a_discarded_response_still_updates_the_stored_quota_first(world):
     (state,) = _rows(world, OddsApiQuotaState)
     assert (state["remaining"], state["used"], state["last_cost"]) == (5, 19995, 5)
     assert [p["failure_reason"] for p in _rows(world, OddsApiPoll)] == ["received_after_tip"]
+
+
+# -- a paid sportsbook response is recorded before anything can fail (#702) --
+
+
+def test_a_quota_fault_after_a_night_purchase_never_buys_the_game_again(world):
+    client = FakeClient()
+    coordinator = world.coordinator(client)
+    save = coordinator._save_quota
+
+    def refuse_the_paid_quota(quota, *, now):
+        if quota.last_cost:
+            raise RuntimeError("quota persistence interrupted after the paid response")
+        return save(quota, now=now)
+
+    coordinator._save_quota = refuse_the_paid_quota
+    night = TIP - timedelta(hours=22, minutes=30)  # 22:00 ET the night before
+    world.clock[0] = night
+    assert run_once(coordinator).reason == "unexpected_error"
+
+    coordinator._save_quota = save
+    world.clock[0] = night + timedelta(minutes=5)
+    assert run_once(coordinator).calls == 0
+
+    assert client.event_calls == [EVENT_ID]
+    assert 20000 - client.remaining == 5
+    (poll,) = _rows(world, OddsApiPoll)
+    assert (poll["outcome"], poll["cost"], poll["remaining"]) == ("complete", 5, 19995)
+
+
+def test_a_quote_store_fault_counts_the_paid_poll_and_backs_off_without_buying_again(world):
+    messages = []
+    client = FakeClient()
+    coordinator = world.coordinator(client, notify=lambda level, message: messages.append((level, message)))
+
+    def refuse_quote_writes(_conn, _cursor, statement, *_args):
+        if statement.lstrip().upper().startswith(("INSERT", "UPDATE")) and "sportsbook_prop_" in statement:
+            raise RuntimeError("quote tables unavailable")
+
+    event.listen(world.engine, "before_cursor_execute", refuse_quote_writes)
+    result = run_once(coordinator)
+
+    assert (result.status, result.reason, result.calls, result.credits) == (
+        "failed",
+        "storage_error",
+        1,
+        5,
+    )
+    (poll,) = _rows(world, OddsApiPoll)
+    assert (poll["outcome"], poll["failure_reason"], poll["cost"], poll["quote_count"]) == (
+        "complete",
+        "storage_error",
+        5,
+        0,
+    )
+    assert _rows(world, SportsbookPropLatest) == []
+    assert (logging.ERROR, "Odds API could not record sportsbook quotes; backing off") in messages
+    (state,) = _rows(world, OddsApiQuotaState)
+    assert (state["consecutive_failures"], state["last_failure_reason"]) == (1, "storage_error")
+
+    for minutes in (5, 29, 31, 55):
+        world.clock[0] = NOW + timedelta(minutes=minutes)
+        assert run_once(coordinator).calls == 0, minutes
+    assert client.event_calls == [EVENT_ID]
+
+    event.remove(world.engine, "before_cursor_execute", refuse_quote_writes)
+    world.clock[0] = NOW + timedelta(hours=1)
+    recovered = run_once(coordinator)
+    assert (recovered.status, recovered.calls) == ("complete", 1)
+    assert client.event_calls == [EVENT_ID, EVENT_ID]
+    assert [(p["failure_reason"], p["quote_count"]) for p in _rows(world, OddsApiPoll)] == [
+        ("storage_error", 0),
+        (None, 11),
+    ]
+    assert len(_rows(world, SportsbookPropLatest)) == 11
