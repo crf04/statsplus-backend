@@ -70,6 +70,7 @@ from app.services.team_matchup_publications import (
     validate_publication_rows,
 )
 from app.services.traditional_opponent_publications import (
+    FRACTIONAL_COUNT_METRICS,
     TraditionalOpponentFormat,
     TraditionalOpponentFormatError,
     is_traditional_opponent_stream,
@@ -756,7 +757,12 @@ def decode_team_window(payload: Any, *, stream_key: str) -> tuple[PublicationTea
                     raise PublicationPayloadError(
                         f"{stream_key} publication counts.{key} is invalid"
                     ) from None
-                if not isfinite(numeric_value) or numeric_value < 0 or not numeric_value.is_integer():
+                integral = not (traditional_family and key in FRACTIONAL_COUNT_METRICS)
+                if (
+                    not isfinite(numeric_value)
+                    or numeric_value < 0
+                    or (integral and not numeric_value.is_integer())
+                ):
                     raise PublicationPayloadError(f"{stream_key} publication counts.{key} is invalid")
             for key, value in per48.items():
                 _strict_float(value, field=f"per48.{key}", stream_key=stream_key, minimum=0)

@@ -182,6 +182,42 @@ def test_stocks_filter_sums_the_two_published_primitives():
     assert ranked[:3] == ["GSW", "LAL", "BOS"]
 
 
+def _drtg_reads(*, possessions=True):
+    """Points and possessions per 48 whose DRTG order differs from points.
+
+    MIA 100 / 80 = 125.0, GSW 120 / 100 = 120.0, BOS 110 / 100 = 110.0, and
+    every other team 100 / 100 = 100.0.
+    """
+
+    values = {"MIA": (100.0, 80.0), "GSW": (120.0, 100.0), "BOS": (110.0, 100.0)}
+
+    def per48(tricode):
+        points, team_possessions = values.get(tricode, (100.0, 100.0))
+        if not possessions:
+            return traditional_per48(points=points)
+        return traditional_per48(points=points, possessions=team_possessions)
+
+    return {"traditional_opponent_season": _read("traditional_opponent_season", _league(per48))}
+
+
+def test_drtg_ranks_points_per_100_possessions_highest_first():
+    service = _service(_drtg_reads())
+
+    drtg = service.ranked_teams("DRTG", SEASON)
+    points = service.ranked_teams("OPP_PTS", SEASON)
+
+    assert len(drtg) == 30
+    assert drtg[:3] == ["MIA", "GSW", "BOS"]
+    assert points[:3] == ["GSW", "BOS", "ATL"]
+
+
+def test_a_publication_without_possessions_ranks_no_drtg_but_every_other_filter():
+    service = _service(_drtg_reads(possessions=False))
+
+    assert service.ranked_teams("DRTG", SEASON) == []
+    assert service.ranked_teams("OPP_PTS", SEASON)[:2] == ["GSW", "BOS"]
+
+
 def _shot_type_reads(values):
     """Build shot-type rows from ``{tricode: (fg2m, fg3m)}`` pairs."""
 

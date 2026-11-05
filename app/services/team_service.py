@@ -173,7 +173,7 @@ def _resolve_team_id(team_name) -> int | None:
     return None
 
 
-def _rate_column(table, numerator_key, denominator_key) -> LeagueMetricColumn:
+def _rate_column(table, numerator_key, denominator_key, *, scale=1.0) -> LeagueMetricColumn:
     """Rank one published rate over the teams that have a rate at all.
 
     A team that faced no possessions of a play type has no points per
@@ -186,7 +186,7 @@ def _rate_column(table, numerator_key, denominator_key) -> LeagueMetricColumn:
 
     denominator = table[denominator_key].values
     rates = {
-        team_id: value / denominator[team_id]
+        team_id: scale * value / denominator[team_id]
         for team_id, value in table[numerator_key].values.items()
         if denominator[team_id]
     }
@@ -226,6 +226,8 @@ def _traditional_profile(table, team_id) -> dict:
             field = "OPP_FG_PCT" if label == "FG%" else "OPP_FG3_PCT"
         elif token == "OPP_STOCKS":
             field = "OPP_STL+BLK"
+        elif token == "DRTG":
+            field = "DRTG"
         else:
             field = fields[definition.numerator[0][0]]
         _place(stats, field, column, team_id)
@@ -336,6 +338,17 @@ def opponent_profile_metrics(base, table):
                 TeamFilterRanking(base, ((numerator, 1.0),), denominator),
                 None,
                 "percent",
+            )
+        # A publication whose format predates possessions has no Defensive
+        # Rating; the field is omitted rather than ranked as zero.
+        if "possessions" in table:
+            yield (
+                "General",
+                "Defensive rating",
+                _rate_column(table, "points", "possessions", scale=100.0),
+                TEAM_FILTER_RANKINGS["DRTG"],
+                "DRTG",
+                "rating",
             )
     elif base == "play_types":
         for key in PLAY_TYPES:

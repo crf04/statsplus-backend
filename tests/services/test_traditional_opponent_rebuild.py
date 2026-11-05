@@ -30,6 +30,7 @@ from app.services.traditional_opponent_publications import (
     TRADITIONAL_OPPONENT_TARGET_FORMAT,
     TRADITIONAL_OPPONENT_V1,
     TRADITIONAL_OPPONENT_V2,
+    TRADITIONAL_OPPONENT_V3,
     normalize_traditional_opponent_window,
 )
 from app.services.traditional_opponent_rebuild import (
@@ -47,6 +48,7 @@ from tests.support.traditional_opponent_family import (
     seed_family,
     v1_payload,
     v2_payload,
+    v3_payload,
 )
 
 UTC = UTC
@@ -54,11 +56,11 @@ ACTOR = "operator@example.com"
 REASON = "publish the opponent rebound split"
 
 
-def _v2_composer(*, mutate=None):
+def _target_composer(*, mutate=None):
     """Compose both windows in the deployed target format."""
 
     def compose(sources):
-        return {stream_key: v2_payload(mutate=mutate) for stream_key in sources.stream_keys}
+        return {stream_key: v3_payload(mutate=mutate) for stream_key in sources.stream_keys}
 
     return compose
 
@@ -74,7 +76,7 @@ def _service(engine, *, compose=None, clock=None, lease_seconds=300):
     return TraditionalOpponentRebuildService(
         engine,
         publication_service=PublicationService(engine, clock=clock or (lambda: NOW)),
-        compose=compose or _v2_composer(),
+        compose=compose or _target_composer(),
         clock=clock or (lambda: NOW),
         lease_seconds=lease_seconds,
     )
@@ -120,8 +122,8 @@ def test_the_deployed_module_owns_the_target_format(family):
     engine, publications = family
     rebuild = _service(engine).start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
 
-    assert rebuild.target_format == TRADITIONAL_OPPONENT_V2.name
-    assert TRADITIONAL_OPPONENT_TARGET_FORMAT is TRADITIONAL_OPPONENT_V2
+    assert rebuild.target_format == TRADITIONAL_OPPONENT_V3.name
+    assert TRADITIONAL_OPPONENT_TARGET_FORMAT is TRADITIONAL_OPPONENT_V3
 
 
 def test_a_start_refuses_a_stale_expected_pair(family):
@@ -313,13 +315,31 @@ def test_a_composed_candidate_that_is_not_the_target_format_is_terminal(family):
     assert _pointers(engine) == before
 
 
+def test_a_rebuild_before_the_possessions_backfill_fails_and_moves_nothing(family):
+    """Ledger facts without possessions compose v2, which is not the target."""
+
+    engine, publications = family
+
+    def compose_v2(sources):
+        return {stream_key: v2_payload() for stream_key in sources.stream_keys}
+
+    service = _service(engine, compose=compose_v2)
+    rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
+    before = _pointers(engine)
+
+    failed = service.run(rebuild.rebuild_id, owner="worker-1")
+
+    assert (failed.state, failed.error_code) == ("failed", "publication_format_unsupported")
+    assert _pointers(engine) == before
+
+
 def test_a_semantically_invalid_candidate_fails_the_whole_rebuild(family):
     engine, publications = family
 
     def break_the_identity(rows):
         rows[4]["counts"] = {**rows[4]["counts"], "offensive_rebounds": 12.0}
 
-    service = _service(engine, compose=_v2_composer(mutate=break_the_identity))
+    service = _service(engine, compose=_target_composer(mutate=break_the_identity))
     rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
     before = _pointers(engine)
 
@@ -451,7 +471,7 @@ def test_a_transient_worker_failure_leaves_the_rebuild_retryable(family):
         calls.append(1)
         if len(calls) == 1:
             raise TimeoutError("database connection dropped")
-        return {stream_key: v2_payload() for stream_key in sources.stream_keys}
+        return {stream_key: v3_payload() for stream_key in sources.stream_keys}
 
     service = _service(engine, compose=flaky)
     rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
@@ -816,7 +836,7 @@ def test_the_rebuilt_pair_is_read_back_through_the_family_interface(family):
             decode_team_window(_json.loads(version.payload), stream_key=stream_key),
             stream_key=stream_key,
         )
-        assert window.format is TRADITIONAL_OPPONENT_V2
+        assert window.format is TRADITIONAL_OPPONENT_V3
         assert window.supports(REBOUND_SPLIT)
 
 
@@ -873,12 +893,30 @@ def test_the_production_composer_emits_the_target_format_for_both_windows():
             decode_team_window(payload_rows, stream_key=stream_key),
             stream_key=stream_key,
         )
-        assert window.format is TRADITIONAL_OPPONENT_V2
+        assert window.format is TRADITIONAL_OPPONENT_V3
         assert len(window.teams) == 30
         for team in window.teams:
             assert team.per48["rebounds"] == (
                 team.per48["offensive_rebounds"] + team.per48["defensive_rebounds"]
             )
+
+
+def test_ledger_facts_without_possessions_compose_v2_never_zero_possessions():
+    from app.services.traditional_opponent_rebuild import compose_from_ledger
+    from tests.services.test_ledger_derivations import _league_games
+
+    games = _league_games(possessions=False)
+
+    payloads = compose_from_ledger(_ledger_sources(games), games=games)
+
+    for stream_key, payload_rows in payloads.items():
+        window = normalize_traditional_opponent_window(
+            decode_team_window(payload_rows, stream_key=stream_key),
+            stream_key=stream_key,
+        )
+        assert window.format is TRADITIONAL_OPPONENT_V2
+        assert window.metric_values("possessions") is None
+        assert all("possessions" not in row["counts"] for row in payload_rows)
 
 
 def test_the_composer_refuses_to_widen_its_own_governed_game_set():
@@ -918,7 +956,7 @@ def test_an_expired_worker_cannot_overwrite_its_successors_state(family):
         # rebuild all the way to succeeded.
         clock[0] = NOW + timedelta(minutes=5)
         successor.run(rebuild.rebuild_id, owner="worker-2")
-        return {stream_key: v2_payload() for stream_key in sources.stream_keys}
+        return {stream_key: v3_payload() for stream_key in sources.stream_keys}
 
     slow = _service(engine, compose=slow_compose, clock=lambda: clock[0], lease_seconds=60)
 
@@ -1154,7 +1192,7 @@ def test_the_executable_adapter_drives_and_reports_one_rebuild(tmp_path, capsys)
     service = TraditionalOpponentRebuildService(
         engine,
         publication_service=publications,
-        compose=_v2_composer(),
+        compose=_target_composer(),
         clock=lambda: NOW,
     )
     rebuild = service.start(actor=ACTOR, reason=REASON, expected=active_expectation(publications))
@@ -1487,7 +1525,7 @@ def test_a_stale_same_owner_pass_cannot_stage_candidates(family):
     with pytest.raises(ControlPlaneError, match="rebuild_lease_held"):
         service._stage_candidates(
             rebuild,
-            {stream_key: v2_payload() for stream_key in service.stream_keys},
+            {stream_key: v3_payload() for stream_key in service.stream_keys},
             claim=stale,
         )
 
@@ -1513,7 +1551,7 @@ def test_a_stale_same_owner_pass_cannot_stage_through_the_public_seam(family):
         clock[0] = NOW + timedelta(minutes=5)
         stale_service.claim(rebuild.rebuild_id, owner=WORKER)
         composed.append(1)
-        return {stream_key: v2_payload() for stream_key in sources.stream_keys}
+        return {stream_key: v3_payload() for stream_key in sources.stream_keys}
 
     racing = _service(engine, compose=slow_compose, clock=lambda: clock[0], lease_seconds=60)
     before = _candidate_rows(publications)

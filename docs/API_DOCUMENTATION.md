@@ -2915,7 +2915,7 @@ Every successful response also carries the shared
 
 ```json
 {
-  "game_logs": [{ "GAME_DATE": "2026-01-15", "PTS": 31, "closing_line": null }],
+  "game_logs": [{ "GAME_DATE": "2026-01-15", "PTS": 31, "closing_line": null, "closing_lines": {} }],
   "averages": [{ "PTS": 31.0 }],
   "season_averages": [{ "PTS": 27.4 }],
   "season_game_count": 71,
@@ -3018,15 +3018,42 @@ Closing line (crf04/statsplus#216): every `game_logs` row carries
   `draftkings`, `fanduel`, `betmgm`, `williamhill_us` (Caesars), `betrivers`
   or `fanatics`. One line is stored per player per game: DraftKings'
   where it posted him, else FanDuel's, then the others in that order.
-* It is the last snapshot The Odds API held before tip (snapshots are about 5
-  minutes apart), bought once by `scripts/backfill_closing_lines.py` and never
-  refreshed. Only 2025-26 games are backfilled, so every other season, a game
-  the backfill has not reached, a player no regulated book posted and a name
-  that did not match a rostered player carry `null`. A storage fault also
-  reads as `null`; the rest of the response is unaffected.
+* For 2025-26 it is the last snapshot The Odds API held before tip (snapshots
+  are about 5 minutes apart), bought once by `scripts/backfill_closing_lines.py`
+  and never refreshed. From 2026-27 on it is the live odds collector's closing
+  poll, taken 5 to 10 minutes before tip (a game it missed is bought at the
+  last snapshot before tip by the same script, `--season 2026-27`). Earlier
+  seasons, a game with no stored close, a player no regulated book posted and
+  a name that did not match a rostered player carry `null`. A storage fault
+  also reads as `null`; the rest of the response is unaffected.
 * The field is additive and always present. No filter, average or `provenance`
   entry depends on it, and a filter does not change it: each kept row carries
   its own game's line. Counting games against it is the caller's job.
+* It is always `closing_lines.PTS` (below), or `null` when that is absent.
+
+Closing lines by market (crf04/statsplus#429): every `game_logs` row also
+carries `closing_lines`, the player's closing line in each market that has one
+for that game, keyed by market, or `{}`:
+
+```json
+{ "GAME_DATE": "2026-11-01", "REB": 9, "closing_line": { "value": 24.5, "book": "draftkings" },
+  "closing_lines": { "PTS": { "value": 24.5, "book": "draftkings" }, "REB": { "value": 7.5, "book": "fanduel" } } }
+```
+
+* Markets are `PTS`, `REB`, `AST`, `3PM` and `PRA`; a market without a line is
+  absent, never `null`. Each entry is `{value, book}` exactly as `closing_line`
+  is, one book per market by the same order (DraftKings, FanDuel, BetMGM,
+  Caesars, BetRivers, Fanatics: the first that posted him in that market).
+* 2026-27 onward: the closing quotes the live collector stored for that game,
+  player and market (all five markets), from the game's close: its newest
+  closing poll for its current tip that stored a quote (an empty poll never
+  replaces an earlier close for the same tip). A player that close did not
+  carry, and a game closed only for a tip a postponement moved, carry `{}`
+  (and `closing_line` `null`). 2025-26: the backfilled table, which holds points only, so
+  a 2025-26 row carries `PTS` or nothing. Earlier seasons carry `{}`.
+* Additive, always present, unaffected by filters, averages and `provenance`,
+  like `closing_line`. A storage fault reads as `{}` on every row; the rest of
+  the response is unaffected.
 
 Posted line (crf04/statsplus#238): the response carries `posted_line`, the
 player's lines for his team's game on the **line day**, or `null`. The optional
@@ -3973,6 +4000,16 @@ authentication, current-season selection, error contract, and every existing
 response field are unchanged.  A publication whose format predates the split
 omits all six rather than reporting zero, and the panel renders them as `N/A`;
 a fabricated zero would be indistinguishable from a defense that allowed none.
+
+`Traditional` also serves Defensive Rating -- `DRTG`, `DRTG_RANK`, and
+`DRTG_vs_avg_pct` (crf04/statsplus#433). `DRTG` is
+`100 x points allowed / opponent offensive possessions` over the Season, both
+per 48 from the publication, so it is points allowed per 100 possessions (for
+example `112.4`, not a fraction). Its rank and comparison use the same
+ascending ranks and league-average formula, so rank 30 is the highest DRTG.
+Possessions are PBPStats' player `OffPoss` over five. A publication without
+`possessions` (format `traditional_opponent.v2`) omits all three fields, and
+the panel renders `N/A`.
 Team Filters and the Matchups Defense Sheet keep their existing projection
 catalogs and do not expose the split.
 
@@ -6759,7 +6796,7 @@ with crf04/statsplus-frontend#103 by the coordination contract gate.
 
 Common opponent filters include:
 
-- Traditional: `OPP_PTS`, `OPP_REB`, `OPP_AST`, `OPP_STOCKS`, `OPP_FTA`, `OPP_TOV`, `OPP_BLK`, `OPP_STL`, `OPP_FG3M`, `OPP_FG3A`
+- Traditional: `OPP_PTS`, `OPP_REB`, `OPP_AST`, `OPP_STOCKS`, `OPP_FTA`, `OPP_TOV`, `OPP_BLK`, `OPP_STL`, `OPP_FG3M`, `OPP_FG3A`, `DRTG` (Defensive Rating: points allowed per 100 opponent possessions; ranks nothing while the Season publication carries no possessions)
 - Shooting: `C&S PTS`, `C&S 3s`, `C&S 3A`, `PU PTS`, `PU 2s`, `PU 3s`, `Less Than 10 ft` (legacy `<10 Ft` is accepted and normalized)
 - Play types: `PRBallHandler`, `PRRollMan`, `Transition`, `Isolation`, `Spotup`, `Cut`, `Handoff`, `OffScreen`, `Postup`, `OffRebound`, `Misc`
 

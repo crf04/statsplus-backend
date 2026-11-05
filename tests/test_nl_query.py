@@ -186,6 +186,17 @@ class TestBaseQueryParser(unittest.TestCase):
                 if "against" in query:
                     self.assertGreaterEqual(len(components.opponent_filters), 0)
 
+    def test_defensive_rating_phrases_rank_drtg_with_low_as_best(self):
+        test_cases = [
+            ("Curry vs top 10 defensive rating", [("DRTG", -10)]),
+            ("LeBron against worst 5 drtg teams", [("DRTG", 5)]),
+            ("Tatum vs the best 8 in defensive rating", [("DRTG", -8)]),
+        ]
+
+        for query, expected_filters in test_cases:
+            with self.subTest(query=query):
+                self.assertEqual(self.parser.parse(query).opponent_filters, expected_filters)
+
     def test_intent_classification(self):
         """Test classification of query intent"""
         test_cases = [

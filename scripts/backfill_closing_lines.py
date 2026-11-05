@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Backfill 2025-26 closing NBA points lines from The Odds API (#433).
+"""Backfill closing NBA lines from The Odds API (#433, crf04/statsplus#429).
 
 Buys, for each game of the season, the ``player_points`` snapshot at the last
 5-minute mark before tip (10 credits, region ``us``), stores one line per
@@ -7,8 +7,15 @@ player with its source book, and prints a coverage report.  Idempotent and
 resumable: every response is recorded before it is parsed, and a game that is
 recorded is never bought again, so a rerun spends 0 credits on it.
 
-  --dry-run         no call is made and nothing is written: prints the plan
-                    and the estimated credits
+  --season 2026-27  the gap backfill instead: each started regular-season or
+                    playoff game with no closing quote from the live collector
+                    is bought at the same snapshot for all five standard
+                    markets (50 credits a game) and stored as that game's
+                    closing poll in sportsbook_prop_quotes.  It prints the
+                    games still without closing quotes afterwards.
+                    --re-resolve does not apply.  The default is 2025-26.
+  --dry-run         no call is made and nothing is written: prints the plan,
+                    the games it would buy and the estimated credits
   --spot-check N    buy only N games spread over the season, then the report
   --max-credits     hard cap on what the whole backfill spends, earlier runs
                     included (default 15000)
@@ -48,15 +55,18 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config.settings import load_settings
+from app.domain.utc import utc_now
 from app.providers.odds_api import SPORTSBOOK_REGION, OddsApiClient
 from app.services.athlete_catalog_service import AthleteCatalogReader
 from app.services.athlete_mapping_errors import AthleteMappingPersistenceError
 from app.services.athlete_mapping_repository import AthleteMappingRepository
 from app.services.closing_line_backfill import (
+    ALL_ODDS_MARKETS,
     SEASON,
     BoxScoreNames,
     ClosingLineBackfill,
     ClosingLineReResolve,
+    ClosingQuoteWriter,
     SettledSeasonCatalog,
     format_coverage,
     format_plan,
@@ -64,15 +74,26 @@ from app.services.closing_line_backfill import (
     format_summary,
 )
 from app.services.closing_lines import (
+    ALL_MARKETS,
+    LIVE_CLOSING_FIRST_SEASON,
+    MARKET_CATEGORY,
     ClosingLineStore,
     RunRefused,
+    closing_quote_gaps,
     coverage_report,
+    describe_gap,
+    games_with_closing_quotes,
 )
 from app.services.event_catalog_repository import EventCatalogRepository
 from app.services.event_mapping_repository import EventMappingRepository
 from app.services.event_resolver import EventResolver
 from app.services.odds_identity import OddsEventMapper
+from app.services.sportsbook_quotes import SportsbookQuoteStore
 from app.utils.db import get_engine, is_demo_database_url
+
+#: The seasons the script can backfill: the points backfill, and the first
+#: season the live collector closes (its gaps).
+SEASONS = (SEASON, LIVE_CLOSING_FIRST_SEASON)
 
 #: Stops that are the guards doing their job, not a fault.
 EXPECTED_STOPS = {None, "max_credits", "keep_remaining"}
@@ -109,9 +130,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-credits", type=_positive, default=15000)
     parser.add_argument("--keep-remaining", type=_non_negative, default=5000)
     parser.add_argument("--re-resolve", action="store_true")
+    parser.add_argument("--season", choices=SEASONS, default=SEASON)
     args = parser.parse_args(argv)
+    gaps = args.season != SEASON
     if args.re_resolve and args.spot_check is not None:
         parser.error("--re-resolve buys no game, so --spot-check does not apply")
+    if args.re_resolve and gaps:
+        parser.error(f"--re-resolve applies to the {SEASON} points lines only")
     if not args.database_url.strip():
         parser.error("--database-url or DATABASE_URL is required")
     if is_demo_database_url(args.database_url):
@@ -120,15 +145,29 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", stream=sys.stdout)
     settings = load_settings(overrides={"DATABASE_URL": args.database_url})
     engine = get_engine(settings)
-    store = ClosingLineStore(engine)
+    store = ClosingLineStore(engine, market=ALL_MARKETS if gaps else MARKET_CATEGORY)
     if not store.ready():
         print("failed: migration 067 has not run; run scripts/migrate.py first")
         return 1
     event_catalog = EventCatalogRepository(engine)
-    events = event_catalog.list_events(SEASON)
+    events = event_catalog.list_events(args.season)
 
     if args.re_resolve:
         return _re_resolve(args, engine, store, events)
+
+    # The gap backfill buys what the gap check names: started games, less
+    # those the live collector closed.
+    now = utc_now()
+    season_options = (
+        dict(
+            season=args.season,
+            markets=ALL_ODDS_MARKETS,
+            started_by=now,
+            covered=games_with_closing_quotes(engine, (event["nba_game_id"] for event in events)),
+        )
+        if gaps
+        else {}
+    )
 
     if args.dry_run:
         backfill = ClosingLineBackfill(
@@ -139,11 +178,12 @@ def main(argv: list[str] | None = None) -> int:
             events=events,
             max_credits=args.max_credits,
             keep_remaining=args.keep_remaining,
+            **season_options,
         )
         plan = backfill.plan(args.spot_check)
         for line in format_plan(plan, dry_run=True, max_credits=args.max_credits):
             print(line)
-        _print_coverage(store, engine)
+        _print_report(args.season, engine, store, events)
         return 0
 
     odds = settings.odds_api
@@ -151,6 +191,12 @@ def main(argv: list[str] | None = None) -> int:
         print("failed: ODDS_API_KEY is not set")
         return 1
     event_mappings = EventMappingRepository(engine, settings=settings)
+    names = BoxScoreNames(
+        engine=engine,
+        catalog=AthleteCatalogReader(engine),
+        mapping_repository=AthleteMappingRepository(engine),
+        season=args.season,
+    )
     backfill = ClosingLineBackfill(
         store=store,
         client=OddsApiClient(
@@ -166,16 +212,18 @@ def main(argv: list[str] | None = None) -> int:
                 settings=settings,
             ),
             mapping_repository=event_mappings,
-            season=SEASON,
+            season=args.season,
         ),
-        names=BoxScoreNames(
-            engine=engine,
-            catalog=AthleteCatalogReader(engine),
-            mapping_repository=AthleteMappingRepository(engine),
-        ),
+        names=names,
         events=events,
         max_credits=args.max_credits,
         keep_remaining=args.keep_remaining,
+        writer=(
+            ClosingQuoteWriter(ledger=store, names=names, quotes=SportsbookQuoteStore(engine))
+            if gaps
+            else None
+        ),
+        **season_options,
     )
     plan = backfill.plan(args.spot_check)
     for line in format_plan(plan, dry_run=False, max_credits=args.max_credits):
@@ -188,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     for line in format_summary(summary):
         print(line)
-    _print_coverage(store, engine)
+    _print_report(args.season, engine, store, events)
     return 0 if summary.stop in EXPECTED_STOPS else 1
 
 
@@ -219,6 +267,19 @@ def _re_resolve(args, engine, store: ClosingLineStore, events) -> int:
     print("coverage projected:" if args.dry_run else "coverage after:")
     _print_coverage(store, engine, projected=summary.projected if args.dry_run else None)
     return 0
+
+
+def _print_report(season: str, engine, store: ClosingLineStore, events) -> None:
+    """2025-26: the coverage report.  2026-27: the gap check, every started game
+    of the season still without closing quotes."""
+
+    if season == SEASON:
+        _print_coverage(store, engine)
+        return
+    missing = closing_quote_gaps(engine, events, now=utc_now())
+    print(f"started {season} games without closing quotes: {len(missing)}")
+    for event in missing:
+        print(f"  {describe_gap(event)}")
 
 
 def _print_coverage(store: ClosingLineStore, engine, *, projected=None) -> None:

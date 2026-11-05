@@ -47,6 +47,7 @@ OPPONENT_FILTERS: tuple[str, ...] = (
     "OPP_STL",
     "OPP_FG3M",
     "OPP_FG3A",
+    "DRTG",
 )
 
 #: Catch-and-shoot and pull-up opponent categories.

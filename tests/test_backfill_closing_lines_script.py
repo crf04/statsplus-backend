@@ -79,7 +79,11 @@ def client(monkeypatch):
 def unlocked(monkeypatch):
     """Paid runs over SQLite, which the store otherwise refuses (one process here)."""
 
-    monkeypatch.setattr(script, "ClosingLineStore", lambda engine: ClosingLineStore(engine, lock_runs=False))
+    monkeypatch.setattr(
+        script,
+        "ClosingLineStore",
+        lambda engine, **kwargs: ClosingLineStore(engine, lock_runs=False, **kwargs),
+    )
 
 
 def test_a_dry_run_prints_the_plan_and_the_estimate_and_makes_no_call_and_no_write(world, client, capsys):
@@ -411,3 +415,91 @@ def test_a_storage_fault_reading_the_mappings_is_a_clean_failure_that_leaves_the
         _rows(world.url, "closing_lines"),
         _rows(world.url, "closing_line_purchases"),
     ) == before
+
+
+# -- --season 2026-27: the closing-quote gap backfill (crf04/statsplus#429) --
+
+
+@pytest.fixture
+def world_2026_27(tmp_path, monkeypatch):
+    from datetime import timedelta
+
+    from app.services.sportsbook_quotes import ResolvedQuote, SportsbookQuoteStore
+    from tests.support.closing_lines_world import BOS_NYK_EVENT, TATUM, TIPS
+
+    monkeypatch.delenv("ODDS_API_KEY", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    world = build_world(
+        tmp_path, database_url=f"sqlite:///{tmp_path / f'gaps-{uuid.uuid4().hex}.sqlite3'}", season="2026-27"
+    )
+    # The live collector closed GSW @ LAC and BOS @ NYK; DEN @ LAL is the gap.
+    store = SportsbookQuoteStore(world.engine)
+    for game_id, event_id, player in ((GSW_LAC, GSW_LAC_EVENT, CURRY), (BOS_NYK, BOS_NYK_EVENT, TATUM)):
+        observed = TIPS[game_id] - timedelta(minutes=7)
+        store.record_poll(
+            odds_event_id=event_id,
+            game_id=game_id,
+            started_at=observed,
+            completed_at=observed,
+            cost=5,
+            remaining=90000,
+            is_closing=True,
+            quotes=[ResolvedQuote(player, "PTS", "draftkings", 27.5, -110, -110, observed)],
+            commence_time=TIPS[game_id],
+        )
+    return world
+
+
+def test_a_2026_27_dry_run_names_the_games_it_would_buy_and_their_credits(world_2026_27, client, capsys):
+    before = _row_counts(world_2026_27.url)
+
+    code = script.main(["--season", "2026-27", "--dry-run", "--database-url", world_2026_27.url])
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert out.splitlines() == [
+        "games in 2026-27 (regular season and playoffs): 3",
+        "already recorded: 0",
+        "closed by the live collector (not bought): 2",
+        "to buy: 1 games over 1 game days",
+        "estimated credits: 51 (1 x 50 for the games + 1 x 1 for the event lists, an upper bound)",
+        f"  {DEN_LAL} 2025-11-04 tip 2025-11-05T00:30Z",
+        "credits already spent by earlier runs: 0; cap for the whole backfill (--max-credits): 15000",
+        "dry run: no call was made",
+        "started 2026-27 games without closing quotes: 1",
+        f"  {DEN_LAL} tip 2025-11-05T00:30Z",
+    ]
+    assert client.made == []
+    assert _row_counts(world_2026_27.url) == before
+
+
+def test_a_2026_27_run_buys_the_gap_and_a_rerun_spends_nothing(
+    world_2026_27, client, unlocked, monkeypatch, capsys
+):
+    from tests.support.odds_world import load
+
+    monkeypatch.setenv("ODDS_API_KEY", KEY)
+    client.bodies[DEN_LAL_EVENT] = load("historical_event_odds_den_lal_five_markets")
+
+    assert (
+        script.main(["--season", "2026-27", "--max-credits", "60", "--database-url", world_2026_27.url]) == 0
+    )
+    first = capsys.readouterr().out
+    assert (
+        script.main(["--season", "2026-27", "--max-credits", "60", "--database-url", world_2026_27.url]) == 0
+    )
+    second = capsys.readouterr().out
+
+    assert [call[0] for call in client.odds_calls] == [DEN_LAL_EVENT]
+    assert client.credits_spent == 51
+    assert "credits spent this run: 51; for the whole backfill: 51" in first
+    assert "started 2026-27 games without closing quotes: 0" in first
+    assert "to buy: 0 games" in second and "credits spent this run: 0; for the whole backfill: 51" in second
+    assert KEY not in first + second and world_2026_27.url not in first + second
+
+
+def test_re_resolve_is_refused_for_2026_27(world_2026_27):
+    with pytest.raises(SystemExit) as exit_:
+        script.main(["--season", "2026-27", "--re-resolve", "--database-url", world_2026_27.url])
+
+    assert exit_.value.code == 2
