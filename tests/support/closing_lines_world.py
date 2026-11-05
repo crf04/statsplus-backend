@@ -11,6 +11,11 @@ Catalog (three completed games over two game days), an athlete catalog, and
 the box scores of those games.  The catalog is deliberately old (published
 three months before the clock), and Austin Reaves is listed with the team he
 finished the season on, not the one he played for in the Lakers game.
+
+``build_world(season="2026-27")`` files the same games, players and box scores
+under 2026-27 for the gap backfill (crf04/statsplus#429): the recorded
+fixtures' dates and event ids stay as they are, and nothing in the backfill
+reads a season from a date or a game id.
 """
 
 from __future__ import annotations
@@ -119,11 +124,11 @@ BOX_SCORES = (
 )
 
 
-def _event_row(game):
+def _event_row(game, season=SEASON):
     game_id, home, home_name, home_tri, away, away_name, away_tri, tip, status, code = game
     return {
         "nba_game_id": game_id,
-        "season": SEASON,
+        "season": season,
         "home_team_id": home,
         "home_team_name": home_name,
         "home_team_tricode": home_tri,
@@ -139,9 +144,9 @@ def _event_row(game):
     }
 
 
-def _athlete(player_id, name, team_id, tricode):
+def _athlete(player_id, name, team_id, tricode, season=SEASON):
     return {
-        "season": SEASON,
+        "season": season,
         "player_id": player_id,
         "display_name": name,
         "roster_status": "active",
@@ -154,13 +159,13 @@ def _athlete(player_id, name, team_id, tricode):
     }
 
 
-def _log_row(game_id, player_id, team_id, minutes):
+def _log_row(game_id, player_id, team_id, minutes, season=SEASON):
     names = {pid: name for pid, name, _, _ in ATHLETES}
     games = {game[0]: game for game in _GAMES}
     _, home, _, home_tri, away, _, away_tri, tip, _, _ = games[game_id]
     is_home = team_id == home
     return {
-        "season": SEASON,
+        "season": season,
         "season_type": "Regular Season",
         "player_id": player_id,
         "game_id": game_id,
@@ -195,7 +200,8 @@ class FakeHistoricalClient:
 
     It answers as the vendor documents: an events list holds the events whose
     ``commence_time`` falls in the requested window and costs 1 credit (0 when
-    empty); event odds cost 10 credits (0 when the snapshot posted nothing).
+    empty); event odds cost 10 credits per market asked for that the snapshot
+    returned (0 when it posted nothing).
     Every call is recorded so the tests can count them.
     """
 
@@ -268,8 +274,12 @@ class FakeHistoricalClient:
         if event_id in self.errors:
             raise self.errors[event_id]
         body = self.bodies[event_id]
-        paid = bool(body["data"].get("bookmakers"))
-        cost = (10 + self.surcharge) if paid else 0
+        returned = {
+            market["key"]
+            for bookmaker in body["data"].get("bookmakers") or []
+            for market in bookmaker.get("markets") or []
+        } & set(markets)
+        cost = (10 * len(returned) + self.surcharge) if returned else 0
         if event_id in self.undecodable:
             body = None
         return HistoricalOddsResponse(body, self._quota(cost), cost)
@@ -328,7 +338,7 @@ def add_player(world, player_id, name, team_id, game_id, *, minutes=25.0):
         )
 
 
-def build_world(tmp_path, *, database_url=None):
+def build_world(tmp_path, *, database_url=None, season=SEASON):
     url = database_url or f"sqlite:///{tmp_path / 'closing.sqlite3'}"
     engine = create_engine(url)
     run_migrations(engine)
@@ -336,12 +346,16 @@ def build_world(tmp_path, *, database_url=None):
     catalog_service = EventCatalogService(
         engine, nba_stats_provider=object(), settings=settings, clock=lambda: CLOCK
     )
-    catalog_service.repository.publish(SEASON, pd.DataFrame([_event_row(game) for game in _GAMES]), PUBLISHED)
+    catalog_service.repository.publish(
+        season, pd.DataFrame([_event_row(game, season) for game in _GAMES]), PUBLISHED
+    )
     with engine.begin() as connection:
-        connection.execute(insert(AthleteCatalog.__table__), [_athlete(*athlete) for athlete in ATHLETES])
+        connection.execute(
+            insert(AthleteCatalog.__table__), [_athlete(*athlete, season=season) for athlete in ATHLETES]
+        )
         connection.execute(
             insert(PlayerGameLog.__table__),
-            [_log_row(*score) for score in BOX_SCORES]
+            [_log_row(*score, season=season) for score in BOX_SCORES]
             # Another season's row under a game id that is in the ledger: it
             # must never count toward 2025-26 coverage.
             + [{**_log_row(DEN_LAL, TATUM, BOS, 30.0), "season": "2024-25"}],
@@ -369,8 +383,11 @@ def build_world(tmp_path, *, database_url=None):
         catalog_service=catalog_service,
         store=store,
         athlete_repository=athlete_repository,
-        event_mapper=OddsEventMapper(resolver=resolver, mapping_repository=event_repository, season=SEASON),
-        names=BoxScoreNames(engine=engine, catalog=Catalog(), mapping_repository=athlete_repository),
+        event_mapper=OddsEventMapper(resolver=resolver, mapping_repository=event_repository, season=season),
+        names=BoxScoreNames(
+            engine=engine, catalog=Catalog(), mapping_repository=athlete_repository, season=season
+        ),
+        season=season,
     )
 
     def backfill(client, *, max_credits=15000, keep_remaining=5000, names=None, clock=None, store=store):
@@ -379,7 +396,7 @@ def build_world(tmp_path, *, database_url=None):
             client=client,
             event_mapper=world.event_mapper,
             names=names or world.names,
-            events=catalog_service.get_events(SEASON),
+            events=catalog_service.get_events(season),
             max_credits=max_credits,
             keep_remaining=keep_remaining,
             clock=clock or (lambda: CLOCK),
