@@ -102,6 +102,9 @@ class CanonicalGameLedgerTeamFact(Base):
     off_two_pt_rebounds = Column(Integer, nullable=True)
     off_three_pt_rebounds = Column(Integer, nullable=True)
     ft_off_rebounds = Column(Integer, nullable=True)
+    # The side's player ``OffPoss`` over five (#433).  NULL means the game's
+    # evidence never carried it or it is not backfilled yet.
+    offensive_possessions = Column(Float, nullable=True)
 
     __table_args__ = (
         CheckConstraint("team_id <> opponent_team_id", name="ck_ledger_team_distinct_opponent"),
@@ -160,6 +163,8 @@ class CanonicalGameLedgerPlayerFact(Base):
     # PBPStats' per-game Usage on its own 0-100 scale, unrounded.  NULL means
     # the game's evidence never carried it or it is not backfilled yet.
     usage_pct = Column(Float, nullable=True)
+    # PBPStats' per-game ``OffPoss``; NULL exactly as ``usage_pct`` (#433).
+    offensive_possessions = Column(Float, nullable=True)
 
     __table_args__ = (
         CheckConstraint("minutes >= 0", name="ck_ledger_player_minutes"),

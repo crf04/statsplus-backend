@@ -3422,8 +3422,17 @@ Filters, Matchups, activation candidate validation, snapshot rehearsal, and
 matchup parity — crosses one interface. Consumers branch on capabilities, not
 on which stored generation produced the payload.
 
-**The compatibility window is closed.** Production is on v2 and this release
-reads nothing else: `SUPPORTED_TRADITIONAL_OPPONENT_FORMATS` is `(v2,)`. v1
+**v3 adds possessions.** `traditional_opponent.v3` is v2 plus `possessions`,
+the opponent's offensive possessions (players' `OffPoss` over five, the only
+count that may be fractional), and carries the `possessions` capability that
+Defensive Rating (`DRTG`) needs. It is the composition target, and
+`SUPPORTED_TRADITIONAL_OPPONENT_FORMATS` is `(v2, v3)`. A window composes v3
+only when every opponent team-game in it carries `offensive_possessions`;
+otherwise it composes v2, so a missing possession count is never published as
+zero. A rebuild whose ledger facts still lack possessions therefore composes
+v2 and fails as `publication_format_unsupported`, moving nothing.
+
+**The v1 compatibility window is closed.** This release reads v2 and v3 only. v1
 remains in `KNOWN_TRADITIONAL_OPPONENT_FORMATS`, because recognizing a stored
 payload *as* v1 is what lets a refusal name the format it refused, and because
 immutable v1 publications and their audit evidence are retained forever and

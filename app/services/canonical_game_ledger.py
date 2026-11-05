@@ -686,6 +686,11 @@ class PlayerGameFact:
     # ``Usage`` (a LiveData fallback) or it has not been backfilled yet.  When a
     # game's rows carry it, a row without it is an observed 0.0.
     usage_pct: float | None = None
+    # PBPStats' ``OffPoss``: the offensive possessions this player was on the
+    # floor for (crf04/statsplus#433).  ``None`` means "not derived", exactly
+    # as ``usage_pct``; when a game's rows carry it, a row without it is an
+    # observed 0.0.
+    offensive_possessions: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -726,6 +731,11 @@ class TeamGameFact:
     off_two_pt_rebounds: int | None = None
     off_three_pt_rebounds: int | None = None
     ft_off_rebounds: int | None = None
+    # The side's offensive possessions: its player rows' ``OffPoss`` over five,
+    # the same way ``team_minutes`` is their minutes over five.  ``None`` unless
+    # every player row derived ``offensive_possessions``.  The team-summary
+    # ``possessions`` above is a different, never-observed field.
+    offensive_possessions: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -856,6 +866,28 @@ class UsageBackfillResult:
     ``rejected`` pairs a game with the reason its archived rows fail
     validation; nothing is written for it.  ``superseded`` games were replaced
     by a correction while the pass ran and are left to that correction.
+    """
+
+    examined: int
+    updated: int
+    unchanged: int
+    not_observed: int
+    superseded: int
+    rejected: tuple[tuple[str, str], ...]
+    dry_run: bool
+
+
+class _PossessionsSuperseded(Exception):
+    """A correction replaced the game while ``backfill_offensive_possessions`` wrote it."""
+
+
+@dataclass(frozen=True, slots=True)
+class PossessionsBackfillResult:
+    """What one ``offensive_possessions`` re-derivation pass did (#433).
+
+    The counters mean what :class:`UsageBackfillResult`'s do: a rerun over the
+    same archive reports ``updated == 0``, and ``not_observed`` games never
+    carried ``OffPoss`` and keep NULL.
     """
 
     examined: int
@@ -1072,6 +1104,33 @@ def _usage_from_row(row: Mapping[str, Any], *, observed: bool) -> float | None:
     if _is_absent(raw):
         return 0.0
     return _number(raw, "Usage")
+
+
+def game_observes_offensive_possessions(raw_rows: Iterable[LedgerGameRow]) -> bool:
+    """Whether any archived player row of a game carries ``OffPoss``."""
+
+    return any(
+        not _is_absent(_raw_value(row.payload, "OffPoss")) for row in raw_rows if row.row_type == "player"
+    )
+
+
+def _offensive_possessions_from_row(row: Mapping[str, Any], *, observed: bool) -> float | None:
+    """Extract one player's ``OffPoss`` under the same omission rule as ``Usage``."""
+
+    if not observed:
+        return None
+    raw = _raw_value(row, "OffPoss")
+    if _is_absent(raw):
+        return 0.0
+    return _number(raw, "OffPoss")
+
+
+def _team_offensive_possessions(players: Sequence[PlayerGameFact]) -> float | None:
+    if not players or any(player.offensive_possessions is None for player in players):
+        return None
+    # ``fsum`` is exactly rounded, so the stored value does not depend on the
+    # order the players were read back in (``team_minutes`` needs a re-sort).
+    return math.fsum(float(player.offensive_possessions) for player in players) / 5.0
 
 
 def _number(value: Any, field_name: str, *, nullable: bool = False) -> float | None:
@@ -1469,6 +1528,8 @@ def raw_rows_from_facts(game: CanonicalGame) -> tuple[LedgerGameRow, ...]:
                     payload[wire] = value
             if player.usage_pct is not None:
                 payload["Usage"] = player.usage_pct
+            if player.offensive_possessions is not None:
+                payload["OffPoss"] = player.offensive_possessions
             rows.append(
                 LedgerGameRow(
                     game_id=game.game_id,
@@ -1708,6 +1769,7 @@ def _player_fact_from_row(
     team_tricode: str,
     derive_rebound_types: bool,
     derive_usage: bool = False,
+    derive_offensive_possessions: bool = False,
 ) -> PlayerGameFact:
     """Map a PBP player row while retaining the stable primitive superset.
 
@@ -1792,6 +1854,7 @@ def _player_fact_from_row(
         ),
         possessions=_number(_raw_value(row, "Possessions", "possessions"), "possessions", nullable=True),
         usage_pct=_usage_from_row(row, observed=derive_usage),
+        offensive_possessions=_offensive_possessions_from_row(row, observed=derive_offensive_possessions),
         **rebound_types,
     )
 
@@ -1937,6 +2000,7 @@ def _sum_team_facts(
         # retained player-minute total grows beyond 240.
         team_minutes=sum(player.minutes for player in players) / 5.0,
         possessions=_number(possession_value, "possessions", nullable=True),
+        offensive_possessions=_team_offensive_possessions(players),
     )
 
 
@@ -2105,6 +2169,9 @@ def canonical_game_from_pbp(
             team_row for side in ("Home", "Away") for team_row in _wire_side_rows(raw_observation, side)
         )
     derive_usage = any(row_observes_usage(raw) for _row, raw in merged_rows)
+    derive_offensive_possessions = any(
+        not _is_absent(_raw_value(raw, "OffPoss")) for _row, raw in merged_rows
+    )
     players: list[PlayerGameFact] = [
         _player_fact_from_row(
             raw,
@@ -2112,6 +2179,7 @@ def canonical_game_from_pbp(
             team_tricode=str(row["TEAM_ABBREVIATION"]),
             derive_rebound_types=derive_rebound_types,
             derive_usage=derive_usage,
+            derive_offensive_possessions=derive_offensive_possessions,
         )
         for row, raw in merged_rows
     ]
@@ -2236,8 +2304,10 @@ def _fact_payload(value: Any) -> dict[str, Any]:
     # nothing about the existing streams changed.
     for attribute in REBOUND_TYPE_ATTRIBUTES:
         result.pop(attribute, None)
-    # ``Usage`` is likewise a pure function of the archived rows (#236).
+    # ``Usage`` and ``OffPoss`` are likewise pure functions of the archived
+    # rows (#236, #433).
     result.pop("usage_pct", None)
+    result.pop("offensive_possessions", None)
     for key, item in list(result.items()):
         if isinstance(item, (date, datetime)):
             result[key] = item.isoformat()
@@ -2322,6 +2392,13 @@ def _validate_count_primitives(value: Any, *, label: str) -> None:
     if value.rebounds != value.offensive_rebounds + value.defensive_rebounds:
         raise LedgerValidationError(f"{label}.rebounds must equal offensive plus defensive rebounds")
     _validate_rebound_types(value, label=label)
+    if value.offensive_possessions is not None and (
+        isinstance(value.offensive_possessions, bool)
+        or not isinstance(value.offensive_possessions, (int, float))
+        or not math.isfinite(value.offensive_possessions)
+        or value.offensive_possessions < 0
+    ):
+        raise LedgerValidationError(f"{label}.offensive_possessions must be null or finite and non-negative")
     if isinstance(value, PlayerGameFact):
         if (
             not isinstance(value.minutes, (int, float))
@@ -2375,6 +2452,7 @@ def _validate_count_primitives(value: Any, *, label: str) -> None:
 _BACKFILLED_PLAYER_FIELDS: Final[tuple[str, ...]] = (
     *REBOUND_TYPE_ATTRIBUTES,
     "usage_pct",
+    "offensive_possessions",
 )
 
 
@@ -2409,6 +2487,7 @@ def _reconcile_raw_and_typed_evidence(
     raw_team_rows: dict[int, LedgerGameRow] = {}
     derive_rebound_types = game_derives_rebound_types(game.raw_rows)
     derive_usage = game_observes_usage(game.raw_rows)
+    derive_offensive_possessions = game_observes_offensive_possessions(game.raw_rows)
     for row in game.raw_rows:
         if row.row_type == "team":
             raw_team_rows[row.team_id] = row
@@ -2419,6 +2498,7 @@ def _reconcile_raw_and_typed_evidence(
             team_tricode=tricode_by_team[row.team_id],
             derive_rebound_types=derive_rebound_types,
             derive_usage=derive_usage,
+            derive_offensive_possessions=derive_offensive_possessions,
         )
     typed_player_facts = {(fact.team_id, fact.player_id): fact for fact in game.player_facts}
     if set(raw_player_facts) != set(typed_player_facts):
@@ -2586,6 +2666,8 @@ def validate_complete_game(game: CanonicalGame, *, tolerate_pending_backfills: b
         )
     if len({fact.usage_pct is None for fact in game.player_facts}) > 1:
         raise LedgerValidationError("a game derives usage_pct for every player or for none")
+    if len({fact.offensive_possessions is None for fact in game.player_facts}) > 1:
+        raise LedgerValidationError("a game derives offensive_possessions for every player or for none")
     for fact in game.player_facts:
         _validate_count_primitives(fact, label="player_fact")
         key = (fact.team_id, fact.player_id)
@@ -2722,6 +2804,10 @@ def validate_complete_game(game: CanonicalGame, *, tolerate_pending_backfills: b
                 )
         if not team_row_payload[team_fact.team_id] and team_fact.possessions is not None:
             raise LedgerValidationError("team_fact.possessions requires a team-summary row")
+        if team_fact.offensive_possessions != _team_offensive_possessions(team_players):
+            raise LedgerValidationError(
+                "team_fact.offensive_possessions must be its player rows' offensive possessions over five"
+            )
         expected_minutes = sum(player.minutes for player in team_players) / 5.0
         if not math.isclose(team_fact.team_minutes, expected_minutes, abs_tol=1e-9):
             raise LedgerValidationError("team_fact.team_minutes must reconcile with player minutes")
@@ -2800,6 +2886,44 @@ def rederive_usage(game: CanonicalGame) -> CanonicalGame | None:
         players.append(replace(fact, usage_pct=_usage_from_row(row.payload, observed=True)))
     return validate_complete_game(
         replace(game, player_facts=tuple(players)),
+        tolerate_pending_backfills=True,
+    )
+
+
+def rederive_offensive_possessions(game: CanonicalGame) -> CanonicalGame | None:
+    """Re-derive a stored game's ``offensive_possessions`` from its raw archive.
+
+    A pure function of the archived rows: no provider call.  Returns ``None``
+    when no archived player row carries ``OffPoss``, the game with every player
+    and both team facts filled otherwise.  The result passes through
+    :func:`validate_complete_game`.
+    """
+
+    if not game.raw_rows or not game_observes_offensive_possessions(game.raw_rows):
+        return None
+    rows_by_player = {(row.team_id, row.entity_id): row for row in game.raw_rows if row.row_type == "player"}
+    players = []
+    for fact in game.player_facts:
+        row = rows_by_player.get((fact.team_id, fact.player_id))
+        if row is None:
+            raise LedgerValidationError("typed player facts must match raw player evidence")
+        players.append(
+            replace(
+                fact,
+                offensive_possessions=_offensive_possessions_from_row(row.payload, observed=True),
+            )
+        )
+    teams = tuple(
+        replace(
+            team,
+            offensive_possessions=_team_offensive_possessions(
+                tuple(player for player in players if player.team_id == team.team_id)
+            ),
+        )
+        for team in game.team_facts
+    )
+    return validate_complete_game(
+        replace(game, player_facts=tuple(players), team_facts=teams),
         tolerate_pending_backfills=True,
     )
 
@@ -3839,6 +3963,102 @@ class CanonicalGameLedgerRepository:
             dry_run=dry_run,
         )
 
+    def backfill_offensive_possessions(
+        self,
+        game_ids: Iterable[str] | None = None,
+        *,
+        season: str | None = None,
+        dry_run: bool = False,
+    ) -> PossessionsBackfillResult:
+        """Idempotently fill ``offensive_possessions`` from the raw archive (#433).
+
+        The same write discipline as :meth:`backfill_usage`: each game is
+        re-derived by :func:`rederive_offensive_possessions` from its own rows,
+        only the player and team facts whose value differs are written, and
+        every write is a compare-and-set on the game's ``raw_checksum`` under
+        its row lock.  The field is outside the typed game checksum.
+        """
+
+        if game_ids is None:
+            if season is None:
+                raise ValueError("a season or explicit game IDs are required")
+            targets = tuple(summary.game_id for summary in self.list_games(season))
+        else:
+            targets = tuple(dict.fromkeys(game_ids))
+        tables = self._tables()
+        examined = updated = unchanged = not_observed = superseded = 0
+        rejected: list[tuple[str, str]] = []
+        for start in range(0, len(targets), 25):
+            chunk = targets[start : start + 25]
+            for game in self.get_games(chunk):
+                if game is None:
+                    continue
+                examined += 1
+                try:
+                    derived = rederive_offensive_possessions(game)
+                except LedgerValidationError as error:
+                    rejected.append((game.game_id, str(error)))
+                    continue
+                if derived is None:
+                    not_observed += 1
+                    continue
+                writes = [
+                    (
+                        tables["player"],
+                        (
+                            tables["player"].c.team_id == new.team_id,
+                            tables["player"].c.player_id == new.player_id,
+                        ),
+                        new.offensive_possessions,
+                    )
+                    for new, old in zip(derived.player_facts, game.player_facts, strict=True)
+                    if new.offensive_possessions != old.offensive_possessions
+                ] + [
+                    (tables["team"], (tables["team"].c.team_id == new.team_id,), new.offensive_possessions)
+                    for new, old in zip(derived.team_facts, game.team_facts, strict=True)
+                    if new.offensive_possessions != old.offensive_possessions
+                ]
+                if not writes:
+                    unchanged += 1
+                    continue
+                if dry_run:
+                    updated += 1
+                    continue
+                try:
+                    with self.engine.begin() as connection:
+                        connection.execute(
+                            select(tables["game"].c.raw_checksum)
+                            .where(tables["game"].c.game_id == game.game_id)
+                            .with_for_update()
+                        ).scalar_one_or_none()
+                        still_current = exists(
+                            select(1).where(
+                                tables["game"].c.game_id == game.game_id,
+                                tables["game"].c.raw_checksum == game.raw_checksum,
+                            )
+                        )
+                        for table, identity, value in writes:
+                            written = connection.execute(
+                                update(table)
+                                .where(table.c.game_id == game.game_id, *identity, still_current)
+                                .values(offensive_possessions=value)
+                            )
+                            if written.rowcount != 1:
+                                raise _PossessionsSuperseded
+                except _PossessionsSuperseded:
+                    superseded += 1
+                    continue
+                updated += 1
+        return PossessionsBackfillResult(
+            examined=examined,
+            updated=updated,
+            unchanged=unchanged,
+            not_observed=not_observed,
+            superseded=superseded,
+            rejected=tuple(rejected),
+            dry_run=dry_run,
+        )
+
     def save_progress(self, progress: LedgerBackfillProgress) -> None:
         table = LedgerBackfillState.__table__
         values = {
@@ -4130,6 +4350,7 @@ __all__ = [
     "LedgerValidationError",
     "LedgerWriteResult",
     "PlayerGameFact",
+    "PossessionsBackfillResult",
     "ReboundTypeIdentityError",
     "ReboundTypeRegressionError",
     "ReboundTypesBackfillResult",
@@ -4143,6 +4364,7 @@ __all__ = [
     "raw_checksum",
     "raw_rows_from_facts",
     "record_schema_drift",
+    "rederive_offensive_possessions",
     "rederive_rebound_types",
     "row_observes_rebound_types",
     "validate_complete_game",

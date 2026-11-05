@@ -248,6 +248,13 @@ BARE_GAME_COUNT = (
     r"(?=\s*$|\s*(?:[,;?!]|\.(?!\d))|\s+(?:vs\.?|v\.?|versus|against|at|on|in|with|without|home|away|since)\b)"
 )
 
+# Defensive Rating rankings.  A high DRTG is a weak defense, so the best N are
+# the N lowest values (-N) and the worst N the N highest (+N).
+DRTG_RANKING_PATTERNS = [
+    (r"(?:top|best)\s+(\d+)\s+(?:in\s+)?(?:defensive\s+rating|drtg)\b", "DRTG", -1),
+    (r"(?:bottom|worst)\s+(\d+)\s+(?:in\s+)?(?:defensive\s+rating|drtg)\b", "DRTG", 1),
+]
+
 # Opponent filter mappings for natural language to filter types
 OPPONENT_FILTER_MAPPINGS = {
     # Catch & Shoot variations
@@ -1986,6 +1993,7 @@ class BaseQueryParser:
             (r"bottom\s+(\d+)\s+(?:teams?)", "OPP_PTS", -1),
             (r"worst\s+(\d+)\s+(?:teams?)", "OPP_PTS", -1),
             (r"best\s+(\d+)\s+(?:teams?)", "OPP_PTS", 1),
+            *DRTG_RANKING_PATTERNS,
         ]
 
         for pattern, filter_type, direction in ranking_patterns:
@@ -2745,6 +2753,7 @@ class BaseQueryParser:
                 (r"bottom\s+(\d+)\s+(?:offenses?|offensive\s+teams?)", "OPP_PTS", -1),
                 (r"top\s+(\d+)\s+(?:teams?)", "OPP_PTS", 1),
                 (r"bottom\s+(\d+)\s+(?:teams?)", "OPP_PTS", -1),
+                *DRTG_RANKING_PATTERNS,
             ]
 
             for pattern, _filter_type, _direction in ranking_patterns:

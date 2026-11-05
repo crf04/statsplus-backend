@@ -97,6 +97,7 @@ from app.services.team_matchup_repository import (
     TeamMatchupObservation,
     TeamMatchupSnapshotScope,
 )
+from app.services.traditional_opponent_publications import FRACTIONAL_COUNT_METRICS
 
 #: The single documented comparison tolerance for floating denominators and
 #: derived per-48 rates.  Integer counts compare exactly; only denominators
@@ -507,7 +508,11 @@ def _decode_ledger_rows(payload: Any, *, stream_key: str) -> tuple[LedgerTeamWin
                 if isinstance(value, bool):
                     raise ValueError("ledger publication count is invalid")
                 number = float(value)
-                if not math.isfinite(number) or number < 0 or not number.is_integer():
+                if (
+                    not math.isfinite(number)
+                    or number < 0
+                    or (key not in FRACTIONAL_COUNT_METRICS and not number.is_integer())
+                ):
                     raise ValueError("ledger publication count is invalid")
                 counts[str(key)] = number
             per48_value = row["per48"]
