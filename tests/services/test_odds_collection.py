@@ -8,7 +8,6 @@ from datetime import UTC, timedelta
 import pytest
 from sqlalchemy import select
 
-from app.config.settings import OddsApiSettings
 from app.models.athlete_mapping import ProviderAthleteMapping
 from app.models.sportsbook_odds import (
     OddsApiPoll,
@@ -267,7 +266,7 @@ def test_a_held_lease_makes_the_beat_busy(world):
 def test_full_team_names_map_and_an_unmapped_event_is_skipped_never_guessed(world):
     events = load("events")  # Lakers at Nuggets, "LA Clippers" at Warriors, Sonics
     client = FakeClient(events=events)
-    world.clock[0] = NOW + timedelta(hours=2)  # both tips inside the 13-hour window
+    world.clock[0] = NOW + timedelta(hours=2)  # both tips inside their day window
 
     result = world.coordinator(client).run()
 
@@ -537,17 +536,76 @@ def test_a_beat_that_drifts_out_of_the_closing_window_never_stores_a_closing_fla
     assert _rows(world, OddsApiPoll) == []
 
 
+def test_an_empty_night_poll_is_repeated_an_hour_later_and_a_populated_one_is_not(world):
+    client = FakeClient(odds=load("event_odds_empty"))
+    coordinator = world.coordinator(client)
+    night = TIP - timedelta(hours=22, minutes=30)  # 22:00 ET the night before
+
+    world.clock[0] = night
+    coordinator.run()
+    client.odds = load("event_odds_five_markets")
+    world.clock[0] = night + timedelta(hours=1)
+    coordinator.run()
+    world.clock[0] = night + timedelta(hours=2)
+    coordinator.run()
+
+    assert client.event_calls == [EVENT_ID, EVENT_ID]
+    assert [poll["outcome"] for poll in _rows(world, OddsApiPoll)] == ["empty", "complete"]
+
+
+def test_a_night_poll_that_drifts_into_the_overnight_pause_is_not_made(world):
+    client = FakeClient()
+    pause = TIP - timedelta(hours=18, minutes=30)  # 02:00 ET on tip day
+    world.clock[0] = pause - timedelta(seconds=1)  # a night poll is due
+    client.on_list = lambda: world.clock.__setitem__(0, pause + timedelta(seconds=1))
+
+    result = world.coordinator(client).run()
+
+    assert (result.calls, result.reason) == (0, "window_passed")
+    assert client.event_calls == []
+
+
+def test_a_final_poll_that_drifts_into_the_closing_window_is_not_made_as_a_regular_poll(world):
+    client = FakeClient()
+    world.clock[0] = TIP - timedelta(minutes=10, seconds=1)  # a final poll is due
+    client.on_list = lambda: world.clock.__setitem__(0, TIP - timedelta(minutes=9, seconds=59))
+
+    result = world.coordinator(client).run()
+
+    assert (result.calls, result.reason) == (0, "window_passed")
+    assert client.event_calls == []
+
+
+def test_the_budget_counts_a_populated_night_poll_as_taken(world):
+    client = FakeClient()
+    coordinator = world.coordinator(client)
+    night = TIP - timedelta(hours=22, minutes=30)  # 22:00 ET the night before
+    world.clock[0] = night
+    coordinator.run()
+
+    # At 23:00 ET this game still needs 8 day polls, 6 final and the closing
+    # (75 credits); the 22:00 ET game needs its night poll too, 9 day, 6
+    # final and the closing (85).  1160 leaves exactly 160 above the reserve.
+    client.discovery_quota = OddsQuota(1160, 18840, 0)
+    world.clock[0] = night + timedelta(hours=1)
+    result = coordinator.run()
+
+    assert (result.tier, result.calls) == ("normal", 0)
+
+
 def test_the_guard_rechecks_remaining_credits_before_every_paid_call(world):
     events = load("events")[:2]
     events[1]["commence_time"] = (TIP + timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    # Discovery says 1020, so both hourly polls fit above the 1000 reserve; a
-    # shared-key consumer then spends 11 and our first response says 999.
+    # Twenty minutes out, the two catalog games still need 35 credits (a final
+    # poll and the closing for this one; four final polls and the closing for
+    # the 22:00 ET tip).  Discovery says 1035, so both due final polls fit above
+    # the 1000 reserve; a shared-key consumer then spends 31 and our first
+    # response says 999.
     client = FakeClient(events=events, remaining=1004)
-    client.discovery_quota = OddsQuota(1020, 18980, 0)
-    world.clock[0] = TIP - timedelta(hours=5)
-    settings = OddsApiSettings(enabled=True, api_key="k" * 24, assumed_lead_hours=1, regions="us")
+    client.discovery_quota = OddsQuota(1035, 18965, 0)
+    world.clock[0] = TIP - timedelta(minutes=20)
 
-    result = world.coordinator(client, odds_settings=settings).run()
+    result = world.coordinator(client).run()
 
     assert (result.tier, len(client.event_calls)) == ("normal", 1)  # a second would dip below the reserve
     assert (result.status, result.remaining) == ("partial", 999)
