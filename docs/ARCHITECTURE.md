@@ -4891,17 +4891,32 @@ Board read (only when ODDS_API_ENABLED): SlateBoardService →
   SportsbookQuoteReader.latest_quotes (every slate game, one statement)
 ```
 
-Schedule: polling starts 13 hours before tip (an empty response costs
-nothing), hourly in the `normal` tier, with one closing fetch from tip-10
-minutes (the closing fetch is only made from tip-10 until tip-5; a missed one
-is not made up, and the last quote stands unmarked), and no call at or after
-tip; a response that crosses tip is paid for but discarded. A postponement
-(a changed `commence_time`) reopens hourly polling and a new closing snapshot. The budget guard re-evaluates hourly and
-moves one tier per evaluation (a halted collector re-reads the quota every
-beat, and free discovery's quota headers feed the guard before any paid call, so a monthly
-reset reopens it): `normal` (hourly), `degraded` (every 2 hours),
+Schedule (crf04/statsplus#430): one table of windows in
+`app/services/odds_schedule.py`, located from each game's tip; the night and
+pause bounds and the day window's start are New York time (DST included). An
+empty response costs nothing.
+
+| Window | Span | `normal` | `degraded` |
+| --- | --- | --- | --- |
+| `night` | 22:00 ET the day before tip day to 02:00 ET | hourly until one populated response, then none | same |
+| (pause) | 02:00 to 10:00 ET on tip day | none | none |
+| `day` | 10:00 ET to tip-3 hours | hourly | every 2 hours |
+| `final` | tip-3 hours to tip-10 minutes | every 30 minutes | hourly |
+| `closing` | tip-10 to tip-5 minutes | one fetch | one fetch |
+
+A later window takes precedence and cuts an earlier one short, so a noon tip
+polls every 30 minutes from 9:00 ET and has no `day` window. The night pull
+catches the opening lines books post the evening before. A missed closing fetch
+is not made up, and the last quote stands unmarked. No call is made at or after
+tip; a response that crosses tip is paid for but discarded. The beat re-checks
+each call's window with the same function at dispatch, so a call that drifts
+out of its window is skipped. A postponement (a changed `commence_time`)
+reopens polling and a new closing snapshot. The budget guard re-evaluates
+hourly and moves one tier per evaluation (a halted collector re-reads the quota
+every beat, and free discovery's quota headers feed the guard before any paid
+call, so a monthly reset reopens it): `normal` and `degraded` as above,
 `closing` (closing snapshots only, which may spend the 1,000-credit reserve),
-`halted`. Hourly polls never touch the reserve and no call may leave fewer than
+`halted`. Other polls never touch the reserve and no call may leave fewer than
 1 credit, so `x-requests-remaining` never reaches 0 because of this job. A
 401/422 halts for six hours; 429, 5xx and transport failures back off
 exponentially (1 to 30 minutes). Tier changes and quota below 25% and 10% of
@@ -5012,7 +5027,8 @@ beat (every 5 min, the odds cron service, ODDS_API_REGIONS=us_dfs)
   confirmation, which an hourly poll cannot meet, so the registry gives
   `prizepicks` a 90-minute window (one poll interval plus half an hour for a
   retry). In the `degraded` tier (a poll every two hours) a line is therefore
-  live for 90 of every 120 minutes. The pool's aggregate times (live and
+  live for 90 of every 120 minutes, and from 90 minutes after the night pull
+  until 10:00 ET no line is live. The pool's aggregate times (live and
   closing) are the oldest of the default-window providers, so the hourly
   provider is not read as the pool's age.
 * **Closing.** The beat freezes `prizepicks` closing sets for started games on
@@ -5028,7 +5044,7 @@ beat (every 5 min, the odds cron service, ODDS_API_REGIONS=us_dfs)
   written to `odds_api_polls` first, as `complete` with
   `failure_reason = 'unpublished'`, by the first durable write after it
   arrives -- before the quota save, name resolution or publication, any of which
-  can fail -- under the lease fence. It counts toward the hourly cadence and the
+  can fail -- under the lease fence. It counts toward the cadence and the
   credit budget whatever happens next, and a superseded worker is refused at that
   write. The archive write then runs the same lease check inside its own
   transaction (the lease row is locked until the lines commit), so a worker whose
@@ -5037,24 +5053,29 @@ beat (every 5 min, the odds cron service, ODDS_API_REGIONS=us_dfs)
   afterwards: `quote_count`, `unresolved_count` and no reason once the lines are
   in the archive, or `storage_error` if publication failed (logged, mirrored to
   Sentry, and no call for 30 minutes). A fault after the purchase therefore
-  costs at most an hour of fresh lines for that game (for the closing fetch, its
-  snapshot: the last hourly lines stand), never a second purchase; a crash
-  leaves an `unpublished` row and the next hour's poll republishes.
+  costs at most one poll interval of fresh lines for that game (for the closing
+  fetch, its snapshot: the last lines stand), never a second purchase; a crash
+  leaves an `unpublished` row and the next poll republishes.
 * **Authorization.** `build_odds_collection` builds its own
   `ProjectionRecordingService` for the single `prizepicks` scope, so the
   application's recording service (authorized for `DFS_ENABLED_PROVIDERS` only)
   is untouched. The feed needs the projection archive, so it refuses the
   read-only demo database.
 
-**Credits.** A call costs unique markets returned x one region, at most 5. The
-planner polls hourly from 13 hours before tip and takes one closing fetch
-(tip-10 to tip-5 minutes): at most 13 + 1 = 14 paid calls = 70 credits per game
-however early PrizePicks posts, because an empty response is free and the window
-opens late, and a failure after the purchase does not add a call (see above). A
-peak month of 250 games therefore costs at most 17,500 of the 20,000-credit
-plan, and a typical month (lines up about 10 hours before tip, 222 games)
-12,210. The bound has three exceptions, each of which restarts one game's
-polling and so adds at most 14 calls: a process killed while the request itself
+**Credits.** A call costs unique markets returned x one region, at most 5, and
+an empty response is free. With props up the night before, a 7pm ET tip takes
+14 paid calls = 70 credits: the night pull, hourly 10:00 to 15:00 ET (6),
+every 30 minutes 16:00 to 18:30 ET (6), and the closing fetch. Each half hour
+later adds half a day pull (a 6pm tip takes 13, a 10pm tip 17), a noon tip takes
+8, props first posted after 02:00 ET save the night pull, and a failure after
+the purchase does not add a call (see above). A typical month of 222 games
+tipping 6pm to 9:30pm ET therefore costs 16,390 credits (about 16,000 for 230
+games), and a peak month of 250 games 18,775, under the 19,000 spendable above
+the 1,000-credit reserve. `budget_needs` projects each tier's spend from the same
+windows, so the guard sees what the planner will schedule (one call high at
+most per game when a game's polls run off the hour). The bound has three
+exceptions, each of which restarts one game's polling and so adds at most one
+game's calls: a process killed while the request itself
 is in flight (the vendor may have charged it and nothing was written), a
 postponement (a new tip reopens polling and the closing fetch), and an Odds API
 event id replaced for the same game. The vendor's `x-requests-remaining` still
@@ -5062,7 +5083,7 @@ drives the guard tiers, so such extra spend degrades the cadence before it can
 exhaust the plan. The guard tiers (`normal` / `degraded` / `closing` /
 `halted`) and the 1,000-credit reserve are unchanged and cover a heavier
 month. Every paid poll logs
-`Odds API poll region=us_dfs game=<id> kind=<hourly|closing> cost=<n>
+`Odds API poll region=us_dfs game=<id> kind=<night|day|final|closing> cost=<n>
 remaining=<n> quotes=<n> unresolved_players=<n>` (also stored in
 `odds_api_polls.cost` / `remaining`), and each beat that calls logs the cycle
 line, so a peak month projects from the first game days as credits per game x
