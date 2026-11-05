@@ -40,6 +40,7 @@ OpponentFilterType = Literal[
     "OPP_STL",
     "OPP_FG3M",
     "OPP_FG3A",
+    "DRTG",
     "C&S PTS",
     "C&S 3s",
     "C&S 3A",

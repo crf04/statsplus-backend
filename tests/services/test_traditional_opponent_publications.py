@@ -16,6 +16,7 @@ from app.services.database_first_activation import (
 from app.services.ledger_derivations import TEAM_METRICS
 from app.services.traditional_opponent_publications import (
     KNOWN_TRADITIONAL_OPPONENT_FORMATS,
+    POSSESSIONS,
     REBOUND_SPLIT,
     REBOUND_SPLIT_METRICS,
     SUPPORTED_TRADITIONAL_OPPONENT_FORMATS,
@@ -23,6 +24,7 @@ from app.services.traditional_opponent_publications import (
     TRADITIONAL_OPPONENT_TARGET_FORMAT,
     TRADITIONAL_OPPONENT_V1,
     TRADITIONAL_OPPONENT_V2,
+    TRADITIONAL_OPPONENT_V3,
     TraditionalOpponentFormatError,
     normalize_traditional_opponent_window,
     recognize_traditional_opponent_format,
@@ -50,6 +52,8 @@ _COUNTS = {
     "personal_fouls": 19.0,
     "offensive_rebounds": 11.0,
     "defensive_rebounds": 33.0,
+    # Possessions are players' OffPoss over five, so a count may be fractional.
+    "possessions": 101.4,
 }
 
 
@@ -95,19 +99,27 @@ def _payload(publication_format, *, mutate=None):
 # --- Format identities -----------------------------------------------------
 
 
-def test_only_v2_is_supported_while_v1_stays_known():
-    """The compatibility window is closed, but v1 stays describable.
+def test_v2_and_v3_are_supported_v3_is_composed_and_v1_stays_known():
+    """The v1 window is closed, but v1 stays describable.
 
     Immutable v1 publications and their audit evidence are retained forever,
     so this code must still be able to name that format when it refuses it.
+    v2 stays readable: production serves it until the possessions rebuild.
     """
 
-    assert SUPPORTED_TRADITIONAL_OPPONENT_FORMATS == (TRADITIONAL_OPPONENT_V2,)
+    assert SUPPORTED_TRADITIONAL_OPPONENT_FORMATS == (TRADITIONAL_OPPONENT_V2, TRADITIONAL_OPPONENT_V3)
     assert KNOWN_TRADITIONAL_OPPONENT_FORMATS == (
         TRADITIONAL_OPPONENT_V1,
         TRADITIONAL_OPPONENT_V2,
+        TRADITIONAL_OPPONENT_V3,
     )
-    assert TRADITIONAL_OPPONENT_TARGET_FORMAT is TRADITIONAL_OPPONENT_V2
+    assert TRADITIONAL_OPPONENT_TARGET_FORMAT is TRADITIONAL_OPPONENT_V3
+
+
+def test_v3_adds_only_possessions_to_v2():
+    assert set(TRADITIONAL_OPPONENT_V3.metrics) - set(TRADITIONAL_OPPONENT_V2.metrics) == {"possessions"}
+    assert TRADITIONAL_OPPONENT_V3.capabilities == frozenset({REBOUND_SPLIT, POSSESSIONS})
+    assert traditional_opponent_format_by_name("traditional_opponent.v3") is TRADITIONAL_OPPONENT_V3
 
 
 def test_v1_is_the_current_metric_set_and_v2_adds_only_the_rebound_split():
@@ -130,7 +142,7 @@ def test_each_format_has_a_stable_name_and_a_deterministic_distinct_fingerprint(
 
 def test_an_unknown_format_name_is_refused():
     with pytest.raises(TraditionalOpponentFormatError):
-        traditional_opponent_format_by_name("traditional_opponent.v3")
+        traditional_opponent_format_by_name("traditional_opponent.v4")
 
 
 def test_the_family_owns_exactly_the_two_window_streams():
@@ -226,6 +238,27 @@ def test_the_decoder_accepts_exactly_the_two_supported_formats(stream_key):
         assert len(rows) == 30
     with pytest.raises(PublicationPayloadError):
         decode_team_window(_payload(TRADITIONAL_OPPONENT_V1), stream_key=stream_key)
+
+
+def test_only_the_possessions_count_may_be_fractional():
+    rows = decode_team_window(_payload(TRADITIONAL_OPPONENT_V3), stream_key=SEASON_STREAM)
+    assert rows[0].per48["possessions"] == 101.4
+
+    def fractional_points(rows):
+        rows[0] = {**rows[0], "counts": {**rows[0]["counts"], "points": 110.5}}
+
+    with pytest.raises(PublicationPayloadError, match="counts.points is invalid"):
+        decode_team_window(
+            _payload(TRADITIONAL_OPPONENT_V3, mutate=fractional_points), stream_key=SEASON_STREAM
+        )
+
+
+def test_a_v2_window_reports_possessions_as_unpublished_not_zero():
+    window = _normalize(TRADITIONAL_OPPONENT_V2)
+
+    assert window.format is TRADITIONAL_OPPONENT_V2
+    assert not window.supports(POSSESSIONS)
+    assert window.metric_values("possessions") is None
 
 
 def _corrupt_taxonomy(block):

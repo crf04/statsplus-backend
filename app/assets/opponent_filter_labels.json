@@ -7,6 +7,7 @@
   "OPP_BLK": "Blocks",
   "OPP_FTA": "Free Throws Allowed",
   "OPP_TOV": "Turnovers Forced",
+  "DRTG": "Defensive Rating",
   "sheet:shot_zones:Restricted Area:FGM": "Restricted Area Makes",
   "sheet:shot_zones:Restricted Area:FGA": "Restricted Area Attempts",
   "sheet:shot_zones:In The Paint (Non-RA):FGM": "Paint (Non-RA) Makes",

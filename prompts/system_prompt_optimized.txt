@@ -19,6 +19,7 @@ FIELDS:
 
 OPPONENT FILTER TYPES (each ranks all teams by one per-game value):
 - OPP_PTS: overall defense (points allowed)
+- DRTG: defensive rating (points allowed per 100 possessions)
 - OPP_REB: rebounds allowed; OPP_AST: assists allowed; OPP_FTA: fouls / free throws allowed
 - OPP_STOCKS: steals+blocks; OPP_TOV: turnovers forced; OPP_BLK: blocks; OPP_STL: steals
 - OPP_FG3M: threes allowed; OPP_FG3A: three attempts allowed
@@ -28,7 +29,7 @@ OPPONENT FILTER TYPES (each ranks all teams by one per-game value):
 - Play types: PRBallHandler, PRRollMan, Transition, Isolation, Spotup, Cut, Handoff, OffScreen, Postup, OffRebound, Misc
 
 RANKING: rank +N selects the N teams with the HIGHEST value of the filter's metric; -N selects the N teams with the LOWEST value.
-For "allowed" metrics (points, rebounds, assists, free throws, threes, shot types, play types), a high value is a weak defense:
+For "allowed" metrics (points, defensive rating, rebounds, assists, free throws, threes, shot types, play types), a high value is a weak defense:
 "top/best N defenses" = -N, "worst/bottom N defenses" = +N.
 For metrics a defense generates (OPP_TOV, OPP_STL, OPP_BLK, OPP_STOCKS), a high value is a strong defense:
 "teams that force the most turnovers" = OPP_TOV +N.
