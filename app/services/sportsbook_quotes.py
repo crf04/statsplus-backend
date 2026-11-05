@@ -108,79 +108,37 @@ class SportsbookQuoteStore:
             ).inserted_primary_key[0]
             if not quotes and not replace_latest:
                 return PollWrite(int(poll_id), 0, 0, 0)
+            return _store_quotes(connection, int(poll_id), game_id, observed_at, is_closing, quotes)
 
-            latest = SportsbookPropLatest.__table__
-            history = SportsbookPropQuote.__table__
-            existing = {
-                (row.canonical_player_id, row.market_category, row.book): row
-                for row in connection.execute(select(latest).where(latest.c.canonical_game_id == game_id))
-            }
-            history_rows: list[dict[str, Any]] = []
-            seen: set[tuple[int, str, str]] = set()
-            latest_writes = 0
-            for quote in quotes:
-                key = (quote.canonical_player_id, quote.category, quote.book)
-                seen.add(key)
-                values = {
-                    "poll_id": int(poll_id),
-                    "line": quote.line,
-                    "over_price": quote.over,
-                    "under_price": quote.under,
-                    "market_last_update": quote.last_update,
-                    "observed_at": observed_at,
-                    "is_closing": bool(is_closing),
-                }
-                previous = existing.get(key)
-                changed = previous is None or (
-                    float(previous.line),
-                    previous.over_price,
-                    previous.under_price,
-                ) != (quote.line, quote.over, quote.under)
-                if changed or is_closing:
-                    history_rows.append(
-                        {
-                            **values,
-                            "canonical_game_id": game_id,
-                            "canonical_player_id": quote.canonical_player_id,
-                            "market_category": quote.category,
-                            "book": quote.book,
-                        }
-                    )
-                if previous is None:
-                    connection.execute(
-                        insert(latest).values(
-                            canonical_game_id=game_id,
-                            canonical_player_id=quote.canonical_player_id,
-                            market_category=quote.category,
-                            book=quote.book,
-                            **values,
-                        )
-                    )
-                else:
-                    connection.execute(
-                        update(latest)
-                        .where(
-                            latest.c.canonical_game_id == game_id,
-                            latest.c.canonical_player_id == quote.canonical_player_id,
-                            latest.c.market_category == quote.category,
-                            latest.c.book == quote.book,
-                        )
-                        .values(**values)
-                    )
-                latest_writes += 1
-            if history_rows:
-                connection.execute(insert(history), history_rows)
-            stale = [key for key in existing if key not in seen]
-            for player_id, category, book in stale:
-                connection.execute(
-                    delete(latest).where(
-                        latest.c.canonical_game_id == game_id,
-                        latest.c.canonical_player_id == player_id,
-                        latest.c.market_category == category,
-                        latest.c.book == book,
-                    )
-                )
-            return PollWrite(int(poll_id), len(history_rows), latest_writes, len(stale))
+    def publish_poll(
+        self,
+        poll_id: int,
+        *,
+        game_id: str,
+        is_closing: bool,
+        quotes: Sequence[ResolvedQuote],
+        unresolved_count: int,
+        fence: Callable[[Connection], None] | None = None,
+    ) -> PollWrite:
+        """Attach a response's quotes to its write-ahead poll in one transaction.
+
+        The collector records a paid poll with :meth:`record_unstored_poll`
+        before anything else can fail; this settles that row's counts and
+        stores the quotes, observed at the poll's ``completed_at``, under the
+        same omission rule as :meth:`record_poll`.
+        """
+
+        table = OddsApiPoll.__table__
+        with self.engine.begin() as connection:
+            if fence is not None:
+                fence(connection)
+            completed_at = connection.execute(
+                update(table)
+                .where(table.c.poll_id == poll_id)
+                .values(quote_count=len(quotes), unresolved_count=unresolved_count, failure_reason=None)
+                .returning(table.c.completed_at)
+            ).scalar_one()
+            return _store_quotes(connection, poll_id, game_id, assume_utc(completed_at), is_closing, quotes)
 
     def record_unstored_poll(
         self,
@@ -201,10 +159,12 @@ class SportsbookQuoteStore:
     ) -> int:
         """Record a poll that stored nothing in the sportsbook tables.
 
-        An ``empty`` or ``failed`` poll stored no quotes at all.  A
-        ``complete`` poll of the DFS feed stores its quotes in the projection
-        archive instead (crf04/statsplus#215); the caller writes this row first
-        and settles it with :meth:`settle_poll`.  Returns the poll ID.
+        An ``empty`` or ``failed`` poll stored no quotes at all.  The
+        collector writes a paid ``complete`` poll here first, before anything
+        else can fail, and then attaches its quotes with :meth:`publish_poll`
+        or, for the DFS feed whose quotes go to the projection archive
+        (crf04/statsplus#215), settles it with :meth:`settle_poll`.  Returns the
+        poll ID.
         """
 
         with self.engine.begin() as connection:
@@ -251,6 +211,91 @@ class SportsbookQuoteStore:
                     failure_reason=failure_reason,
                 )
             )
+
+
+def _store_quotes(
+    connection: Connection,
+    poll_id: int,
+    game_id: str,
+    observed_at: datetime,
+    is_closing: bool,
+    quotes: Sequence[ResolvedQuote],
+) -> PollWrite:
+    """Write one poll's quotes: a history row when a quote changed (or closes),
+    every latest row, and removal of the latest rows the poll no longer carries."""
+
+    latest = SportsbookPropLatest.__table__
+    history = SportsbookPropQuote.__table__
+    existing = {
+        (row.canonical_player_id, row.market_category, row.book): row
+        for row in connection.execute(select(latest).where(latest.c.canonical_game_id == game_id))
+    }
+    history_rows: list[dict[str, Any]] = []
+    seen: set[tuple[int, str, str]] = set()
+    latest_writes = 0
+    for quote in quotes:
+        key = (quote.canonical_player_id, quote.category, quote.book)
+        seen.add(key)
+        values = {
+            "poll_id": poll_id,
+            "line": quote.line,
+            "over_price": quote.over,
+            "under_price": quote.under,
+            "market_last_update": quote.last_update,
+            "observed_at": observed_at,
+            "is_closing": bool(is_closing),
+        }
+        previous = existing.get(key)
+        changed = previous is None or (
+            float(previous.line),
+            previous.over_price,
+            previous.under_price,
+        ) != (quote.line, quote.over, quote.under)
+        if changed or is_closing:
+            history_rows.append(
+                {
+                    **values,
+                    "canonical_game_id": game_id,
+                    "canonical_player_id": quote.canonical_player_id,
+                    "market_category": quote.category,
+                    "book": quote.book,
+                }
+            )
+        if previous is None:
+            connection.execute(
+                insert(latest).values(
+                    canonical_game_id=game_id,
+                    canonical_player_id=quote.canonical_player_id,
+                    market_category=quote.category,
+                    book=quote.book,
+                    **values,
+                )
+            )
+        else:
+            connection.execute(
+                update(latest)
+                .where(
+                    latest.c.canonical_game_id == game_id,
+                    latest.c.canonical_player_id == quote.canonical_player_id,
+                    latest.c.market_category == quote.category,
+                    latest.c.book == quote.book,
+                )
+                .values(**values)
+            )
+        latest_writes += 1
+    if history_rows:
+        connection.execute(insert(history), history_rows)
+    stale = [key for key in existing if key not in seen]
+    for player_id, category, book in stale:
+        connection.execute(
+            delete(latest).where(
+                latest.c.canonical_game_id == game_id,
+                latest.c.canonical_player_id == player_id,
+                latest.c.market_category == category,
+                latest.c.book == book,
+            )
+        )
+    return PollWrite(poll_id, len(history_rows), latest_writes, len(stale))
 
 
 def _decimal_odds(price: int) -> float:
