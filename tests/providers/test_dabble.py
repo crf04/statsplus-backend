@@ -957,18 +957,20 @@ def _sides(snapshot):
     }
 
 
-def test_recorded_lines_carry_dabbles_own_price_on_each_side():
+def test_recorded_lines_price_near_even_pairs_and_state_only_the_entry_for_uneven_pairs():
+    """Dabble's feed decimals are fair odds, not its per-pick badges (crf04/statsplus#435)."""
+
     snapshot = _recorded_snapshot()
 
     assert snapshot.status is SnapshotStatus.COMPLETE
     assert _sides(snapshot) == {
         ("Myles Turner", "three-made", "1.5", "standard"): [
-            ("higher", "decimal", Decimal("1.7"), "selection"),
-            ("lower", "decimal", Decimal("2.45"), "selection"),
+            ("higher", "multiplier", Decimal(3), "entry"),
+            ("lower", "multiplier", Decimal(3), "entry"),
         ],
         ("Myles Turner", "rebounds", "6.5", "standard"): [
-            ("higher", "decimal", Decimal("2.4"), "selection"),
-            ("lower", "decimal", Decimal("1.7"), "selection"),
+            ("higher", "multiplier", Decimal(3), "entry"),
+            ("lower", "multiplier", Decimal(3), "entry"),
         ],
         ("Josh Giddey", "three-made", "1.5", "standard"): [
             ("higher", "decimal", Decimal("1.817"), "selection"),
@@ -1028,25 +1030,22 @@ def test_recorded_three_made_line_is_served_as_full_game_3pm():
         match.state,
         match.canonical.market_category,
     ) == (Decimal("1.5"), "full_game", ("three-pointers-made",), MatchState.CANONICAL, "3PM")
-    assert [(s.direction.value, s.price_value) for s in turner.selections] == [
-        ("higher", Decimal("1.7")),
-        ("lower", Decimal("2.45")),
-    ]
 
 
-_TURNER_THREES = "01a165f5-0c91-73e8-b406-978d423655d5"
-_TURNER_THREES_OVER = "01a165f5-0dd2-71f8-b585-2d247147f758"
+_GIDDEY_THREES = "01a165f5-0cee-705d-b82a-3980f034fb1e"
+_GIDDEY_THREES_OVER = "01a165f5-1071-77db-bf5c-5bdd9d84b225"
+_ENTRY_PAIR = [("higher", "multiplier", Decimal(3), "entry"), ("lower", "multiplier", Decimal(3), "entry")]
 
 
-def _turner_threes_sides(detail):
-    return _sides(_recorded_snapshot(detail)).get(("Myles Turner", "three-made", "1.5", "standard"))
+def _giddey_threes_sides(detail):
+    return _sides(_recorded_snapshot(detail)).get(("Josh Giddey", "three-made", "1.5", "standard"))
 
 
 @pytest.mark.parametrize("price", [None, 1, "1.0", 0.5, -2, "abc", True, "NaN", "Infinity"])
 def test_a_price_that_is_not_a_decimal_above_one_is_no_price(price):
     detail = _payload("recorded_2026-10-23.chi-mil.fixture_details.json")
     for row in detail["sportFixtureDetail"]["prices"]:
-        if row["selectionId"] == _TURNER_THREES_OVER:
+        if row["selectionId"] == _GIDDEY_THREES_OVER:
             row["price"] = price
 
     snapshot = _recorded_snapshot(detail)
@@ -1056,18 +1055,15 @@ def test_a_price_that_is_not_a_decimal_above_one_is_no_price(price):
         True,
         8,
     )
-    assert _turner_threes_sides(detail) == [
-        ("higher", "unpriced", None, "selection"),
-        ("lower", "decimal", Decimal("2.45"), "selection"),
-    ]
+    assert _giddey_threes_sides(detail) == _ENTRY_PAIR
 
 
 def test_a_repeated_price_row_that_agrees_is_one_price():
     detail = _payload("recorded_2026-10-23.chi-mil.fixture_details.json")
     prices = detail["sportFixtureDetail"]["prices"]
-    prices.extend(copy.deepcopy([row for row in prices if row["selectionId"] == _TURNER_THREES_OVER]))
+    prices.extend(copy.deepcopy([row for row in prices if row["selectionId"] == _GIDDEY_THREES_OVER]))
 
-    assert _turner_threes_sides(detail)[0] == ("higher", "decimal", Decimal("1.7"), "selection")
+    assert _giddey_threes_sides(detail)[0] == ("higher", "decimal", Decimal("1.817"), "selection")
 
 
 def test_two_prices_for_one_side_leave_that_side_unpriced_in_a_complete_snapshot():
@@ -1075,7 +1071,7 @@ def test_two_prices_for_one_side_leave_that_side_unpriced_in_a_complete_snapshot
     # price conflict must cost only the price.
     detail = _payload("recorded_2026-10-23.chi-mil.fixture_details.json")
     prices = detail["sportFixtureDetail"]["prices"]
-    prices.append({"id": "x", "selectionId": _TURNER_THREES_OVER, "marketId": _TURNER_THREES, "price": 2.5})
+    prices.append({"id": "x", "selectionId": _GIDDEY_THREES_OVER, "marketId": _GIDDEY_THREES, "price": 2.5})
 
     snapshot = _recorded_snapshot(detail)
 
@@ -1084,10 +1080,7 @@ def test_two_prices_for_one_side_leave_that_side_unpriced_in_a_complete_snapshot
         True,
         8,
     )
-    assert _turner_threes_sides(detail) == [
-        ("higher", "unpriced", None, "selection"),
-        ("lower", "decimal", Decimal("2.45"), "selection"),
-    ]
+    assert _giddey_threes_sides(detail) == _ENTRY_PAIR
 
 
 @pytest.mark.parametrize("prices", [{"price": 1.82}, 1.82, "1.82"])
