@@ -9,6 +9,7 @@ selects a payload.  Every test reads through the real reader of
 
 from __future__ import annotations
 
+import hashlib
 import json
 from copy import copy
 
@@ -154,6 +155,18 @@ def _selected_slate(tmp_path, edit, capture):
         world.engine.dispose()
 
 
+def _undecodable_payload(connection, publication_id):
+    """A payload whose checksum holds and whose decoder refuses it: a team window with no rows."""
+
+    payload = json.dumps({"rows": []})
+    connection.execute(
+        text(
+            "UPDATE publication_versions SET payload = :payload, checksum = :checksum WHERE publication_id = :p"
+        ),
+        {"payload": payload, "checksum": hashlib.sha256(payload.encode()).hexdigest(), "p": publication_id},
+    )
+
+
 @pytest.mark.parametrize("edit", [_corrupt_checksum, _corrupt_payload])
 def test_a_selected_slate_leaves_a_corrupt_publication_out_of_trailing_as_a_full_capture_does(tmp_path, edit):
     full = _selected_slate(tmp_path / "full", edit, capture_matchup_snapshot)
@@ -162,3 +175,19 @@ def test_a_selected_slate_leaves_a_corrupt_publication_out_of_trailing_as_a_full
 
     assert labelled == full
     assert [family["family"] for family in labelled["trailing"]] == ["player_diets"]
+
+
+def test_a_selected_slate_still_lists_a_family_whose_payload_only_its_decoder_refuses(tmp_path):
+    """The one difference from a full capture, left for the owner (crf04/statsplus#408 spot 4).
+
+    Activation runs the same decoders on the same immutable bytes, so only a
+    deploy with a stricter decoder can make an active version undecodable.
+    """
+
+    full = _selected_slate(tmp_path / "full", _undecodable_payload, capture_matchup_snapshot)
+
+    labelled = _selected_slate(tmp_path / "labels", _undecodable_payload, capture_matchup_labels)
+
+    assert [family["family"] for family in full["trailing"]] == ["player_diets"]
+    assert [family["family"] for family in labelled["trailing"]] == ["player_diets", "last_15"]
+    assert {**labelled, "trailing": full["trailing"]} == full
