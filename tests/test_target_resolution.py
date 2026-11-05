@@ -2459,6 +2459,7 @@ def resolve_rules(targets, runtime_settings):
         game_counts=None,
         with_logs=True,
         with_catalog=True,
+        catalog=None,
     ):
         positions = {1: "Wing", 2: "Big", 3: None} if positions is None else positions
         attempts = {1: [8, 8], 2: [1, 1], 3: [9, 9]} if three_attempts is None else three_attempts
@@ -2472,7 +2473,7 @@ def resolve_rules(targets, runtime_settings):
             matchups=FakeMatchups({GAME_ID: _rules_matchup()}),
             settings=runtime_settings,
             player_logs=logs if with_logs else None,
-            athlete_catalog=bt.FakeCatalog(positions) if with_catalog else None,
+            athlete_catalog=catalog or (bt.FakeCatalog(positions) if with_catalog else None),
         )
         resolved = service.resolve(OWNER, requested_date=SLATE_DATE)["targets"]
         return {entry["target"]["title"]: entry for entry in resolved}
@@ -2553,6 +2554,27 @@ def test_each_fit_carries_its_position_and_a_diet_only_fit_is_otherwise_unchange
             {"base": "shot_zones", "slice_key": "Corner 3", "share": 0.4, "league_average_share": 0.2}
         ],
     }
+
+
+class _StoredPositions:
+    """Positions as the catalog reader returns them: every stored value, an empty one included."""
+
+    def __init__(self, positions):
+        self.positions = positions
+
+    def get_positions(self, season):
+        return dict(self.positions)
+
+
+def test_an_empty_stored_position_leaves_the_player_unlisted(targets, resolve_rules):
+    created = _create(targets, qualifiers=[CORNER_THREE])
+
+    resolved = resolve_rules(catalog=_StoredPositions({1: "Wing", 2: "Big", 3: ""}))
+
+    assert [(player["name"], player["position"]) for player in resolved[created["title"]]["players"]] == [
+        ("Corner Sniper", "Wing"),
+        ("Unlisted Guy", None),
+    ]
 
 
 def test_every_qualifier_kind_has_a_share_and_a_context_entry_with_nulls_for_diet_only_fields(
