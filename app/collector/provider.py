@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import numbers
 import os
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
@@ -284,6 +284,9 @@ class ResidentialScopeExecutor:
                 team_id = parameters.get("team_id")
                 if team_id is None:
                     raise ProviderContractError("scope_team_required")
+                # The dates of games tracking leaves out for good, sent only
+                # when there are some so other providers need not accept them.
+                untracked = parameters.get("untracked_dates")
                 for category in categories:
                     raw = _call(
                         self.provider,
@@ -296,6 +299,7 @@ class ResidentialScopeExecutor:
                         team_id=int(team_id),
                         last_n_games=15 if window == "l15" else None,
                         per_mode_simple=str(parameters.get("per_mode", "Totals")),
+                        **({"untracked_dates": untracked} if untracked else {}),
                     )
                     yield _defer_lagging_tracking(
                         raw,
@@ -505,18 +509,24 @@ class _StandaloneNBAProvider:
             raise ProviderContractError("provider_schema_changed") from error
 
     @staticmethod
-    def _bind_window_gp(frame: Any, evidence: Any, *, team_id: int) -> Any:
+    def _bind_window_gp(frame: Any, evidence: Any, *, team_id: int, untracked: Sequence[Any] = ()) -> Any:
         """Bind the box score's games and minutes to the tracking frame.
 
         Tracking trails the box score for hours after a game, so its own
         count is kept as ``TRACKING_GP`` for the executor to defer on once the
         response has passed every other check.  Tracking counting more games
         than were played, or any malformed count, is a contract failure.
+        ``untracked`` is the box score of each game tracking leaves out for
+        good; those games and their minutes are not in the window.
         """
 
         try:
             frame = _flatten_frame_columns(frame)
             expected_gp, expected_minutes = _box_score_window(evidence, team_id=team_id)
+            for game in untracked:
+                games, minutes = _box_score_window(game, team_id=team_id)
+                expected_gp -= games
+                expected_minutes -= minutes
             merged = frame.copy()
             if not (merged["TEAM_ID"] == team_id).all():
                 raise ProviderContractError("manifest_scope_mismatch")
@@ -796,6 +806,7 @@ class _StandaloneNBAProvider:
         team_id: int,
         last_n_games: int | None,
         per_mode_simple: str = "Totals",
+        untracked_dates: Sequence[str] = (),
     ) -> Any:
         from nba_api.stats import endpoints
 
@@ -823,7 +834,18 @@ class _StandaloneNBAProvider:
             date_from=date_from,
             date_to=date_to,
         )
-        return self._bind_window_gp(frame, evidence, team_id=team_id)
+        untracked = [
+            self._team_window_evidence(
+                season=season,
+                season_type=season_type,
+                team_id=team_id,
+                last_n_games=None,
+                date_from=played,
+                date_to=played,
+            )
+            for played in untracked_dates
+        ]
+        return self._bind_window_gp(frame, evidence, team_id=team_id, untracked=untracked)
 
     @staticmethod
     def _collapse_opponent_breakdown(frame: Any, *, team_id: int) -> Any:

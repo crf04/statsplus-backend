@@ -523,7 +523,7 @@ def test_player_zone_scope_reads_per_game_totals_and_games_for_one_window():
 
 
 def test_authorized_player_zone_descriptor_binds_the_manifest_date_bound():
-    descriptors = _collector_scope_descriptors({"exact_shot_zones"}, NOW)
+    descriptors = _collector_scope_descriptors({"exact_shot_zones"}, NOW, season="2025-26")
     assert [item["parameters"] for item in descriptors] == [
         {
             "window": "season",
@@ -888,6 +888,7 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
             "shot_zones_opponent",
         },
         NOW,
+        season="2025-26",
         l15_date_from_by_team=l15_boundaries,
     )
     opponent = [item for item in descriptors if item["parameters"].get("subject") == "opponent"]
@@ -924,6 +925,7 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
     l15_only = _collector_scope_descriptors(
         {"grouped_shot_types_opponent_l15"},
         NOW,
+        season="2025-26",
         l15_date_from_by_team=l15_boundaries,
     )
     assert {item["parameters"]["window"] for item in l15_only} == {"l15"}
@@ -933,6 +935,7 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
     prior_slate = _collector_scope_descriptors(
         {"shot_zones_opponent"},
         utc_evening,
+        season="2025-26",
         l15_date_from_by_team={int(team_id): "10/15/2025" for team_id in NBA_TEAM_IDS},
     )
     assert {
@@ -1486,7 +1489,7 @@ def _collect_player_shot_types_on_1025(tmp_path, nba, *, ledger_players=()):
     executor = ResidentialScopeExecutor(nba, clock=lambda: cutoff)
     observations = [
         observation
-        for descriptor in _collector_scope_descriptors({"grouped_shot_types"}, cutoff)
+        for descriptor in _collector_scope_descriptors({"grouped_shot_types"}, cutoff, season="2026-27")
         for observation in executor.iter_scope(
             ScopeWork(
                 scope=descriptor["scope"],
@@ -2529,6 +2532,7 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
     descriptors = _collector_scope_descriptors(
         manifest_scopes,
         cutoff,
+        season="2025-26",
         l15_date_from_by_team={int(team_id): l15_date_from for team_id in team_ids},
     )
     discovery = {
@@ -3106,20 +3110,19 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
                 40 * 48 / 725,
             )
         }
+    if evidence_mode == "tracking_omitted":
+        # The season shot types answer for the games tracking covers: the
+        # omitted game leaves both teams' rows, and its minutes with it.
+        read = reader.read("grouped_shot_types_opponent_season", season="2025-26")
+        games = {row.team_id: row.game_ids for row in read.decoded}
+        assert [len(games[int(team_id)]) for team_id in team_ids[:3]] == [14, 14, 15]
+        assert "game-3-0" not in {*games[int(team_ids[0])], *games[int(team_ids[1])]}
+        expected_values["grouped_shot_types_opponent_season"] = ("catch_and_shoot_FG2M", 40 * 48 / 677)
     for stream_key, (metric, expected) in expected_values.items():
         read = reader.read(stream_key, season="2025-26")
         assert read.available and len(read.decoded or ()) == 30
         assert (read.decoded or ())[0].per48[metric] == pytest.approx(expected)
         assert read.payload["source_observations"]
-    if evidence_mode == "tracking_omitted":
-        # The season shot types answer for the games tracking covers: the
-        # omitted game leaves both teams' rows, and their minutes with it.
-        read = reader.read("grouped_shot_types_opponent_season", season="2025-26")
-        games = {row.team_id: row.game_ids for row in read.decoded}
-        assert [len(games[int(team_id)]) for team_id in team_ids[:3]] == [14, 14, 15]
-        assert "game-3-0" not in {*games[int(team_ids[0])], *games[int(team_ids[1])]}
-        assert read.decoded[0].per48["catch_and_shoot_FG2M"] == pytest.approx(40 * 48 / 677)
-        expected_values.pop("grouped_shot_types_opponent_season")
     if evidence_mode in {"complete", "projection_failure", "tracking_omitted"}:
         season_snapshot = matchup_repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", cutoff.date()))
         l15_snapshot = matchup_repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", cutoff.date(), 15))
@@ -3826,7 +3829,7 @@ def test_a_game_tracking_omits_leaves_the_window_and_any_other_shortfall_still_d
 def test_the_manifest_names_each_teams_games_tracking_omits():
     from app.services.collection_control import NBA_TEAM_IDS, _collector_scope_descriptors
 
-    def untracked(cutoff):
+    def untracked(cutoff, season="2026-27"):
         return {
             (item["parameters"]["team_id"], item["parameters"]["window"]): item["parameters"][
                 "untracked_dates"
@@ -3834,7 +3837,7 @@ def test_the_manifest_names_each_teams_games_tracking_omits():
             for item in _collector_scope_descriptors(
                 {"grouped_shot_types_opponent_season", "grouped_shot_types_opponent_l15"},
                 cutoff,
-                season="2026-27",
+                season=season,
                 l15_date_from_by_team={int(team_id): "10/21/2026" for team_id in NBA_TEAM_IDS},
             )
             if "untracked_dates" in item["parameters"]
@@ -3844,7 +3847,9 @@ def test_the_manifest_names_each_teams_games_tracking_omits():
         (LAC, "season"): ["10/25/2026"],
         (OKC, "season"): ["10/25/2026"],
     }
+    # Not yet played at the 10/25 cutoff, and not in the next season's window.
     assert untracked(datetime(2026, 10, 25, 9, 45, tzinfo=UTC)) == {}
+    assert untracked(datetime(2027, 11, 5, 9, 45, tzinfo=UTC), season="2027-28") == {}
 
 
 BOX_SCORE_7 = {"GP": 7, "MIN": 1691.0}
@@ -4597,7 +4602,7 @@ def test_operator_enable_unblocks_the_first_collection_of_an_nba_stream(tmp_path
         collect_before=NOW + timedelta(hours=1),
     )
     manifest_scopes = set(json.loads(manifest.scopes))
-    descriptors = _collector_scope_descriptors(manifest_scopes, cutoff)
+    descriptors = _collector_scope_descriptors(manifest_scopes, cutoff, season="2025-26")
     discovery = {
         "environment": "testing",
         "bootstrap_requests": [],
@@ -4830,7 +4835,7 @@ def test_a_persistent_zone_mismatch_reports_its_residual_to_the_operator(tmp_pat
     # A real manifest freezes the stream key beside the observation type it
     # authorizes; the runner matches descriptors against the latter.
     manifest_scopes = {"exact_shot_zones_opponent_season", "shot_zones_opponent"}
-    descriptors = _collector_scope_descriptors(manifest_scopes, NOW)
+    descriptors = _collector_scope_descriptors(manifest_scopes, NOW, season="2025-26")
     discovery = {
         "environment": "testing",
         "bootstrap_requests": [],
@@ -4920,7 +4925,7 @@ def test_run_once_writes_the_zone_diagnostic_to_the_configured_log(
                 "collect_before": (live + timedelta(hours=1)).isoformat(),
                 "accepted_versions": [2],
                 "scopes": sorted(manifest_scopes),
-                "scope_descriptors": _collector_scope_descriptors(manifest_scopes, live),
+                "scope_descriptors": _collector_scope_descriptors(manifest_scopes, live, season="2025-26"),
             }
         ],
     }
@@ -5234,6 +5239,7 @@ def test_l15_nba_release_transition_publishes_after_the_last_team_reaches_15(
     descriptors = _collector_scope_descriptors(
         scopes,
         cutoff_one,
+        season="2025-26",
         l15_date_from_by_team=_manifest_l15_date_from_by_team(engine, manifest_one),
     )
     assert not any(descriptor["parameters"].get("window") == "l15" for descriptor in descriptors)
@@ -5284,6 +5290,7 @@ def test_l15_nba_release_transition_publishes_after_the_last_team_reaches_15(
     descriptors = _collector_scope_descriptors(
         scopes,
         cutoff_two,
+        season="2025-26",
         l15_date_from_by_team=boundaries,
     )
     l15_descriptors = [

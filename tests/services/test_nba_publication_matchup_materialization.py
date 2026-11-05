@@ -1712,6 +1712,29 @@ def test_publication_rejects_normalized_alias_for_registered_key(tmp_path):
     assert observation.unavailable_reason == "publication_metric_taxonomy_mismatch"
 
 
+def test_a_season_shot_type_row_claims_every_governed_game_or_only_those_tracking_covers():
+    """#712: tracking dropped LAC @ OKC after the 11-02 Publication had counted it."""
+
+    lac, okc = 1610612746, 1610612760
+    governed = {team_id: (f"game-{team_id}",) for team_id in CANONICAL_TEAM_IDS}
+    governed[lac] = ("0022600116", "lac-other")
+    governed[okc] = ("0022600116", "okc-other")
+    tracked = {**governed, lac: ("lac-other",), okc: ("okc-other",)}
+    expected = {team_id: frozenset(game_ids) for team_id, game_ids in governed.items()}
+
+    def validate(base, game_ids_by_team, *, window="season"):
+        rows = _rows(tuple(sorted(NBA_PUBLICATION_TAXONOMY[base])), game_ids_by_team)
+        return validate_publication_rows(base, rows, expected_game_ids_by_team=expected, window=window)
+
+    assert validate("shot_types", governed)
+    assert validate("shot_types", tracked)
+    # Only tracking leaves the game out, and only that game.
+    with pytest.raises(PublicationValidationError, match="publication_game_set_mismatch"):
+        validate("shot_zones", tracked)
+    with pytest.raises(PublicationValidationError, match="publication_game_set_mismatch"):
+        validate("shot_types", {**governed, lac: ("0022600116",)})
+
+
 def test_injected_governed_roster_cannot_replace_canonical_nba_identity_set():
     rows = _rows(tuple(sorted(NBA_PUBLICATION_TAXONOMY["shot_zones"])))
 

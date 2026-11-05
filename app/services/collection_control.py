@@ -18,6 +18,7 @@ import secrets
 import threading
 import uuid
 import zlib
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from contextlib import contextmanager, suppress
@@ -68,9 +69,11 @@ from app.domain.team_matchup_taxonomy import (
     SHOT_ZONE_SLICES,
     nba_publication_taxonomies,
 )
+from app.domain.tracking_omissions import omitted_game_dates, omitted_game_ids, tracked_game_ids_by_team
 from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
 from app.models.canonical_game_ledger import (
     CanonicalGameLedgerGame,
+    CanonicalGameLedgerPlayerFact,
     CanonicalGameLedgerTeamFact,
     LedgerObservationEvidence,
     LedgerParityArtifact,
@@ -645,9 +648,15 @@ def _collector_scope_descriptors(
     scopes: Iterable[str],
     cutoff: datetime,
     *,
+    season: str,
     l15_date_from_by_team: Mapping[int, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Expand frozen surface authority into exact, executable NBA requests."""
+    """Expand frozen surface authority into exact, executable NBA requests.
+
+    A team's season shot-type requests name the dates of its games NBA
+    tracking leaves out, so the collector takes those games out of the box
+    score it binds the tracking to.
+    """
 
     authorized = {str(value) for value in scopes}
     descriptors: list[dict[str, Any]] = []
@@ -692,7 +701,8 @@ def _collector_scope_descriptors(
             }
             for category in PLAY_TYPES
         )
-    date_to = slate_date_for_instant(_aware(cutoff)).strftime("%m/%d/%Y")
+    slate_date = slate_date_for_instant(_aware(cutoff))
+    date_to = slate_date.strftime("%m/%d/%Y")
     if shots:
         descriptors.extend(
             {
@@ -758,6 +768,9 @@ def _collector_scope_descriptors(
                 "value_mode": "totals_with_minutes",
             }
             if opponent_shots and window in shot_stream_windows:
+                untracked_dates = (
+                    omitted_game_dates(season, team_id, before=slate_date) if window == "season" else []
+                )
                 descriptors.extend(
                     {
                         "scope": opponent_shots,
@@ -766,6 +779,7 @@ def _collector_scope_descriptors(
                             "general_range": category,
                             "per_mode": "Totals",
                             "value_mode": "totals_with_minutes",
+                            **({"untracked_dates": untracked_dates} if untracked_dates else {}),
                         },
                     }
                     for category in SHOOTING_TYPES
@@ -1041,6 +1055,10 @@ def _compose_nba_observation_payload(
     expected_teams = {int(team_id) for team_id in NBA_TEAM_IDS}
     if not base or not expected_metrics or set(expected_game_ids_by_team) != expected_teams:
         raise ValueError("publication governance is incomplete")
+    if base == "shot_types" and window == "season":
+        # Opponent shot types are player tracking: the window is the games
+        # it covers, and the collector bound the box score to the same games.
+        expected_game_ids_by_team = tracked_game_ids_by_team(expected_game_ids_by_team)
     observations = [
         session.get(CollectionObservation, observation_id) for observation_id in sorted(provenance_ids)
     ]
@@ -1275,12 +1293,34 @@ def _is_player_season_scope(scope: Mapping[str, Any]) -> bool:
     )
 
 
+def _tracking_omitted_games_played(
+    session: Session, expected_game_ids_by_team: Mapping[int, frozenset[str]]
+) -> Counter[str]:
+    """Count each player's governed games that tracking leaves out, from the ledger's box score."""
+
+    omitted = omitted_game_ids(
+        game_id for game_ids in expected_game_ids_by_team.values() for game_id in game_ids
+    )
+    if not omitted:
+        return Counter()
+    return Counter(
+        str(player_id)
+        for player_id in session.scalars(
+            select(CanonicalGameLedgerPlayerFact.player_id).where(
+                CanonicalGameLedgerPlayerFact.game_id.in_(sorted(omitted)),
+                CanonicalGameLedgerPlayerFact.minutes > 0,
+            )
+        )
+    )
+
+
 def _assert_player_shot_types_cover_governed_games(
     scope: Mapping[str, Any],
     document: Mapping[str, Any],
     *,
     cutoff: datetime,
     expected_game_ids_by_team: Mapping[int, frozenset[str]] | None,
+    omitted_games_played: Mapping[str, int],
 ) -> None:
     """Refuse player tracking that does not yet cover every governed game.
 
@@ -1294,7 +1334,14 @@ def _assert_player_shot_types_cover_governed_games(
     no Overall record at all.  A player whose shots are none of the three
     types has an Overall record and no category record, and is legitimately
     absent from the Diet (crf04/statsplus#386).
+
+    ``omitted_games_played`` counts the games each player played that
+    tracking leaves out for good (crf04/statsplus-backend#712); tracking is
+    expected to be short by exactly those.
     """
+
+    def tracked(player_id: Any, box: Any) -> Any:
+        return box - omitted_games_played.get(str(player_id), 0) if isinstance(box, int) else box
 
     if not expected_game_ids_by_team:
         raise ValueError("publication governance is incomplete")
@@ -1322,10 +1369,14 @@ def _assert_player_shot_types_cover_governed_games(
             for team_id, game_ids in expected_game_ids_by_team.items()
         )
         or any(
-            not isinstance(record, Mapping) or record.get("box_games_played") != record.get("games_played")
+            not isinstance(record, Mapping)
+            or tracked(record.get("player_id"), record.get("box_games_played")) != record.get("games_played")
             for record in document.get("records") or ()
         )
-        or any(tracking_games.get(player_id) != box_games.get(player_id) for player_id in shooters)
+        or any(
+            tracking_games.get(player_id) != tracked(player_id, box_games.get(player_id))
+            for player_id in shooters
+        )
     ):
         raise _ProviderWindowUnavailable("provider_window_lagging")
 
@@ -1414,6 +1465,7 @@ def _compose_player_diet_observation_payload(
             latest[identity] = observation
     if not latest:
         raise ValueError("publication observation season evidence missing")
+    omitted_games_played = _tracking_omitted_games_played(session, expected_game_ids_by_team or {})
     observed_categories: set[str] = set()
     facts: dict[tuple[int, str], dict[str, Any]] = {}
     sources: list[dict[str, str]] = []
@@ -1444,6 +1496,7 @@ def _compose_player_diet_observation_payload(
             document,
             cutoff=cutoff,
             expected_game_ids_by_team=expected_game_ids_by_team,
+            omitted_games_played=omitted_games_played,
         )
         sources.append(
             {
@@ -3956,6 +4009,7 @@ class CollectionControlService(_SessionService):
                     scope_descriptors = _collector_scope_descriptors(
                         authorized_scopes,
                         manifest.cutoff,
+                        season=manifest.season,
                         l15_date_from_by_team=(
                             _manifest_l15_date_from_by_team(self.engine, manifest)
                             if any(
@@ -4362,6 +4416,7 @@ class CollectionControlService(_SessionService):
                 row._scope_descriptors = _collector_scope_descriptors(
                     authorized_scopes,
                     row.cutoff,
+                    season=row.season,
                     l15_date_from_by_team=(
                         _manifest_l15_date_from_by_team(self.engine, row)
                         if any(

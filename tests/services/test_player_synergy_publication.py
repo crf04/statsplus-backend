@@ -382,7 +382,7 @@ def test_synergy_invalid_new_generation_preserves_active_publication(plane):
 
 
 def test_player_synergy_manifest_descriptor_freezes_source_contract():
-    descriptors = module._collector_scope_descriptors({"synergy_play_types"}, NOW)
+    descriptors = module._collector_scope_descriptors({"synergy_play_types"}, NOW, season="2025-26")
     assert len(descriptors) == 11
     assert {d["parameters"]["play_type"] for d in descriptors} == set(PLAY_TYPES)
     for descriptor in descriptors:
