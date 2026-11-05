@@ -56,8 +56,7 @@ def _metric_families():
             "threes",
             ("FG3M", "PTS"),
         ),
-        # Defensive Rating is a profile row and a Team Filter, not a Next list entry.
-        key("traditional", "points", per="possessions"): None,
+        key("traditional", "points", per="possessions"): ("defensive-rating", ("PTS",)),
     }
     for metric in ("two_point", "at_rim", "short_mid_range", "long_mid_range"):
         families[key("assist_locations", metric + "_assists")] = ("2pt-assists", ("AST",))

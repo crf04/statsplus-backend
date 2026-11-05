@@ -493,7 +493,7 @@ def test_a_hidden_row_never_displaces_a_listed_copy(setup):
     assert "C&S 3PA" not in labels
 
 
-def test_defensive_rating_is_a_profile_row_but_not_a_next_list_entry(setup):
+def test_defensive_rating_is_its_own_next_list_entry_on_points(setup):
     client, reads, _ = setup
     key = "traditional_opponent_season"
     reads[key] = replace(
@@ -507,6 +507,6 @@ def test_defensive_rating_is_a_profile_row_but_not_a_next_list_entry(setup):
     response = get(client)
 
     assert response.status_code == 200
-    filters = {row["team_filter"] for row in response.get_json()["opponent_ranks"]}
-    assert "OPP_PTS" in filters
-    assert "DRTG" not in filters
+    rows = {row["team_filter"]: row for row in response.get_json()["opponent_ranks"]}
+    assert "OPP_PTS" in rows
+    assert (rows["DRTG"]["family"], rows["DRTG"]["markets"]) == ("defensive-rating", ["PTS"])
