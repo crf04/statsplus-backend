@@ -1639,7 +1639,9 @@ def test_player_shot_types_short_of_a_game_tracking_keeps_still_lag(tmp_path, mo
     assert (composed, job, versions) == (0, ("failed", "provider_window_lagging"), [])
 
 
-def test_player_shot_types_without_a_shooter_whose_only_game_tracking_omits_are_published(tmp_path, monkeypatch):
+def test_player_shot_types_without_a_shooter_whose_only_game_tracking_omits_are_published(
+    tmp_path, monkeypatch
+):
     # 1630174 has one box-score game and 7 attempts through 10/24.  When that
     # game is the one tracking omits, tracking has no Overall record for the
     # player at all, and the Diet publishes without them.

@@ -1374,7 +1374,8 @@ def _assert_player_shot_types_cover_governed_games(
             for record in document.get("records") or ()
         )
         or any(
-            tracking_games.get(player_id) != tracked(player_id, box_games.get(player_id))
+            # A shooter whose only games tracking omits has no tracking record.
+            tracking_games.get(player_id, 0) != tracked(player_id, box_games.get(player_id))
             for player_id in shooters
         )
     ):
