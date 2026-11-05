@@ -300,8 +300,6 @@ class OddsApiSettings:
     reset_day: int = 1
     plan_credits: int = 20000
     reserve_credits: int = 1000
-    #: Assumed hours before tip that props first post; sizes the budget guard.
-    assumed_lead_hours: int = 10
     request_timeout_seconds: float = 20.0
     #: The one Odds API region the beat requests.  ``us_dfs`` feeds PrizePicks
     #: lines into the DFS projection pipeline (crf04/statsplus#215);
@@ -319,8 +317,8 @@ class OddsApiSettings:
             raise ValueError("ODDS_API_RESET_DAY must be between 1 and 31")
         if self.plan_credits <= self.reserve_credits or self.reserve_credits < 0:
             raise ValueError("ODDS_API_PLAN_CREDITS must exceed the reserve")
-        if self.assumed_lead_hours < 1 or self.request_timeout_seconds <= 0:
-            raise ValueError("ODDS_API lead hours and timeout must be positive")
+        if self.request_timeout_seconds <= 0:
+            raise ValueError("ODDS_API timeout must be positive")
 
 
 class ProviderSettings(BaseModel):
@@ -965,7 +963,6 @@ def _build_settings(
                 reset_day=reader.integer("ODDS_API_RESET_DAY", 1),
                 plan_credits=reader.integer("ODDS_API_PLAN_CREDITS", 20000),
                 reserve_credits=reader.integer("ODDS_API_RESERVE_CREDITS", 1000),
-                assumed_lead_hours=reader.integer("ODDS_API_ASSUMED_LEAD_HOURS", 10),
                 regions=(reader.text("ODDS_API_REGIONS") or "us_dfs").lower(),
             ),
             feedback=_validated_model(

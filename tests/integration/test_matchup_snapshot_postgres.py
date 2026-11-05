@@ -21,6 +21,7 @@ from app.services.projection_archive import LatestProjectionPlayerPoolReader, Pr
 from app.services.request_reads import request_read_scope
 from app.services.stats_freshness_repository import StatsFreshnessRepository
 from tests.routes.test_games_board import (
+    BOS,
     BRUNSON,
     CURRY,
     HAUSER,
@@ -441,3 +442,56 @@ def test_a_cached_matchup_without_a_caller_scope_keys_the_stats_freshness_it_com
         (30.5, NOW.isoformat(), 2),
         (30.5, NOW.isoformat(), 2),
     ]
+
+
+def _move_bostons_side_to_miami(engine):
+    """One commit: the later game's away side is corrected from Boston to Miami, its
+    event and Boston's pool rows together."""
+
+    miami = 1610612748
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE event_catalog SET away_team_id = :miami, away_team_name = 'Miami Heat', "
+                "away_team_tricode = 'MIA' WHERE nba_game_id = :game"
+            ),
+            {"miami": miami, "game": LATER},
+        )
+        connection.execute(
+            text(
+                "UPDATE latest_player_projections SET canonical_team_id = :miami "
+                "WHERE canonical_game_id = :game AND canonical_team_id = :boston"
+            ),
+            {"miami": miami, "game": LATER, "boston": BOS.canonical_id},
+        )
+
+
+def test_a_matchup_composed_from_a_held_pool_read_takes_its_event_and_pool_from_one_snapshot(
+    matchup, monkeypatch
+):
+    """Target resolution and the slate edges read every game's event and pool once
+    (crf04/statsplus-backend#696); a correction committed after the events read
+    never pairs the old event with the corrected pool."""
+
+    events = matchup.service.player_pool.event_reader
+    read_events = events.get_events_by_ids
+
+    def read_then_correct(*arguments, **keywords):
+        listed = read_events(*arguments, **keywords)
+        _move_bostons_side_to_miami(matchup.engine)
+        return listed
+
+    monkeypatch.setattr(events, "get_events_by_ids", read_then_correct)
+    held = matchup.service.player_pool.read_games(season=SEASON, game_ids=(LATER, STARTED))
+    monkeypatch.setattr(events, "get_events_by_ids", read_events)
+
+    document = matchup.service.get_matchup_from_snapshot(
+        game_id=LATER,
+        publication_snapshot=None,
+        injuries=StoredMatchupInjuryReader(matchup.service.injuries),
+        pool_read=held,
+    )
+
+    assert document["game"]["away_team"]["tricode"] == "BOS"
+    assert document["game"]["away_team"]["targetable_player_count"] == 3
+    assert TATUM[0] in {row["canonical_id"] for row in document["players"]}

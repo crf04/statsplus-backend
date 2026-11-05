@@ -46,6 +46,7 @@ from app.services.matchup_snapshot import (
     read_game_matchup,
     request_matchups,
 )
+from app.services.player_pool import KeptPoolRead, PoolRead, PoolReadReader
 from app.services.publication_snapshot_calls import accepts_keyword
 from app.services.request_reads import read_savepoint, request_read_scope
 from app.services.research_season import refuse_evidence_after_game, season_context, selected_season
@@ -89,9 +90,13 @@ class SlateEdgesService:
         snapshot_reuse: PublicationSnapshotReuse | None = None,
         matchup_cache: ComposedMatchupCache | None = None,
         engine: Engine | None = None,
+        player_pool: PoolReadReader | None = None,
     ) -> None:
         self.slates = slates
         self.matchups = matchups
+        # The pool reader the Slate and every Matchup read: the Slate counts
+        # from one read of it, which each game then composes from.
+        self.player_pool = player_pool
         # All three together let every game compose from one Publication
         # snapshot with stored-only injuries (as Target resolution does);
         # without them each game reads through ``matchups.get_matchup``.
@@ -115,17 +120,23 @@ class SlateEdgesService:
         a malformed one is its ``invalid_input`` refusal; ``fallback`` is the
         Slate's ``previous_game_day``/``next_game_day`` rule (``slate_fallback.read_slate``)."""
 
-        slate = read_slate(self._slate, requested_date, fallback)
-        # Each game's schedule facts are its own season's (crf04/statsplus#330 AC9).
-        for game in slate["games"]:
-            refuse_evidence_after_game(self.publication_reader, season_for_game_id(game["game_id"]))
         # A selection's capture and every game's reads share one REPEATABLE
         # READ snapshot, as a selected Matchup's do, so a prune that commits
         # in between cannot empty a later game's projection reads.  None of
         # them writes.  Otherwise each game composes on a scope of its own.
+        # The Slate's pool read is the games' pool, so it reads in that
+        # snapshot too.
         engine = None if selected_season(self.publication_reader) is None else self._engine
         with request_read_scope(engine, repeatable_read=True) as read_scope:
-            matchups = self._request_matchups(read_scope=None if engine is None else read_scope)
+            pools = None if self.player_pool is None else KeptPoolRead(self.player_pool, read_scope[0])
+            slate = read_slate(partial(self._slate, player_pool=pools), requested_date, fallback)
+            # Each game's schedule facts are its own season's (crf04/statsplus#330 AC9).
+            for game in slate["games"]:
+                refuse_evidence_after_game(self.publication_reader, season_for_game_id(game["game_id"]))
+            matchups = self._request_matchups(
+                read_scope=None if engine is None else read_scope,
+                pool_read=None if pools is None else pools.read,
+            )
             _slate, response = self._read(slate, matchups, may_compose=lambda: True, read_scope=read_scope)
         context = season_context(self.publication_reader, getattr(matchups, "snapshot", None), lambda: None)
         return {
@@ -137,17 +148,21 @@ class SlateEdgesService:
             ],
         }
 
-    def _slate(self, requested_date: str | None) -> dict[str, Any]:
+    def _slate(
+        self, requested_date: str | None, *, player_pool: KeptPoolRead | None = None
+    ) -> dict[str, Any]:
         """The Slate of ``requested_date``, its neighbouring dates read only for a day without games.
 
         The edges never show them, and ``read_slate`` falls back on them only
-        when the day lists no game.
+        when the day lists no game.  ``player_pool`` keeps the Slate's pool
+        read for the games' Matchups.
         """
 
         if not accepts_keyword(self.slates.get_slate, "neighbours"):
             return self.slates.get_slate(requested_date)
-        slate = self.slates.get_slate(requested_date, neighbours=False)
-        return slate if slate["games"] else self.slates.get_slate(requested_date)
+        pool = {} if player_pool is None else {"player_pool": player_pool}
+        slate = self.slates.get_slate(requested_date, neighbours=False, **pool)
+        return slate if slate["games"] else self.slates.get_slate(requested_date, **pool)
 
     def preview_read(
         self,
@@ -366,7 +381,9 @@ class SlateEdgesService:
         except Exception:
             pass
 
-    def _request_matchups(self, *, read_scope: tuple[Any, Any] | None = None) -> MatchupReader:
+    def _request_matchups(
+        self, *, read_scope: tuple[Any, Any] | None = None, pool_read: PoolRead | None = None
+    ) -> MatchupReader:
         return request_matchups(
             composer=self.matchups,
             publication_reader=self.publication_reader,
@@ -378,6 +395,7 @@ class SlateEdgesService:
             # from a cached Matchup would stack the two (#422).
             cache_reads=False,
             read_scope=read_scope,
+            pool_read=pool_read,
         )
 
     # -- selection -----------------------------------------------------------

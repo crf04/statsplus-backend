@@ -50,8 +50,15 @@ from app.services.matchup_snapshot import (
     read_game_matchup,
     request_matchups,
 )
+from app.services.player_pool import PoolRead, PoolReadReader
+from app.services.publication_snapshot_calls import accepts_keyword
 from app.services.request_reads import request_read_scope
-from app.services.research_season import refuse_evidence_after_game, season_context, selected_season
+from app.services.research_season import (
+    event_season,
+    refuse_evidence_after_game,
+    season_context,
+    selected_season,
+)
 from app.services.response_provenance import (
     matchup_generation,
     provenance_block,
@@ -95,7 +102,7 @@ class SeasonSummaryReader(Protocol):
 
 
 class CatalogReader(Protocol):
-    def get_catalog(self, season: str, *, active_only: bool = False) -> Sequence[Mapping[str, Any]]: ...
+    def get_positions(self, season: str) -> Mapping[int, str]: ...
 
 
 class TargetResolutionService:
@@ -115,6 +122,7 @@ class TargetResolutionService:
         player_logs: SeasonSummaryReader | None = None,
         athlete_catalog: CatalogReader | None = None,
         engine: Any | None = None,
+        player_pool: PoolReadReader | None = None,
     ) -> None:
         # Both optional readers serve the player rules Diet shares do not:
         # a Position comes from the athlete catalog and a season average from
@@ -141,6 +149,9 @@ class TargetResolutionService:
         # A selected season's capture and every game's reads share one
         # repeatable-read scope, as the slate edges' do (crf04/statsplus#423).
         self._engine = engine
+        # The pool reader every Matchup reads: one read of it serves every
+        # game a Target names.
+        self.player_pool = player_pool
 
     def resolve(
         self,
@@ -158,7 +169,7 @@ class TargetResolutionService:
         Slate reads it (``slate_fallback.read_slate``).
         """
 
-        slate = read_slate(self.slates.get_slate, requested_date, fallback)
+        slate = read_slate(self._slate, requested_date, fallback)
         # A selected Evidence season (``season_scoped``) after the Slate
         # games' own season is refused: a game's schedule facts are its own
         # season's (crf04/statsplus#330 AC9).
@@ -171,9 +182,13 @@ class TargetResolutionService:
 
         live: list[dict[str, Any]] = []
         idle: list[dict[str, Any]] = []
+        targets = self.targets.list_targets(firebase_uid)
         with request_read_scope(engine, repeatable_read=True) as read_scope:
-            matchups = self._request_matchups(read_scope=None if engine is None else read_scope)
-            for target in self.targets.list_targets(firebase_uid):
+            matchups = self._request_matchups(
+                read_scope=None if engine is None else read_scope,
+                pool_read=self._pool_read(games, targets, connection=read_scope[0]),
+            )
+            for target in targets:
                 resolved = self._resolve_target(
                     target,
                     games,
@@ -201,7 +216,45 @@ class TargetResolutionService:
             ),
         }
 
-    def _request_matchups(self, *, read_scope: tuple[Any, Any] | None = None) -> MatchupReader:
+    def _slate(self, requested_date: str | None) -> Mapping[str, Any]:
+        """The Slate of ``requested_date``, its neighbouring dates read only for a day without games.
+
+        A Targets answer never shows them, and ``read_slate`` falls back on
+        them only when the day lists no game.
+        """
+
+        if not accepts_keyword(self.slates.get_slate, "neighbours"):
+            return self.slates.get_slate(requested_date)
+        slate = self.slates.get_slate(requested_date, neighbours=False)
+        # The reread names the day the first read resolved, so a request
+        # spanning ET midnight cannot answer for the next day.
+        return slate if slate["games"] else self.slates.get_slate(slate["slate_date"])
+
+    def _pool_read(
+        self,
+        games: Mapping[str, tuple[Mapping[str, Any], str, str]],
+        targets: Sequence[Mapping[str, Any]],
+        *,
+        connection: Any | None = None,
+    ) -> PoolRead | None:
+        """One read of the pool of every game a Target names, which each composes from.
+
+        The Slate counted from a roster read of every game; a Target composes
+        only the games it names, so only theirs are read in full.  On the
+        request's ``connection`` it reads in the snapshot the games compose in.
+        """
+
+        if self.player_pool is None or self.settings is None:
+            return None
+        named = {games[target["opponent"]][0]["game_id"] for target in targets if target["opponent"] in games}
+        seasons = {event_season(self.settings, game_id, None) for game_id in named}
+        if len(seasons) != 1:
+            return None
+        return self.player_pool.read_games(season=seasons.pop(), game_ids=named, connection=connection)
+
+    def _request_matchups(
+        self, *, read_scope: tuple[Any, Any] | None = None, pool_read: PoolRead | None = None
+    ) -> MatchupReader:
         """One reader for this whole resolve, reading no provider.
 
         A distinct game a Target names is already composed at most once
@@ -223,6 +276,7 @@ class TargetResolutionService:
             snapshot_reuse=self.snapshot_reuse,
             cache=self.matchup_cache,
             read_scope=read_scope,
+            pool_read=pool_read,
         )
 
     def today(
@@ -578,9 +632,9 @@ class TargetResolutionService:
             return {}
         if season not in memo:
             memo[season] = {
-                int(row["player_id"]): row["position"]
-                for row in self.athlete_catalog.get_catalog(season, active_only=False)
-                if row.get("position")
+                player_id: position
+                for player_id, position in self.athlete_catalog.get_positions(season).items()
+                if position
             }
         return memo[season]
 

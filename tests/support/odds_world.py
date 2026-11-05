@@ -50,7 +50,7 @@ from app.services.statistic_catalog import StatisticCatalog, StatisticResolver
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "odds_api"
 SEASON = "2026-27"
-NOW = datetime(2026, 10, 21, 12, 0, tzinfo=UTC)
+NOW = datetime(2026, 10, 21, 15, 0, tzinfo=UTC)  # 11:00 ET, inside the day window
 TIP = datetime(2026, 10, 22, 0, 30, tzinfo=UTC)
 GAME_ID = "0022600001"
 EVENT_ID = "9e6c2f0a1b7d4c3e8a5f6b7c8d9e0f12"

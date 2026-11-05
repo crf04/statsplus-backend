@@ -214,9 +214,14 @@ TEAM_METRICS = (
 #: The player-credited rebound split.  ``rebounds`` is derived from these two
 #: rather than observed beside them, so the three values cannot disagree.
 TEAM_REBOUND_SPLIT_METRICS = ("offensive_rebounds", "defensive_rebounds")
-#: What a team window composes today.  Reads accept the older taxonomy too;
+#: The opponent's offensive possessions, the denominator of Defensive Rating
+#: (crf04/statsplus#433).  Composed only when every opponent team-game in the
+#: window carries ``offensive_possessions``; otherwise the window is the
+#: taxonomy without it, never a zero.
+TEAM_POSSESSIONS_METRIC = "possessions"
+#: What a team window composes today.  Reads accept the older taxonomies too;
 #: only composition is pinned to the current one.
-TEAM_WINDOW_METRICS = TEAM_METRICS + TEAM_REBOUND_SPLIT_METRICS
+TEAM_WINDOW_METRICS = TEAM_METRICS + TEAM_REBOUND_SPLIT_METRICS + (TEAM_POSSESSIONS_METRIC,)
 NBA_TEAM_IDS = frozenset(1610612737 + index for index in range(30))
 ASSIST_METRICS = (
     "two_point_assists",
@@ -759,12 +764,20 @@ def materialize_team_window(
             teams=(),
         )
     game_by_id = {game.game_id: game for game in supplied}
+    metrics = TEAM_WINDOW_METRICS
+    if any(
+        fact.offensive_possessions is None
+        for game_ids in ids_by_team.values()
+        for game_id in game_ids
+        for fact in game_by_id[game_id].team_facts
+    ):
+        metrics = tuple(metric for metric in TEAM_WINDOW_METRICS if metric != TEAM_POSSESSIONS_METRIC)
     raw_by_team: dict[int, dict[str, float]] = {}
     counts_by_team: dict[int, dict[str, float]] = {}
     minutes_by_team: dict[int, float] = {}
     team_codes: dict[int, str] = {}
     for team_id, game_ids in ids_by_team.items():
-        totals = {metric: 0.0 for metric in TEAM_WINDOW_METRICS}
+        totals = {metric: 0.0 for metric in metrics}
         team_minutes = 0.0
         for game_id in game_ids:
             game = game_by_id[game_id]
@@ -772,11 +785,13 @@ def materialize_team_window(
             opponent = next(fact for fact in game.team_facts if fact.team_id == defense.opponent_team_id)
             team_codes[team_id] = defense.team_tricode
             team_minutes += nominal_game_minutes(game)
-            for metric in TEAM_WINDOW_METRICS:
+            for metric in metrics:
                 if metric == "rebounds":
                     # Derived below from the split, never observed beside it.
                     continue
-                if metric in _PLAYER_CREDITED_MATCHUP_METRICS:
+                if metric == TEAM_POSSESSIONS_METRIC:
+                    totals[metric] += float(opponent.offensive_possessions)
+                elif metric in _PLAYER_CREDITED_MATCHUP_METRICS:
                     # LeagueDashTeamStats' rebound surfaces are
                     # player-credited.  Canonical team facts intentionally also
                     # retain team-only rebounds, which must not leak into that
@@ -796,7 +811,7 @@ def materialize_team_window(
         # A manually assembled fact may not carry minutes; its count-per-game
         # values are the conservative equivalent for that test/replay seam.
         denominator = team_minutes / 48.0 if team_minutes > 0 else float(len(game_ids))
-        raw = {metric: totals[metric] / denominator for metric in TEAM_WINDOW_METRICS if metric != "rebounds"}
+        raw = {metric: totals[metric] / denominator for metric in metrics if metric != "rebounds"}
         # Same order of operations as the counts: the split is served first
         # and the total is its sum, so the served values satisfy the identity
         # exactly rather than to within a rounding difference.
@@ -804,21 +819,21 @@ def materialize_team_window(
         raw_by_team[team_id] = raw
     averages = {
         metric: sum(values[metric] for values in raw_by_team.values()) / len(raw_by_team)
-        for metric in TEAM_WINDOW_METRICS
+        for metric in metrics
     }
     sigma = {
         metric: math.sqrt(
             sum((values[metric] - averages[metric]) ** 2 for values in raw_by_team.values())
             / len(raw_by_team)
         )
-        for metric in TEAM_WINDOW_METRICS
+        for metric in metrics
     }
     ranks = {
         metric: competition_ranks(
             {team_id: values[metric] for team_id, values in raw_by_team.items()},
             descending=False,
         )
-        for metric in TEAM_WINDOW_METRICS
+        for metric in metrics
     }
     teams = tuple(
         TeamWindowMetric(
@@ -829,7 +844,7 @@ def materialize_team_window(
             per48=raw_by_team[team_id],
             league_average=averages,
             population_sigma=sigma,
-            competition_rank={metric: ranks[metric][team_id] for metric in TEAM_WINDOW_METRICS},
+            competition_rank={metric: ranks[metric][team_id] for metric in metrics},
             counts=counts_by_team[team_id],
             team_minutes=minutes_by_team[team_id],
         )
@@ -1148,6 +1163,7 @@ __all__ = [
     "MATCHUP_REBOUND_TYPE_KEYS",
     "MATCHUP_TRADITIONAL_KEYS",
     "TEAM_METRICS",
+    "TEAM_POSSESSIONS_METRIC",
     "TEAM_REBOUND_SPLIT_METRICS",
     "TEAM_WINDOW_METRICS",
     "AssistLocationFact",

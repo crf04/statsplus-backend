@@ -9,27 +9,27 @@ from __future__ import annotations
 
 import math
 from calendar import monthrange
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from enum import Enum
+from functools import lru_cache
+from zoneinfo import ZoneInfo
 
 #: Credits one ``/events/{id}/odds`` call costs: 5 markets x 1 region.
 CALL_COST = 5
-#: First poll of an event: props that are not posted yet answer empty, free.
-#: Thirteen hours of hourly polls plus the closing fetch is at most 14 paid
-#: calls (70 credits) per game however early a book posts, so about 250 games
-#: in a peak month cost at most 17,500 of the 20,000-credit plan
-#: (crf04/statsplus#215).
-POLL_WINDOW_OPENS = timedelta(hours=13)
 #: The one extra fetch before tip, stored as the closing snapshot.
 CLOSING_OPENS = timedelta(minutes=10)
 #: The closing fetch is jittered to the beat, so tip-10 to tip-5; a missed one
 #: is not made up later (the last pregame quote stands, unmarked).
 CLOSING_CLOSES = timedelta(minutes=5)
+#: The last three hours before tip poll twice as often as the day.
+FINAL_OPENS = timedelta(hours=3)
 HOURLY = timedelta(hours=1)
-#: Beats are five minutes apart; a poll is due a little early so latency
-#: jitter never pushes an hourly poll a whole beat late.
+#: The night and pause windows follow the league's wall clock, DST included.
+EASTERN = ZoneInfo("America/New_York")
+#: Beats are five minutes apart; a slot may be served a little early so
+#: latency jitter never pushes an hourly poll a whole beat late.
 CADENCE_SLACK = timedelta(minutes=2)
 TIER_REEVALUATION = timedelta(hours=1)
 #: No call may leave fewer credits than this: ``x-requests-remaining`` never
@@ -45,7 +45,107 @@ class Tier(str, Enum):
 
 
 _TIER_ORDER = (Tier.NORMAL, Tier.DEGRADED, Tier.CLOSING, Tier.HALTED)
-_CADENCE = {Tier.NORMAL: HOURLY, Tier.DEGRADED: 2 * HOURLY}
+
+
+def _eastern(tip: datetime, days: int, hour: int) -> datetime:
+    """``hour``:00 New York time, ``days`` after the tip's New York date."""
+
+    day = tip.astimezone(EASTERN).date() + timedelta(days=days)
+    return datetime.combine(day, time(hour), tzinfo=EASTERN).astimezone(UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class Window:
+    """One stretch of a game's polling schedule, located from its tip."""
+
+    kind: str
+    opens: Callable[[datetime], datetime]
+    closes: Callable[[datetime], datetime]
+    #: Spacing of the window's slots by tier, from where the window opens; a
+    #: tier missing here makes no call.
+    cadence: Mapping[Tier, timedelta]
+    #: One populated (paid) poll ends the window for the game; empty answers
+    #: are free and repeat at the cadence.
+    once: bool = False
+
+
+#: A game's schedule (crf04/statsplus#430), highest precedence first.  Each
+#: window lies later in the game's day than the next, so a window is cut
+#: short where a higher one opens, and one that starts after it ends is empty
+#: (a noon tip's day window).  Outside every window nothing is polled: 02:00
+#: to 10:00 ET on tip day, and before the night window.
+WINDOWS = (
+    # Zero spacing: every beat until the snapshot is taken (closing_done).
+    Window(
+        "closing",
+        lambda tip: tip - CLOSING_OPENS,
+        lambda tip: tip - CLOSING_CLOSES,
+        {Tier.NORMAL: timedelta(0), Tier.DEGRADED: timedelta(0), Tier.CLOSING: timedelta(0)},
+        once=True,
+    ),
+    Window(
+        "final",
+        lambda tip: tip - FINAL_OPENS,
+        lambda tip: tip - CLOSING_OPENS,
+        {Tier.NORMAL: HOURLY / 2, Tier.DEGRADED: HOURLY},
+    ),
+    Window(
+        "day",
+        lambda tip: _eastern(tip, 0, 10),
+        lambda tip: tip - FINAL_OPENS,
+        {Tier.NORMAL: HOURLY, Tier.DEGRADED: 2 * HOURLY},
+    ),
+    # Books post opening lines the evening before; one populated poll keeps them.
+    Window(
+        "night",
+        lambda tip: _eastern(tip, -1, 22),
+        lambda tip: _eastern(tip, 0, 2),
+        {Tier.NORMAL: HOURLY, Tier.DEGRADED: HOURLY},
+        once=True,
+    ),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class Span:
+    window: Window
+    opens: datetime
+    closes: datetime
+
+
+@lru_cache(maxsize=4096)
+def _spans(tip: datetime) -> tuple[Span, ...]:
+    # Offsets from tip are elapsed time, never New York wall-clock arithmetic.
+    tip = tip.astimezone(UTC)
+    spans, cutoff = [], tip
+    for window in WINDOWS:
+        opens = window.opens(tip)
+        spans.append(Span(window, opens, min(window.closes(tip), cutoff)))
+        cutoff = min(cutoff, opens)
+    return tuple(spans)
+
+
+def window_at(tip: datetime, now: datetime) -> Span | None:
+    """The window a game with this tip is in at ``now``, if any."""
+
+    return next((span for span in _spans(tip) if span.opens <= now < span.closes), None)
+
+
+def _populated_in(span: Span, last_populated_at: datetime | None) -> bool:
+    return span.window.once and last_populated_at is not None and last_populated_at >= span.opens
+
+
+def _slots(span: Span, cadence: timedelta) -> int:
+    """How many slots ``span.opens + k * cadence`` lie before the span closes."""
+
+    return math.ceil((span.closes - span.opens) / cadence)
+
+
+def _slot(span: Span, cadence: timedelta, now: datetime) -> int:
+    """Index of the latest slot ``now`` may serve; negative before the first.
+    Slack lets a slot be served early, never adds one."""
+
+    return min((now + CADENCE_SLACK - span.opens) // cadence, _slots(span, cadence) - 1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +154,8 @@ class GameClock:
 
     commence_time: datetime
     closing_done: bool = False
+    #: Completion of the last populated (paid) poll.
+    last_populated_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,12 +167,14 @@ class EventState:
     #: Completion of the last successful (or empty) poll; failures excluded.
     last_poll_at: datetime | None = None
     closing_done: bool = False
+    #: Completion of the last populated (paid) poll.
+    last_populated_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class PlannedCall:
     odds_event_id: str
-    kind: str  # "hourly" | "closing"
+    kind: str  # a Window.kind
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,25 +200,38 @@ def next_reset(now: datetime, reset_day: int) -> datetime:
     return at(year, month)
 
 
-def budget_needs(now: datetime, upcoming: Sequence[GameClock], lead_hours: int) -> tuple[int, int, int]:
+def _paid_calls(game: GameClock, now: datetime, tier: Tier) -> int:
+    """Calls the planner makes for ``game`` from ``now`` to tip if every
+    response is populated: each slot not yet past, the one ``now`` may serve
+    included.  ``GameClock`` cannot see which slots were already served, so
+    this can count high (a late poll can serve the next window's first slot
+    too), never low."""
+
+    if game.closing_done:
+        return 0
+    calls = 0
+    for span in _spans(game.commence_time):
+        cadence = span.window.cadence.get(tier)
+        if cadence is None or max(span.opens, now) >= span.closes:
+            continue
+        if span.window.once:
+            calls += 0 if _populated_in(span, game.last_populated_at) else 1
+        else:
+            calls += _slots(span, cadence) - max(_slot(span, cadence, now), 0)
+    return calls
+
+
+def budget_needs(now: datetime, upcoming: Sequence[GameClock]) -> tuple[int, int, int]:
     """Credits to finish every scheduled game before reset, three ways.
 
-    Returns ``(need_normal, need_degraded, need_closing)``: hourly polls
-    from the assumed posting lead plus the closing snapshot, half the hourly
-    polls plus closing, and closing only.
+    Returns ``(need_normal, need_degraded, need_closing)``: what the planner
+    would spend from ``now`` to each tip in that tier, with props posted.
     """
 
-    normal = degraded = closing = 0
-    for game in upcoming:
-        hours_to_tip = (game.commence_time - now) / HOURLY
-        if hours_to_tip <= 0:
-            continue
-        hourly = math.ceil(min(lead_hours, hours_to_tip))
-        final = 0 if game.closing_done else 1
-        normal += hourly + final
-        degraded += math.ceil(hourly / 2) + final
-        closing += final
-    return CALL_COST * normal, CALL_COST * degraded, CALL_COST * closing
+    return tuple(
+        CALL_COST * sum(_paid_calls(game, now, tier) for game in upcoming)
+        for tier in (Tier.NORMAL, Tier.DEGRADED, Tier.CLOSING)
+    )
 
 
 def target_tier(
@@ -185,15 +302,14 @@ def plan_cycle(
     tier_evaluated_at: datetime | None,
     remaining: int | None,
     reserve: int,
-    lead_hours: int,
 ) -> CyclePlan:
     """Decide which paid calls this beat makes.
 
-    Closing snapshots go first and may spend the reserve; hourly polls may
+    Closing snapshots go first and may spend the reserve; other polls may
     not.  No call is planned at or after tip.
     """
 
-    needs = budget_needs(now, upcoming, lead_hours)
+    needs = budget_needs(now, upcoming)
     tier, evaluated_at = evaluate_tier(
         now=now,
         current=tier,
@@ -205,39 +321,29 @@ def plan_cycle(
     if tier is Tier.HALTED:
         return CyclePlan(tier, evaluated_at, ())
 
-    closing = sorted(
-        (
-            event
-            for event in events
-            if not event.closing_done
-            and event.commence_time - CLOSING_OPENS <= now < event.commence_time - CLOSING_CLOSES
-        ),
-        key=lambda event: (event.commence_time, event.odds_event_id),
-    )
-    hourly: list[EventState] = []
-    cadence = _CADENCE.get(tier)
-    if cadence is not None:
-        hourly = sorted(
-            (
-                event
-                for event in events
-                if not event.closing_done
-                and event.commence_time - POLL_WINDOW_OPENS <= now < event.commence_time - CLOSING_OPENS
-                and (event.last_poll_at is None or event.last_poll_at + cadence - CADENCE_SLACK <= now)
-            ),
-            key=lambda event: (event.commence_time, event.odds_event_id),
-        )
+    due: list[tuple[EventState, str]] = []
+    for event in events:
+        span = None if event.closing_done else window_at(event.commence_time, now)
+        cadence = None if span is None else span.window.cadence.get(tier)
+        if cadence is None or _populated_in(span, event.last_populated_at):
+            continue
+        # A slot is served by any poll from CADENCE_SLACK before it, so each
+        # slot is polled once however the beats drift.
+        if (
+            not cadence
+            or event.last_poll_at is None
+            or event.last_poll_at < span.opens + _slot(span, cadence, now) * cadence - CADENCE_SLACK
+        ):
+            due.append((event, span.window.kind))
+    due.sort(key=lambda item: (item[1] != "closing", item[0].commence_time, item[0].odds_event_id))
 
     budget = math.inf if remaining is None else remaining
     calls: list[PlannedCall] = []
-    for kind, group, floor in (
-        ("closing", closing, MIN_REMAINING_AFTER_CALL),
-        ("hourly", hourly, max(reserve, MIN_REMAINING_AFTER_CALL)),
-    ):
-        for event in group:
-            if budget - CALL_COST >= floor:
-                calls.append(PlannedCall(event.odds_event_id, kind))
-                budget -= CALL_COST
+    for event, kind in due:
+        floor = MIN_REMAINING_AFTER_CALL if kind == "closing" else max(reserve, MIN_REMAINING_AFTER_CALL)
+        if budget - CALL_COST >= floor:
+            calls.append(PlannedCall(event.odds_event_id, kind))
+            budget -= CALL_COST
     return CyclePlan(tier, evaluated_at, tuple(calls))
 
 
@@ -245,18 +351,23 @@ __all__ = [
     "CALL_COST",
     "CLOSING_CLOSES",
     "CLOSING_OPENS",
+    "EASTERN",
+    "FINAL_OPENS",
     "HOURLY",
     "MIN_REMAINING_AFTER_CALL",
-    "POLL_WINDOW_OPENS",
+    "WINDOWS",
     "CyclePlan",
     "EventState",
     "GameClock",
     "PlannedCall",
+    "Span",
     "Tier",
+    "Window",
     "budget_needs",
     "evaluate_tier",
     "next_reset",
     "plan_cycle",
     "step_tier",
     "target_tier",
+    "window_at",
 ]

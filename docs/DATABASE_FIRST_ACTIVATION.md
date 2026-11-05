@@ -511,7 +511,7 @@ Publication Rebuild, never a per-stream activation.
 
 ### Recovering the traditional-opponent family to v1
 
-The deployed code reads **only** the v2 traditional-opponent format. Recovery
+The deployed code reads **only** the v2 and v3 traditional-opponent formats. Recovery
 to v1 is therefore code first, data second, and must be done in this order:
 
 | Step | Action |
@@ -539,6 +539,40 @@ deletes nothing — neither the immutable v1 payloads nor their audit evidence.
 | `publication_format_unsupported` | 400 | The target pair is in a format this release does not read. Restore the retained dual-format release first. |
 | `publication_family_coupled` | 409 | A per-stream operation would split the family. |
 | `publication_family_authority_mismatch` | 400 | The target pair does not rest on one season, cutoff, and authority. |
+
+### Backfilling possessions for Defensive Rating
+
+`DRTG` (crf04/statsplus#433) needs the opponent's offensive possessions:
+PBPStats' per-player `OffPoss`, extracted from the archived raw rows into the
+nullable `offensive_possessions` columns of the ledger player and team facts
+(migration `085_ledger_offensive_possessions`, which invents no value). A
+team's value is its players' sum over five. Both are outside the typed game
+checksum, and a re-derived game whose checksum would move is rejected, never
+written. The backfill publishes nothing; a traditional-opponent rebuild then
+recomposes the active Season and L15 pair in `traditional_opponent.v3`. After
+the deploy applies the migration, from the repository root:
+
+```bash
+export DATABASE_URL='postgresql://...'   # the production database
+for SEASON in 2025-26 2026-27; do
+  python -m scripts.ledger_possessions_backfill "$SEASON" --database-url "$DATABASE_URL" --dry-run
+  python -m scripts.ledger_possessions_backfill "$SEASON" --database-url "$DATABASE_URL"
+done
+```
+
+* The dry run reports `updated` equal to the number of games whose rows carry
+  `OffPoss`; `not_observed` counts LiveData fallback games, which keep NULL.
+* Every report carries `checksums_changed: 0`. A rerun reports `updated: 0`.
+* Any `not_observed` game in a window keeps that window in v2: Defensive
+  Rating stays unavailable rather than counting the game's possessions as
+  zero.
+
+Then start a rebuild of the active pair (`POST
+/api/admin/collection/publication-rebuilds` with family
+`traditional_opponent`, a reason, and the active pair's ids and fences) and
+drive it with `scripts/publication_rebuild.py`, below. Its status reports
+`target_format` `traditional_opponent.v3`. An unpublished season's held
+candidates become v3 at their next composition.
 
 ## Driving a publication rebuild
 

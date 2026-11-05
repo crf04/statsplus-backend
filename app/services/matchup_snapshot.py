@@ -28,8 +28,9 @@ from app.services.matchup import (
     build_publication_metadata,
 )
 from app.services.matchup_reuse import ComposedMatchupCache, PublicationSnapshotReuse
+from app.services.player_pool import PoolRead
 from app.services.publication_snapshot_calls import accepts_keyword, call_with_read_scope
-from app.services.research_season import event_season, published_capture
+from app.services.research_season import event_season, published_capture, selected_season
 
 
 def capture_publication_snapshot(
@@ -38,6 +39,7 @@ def capture_publication_snapshot(
     *,
     projection_only_keys: Any,
     decoded_only_keys: Any = frozenset(),
+    checksum_only_keys: Any = frozenset(),
     season: str,
     session: Any = None,
 ) -> Any:
@@ -61,6 +63,8 @@ def capture_publication_snapshot(
         keyword["projection_only_keys"] = projection_only_keys
     if accepts_keyword(snapshot, "decoded_only_keys"):
         keyword["decoded_only_keys"] = decoded_only_keys
+    if checksum_only_keys and accepts_keyword(snapshot, "checksum_only_keys"):
+        keyword["checksum_only_keys"] = checksum_only_keys
     if session is not None and accepts_keyword(snapshot, "session"):
         keyword["session"] = session
     return snapshot(stream_keys, season=season, **keyword)
@@ -172,6 +176,7 @@ class SnapshotMatchups:
         settings: RuntimeSettings | None = None,
         cache_reads: bool = True,
         read_scope: tuple[Any, Any] | None = None,
+        pool_read: PoolRead | None = None,
     ) -> None:
         self.composer = composer
         self.snapshot = snapshot
@@ -194,6 +199,9 @@ class SnapshotMatchups:
         # ``(connection, session)`` every game composes on, the capture's own;
         # ``None`` lets each game open its own.
         self._read_scope = read_scope
+        # The request's one read of its Slate's pool, which each game it
+        # holds composes from.
+        self._pool_read = pool_read
 
     def get_matchup(
         self,
@@ -390,6 +398,8 @@ class SnapshotMatchups:
             kwargs["season"] = self.season
         if read_scope is not None:
             kwargs["read_scope"] = read_scope
+        if self._pool_read is not None:
+            kwargs["pool_read"] = self._pool_read
         return self.composer.get_matchup_from_snapshot(
             game_id=game_id,
             publication_snapshot=self.snapshot if snapshot is None else snapshot,
@@ -425,6 +435,7 @@ def request_matchups(
     cache: ComposedMatchupCache | None = None,
     cache_reads: bool = True,
     read_scope: tuple[Any, Any] | None = None,
+    pool_read: PoolRead | None = None,
 ) -> Any:
     """The one reader a request composing several Matchups uses, no provider read.
 
@@ -433,7 +444,8 @@ def request_matchups(
     Without a publication reader, settings, injuries or a snapshot composer the
     plain ``composer`` reads each game as before, live injuries included.
     ``read_scope`` is a caller's ``(connection, session)``: the capture and
-    every game's reads then share its transaction.
+    every game's reads then share its transaction.  ``pool_read`` is the
+    request's read of its Slate's pool, from the composer's own pool reader.
     """
 
     if (
@@ -456,6 +468,7 @@ def request_matchups(
         settings=settings,
         cache_reads=cache_reads,
         read_scope=read_scope,
+        pool_read=pool_read,
     )
 
 
@@ -486,9 +499,42 @@ def capture_matchup_snapshot(
     return snapshot_reuse.capture(settings, publication_reader, MATCHUP_PUBLICATION_STREAM_KEYS, capture)
 
 
+def capture_matchup_labels(
+    settings: RuntimeSettings,
+    publication_reader: Any,
+    snapshot_reuse: PublicationSnapshotReuse | None = None,
+) -> tuple[str, Any]:
+    """``capture_matchup_snapshot`` for a caller that reads each read's labels, never a fact.
+
+    The Slate prints the Published Season and each read's season and status
+    (``trailing``).  An explicit selection is never reused, so it captures
+    without a payload: every check a full capture runs but the decode, an
+    Unpublished candidate's ledger lineage included, and the database hashes
+    each payload against its checksum where it is stored.  Without one,
+    ``snapshot_reuse`` holds the live generation's full capture that Target
+    resolution and the slate edges share, which one statement checks.
+    """
+
+    if snapshot_reuse is not None and selected_season(publication_reader) is None:
+        return capture_matchup_snapshot(settings, publication_reader, snapshot_reuse)
+
+    def capture(season: Any) -> Any:
+        return capture_publication_snapshot(
+            publication_reader,
+            MATCHUP_PUBLICATION_STREAM_KEYS,
+            projection_only_keys=MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
+            checksum_only_keys=frozenset(MATCHUP_PUBLICATION_STREAM_KEYS)
+            - MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
+            season=season,
+        )
+
+    return published_capture(settings, publication_reader, capture)
+
+
 __all__ = [
     "SnapshotMatchupComposer",
     "SnapshotMatchups",
+    "capture_matchup_labels",
     "capture_matchup_snapshot",
     "capture_publication_snapshot",
     "read_game_matchup",

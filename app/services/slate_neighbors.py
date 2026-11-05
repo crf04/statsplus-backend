@@ -32,8 +32,8 @@ _PAGE = 50
 _Fetch = Callable[[str, "tuple[datetime, str] | None"], "list[dict[str, Any]]"]
 
 
-class _CountMemo:
-    """``count_events`` answered once per season for one neighbour search."""
+class EventCounts:
+    """``count_events`` answered once per season for one Slate read."""
 
     def __init__(self, catalog: Any) -> None:
         self._catalog = catalog
@@ -45,10 +45,15 @@ class _CountMemo:
         return self._counts[season]
 
 
-def neighbouring_game_dates(settings: Any, catalog: Any, slate_date: date) -> tuple[str | None, str | None]:
-    """``(previous, next)`` Slate Dates, ISO strings or ``None``, around a date."""
+def neighbouring_game_dates(
+    settings: Any, catalog: Any, slate_date: date, *, counts: EventCounts | None = None
+) -> tuple[str | None, str | None]:
+    """``(previous, next)`` Slate Dates, ISO strings or ``None``, around a date.
 
-    counts = _CountMemo(catalog)
+    ``counts`` are the Slate read's own, so a season it already counted is not counted again.
+    """
+
+    counts = counts or EventCounts(catalog)
     start, end = slate_day_bounds_utc(slate_date)
     containing = current_nba_season(slate_date)
 

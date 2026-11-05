@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import func, insert, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
@@ -47,14 +47,12 @@ from app.services.odds_dfs_projection import (
 from app.services.odds_identity import OddsEventMapper, RosterNameResolver
 from app.services.odds_schedule import (
     CALL_COST,
-    CLOSING_CLOSES,
-    CLOSING_OPENS,
-    POLL_WINDOW_OPENS,
     EventState,
     GameClock,
     Tier,
     next_reset,
     plan_cycle,
+    window_at,
 )
 from app.services.projection_archive import (
     ProjectionArchiveReadScope,
@@ -103,6 +101,11 @@ class OddsRunResult:
 
 def _utc(value: datetime | str | None) -> datetime | None:
     return stored_timestamp(value) if value is not None else None
+
+
+def _keep_latest(latest: dict[str, datetime], key: str, value: datetime) -> None:
+    if key not in latest or value > latest[key]:
+        latest[key] = value
 
 
 def _default_notify(level: int, message: str) -> None:
@@ -243,7 +246,6 @@ class OddsCollectionCoordinator:
             tier_evaluated_at=_utc(state["tier_evaluated_at"]),
             remaining=state["remaining"],
             reserve=self.settings.reserve_credits,
-            lead_hours=self.settings.assumed_lead_hours,
         )
         self._save_tier(state, plan.tier, plan.tier_evaluated_at, now)
         if plan.tier.value != state["tier"]:
@@ -271,11 +273,8 @@ class OddsCollectionCoordinator:
             # Eligibility is re-checked at dispatch: discovery latency can
             # carry a call planned inside a window out of it, and a closing
             # flag must never be stored outside tip-10m..tip-5m.
-            if call.kind == "closing":
-                eligible = tip - CLOSING_OPENS <= started < tip - CLOSING_CLOSES
-            else:
-                eligible = tip - POLL_WINDOW_OPENS <= started < tip - CLOSING_OPENS
-            if not eligible:
+            span = window_at(tip, started)
+            if span is None or span.window.kind != call.kind:
                 status, reason = "partial", "window_passed"
                 continue
             # The guard reads the quota as of the previous response (and any
@@ -658,6 +657,7 @@ class OddsCollectionCoordinator:
                 select(
                     polls.c.odds_event_id,
                     polls.c.completed_at,
+                    polls.c.outcome,
                     polls.c.is_closing,
                     polls.c.commence_time,
                 ).where(
@@ -666,13 +666,14 @@ class OddsCollectionCoordinator:
                 )
             ).all()
         last: dict[str, datetime] = {}
+        populated: dict[str, datetime] = {}
         closing: set[str] = set()
         for row in rows:
             completed = _utc(row.completed_at)
-            if completed is not None and (
-                row.odds_event_id not in last or completed > last[row.odds_event_id]
-            ):
-                last[row.odds_event_id] = completed
+            if completed is not None:
+                _keep_latest(last, row.odds_event_id, completed)
+                if row.outcome == "complete":
+                    _keep_latest(populated, row.odds_event_id, completed)
             # A closing poll closes the game only for the tip it was taken
             # against; a postponement moves the tip and reopens collection.
             if row.is_closing and _utc(row.commence_time) == by_event[row.odds_event_id].event.commence_time:
@@ -683,6 +684,7 @@ class OddsCollectionCoordinator:
                 commence_time=item.event.commence_time,
                 last_poll_at=last.get(event_id),
                 closing_done=event_id in closing,
+                last_populated_at=populated.get(event_id),
             )
             for event_id, item in by_event.items()
         ]
@@ -690,6 +692,7 @@ class OddsCollectionCoordinator:
     def _upcoming(self, now: datetime) -> list[GameClock]:
         reset = next_reset(now, self.settings.reset_day)
         rows = self.events_between(self.season, now, reset)
+        game_ids = [str(row.get("nba_game_id")) for row in rows]
         polls = OddsApiPoll.__table__
         with self.engine.connect() as connection:
             closed = {
@@ -699,6 +702,17 @@ class OddsCollectionCoordinator:
                         polls.c.is_closing.is_(True),
                         polls.c.outcome.in_(("complete", "empty")),
                     )
+                )
+            }
+            populated = {
+                row[0]: _utc(row[1])
+                for row in connection.execute(
+                    select(polls.c.canonical_game_id, func.max(polls.c.completed_at))
+                    .where(
+                        polls.c.outcome == "complete",
+                        polls.c.canonical_game_id.in_(game_ids),
+                    )
+                    .group_by(polls.c.canonical_game_id)
                 )
             }
         games = []
@@ -713,7 +727,13 @@ class OddsCollectionCoordinator:
                 and abs(tip - scheduled) <= timedelta(hours=1)
                 for game, tip in closed
             )
-            games.append(GameClock(scheduled, closing_done=done))
+            games.append(
+                GameClock(
+                    scheduled,
+                    closing_done=done,
+                    last_populated_at=populated.get(str(row.get("nba_game_id"))),
+                )
+            )
         return games
 
     # -- lease -------------------------------------------------------------

@@ -491,3 +491,22 @@ def test_a_hidden_row_never_displaces_a_listed_copy(setup):
     labels = {row["label"] for row in get(client).get_json()["opponent_ranks"]}
     assert "C&S attempts" in labels
     assert "C&S 3PA" not in labels
+
+
+def test_defensive_rating_is_a_profile_row_but_not_a_next_list_entry(setup):
+    client, reads, _ = setup
+    key = "traditional_opponent_season"
+    reads[key] = replace(
+        reads[key],
+        decoded=tuple(
+            replace(row, per48={**row.per48, "possessions": 90.0 + index})
+            for index, row in enumerate(reads[key].decoded)
+        ),
+    )
+
+    response = get(client)
+
+    assert response.status_code == 200
+    filters = {row["team_filter"] for row in response.get_json()["opponent_ranks"]}
+    assert "OPP_PTS" in filters
+    assert "DRTG" not in filters

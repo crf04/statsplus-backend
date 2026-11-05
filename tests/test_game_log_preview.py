@@ -185,7 +185,7 @@ def test_the_labels_are_the_contract_file():
     # crf04/statsplus docs/contracts/opponent-filter-labels.json; change both together.
     labels = Path(__file__).parent.parent / "app" / "assets" / "opponent_filter_labels.json"
 
-    assert hashlib.sha1(labels.read_bytes()).hexdigest() == "c5ed3284ec4440fa08c009e0e5a0a1f99918b91d"
+    assert hashlib.sha1(labels.read_bytes()).hexdigest() == "5fd5fe00a52e52a604a299cc6ee754d9d7c4221b"
 
 
 def test_a_zero_line_makes_no_hit_claim():

@@ -4001,6 +4001,16 @@ authentication, current-season selection, error contract, and every existing
 response field are unchanged.  A publication whose format predates the split
 omits all six rather than reporting zero, and the panel renders them as `N/A`;
 a fabricated zero would be indistinguishable from a defense that allowed none.
+
+`Traditional` also serves Defensive Rating -- `DRTG`, `DRTG_RANK`, and
+`DRTG_vs_avg_pct` (crf04/statsplus#433). `DRTG` is
+`100 x points allowed / opponent offensive possessions` over the Season, both
+per 48 from the publication, so it is points allowed per 100 possessions (for
+example `112.4`, not a fraction). Its rank and comparison use the same
+ascending ranks and league-average formula, so rank 30 is the highest DRTG.
+Possessions are PBPStats' player `OffPoss` over five. A publication without
+`possessions` (format `traditional_opponent.v2`) omits all three fields, and
+the panel renders `N/A`.
 Team Filters and the Matchups Defense Sheet keep their existing projection
 catalogs and do not expose the split.
 
@@ -6787,7 +6797,7 @@ with crf04/statsplus-frontend#103 by the coordination contract gate.
 
 Common opponent filters include:
 
-- Traditional: `OPP_PTS`, `OPP_REB`, `OPP_AST`, `OPP_STOCKS`, `OPP_FTA`, `OPP_TOV`, `OPP_BLK`, `OPP_STL`, `OPP_FG3M`, `OPP_FG3A`
+- Traditional: `OPP_PTS`, `OPP_REB`, `OPP_AST`, `OPP_STOCKS`, `OPP_FTA`, `OPP_TOV`, `OPP_BLK`, `OPP_STL`, `OPP_FG3M`, `OPP_FG3A`, `DRTG` (Defensive Rating: points allowed per 100 opponent possessions; ranks nothing while the Season publication carries no possessions)
 - Shooting: `C&S PTS`, `C&S 3s`, `C&S 3A`, `PU PTS`, `PU 2s`, `PU 3s`, `Less Than 10 ft` (legacy `<10 Ft` is accepted and normalized)
 - Play types: `PRBallHandler`, `PRRollMan`, `Transition`, `Isolation`, `Spotup`, `Cut`, `Handoff`, `OffScreen`, `Postup`, `OffRebound`, `Misc`
 
