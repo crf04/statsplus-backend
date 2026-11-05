@@ -312,6 +312,7 @@ _DECODED_ONLY_STREAM_KEYS = PLAYER_DIET_PUBLICATION_STREAM_KEYS | PLAYER_DIET_OP
 #: caller that captures one generation to share with another read (#253).
 MATCHUP_PUBLICATION_STREAM_KEYS = _PUBLICATION_STREAM_KEYS
 MATCHUP_PROJECTION_ONLY_STREAM_KEYS = _PROJECTION_ONLY_STREAM_KEYS
+MATCHUP_DECODED_ONLY_STREAM_KEYS = _DECODED_ONLY_STREAM_KEYS
 #: The player-row keys that describe one game, which an Unscheduled Matchup
 #: has none of: a focal line, posted markets, and an injury badge.
 _PER_GAME_PLAYER_KEYS = frozenset({"focal_game_line", "posted_markets", "injury_badge_ref"})
@@ -3094,6 +3095,7 @@ __all__ = [
     "DEFENSE_BASES",
     "DEFENSIVE_COLUMNS",
     "HISTORICAL_MODE",
+    "MATCHUP_DECODED_ONLY_STREAM_KEYS",
     "MATCHUP_PROJECTION_ONLY_STREAM_KEYS",
     "MATCHUP_PUBLICATION_STREAM_KEYS",
     "MatchupComposeCache",

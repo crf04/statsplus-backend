@@ -22,6 +22,7 @@ from typing import Any, Protocol
 from app.config.settings import RuntimeSettings
 from app.domain.utc import parse_utc_iso
 from app.services.matchup import (
+    MATCHUP_DECODED_ONLY_STREAM_KEYS,
     MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
     MATCHUP_PUBLICATION_STREAM_KEYS,
     MatchupComposeCache,
@@ -499,6 +500,7 @@ def capture_matchup_snapshot(
             publication_reader,
             MATCHUP_PUBLICATION_STREAM_KEYS,
             projection_only_keys=MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
+            decoded_only_keys=MATCHUP_DECODED_ONLY_STREAM_KEYS,
             season=season,
             session=session,
         )
