@@ -41,6 +41,8 @@ from app.providers.dfs import (
     MarketVariant,
     NBAMarketQuery,
     PlayerProjectionMarket,
+    PriceKind,
+    PriceScope,
     ProviderSnapshot,
     RetrievalContext,
     ScoringPeriod,
@@ -80,8 +82,13 @@ _STAT_ORDER = {
 _ONE_SIDED_VARIANT_LABEL = "one_sided"
 #: Dabble pays a near-even line (both sides at or above 1.88) the flat
 #: default, a 3-pick 6x entry: 6^(1/3) per pick, -122 (crf04/statsplus#317).
+#: Every other line pays a per-pick badge the feed does not carry: its
+#: decimals are fair odds.  Such a line states only Dabble's 2-pick 3x entry,
+#: as PrizePicks states its slip, which is never a price on the pick
+#: (crf04/statsplus#435).
 _NEAR_EVEN_DECIMAL = Decimal("1.88")
 _FLAT_PICK_DECIMAL = Decimal("1.817")
+_REFERENCE_ENTRY_MULTIPLIER = Decimal(3)
 #: Stats Dabble posts for a whole game.  A market type confirms a full game
 #: only for these; a stat carrying a period qualifier is never in the set.
 _WHOLE_GAME_STATS = frozenset(
@@ -933,23 +940,39 @@ class DabbleAdapter:
                     market,
                     variant=variant,
                     variant_label=variant_label,
-                    selections=self._price_near_even(selections),
+                    selections=self._price_selections(selections),
                 )
             )
         return tuple(sorted(market_values, key=self._market_sort_key))
 
     @staticmethod
-    def _price_near_even(selections: tuple[Selection, ...]) -> tuple[Selection, ...]:
+    def _price_selections(selections: tuple[Selection, ...]) -> tuple[Selection, ...]:
         directions = {selection.direction for selection in selections}
-        if len(selections) != 2 or directions != {SelectionDirection.HIGHER, SelectionDirection.LOWER}:
-            return selections
-        if any(
-            selection.decimal_price is None or selection.decimal_price < _NEAR_EVEN_DECIMAL
+        two_sided = len(selections) == 2 and directions == {
+            SelectionDirection.HIGHER,
+            SelectionDirection.LOWER,
+        }
+        if not two_sided or all(selection.decimal_price is None for selection in selections):
+            return tuple(
+                replace(selection, decimal_price=None, price_kind=PriceKind.UNPRICED, price_value=None)
+                for selection in selections
+            )
+        if all(
+            selection.decimal_price is not None and selection.decimal_price >= _NEAR_EVEN_DECIMAL
             for selection in selections
         ):
-            return selections
+            return tuple(
+                replace(selection, decimal_price=_FLAT_PICK_DECIMAL, price_value=_FLAT_PICK_DECIMAL)
+                for selection in selections
+            )
         return tuple(
-            replace(selection, decimal_price=_FLAT_PICK_DECIMAL, price_value=_FLAT_PICK_DECIMAL)
+            replace(
+                selection,
+                decimal_price=None,
+                price_kind=PriceKind.MULTIPLIER,
+                price_value=_REFERENCE_ENTRY_MULTIPLIER,
+                price_scope=PriceScope.ENTRY,
+            )
             for selection in selections
         )
 
