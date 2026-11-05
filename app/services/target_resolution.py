@@ -97,7 +97,7 @@ class SeasonSummaryReader(Protocol):
 
 
 class CatalogReader(Protocol):
-    def get_catalog(self, season: str, *, active_only: bool = False) -> Sequence[Mapping[str, Any]]: ...
+    def get_positions(self, season: str) -> Mapping[int, str]: ...
 
 
 class TargetResolutionService:
@@ -610,9 +610,9 @@ class TargetResolutionService:
             return {}
         if season not in memo:
             memo[season] = {
-                int(row["player_id"]): row["position"]
-                for row in self.athlete_catalog.get_catalog(season, active_only=False)
-                if row.get("position")
+                player_id: position
+                for player_id, position in self.athlete_catalog.get_positions(season).items()
+                if position
             }
         return memo[season]
 

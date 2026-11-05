@@ -2092,11 +2092,11 @@ class _EngineCatalog:
         self.engine = engine
         self.reads = 0
 
-    def get_catalog(self, season, *, active_only=True):
+    def get_positions(self, season):
         with self.engine.connect() as connection:
             connection.execute(text("SELECT 1"))
         self.reads += 1
-        return []
+        return {}
 
 
 def test_a_selected_season_resolves_on_one_checked_out_connection(tmp_path, runtime_settings):
