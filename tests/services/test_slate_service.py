@@ -433,6 +433,42 @@ def test_slate_targetable_counts_apply_the_same_stored_out_override_as_matchup()
     assert injuries.calls[0][0:2] == (("0022500001",), "2025-26")
 
 
+class CountingCatalog(RecordedCatalog):
+    def __init__(self, events, freshness):
+        super().__init__(events, freshness)
+        self.counted = []
+
+    def count_events(self, season):
+        self.counted.append(season)
+        return super().count_events(season)
+
+    def get_adjacent_season(self, season, *, below, inclusive=False):
+        nearer = (lambda held: held < season) if below else (lambda held: held > season)
+        held = [held for held in ("2025-26",) if nearer(held) or (inclusive and held == season)]
+        return held[0] if held else None
+
+
+def test_a_slate_read_counts_its_seasons_events_once():
+    catalog = CountingCatalog(
+        [
+            _event("0022500001", "2025-12-31T00:00:00+00:00"),
+            _event("0022500002", "2026-01-03T00:00:00+00:00"),
+            _event("0022500003", "2026-01-06T00:00:00+00:00"),
+        ],
+        {"fresh": True, "last_success_at": "2026-01-02T10:00:00+00:00", "event_count": 3},
+    )
+    service = SlateService(
+        catalog,
+        settings=RuntimeSettings(environment="testing"),
+        clock=lambda: datetime(2026, 1, 2, 15, tzinfo=UTC),
+    )
+
+    body = service.get_slate("2026-01-02")
+
+    assert (body["previous_game_date"], body["next_game_date"]) == ("2025-12-30", "2026-01-05")
+    assert catalog.counted == ["2025-26"]
+
+
 class RosterOnlyPool:
     """A reader whose pool with lines must not be read: the Slate counts players."""
 

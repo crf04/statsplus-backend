@@ -48,7 +48,7 @@ from app.services.response_provenance import (
 )
 from app.services.serving_season import merge_trailing, snapshot_trailing
 from app.services.slate_fallback import read_slate
-from app.services.slate_neighbors import neighbouring_game_dates
+from app.services.slate_neighbors import EventCounts, neighbouring_game_dates
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -134,12 +134,13 @@ class SlateService:
         slate_date = self._parse_slate_date(requested_date)
         if self.event_catalog is None:
             raise ProviderUnavailableError("The NBA schedule is not available. Please try again later.")
+        counts = EventCounts(self.event_catalog)
         # The date's own season, so a past date reads its own schedule and an
         # offseason date before collection reads the previous one's (empty).
-        season = season or schedule_season(self.settings, self.event_catalog, slate_date)
+        season = season or schedule_season(self.settings, counts, slate_date)
         refuse_evidence_after_game(self.publication_reader, season)
         observed_at = assume_utc(self._clock())
-        if self.event_catalog.count_events(season) == 0:
+        if counts.count_events(season) == 0:
             # Neither the date's season nor the one before was ever collected;
             # retrying cannot change that, so it is a definite answer.
             raise ResourceNotFoundError(
@@ -228,7 +229,7 @@ class SlateService:
             "retrieved_at": retrieved_at,
         }
         previous_game_date, next_game_date = (
-            neighbouring_game_dates(self.settings, self.event_catalog, slate_date)
+            neighbouring_game_dates(self.settings, self.event_catalog, slate_date, counts=counts)
             if neighbours
             else (None, None)
         )
