@@ -237,6 +237,16 @@ _PLAYER_MIX_SHOT_STATS = {
     frozenset({"FG2M", "FG3M"}): "makes",
     frozenset({"FG2A", "FG3A"}): "attempts",
 }
+# Single-stat shooting markets weigh each shot type by the player's own count
+# of that stat there rather than his share of all attempts, so his twos inside
+# 10 ft never weigh on a three-point row (crf04/statsplus#436).  Makes fall back
+# to attempts when he made none.
+_OWN_SHOT_STAT_FIELDS = {
+    frozenset({"FG3A"}): ("three_point_attempts",),
+    frozenset({"FG2A"}): ("two_point_attempts",),
+    frozenset({"FG3M"}): ("three_point_makes", "three_point_attempts"),
+    frozenset({"FG2M"}): ("two_point_makes", "two_point_attempts"),
+}
 _ASSIST_LOCATION_SLICES = frozenset(
     {
         "Arc3Assists",
@@ -2531,10 +2541,15 @@ class MatchupService:
             if value is None:
                 return None
         else:
+            own_shares = (
+                self._own_shot_stat_shares(selected_facts, stat_weights)
+                if base == "shot_types" and stat_weights
+                else None
+            )
             if slice_keys is None:
                 positive_facts = []
                 for fact in selected_facts:
-                    share = fact.share
+                    share = fact.share if own_shares is None else own_shares[fact.slice_key]
                     if share > 0:
                         positive_facts.append((fact, share))
                 weighted_facts = tuple(positive_facts)
@@ -2628,6 +2643,29 @@ class MatchupService:
         if total <= 0:
             return None
         return {slice_key: count / total for slice_key, count in counts.items()}
+
+    @staticmethod
+    def _own_shot_stat_shares(
+        facts: Sequence[StoredPlayerDietFact], stat_weights: Mapping[str, float]
+    ) -> dict[str, float] | None:
+        """The player's shot-type weights for a single-stat shooting market.
+
+        His own count of that stat in each shot type over his total, so a shot
+        type where he takes none of it (threes inside 10 ft) weighs nothing:
+        attempts for FG2A/FG3A, makes for FG2M/FG3M, falling back to attempts
+        when he made none.  ``None`` (his overall shares stand) for any other
+        market, or when a fact has no shooting split or he has none of the stat.
+        """
+
+        fields = _OWN_SHOT_STAT_FIELDS.get(frozenset(stat_weights))
+        if fields is None or any(fact.shooting is None for fact in facts):
+            return None
+        for count_field in fields:
+            counts = {fact.slice_key: getattr(fact.shooting, count_field) for fact in facts}
+            total = sum(counts.values())
+            if total > 0:
+                return {slice_key: count / total for slice_key, count in counts.items()}
+        return None
 
     @staticmethod
     def _player_mix_ratio(
