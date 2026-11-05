@@ -165,6 +165,9 @@ TEAM_FILTER_RANKINGS: dict[str, TeamFilterRanking] = {
     "OPP_STL": _traditional("steals"),
     "OPP_FG3M": _traditional("three_pointers_made"),
     "OPP_FG3A": _traditional("three_pointers_attempted"),
+    # Defensive Rating: points allowed per 100 opponent possessions.  A
+    # publication without possessions cannot read it and ranks nothing.
+    "DRTG": TeamFilterRanking(_TRADITIONAL, (("points", 100.0),), denominator="possessions"),
     "C&S 3s": _shot_type("catch_and_shoot", "FG3M"),
     "C&S PTS": _shot_type_points("catch_and_shoot"),
     "C&S 3A": _shot_type("catch_and_shoot", "FG3A"),

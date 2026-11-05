@@ -143,6 +143,36 @@ def test_traditional_serves_the_rebound_split_every_publication_now_carries():
     assert stats["OPP_REB"] == 44.0
 
 
+def _drtg_reads():
+    """LAL allows 120 per 96 possessions; the other twenty-nine 100 per 100."""
+
+    def per48(tricode):
+        if tricode != "LAL":
+            return _traditional_per48(points=100.0, possessions=100.0)
+        return _traditional_per48(points=120.0, possessions=96.0)
+
+    return {"traditional_opponent_season": _read("traditional_opponent_season", _league(per48))}
+
+
+def test_traditional_serves_defensive_rating_per_100_possessions():
+    stats = _service(_drtg_reads()).get_team_stats("Traditional", LAKERS)
+    celtics = _service(_drtg_reads()).get_team_stats("Traditional", "Boston Celtics")
+
+    assert stats["DRTG"] == pytest.approx(125.0)
+    assert stats["DRTG_RANK"] == 30
+    # League average (29 * 100 + 125) / 30 = 100.8333...
+    assert stats["DRTG_vs_avg_pct"] == pytest.approx((125.0 / (3025.0 / 30) - 1) * 100)
+    assert (celtics["DRTG"], celtics["DRTG_RANK"]) == (pytest.approx(100.0), 1)
+
+
+def test_a_publication_without_possessions_omits_defensive_rating_only():
+    stats = _service(_traditional_reads()).get_team_stats("Traditional", LAKERS)
+
+    assert {"DRTG", "DRTG_RANK", "DRTG_vs_avg_pct"}.isdisjoint(stats)
+    assert stats["OPP_PTS"] == 120.0
+    assert stats["OPP_FG_PCT"] == pytest.approx(0.5)
+
+
 def test_the_clippers_display_name_the_panel_sends_resolves_to_its_publication():
     def per48(tricode):
         if tricode != "LAC":

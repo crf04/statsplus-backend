@@ -665,7 +665,13 @@ def _league_rebound_types(team_id):
     }
 
 
-def _league_games():
+def _league_games(*, possessions=True):
+    """Fifteen rounds of a thirty-team league.
+
+    Each side's possessions are ``90 + team_id`` (one player's ``OffPoss`` of
+    five times that), so Defensive Rating differs per opponent faced.
+    """
+
     teams = list(range(1, 31))
     games = []
     for round_index in range(15):
@@ -711,6 +717,7 @@ def _league_games():
                         at_rim_assists=1,
                         short_mid_range_assists=0,
                         long_mid_range_assists=0,
+                        offensive_possessions=5.0 * (90 + team_id) if possessions else None,
                         **rebound_types,
                     )
                 )
@@ -736,6 +743,7 @@ def _league_games():
                         steals=1,
                         personal_fouls=1,
                         team_minutes=48.0,
+                        offensive_possessions=float(90 + team_id) if possessions else None,
                         **rebound_types,
                     )
                 )
@@ -1762,6 +1770,52 @@ def test_the_split_is_ranked_ascending_with_the_league_it_belongs_to():
         fewest = min(values, key=lambda team_id: values[team_id])
         assert ranks[fewest] == 1
         assert window.teams[0].league_average[metric] == pytest.approx(sum(values.values()) / 30)
+
+
+def _with_possessions(games, possessions_by_game):
+    return tuple(
+        replace(
+            game,
+            team_facts=tuple(
+                replace(fact, offensive_possessions=possessions_by_game(game, fact))
+                for fact in game.team_facts
+            ),
+        )
+        for game in games
+    )
+
+
+@pytest.mark.parametrize("window_games", [None, 15])
+def test_the_window_publishes_opponent_possessions_per_48(window_games):
+    # Team 1 has 100 possessions a game and everyone else 80, so team 1's
+    # defense faced 80 a game: the window reads the opponent's possessions.
+    games = _with_possessions(_league_games(), lambda game, fact: 100.0 if fact.team_id == 1 else 80.0)
+
+    window = _rebound_window(games, window_games=window_games)
+
+    team_one = next(team for team in window.teams if team.team_id == 1)
+    assert (team_one.counts["possessions"], team_one.per48["possessions"]) == (1200.0, 80.0)
+    assert team_one.competition_rank["possessions"] == 1
+
+
+def test_one_game_without_possessions_leaves_the_whole_window_without_them():
+    first = _league_games()[0].game_id
+    games = _with_possessions(
+        _league_games(), lambda game, fact: None if game.game_id == first and fact.is_home else 96.0
+    )
+
+    window = _rebound_window(games)
+
+    for team in window.teams:
+        for block in (
+            team.counts,
+            team.per48,
+            team.league_average,
+            team.population_sigma,
+            team.competition_rank,
+        ):
+            assert "possessions" not in block
+    assert window.teams[0].per48["points"] > 0
 
 
 def test_the_composed_window_is_the_deployed_target_publication_format():
