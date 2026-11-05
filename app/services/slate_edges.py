@@ -65,6 +65,8 @@ EFFECTS_PER_GAME = 3
 SLATE_EDGES_CACHE_SCHEMA = 7
 _REASON_BASE = "play_types"
 _REASON_SLICES = 2
+#: The one score each game's Matchup is composed for: a player's season PTS.
+_SCORE_CELLS = frozenset({("PTS", "season")})
 
 #: A Matchup that cannot be read: a refused or incomplete stored read.
 _UNREADABLE = (AppError, SQLAlchemyError)
@@ -394,6 +396,7 @@ class SlateEdgesService:
             cache_reads=False,
             read_scope=read_scope,
             pool_read=pool_read,
+            score_cells=_SCORE_CELLS,
         )
 
     # -- selection -----------------------------------------------------------
