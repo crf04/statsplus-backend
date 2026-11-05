@@ -603,7 +603,7 @@ class SnapshotComposer:
         self._lock = threading.Lock()
 
     def get_matchup_from_snapshot(
-        self, *, game_id, publication_snapshot, injuries, compose_cache=None, season=None
+        self, *, game_id, publication_snapshot, injuries, compose_cache=None, season=None, score_cells=None
     ):
         with self._lock:
             self.calls.append(game_id)
@@ -885,7 +885,8 @@ def test_an_edges_miss_composes_fresh_and_never_stacks_a_cached_matchup():
     assert composer.calls == ["G1", "G2"]
     assert edges["spotlight"]["best"]["value"] == 0.01
     assert edges["spotlight"]["toughest"]["value"] == -0.09
-    # The fresh Matchups were written for the readers that do use the cache.
+    # A Matchup scoring season PTS alone is never stored: the readers that use
+    # the cache still find the one Target resolution wrote.
     later = SnapshotMatchups(
         SnapshotComposer(old),
         snapshot,
@@ -898,7 +899,7 @@ def test_an_edges_miss_composes_fresh_and_never_stacks_a_cached_matchup():
         later.get_matchup(game_id="G2", game=games[1])["players"][0]["scores"]["PTS"]["season"]["blend"][
             "value"
         ]
-        == -0.09
+        == -0.04
     )
 
 
@@ -958,41 +959,6 @@ def test_the_route_serves_an_unauthenticated_caller(client, authenticate, edges_
 
     assert response.status_code == 200
     assert response.get_json() == {"slate_date": "2026-04-10"}
-
-
-def test_edges_recompose_when_one_providers_pool_stamp_moves():
-    from app.services.matchup_reuse import ComposedMatchupCache
-
-    games, payloads = _two_games()
-    redis_client = DictRedis()
-    settings = RuntimeSettings(
-        environment="testing",
-        nba={"current_season": "2025-26"},
-        cache={"slate_edges_enabled": False},
-    )
-    composer = SnapshotComposer(payloads)
-
-    class PooledSlate(FakeSlate):
-        def __init__(self, games, underdog):
-            super().__init__(games)
-            self.underdog = underdog
-
-        def get_slate(self, requested_date=None):
-            slate = super().get_slate(requested_date)
-            slate["freshness"] = {"pool": {"providers": {"underdog": {"retrieved_at": self.underdog}}}}
-            return slate
-
-    def edges(underdog):
-        service = _cached_service(composer, redis_client, games, settings=settings)
-        service.matchup_cache = ComposedMatchupCache(redis_client)
-        service.slates = PooledSlate(games, underdog)
-        service.get_edges("2026-04-10")
-
-    edges("12:31")
-    keys_first = set(redis_client.values)
-    edges("12:32")
-
-    assert len(set(redis_client.values) - keys_first) == 2
 
 
 def test_edges_hand_the_slates_schedule_and_pool_blocks_to_the_matchup_reader():
@@ -1059,12 +1025,14 @@ def test_a_cached_response_keeps_its_trailing_families_under_the_current_schema(
     assert [key.split(":")[2] for key in redis_client.values] == ["v7"]
 
 
-def test_the_edges_and_their_matchups_write_what_the_previous_release_wrote():
+def test_the_edges_write_what_the_previous_release_wrote_and_no_matchup():
     """Every Redis key and stored payload (sha256 of its JSON text) of one edges
-    miss, as 3a1a7bb9 wrote them before #671 changed how the reads are made,
-    under the schemas #407 and #416 bumped for their Matchup scores.
+    miss: the response 3a1a7bb9 wrote before #671 changed how the reads are
+    made, under the schemas #407 and #416 bumped for their Matchup scores.
 
-    A change to either is a cache-format change: bump its schema instead.
+    Each game's Matchup scores only season PTS (#696), which is not the
+    document the composed-Matchup cache holds, so none is written.  A change
+    to the response is a cache-format change: bump its schema instead.
     """
 
     import hashlib
@@ -1114,12 +1082,6 @@ def test_the_edges_and_their_matchups_write_what_the_previous_release_wrote():
         key: hashlib.sha256(zlib.decompress(payload)).hexdigest()
         for key, payload in redis_client.values.items()
     } == {
-        "matchup:composed:v8:cadd2606a01f41f535d2b938790fba3319ae3e72efb6e3600957ea2856c7d6ef": (
-            "1e52e4b117ba6fd9f993eef34d2dc4993c5ec2c5602d63f8389d4d3c902a64a2"
-        ),
-        "matchup:composed:v8:dce742bb269cdc8438369a87871c32a3daa47f27fa5480974895bcef7f219015": (
-            "b5345cc554cbf6241d257c47247feb7857cf96bc33ae1fcf4f403a4cacd8087a"
-        ),
         "slate:edges:v7:6f5df36dc5f1b18940a2bffdbf5efc9545f60fdf8583a1501c9bdecfd990c967": (
             "85542ea8a3695da15ec4c69b0a37cc79b2a6b26a62c64788446e568f105c1552"
         ),

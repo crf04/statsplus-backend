@@ -177,6 +177,7 @@ class SnapshotMatchups:
         cache_reads: bool = True,
         read_scope: tuple[Any, Any] | None = None,
         pool_read: PoolRead | None = None,
+        score_cells: frozenset[tuple[str, str]] | None = None,
     ) -> None:
         self.composer = composer
         self.snapshot = snapshot
@@ -202,6 +203,10 @@ class SnapshotMatchups:
         # The request's one read of its Slate's pool, which each game it
         # holds composes from.
         self._pool_read = pool_read
+        # The ``(market, window)`` scores a caller reads.  A document scoring
+        # only those is not the Matchup the cache holds for other readers, so
+        # it is never stored.
+        self._score_cells = score_cells
 
     def get_matchup(
         self,
@@ -252,12 +257,9 @@ class SnapshotMatchups:
                     # does not belong under this key.
                     return document
                 used = _used_publication(document, None if found is None else found[0])
-                entry = self._cache.put(
-                    key, {"matchup": document, "retained_used": used}, self._settings
-                ) or {
-                    "matchup": document,
-                    "retained_used": used,
-                }
+                entry = {"matchup": document, "retained_used": used}
+                if self._score_cells is None:
+                    entry = self._cache.put(key, entry, self._settings) or entry
         return self._with_current_provenance(entry, found, schedule, snapshot)
 
     @contextmanager
@@ -400,6 +402,10 @@ class SnapshotMatchups:
             kwargs["read_scope"] = read_scope
         if self._pool_read is not None:
             kwargs["pool_read"] = self._pool_read
+        if self._score_cells is not None and accepts_keyword(
+            self.composer.get_matchup_from_snapshot, "score_cells"
+        ):
+            kwargs["score_cells"] = self._score_cells
         return self.composer.get_matchup_from_snapshot(
             game_id=game_id,
             publication_snapshot=self.snapshot if snapshot is None else snapshot,
@@ -436,6 +442,7 @@ def request_matchups(
     cache_reads: bool = True,
     read_scope: tuple[Any, Any] | None = None,
     pool_read: PoolRead | None = None,
+    score_cells: frozenset[tuple[str, str]] | None = None,
 ) -> Any:
     """The one reader a request composing several Matchups uses, no provider read.
 
@@ -446,6 +453,7 @@ def request_matchups(
     ``read_scope`` is a caller's ``(connection, session)``: the capture and
     every game's reads then share its transaction.  ``pool_read`` is the
     request's read of its Slate's pool, from the composer's own pool reader.
+    ``score_cells`` composes only those scores, and nothing is cached.
     """
 
     if (
@@ -469,6 +477,7 @@ def request_matchups(
         cache_reads=cache_reads,
         read_scope=read_scope,
         pool_read=pool_read,
+        score_cells=score_cells,
     )
 
 
