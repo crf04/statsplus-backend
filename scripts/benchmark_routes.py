@@ -316,13 +316,37 @@ def _rtt_ms(relay: _Relay, database_url: str, samples: int = 30) -> dict:
 
 
 ROUTES = {
-    # name: (view attribute, path, unwrap auth decorator, signed-in caller)
-    "slate": ("get_slate", "/api/games/slate", False, False),
-    "slate_edges": ("get_slate_edges", "/api/games/slate/edges", False, False),
-    "matchup": ("get_matchup", "/api/games/matchup", True, True),
-    "game_logs": ("get_game_logs", "/api/games/game_logs", True, True),
-    "seasons": ("get_game_log_seasons", "/api/games/seasons", True, True),
+    # name: (module, view attribute, path, unwrap auth decorator, signed-in caller)
+    "slate": ("game_routes", "get_slate", "/api/games/slate", False, False),
+    "slate_edges": ("game_routes", "get_slate_edges", "/api/games/slate/edges", False, False),
+    "matchup": ("game_routes", "get_matchup", "/api/games/matchup", True, True),
+    "game_logs": ("game_routes", "get_game_logs", "/api/games/game_logs", True, True),
+    "seasons": ("game_routes", "get_game_log_seasons", "/api/games/seasons", True, True),
+    "unscheduled": ("game_routes", "get_unscheduled_matchup", "/api/matchups/unscheduled", True, True),
+    "targets_resolve": ("user_routes", "resolve_targets", "/api/user/targets/resolve", True, True),
 }
+
+
+def _target_owner_uid(rank: int) -> tuple[str, int]:
+    """The Firebase UID owning the ``rank``-th most Targets, and its count.
+
+    The UID stays in process: callers print only the count.
+    """
+
+    from sqlalchemy import text
+
+    from app.utils.db import get_engine
+
+    with get_engine().connect() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT firebase_uid, count(*) AS n FROM targets"
+                " GROUP BY firebase_uid ORDER BY n DESC, firebase_uid LIMIT :limit"
+            ),
+            {"limit": rank},
+        ).all()
+    uid, count = rows[rank - 1]
+    return uid, int(count)
 
 
 def main() -> int:
@@ -340,6 +364,12 @@ def main() -> int:
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--no-profile", action="store_true")
+    parser.add_argument(
+        "--target-owner",
+        type=int,
+        default=1,
+        help="targets_resolve signs in as the owner of the N-th most Targets",
+    )
     args = parser.parse_args()
 
     database_url = os.environ.get("BENCH_DATABASE_URL")
@@ -350,10 +380,13 @@ def main() -> int:
     target = make_url(database_url)
     relay = _Relay(target.host, target.port or 5432)
     app, dependencies = _build(database_url, relay)
+    if os.environ.get("BENCH_PATCH_FILE"):
+        # A prototype patch applied in process only, to measure a candidate fix.
+        exec(compile(Path(os.environ["BENCH_PATCH_FILE"]).read_text(), os.environ["BENCH_PATCH_FILE"], "exec"), {})
     from flask import g
 
     import app as app_package
-    from app.routes import game_routes
+    from app.routes import game_routes, user_routes
     from app.utils.db import get_engine
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -362,11 +395,17 @@ def main() -> int:
     rtt = _rtt_ms(relay, database_url)
     relay.reset()
     meta = {"app_file": app_package.__file__, "now": args.now, "rtt_ms": rtt}
+    owner_uid = None
+    if any(spec.split("=", 1)[1].startswith("targets_resolve") for spec in args.case):
+        owner_uid, meta["target_owner_targets"] = _target_owner_uid(args.target_owner)
+        meta["target_owner_rank"] = args.target_owner
+        relay.reset()
     print(json.dumps(meta), flush=True)
 
     def make_call(route: str, query: str):
-        attr, path, unwrap, signed_in = ROUTES[route]
-        view = getattr(game_routes, attr)
+        module, attr, path, unwrap, signed_in = ROUTES[route]
+        view = getattr({"game_routes": game_routes, "user_routes": user_routes}[module], attr)
+        uid = owner_uid if route == "targets_resolve" else "bench"
         if unwrap:
             view = view.__wrapped__
 
@@ -376,7 +415,7 @@ def main() -> int:
                 if signed_in:
                     # An admitted caller without the Firebase sync: ``is_dev_bypass``
                     # makes ``is_waitlisted`` answer False with no lookup.
-                    g.current_user = {"uid": "bench", "email": "bench@example.invalid", "is_dev_bypass": True}
+                    g.current_user = {"uid": uid, "email": "bench@example.invalid", "is_dev_bypass": True}
                 try:
                     response = view()
                 except Exception as error:
@@ -435,7 +474,11 @@ def main() -> int:
         if not args.no_profile:
             import cProfile
 
-            cProfile.runctx("call()", globals(), {"call": call}, str(args.out / f"{name}.pstats"))
+            # ``BENCH_PROFILE_TIMER=cpu`` attributes thread CPU instead of wall time.
+            timer = time.thread_time if os.environ.get("BENCH_PROFILE_TIMER") == "cpu" else time.perf_counter
+            profiler = cProfile.Profile(timer)
+            profiler.runcall(call)
+            profiler.dump_stats(str(args.out / f"{name}.pstats"))
             counters.reset()
             relay.reset()
         walls = [r["wall_ms"] for r in runs]
