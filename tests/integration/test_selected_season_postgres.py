@@ -18,9 +18,11 @@ from sqlalchemy import create_engine, event, text
 
 from app.models import Base
 from app.models.game_logs import GameLogQuery
+from app.services.matchup_snapshot import capture_matchup_labels
 from app.services.player_service import _ARCHETYPE_RATE_COLUMNS
 from app.services.research_season import season_scoped
 from tests.services.test_serving_season_matchup import BOS
+from tests.services.test_slate_labels_capture import _corrupt_payload, _payload_statements
 from tests.services.test_unpublished_as_of_reads import (
     AFTER_THE_OPENING_WEEK,
     _cut_over_and_revert_the_opening_week,
@@ -31,8 +33,16 @@ from tests.services.test_unpublished_as_of_reads import (
     _status,
     season_in_progress,
 )
-from tests.support.season_cutover import NEW, OLD, OLD_CUTOFF, PLAYER_LOGS, SEASON_STREAM, THIN_CUTOFF
-from tests.support.selected_season import GAME_ID, PLAYER_ID, PLAYER_NAME, SelectedWorld
+from tests.support.season_cutover import (
+    L15_STREAM,
+    NEW,
+    OLD,
+    OLD_CUTOFF,
+    PLAYER_LOGS,
+    SEASON_STREAM,
+    THIN_CUTOFF,
+)
+from tests.support.selected_season import GAME_ID, PLAYER_ID, PLAYER_NAME, SelectedWorld, settings
 
 pytestmark = pytest.mark.integration
 
@@ -306,3 +316,22 @@ def test_a_past_game_never_reads_and_prune_deletes_a_withdrawn_defense(world, mo
     }
     world.publications.prune_history(season=NEW)
     assert _status(world, withdrawn.publication_id) is None
+
+
+def test_a_selected_slate_capture_has_postgres_hash_each_payload_against_its_checksum(world):
+    world.hold_opening_week()
+    selected = world.reader.for_season(NEW)
+    _season, intact = capture_matchup_labels(settings(), selected)
+    with world.engine.begin() as connection:
+        _corrupt_payload(connection, world.live(L15_STREAM))
+
+    (_season, corrupt), payloads = _payload_statements(
+        world.engine, lambda: capture_matchup_labels(settings(), selected)
+    )
+
+    assert intact.reads[L15_STREAM].status == "prior_season"
+    assert (corrupt.reads[L15_STREAM].status, corrupt.reads[L15_STREAM].unavailable_reason) == (
+        "unavailable",
+        "publication_checksum_mismatch",
+    )
+    assert payloads == []

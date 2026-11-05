@@ -38,7 +38,7 @@ def capture_publication_snapshot(
     *,
     projection_only_keys: Any,
     decoded_only_keys: Any = frozenset(),
-    label_only_keys: Any = frozenset(),
+    checksum_only_keys: Any = frozenset(),
     season: str,
     session: Any = None,
 ) -> Any:
@@ -62,8 +62,8 @@ def capture_publication_snapshot(
         keyword["projection_only_keys"] = projection_only_keys
     if accepts_keyword(snapshot, "decoded_only_keys"):
         keyword["decoded_only_keys"] = decoded_only_keys
-    if label_only_keys and accepts_keyword(snapshot, "label_only_keys"):
-        keyword["label_only_keys"] = label_only_keys
+    if checksum_only_keys and accepts_keyword(snapshot, "checksum_only_keys"):
+        keyword["checksum_only_keys"] = checksum_only_keys
     if session is not None and accepts_keyword(snapshot, "session"):
         keyword["session"] = session
     return snapshot(stream_keys, season=season, **keyword)
@@ -498,11 +498,11 @@ def capture_matchup_labels(
 
     The Slate prints the Published Season and each read's season and status
     (``trailing``).  An explicit selection is never reused, so it captures
-    without a payload: every check before the payload's runs, an Unpublished
-    candidate's ledger lineage included, and no payload is read, checksummed
-    or decoded.  Without one, ``snapshot_reuse`` holds the live generation's
-    full capture that Target resolution and the slate edges share, which one
-    statement checks.
+    without a payload: every check a full capture runs but the decode, an
+    Unpublished candidate's ledger lineage included, and the database hashes
+    each payload against its checksum where it is stored.  Without one,
+    ``snapshot_reuse`` holds the live generation's full capture that Target
+    resolution and the slate edges share, which one statement checks.
     """
 
     if snapshot_reuse is not None and selected_season(publication_reader) is None:
@@ -513,7 +513,8 @@ def capture_matchup_labels(
             publication_reader,
             MATCHUP_PUBLICATION_STREAM_KEYS,
             projection_only_keys=MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
-            label_only_keys=frozenset(MATCHUP_PUBLICATION_STREAM_KEYS) - MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
+            checksum_only_keys=frozenset(MATCHUP_PUBLICATION_STREAM_KEYS)
+            - MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
             season=season,
         )
 
