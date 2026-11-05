@@ -1641,6 +1641,7 @@ def _catalog_stale_slate(tmp_path, name):
         tip=tip,
         now=now,
         stale_event=stale_event,
+        live_event=live_event,
         live_game_id=live_game_id,
         reader=reader,
     )
@@ -4079,3 +4080,56 @@ def test_a_pool_roster_ages_each_line_from_its_confirmation_not_its_first_observ
 
     assert roster.players == (RosterPlayer(2544, 1610612747),)
     assert roster == PoolRoster.of(reader.get_pool(season=SEASON, game_ids=(GAME_ID,)))
+
+
+def _statements(engine, read):
+    statements = []
+
+    def record(_connection, _cursor, statement, *_args):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        return read(), statements
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+
+@pytest.mark.parametrize("states", ["closing-beside-live", "two-live", "two-closing"])
+def test_a_pool_read_serves_each_game_the_pool_its_own_read_serves_without_reading_again(tmp_path, states):
+    slate = _catalog_stale_slate(tmp_path, "pool-read.sqlite3")
+    freeze = ProjectionRecordingService(
+        slate.archive,
+        ProjectionArchiveReadScope(provider="dabble", query=slate.query),
+    ).freeze_closing_projection_sets
+    if states == "two-live":
+        slate.stale_event["scheduled_at"] = (slate.now + timedelta(hours=4)).isoformat()
+    else:
+        freeze(events=(slate.stale_event,), query=slate.query, created_at=slate.tip + timedelta(minutes=5))
+    _ingest_live_game(slate)
+    if states == "two-closing":
+        slate.live_event["scheduled_at"] = (slate.now - timedelta(seconds=30)).isoformat()
+        freeze(events=(slate.live_event,), query=slate.query, created_at=slate.now - timedelta(seconds=10))
+    games = (GAME_ID, slate.live_game_id)
+    read = slate.reader.read_games(season=SEASON, game_ids=games)
+
+    derived, statements = _statements(
+        slate.archive.engine,
+        lambda: [read.pool((game_id,)) for game_id in games] + [read.pool()],
+    )
+
+    assert statements == []
+    assert derived == [
+        *(slate.reader.get_pool_for_game(season=SEASON, game_id=game_id) for game_id in games),
+        slate.reader.get_pool(season=SEASON, game_ids=games),
+    ]
+    # Live, the stale game's rows expired before the read.
+    assert [[player.canonical_player_id for player in pool.players] for pool in derived] == (
+        [[], [201939], [201939]] if states == "two-live" else [[2544], [201939], [2544, 201939]]
+    )
+    assert read.roster() == PoolRoster.of(read.pool())
+    assert read.roster() == slate.reader.get_pool_roster(season=SEASON, game_ids=games)
+    assert read.roster((GAME_ID,)) == PoolRoster.of(derived[0])
+    assert read.event(slate.live_game_id)["nba_game_id"] == slate.live_game_id
+    with pytest.raises(ValueError):
+        read.pool(("0022500999",))

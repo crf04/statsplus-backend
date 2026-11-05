@@ -3637,3 +3637,178 @@ def test_a_historical_row_serves_no_games_and_no_averages():
         assert player["season_scoring"] == 21.0
         assert player["last_five_games"] == []
         assert player["season_averages"] == {}
+
+
+class _HeldPool:
+    """A request's one pool read, holding ``events`` and serving ``pool`` for each."""
+
+    def __init__(self, season, events, pool):
+        self.season = season
+        self.game_ids = tuple(event["nba_game_id"] for event in events)
+        self._events = {event["nba_game_id"]: event for event in events}
+        self._pool = pool
+
+    def event(self, game_id):
+        return self._events.get(game_id)
+
+    def pool(self, game_ids=None):
+        return self._pool
+
+
+def test_a_game_the_requests_pool_read_holds_composes_from_it_without_reading_again():
+    alone = _service().get_matchup_from_snapshot(game_id=GAME_ID, publication_snapshot=None, injuries=None)
+    service = _service()
+
+    held = service.get_matchup_from_snapshot(
+        game_id=GAME_ID,
+        publication_snapshot=None,
+        injuries=None,
+        pool_read=_HeldPool(SEASON, [_event()], service.player_pool.pool),
+    )
+
+    assert json.dumps(held, sort_keys=True) == json.dumps(alone, sort_keys=True)
+    assert service.event_catalog.get_event_calls == 0
+    assert service.player_pool.calls == []
+
+
+@pytest.mark.parametrize("season, game_id", [("2024-25", GAME_ID), (SEASON, "0022500999")])
+def test_a_game_the_pool_read_does_not_hold_reads_its_own_event_and_pool(season, game_id):
+    service = _service()
+    empty = PlayerPool((), {}, PlayerPool.unavailable_freshness())
+
+    service.get_matchup_from_snapshot(
+        game_id=GAME_ID,
+        publication_snapshot=None,
+        injuries=None,
+        pool_read=_HeldPool(season, [{**_event(), "nba_game_id": game_id}], empty),
+    )
+
+    assert service.event_catalog.get_event_calls == 1
+    assert service.player_pool.calls == [(SEASON, GAME_ID)]
+
+
+def test_a_held_event_outside_the_regular_season_is_still_refused():
+    preseason = {**_event(), "nba_game_id": "0012500585", "classification": "Preseason"}
+    service = _service(events=RecordedEvents(events=[preseason]))
+
+    with pytest.raises(ResourceNotFoundError, match="outside the Regular Season"):
+        service.get_matchup_from_snapshot(
+            game_id="0012500585",
+            publication_snapshot=None,
+            injuries=None,
+            pool_read=_HeldPool(SEASON, [preseason], service.player_pool.pool),
+        )
+
+
+def test_a_held_pool_read_on_sqlite_takes_a_games_event_and_pool_from_one_snapshot(tmp_path):
+    """A correction committed after the events read never pairs the old event with the
+    corrected pool rows (crf04/statsplus-backend#696), on SQLite as on Postgres."""
+
+    from sqlalchemy import delete, insert, update
+
+    from app.models.event_catalog import EventCatalogEntry
+    from app.models.projection_archive import LatestPlayerProjection
+    from app.providers.dfs import NBAMarketQuery
+    from app.services.event_catalog_repository import EventCatalogRepository
+    from app.services.projection_archive import (
+        LatestProjectionPlayerPoolReader,
+        ProjectionArchive,
+        ProjectionArchiveReadScope,
+    )
+    from tests.services.test_projection_archive import _closing_snapshot
+
+    miami = 1610612748
+    engine = create_engine(f"sqlite:///{tmp_path / 'held-read.sqlite3'}")
+    with engine.connect() as connection:
+        connection.exec_driver_sql("PRAGMA journal_mode=WAL")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    source = _closing_snapshot(catalog, NOW)
+    market = replace(source.markets[0], event=replace(source.markets[0].event, canonical_id=GAME_ID))
+    query = NBAMarketQuery(season=SEASON)
+    ProjectionArchive(engine, catalog).ingest_complete_snapshot(
+        replace(source, markets=(market,)), query=query, accepted_at=NOW
+    )
+    scheduled = _event()
+    with engine.begin() as connection:
+        connection.execute(delete(EventCatalogEntry).where(EventCatalogEntry.nba_game_id == GAME_ID))
+        connection.execute(
+            insert(EventCatalogEntry).values(
+                nba_game_id=GAME_ID,
+                season=SEASON,
+                home_team_id=BOS,
+                home_team_name="Boston Celtics",
+                home_team_tricode="BOS",
+                away_team_id=LAL,
+                away_team_name="Los Angeles Lakers",
+                away_team_tricode="LAL",
+                scheduled_at=datetime.fromisoformat(scheduled["scheduled_at"]),
+                status_text="Scheduled",
+                status_code=1,
+                classification="Regular Season",
+                first_seen_at=NOW,
+                last_seen_at=NOW,
+            )
+        )
+        connection.execute(
+            update(LatestPlayerProjection)
+            .where(LatestPlayerProjection.canonical_game_id == GAME_ID)
+            .values(canonical_team_id=LAL)
+        )
+    repository = EventCatalogRepository(engine)
+
+    class _CorrectedAfterTheEventsRead:
+        """Moves the away side to Miami, event and pool rows in one commit, once its events are read."""
+
+        def __init__(self):
+            self.corrected = False
+
+        def get_events_by_ids(self, season, game_ids, *, connection=None):
+            listed = repository.list_events_by_ids(season, game_ids, connection=connection)
+            if not self.corrected:
+                self.corrected = True
+                with engine.begin() as writer:
+                    writer.execute(
+                        update(EventCatalogEntry)
+                        .where(EventCatalogEntry.nba_game_id == GAME_ID)
+                        .values(away_team_id=miami, away_team_name="Miami Heat", away_team_tricode="MIA")
+                    )
+                    writer.execute(
+                        update(LatestPlayerProjection)
+                        .where(LatestPlayerProjection.canonical_game_id == GAME_ID)
+                        .values(canonical_team_id=miami)
+                    )
+            return listed
+
+        def get_event(self, season, game_id, *, connection=None):
+            return repository.get_event(season, game_id, connection=connection)
+
+        def get_freshness(self, season, *, now, connection=None):
+            return {"last_success_at": RETRIEVED_AT.isoformat(), "fresh": True}
+
+        def count_events(self, season, *, connection=None):
+            return 1
+
+        def latest_final_scheduled_at(self, season, *, connection=None):
+            return None
+
+    events = _CorrectedAfterTheEventsRead()
+    reader = LatestProjectionPlayerPoolReader(
+        engine,
+        ProjectionArchiveReadScope(provider="dabble", query=query),
+        clock=lambda: NOW,
+        event_reader=events,
+    )
+    service = _service(events=events)
+    service.player_pool = reader
+
+    held = reader.read_games(season=SEASON, game_ids=(GAME_ID,))
+    document = service.get_matchup_from_snapshot(
+        game_id=GAME_ID, publication_snapshot=None, injuries=None, pool_read=held
+    )
+    engine.dispose()
+
+    assert events.corrected
+    assert document["game"]["away_team"]["tricode"] == "LAL"
+    assert document["game"]["away_team"]["targetable_player_count"] == 1
+    assert len(document["players"]) == 1
