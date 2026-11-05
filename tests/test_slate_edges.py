@@ -1114,10 +1114,10 @@ def test_the_edges_and_their_matchups_write_what_the_previous_release_wrote():
         key: hashlib.sha256(zlib.decompress(payload)).hexdigest()
         for key, payload in redis_client.values.items()
     } == {
-        "matchup:composed:v8:cadd2606a01f41f535d2b938790fba3319ae3e72efb6e3600957ea2856c7d6ef": (
+        "matchup:composed:v9:63952f169500c0f16ee6e26a1fa039c628e922f4396473fec91fb6671591d4d9": (
             "1e52e4b117ba6fd9f993eef34d2dc4993c5ec2c5602d63f8389d4d3c902a64a2"
         ),
-        "matchup:composed:v8:dce742bb269cdc8438369a87871c32a3daa47f27fa5480974895bcef7f219015": (
+        "matchup:composed:v9:3b7194d21d74e3f46a3225e7b06bb010c292d4057839c57f98055df397884daf": (
             "b5345cc554cbf6241d257c47247feb7857cf96bc33ae1fcf4f403a4cacd8087a"
         ),
         "slate:edges:v7:6f5df36dc5f1b18940a2bffdbf5efc9545f60fdf8583a1501c9bdecfd990c967": (

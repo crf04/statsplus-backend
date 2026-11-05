@@ -1627,9 +1627,14 @@ def test_fga_shot_type_score_weighs_twos_and_threes_by_his_attempt_shares():
     }
 
 
-def test_single_stat_shot_type_scores_are_unchanged_and_carry_no_slices():
-    scores = _mix_scores(("3PM", "FG2A", "FG3A"))
-    # Values captured from the code before the player-mix weighting (origin/master e791f928).
+def test_single_stat_shot_type_scores_weigh_each_slice_by_his_own_count_of_that_stat():
+    scores = _mix_scores(("3PM", "FG2M", "FG2A", "FG3A"))
+    # 3PM:  his makes 10 / 8 / 0 -> (10 * (5/4 - 1) + 8 * (3/2 - 1)) / 18 = 0.361111
+    # FG2M: his makes 15 / 2 / 20 -> (15 * 0 + 2 * 0.1 + 20 * 0.1) / 37 = 0.059459
+    # FG2A: his attempts 30 / 6 / 40 -> (30 * 0.1 + 6 * 0 + 40 * 0) / 76 = 0.039474
+    # FG3A: his attempts 10 / 24 / 0 -> (10 * 0.25 + 24 * 0.2) / 34 = 0.214706
+    # (Weighed by his share of all attempts, 0.5 / 0.3 / 0.2, these were 0.275,
+    # FG2M 0.05, 0.05 and 0.185.)  No single-stat cell lists slices.
     assert scores == {
         market: {
             window: {
@@ -1638,7 +1643,70 @@ def test_single_stat_shot_type_scores_are_unchanged_and_carry_no_slices():
             }
             for window in ("season", "last_15")
         }
-        for market, value in {"3PM": 0.275, "FG2A": 0.05, "FG3A": 0.185}.items()
+        for market, value in {"3PM": 0.361111, "FG2M": 0.059459, "FG2A": 0.039474, "FG3A": 0.214706}.items()
+    }
+
+
+def test_a_three_point_row_where_he_takes_no_threes_does_not_move_his_three_point_scores():
+    # The league allows a sliver of threes inside 10 ft and this opponent none:
+    # -100% on that row.  He takes 40% of all his shots there but no threes, so
+    # neither three-point score reads it (statsplus#436, Bane vs PHX 2026-11-05).
+    sliver = {("less_than_10_ft", "FG3M"): (0.1, 0.0), ("less_than_10_ft", "FG3A"): (0.2, 0.0)}
+    metrics = tuple(
+        (base, slice_key, stat, *sliver.get((slice_key, stat), (league, team)))
+        for base, slice_key, stat, league, team in _MIX_METRICS
+    )
+    shooting = {
+        "Catch and Shoot": _split(0, 6, 0, 15),
+        "Pullups": _split(1, 4, 5, 10),
+        "Less Than 10 ft": _split(20, 0, 40, 0),
+    }
+    player = _service(
+        markets=("3PM", "FG3A"),
+        facts=(
+            _fact("shot_types", "Catch and Shoot", 0.3, 30, shooting=shooting["Catch and Shoot"]),
+            _fact("shot_types", "Pullups", 0.3, 30, shooting=shooting["Pullups"]),
+            _fact("shot_types", "Less Than 10 ft", 0.4, 40, shooting=shooting["Less Than 10 ft"]),
+        ),
+        season_metrics=metrics,
+    ).get_matchup(game_id=GAME_ID)["players"][0]
+    scores = _computed_scores(player)
+
+    # FG3A: (15 * 0.25 + 10 * 0.2) / 25 = 0.23 (by all attempts: 0.3 * 0.25 + 0.3 * 0.2 - 0.4 = -0.265)
+    # 3PM:  (6 * 0.25 + 4 * 0.5) / 10 = 0.35
+    assert scores["FG3A"]["season"]["components"]["shot_types"] == {"value": 0.23, "thin": False}
+    assert scores["3PM"]["season"]["components"]["shot_types"] == {"value": 0.35, "thin": False}
+
+
+def test_single_stat_shot_type_weights_fall_back_to_attempts_then_to_his_overall_shares():
+    no_threes_made = {
+        "Catch and Shoot": _split(15, 0, 30, 10),
+        "Pullups": _split(2, 0, 6, 30),
+        "Less Than 10 ft": _split(20, 0, 40, 0),
+    }
+    # No three-point makes anywhere -> his three-point attempts 10 / 30 / 0:
+    # (10 * 0.25 + 30 * 0.5) / 40 = 0.4375
+    assert _mix_scores(("3PM",), shooting=no_threes_made)["3PM"]["season"]["components"]["shot_types"] == {
+        "value": 0.4375,
+        "thin": False,
+    }
+
+    # One shot type without a split -> his share of all attempts for every slice:
+    # 0.5 * 0.25 + 0.3 * 0.2 = 0.185
+    no_split = {key: value for key, value in _MIX_SHOOTING.items() if key != "Pullups"}
+    assert _mix_scores(("FG3A",), shooting=no_split)["FG3A"]["season"]["components"]["shot_types"] == {
+        "value": 0.185,
+        "thin": False,
+    }
+
+    # No threes at all -> his share of all attempts: 0.5 * 0.25 + 0.3 * 0.2 = 0.185
+    no_threes = {
+        key: _split(split.two_point_makes, 0, split.two_point_attempts, 0)
+        for key, split in _MIX_SHOOTING.items()
+    }
+    assert _mix_scores(("FG3A",), shooting=no_threes)["FG3A"]["season"]["components"]["shot_types"] == {
+        "value": 0.185,
+        "thin": False,
     }
 
 
@@ -1732,8 +1800,8 @@ def test_each_market_blends_its_traditional_row_with_its_diet_components_as_a_pl
 
     # Shot zones: makes over every zone 0.2 * 1.3 + 0.8 - 1 = 0.06; over the
     # three 2PT zones (equal volume) (1.3 + 1 + 1) / 3 - 1 = 0.1; threes and
-    # attempts read the league.  Shot types: points, FGA, 3PM and FG3A as
-    # pinned by the #578 tests above; FG2M 0.3 * 0.1 + 0.2 * 0.1 = 0.05; FGM
+    # attempts read the league.  Shot types: points, FGA, 3PM, FG2M and FG3A as
+    # pinned by the #578 and #436 tests above; FGM
     # weighs each slice's twos and threes by his made counts (not points):
     # Catch and Shoot 15:10 -> 0.6 * 1 + 0.4 * 1.25 = 1.1, Pullups 2:8 ->
     # 0.2 * 1.1 + 0.8 * 1.5 = 1.42, Less Than 10 ft the twos ratio 1.1, so
@@ -1749,24 +1817,24 @@ def test_each_market_blends_its_traditional_row_with_its_diet_components_as_a_pl
             "blend": {"value": -0.05, "thin": False},
         },
         "3PM": {
-            "components": cells(shot_zones=0.0, shot_types=0.275, traditional=0.25),
-            "blend": {"value": 0.175, "thin": False},
+            "components": cells(shot_zones=0.0, shot_types=0.361111, traditional=0.25),
+            "blend": {"value": 0.203704, "thin": False},
         },
         "FGA": {
             "components": cells(shot_zones=0.0, shot_types=0.11675, traditional=0.1),
             "blend": {"value": 0.07225, "thin": False},
         },
         "FG3A": {
-            "components": cells(shot_zones=0.0, shot_types=0.185, traditional=0.1),
-            "blend": {"value": 0.095, "thin": False},
+            "components": cells(shot_zones=0.0, shot_types=0.214706, traditional=0.1),
+            "blend": {"value": 0.104902, "thin": False},
         },
         "FGM": {
             "components": cells(shot_zones=0.06, shot_types=0.196, traditional=0.05),
             "blend": {"value": 0.102, "thin": False},
         },
         "FG2M": {
-            "components": cells(shot_zones=0.1, shot_types=0.05),
-            "blend": {"value": 0.075, "thin": False},
+            "components": cells(shot_zones=0.1, shot_types=0.059459),
+            "blend": {"value": 0.07973, "thin": False},
         },
         "FTA": {"components": cells(traditional=-0.1), "blend": {"value": -0.1, "thin": False}},
         "FTM": {"components": cells(traditional=0.25), "blend": {"value": 0.25, "thin": False}},
