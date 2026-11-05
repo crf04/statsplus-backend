@@ -2976,3 +2976,71 @@ def test_resolve_reads_no_pool_when_no_target_plays(targets):
     service.resolve(OWNER, requested_date=SLATE_DATE)
 
     assert pools.reads == []
+
+
+def test_resolve_reads_the_slates_roster_and_its_named_games_pool_once_each(targets, tmp_path, dependencies):
+    """Over the stored schedule and pool: the Slate reads every game's roster, then one full
+    read of the games a Target names serves their Matchups; nothing reads either again."""
+
+    from collections import Counter
+
+    from sqlalchemy import event as sqlalchemy_event
+
+    from app.services.slate_service import SlateService
+    from tests.routes.test_games_board import BOS, BROWN, BRUNSON, LATER, NOW, NYK, TATUM, WHITE, seed_board
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'board.sqlite3'}")
+    run_migrations(engine)
+    board = seed_board(engine, dependencies).service
+    statements = []
+    sqlalchemy_event.listen(
+        engine, "before_cursor_execute", lambda *arguments: statements.append(arguments[2])
+    )
+    _create(targets, opponent="BOS", qualifiers=(CORNER_THREE,))
+    later = _game(
+        game_id=LATER,
+        away=(BOS.canonical_id, "BOS", "Boston Celtics"),
+        home=(NYK.canonical_id, "NYK", "New York Knicks"),
+    )
+
+    pools = []
+
+    class Composer(_RecordedSnapshotMatchups):
+        def get_matchup_from_snapshot(self, *, game_id, pool_read=None, **kwargs):
+            pools.append(
+                (game_id, sorted(player.canonical_player_id for player in pool_read.pool((game_id,)).players))
+            )
+            return super().get_matchup_from_snapshot(
+                game_id=game_id,
+                publication_snapshot=kwargs["publication_snapshot"],
+                injuries=kwargs["injuries"],
+            )
+
+    service = TargetResolutionService(
+        targets=targets,
+        slates=SlateService(
+            board.event_catalog, settings=board.settings, clock=lambda: NOW, player_pool=board.player_pool
+        ),
+        matchups=Composer({LATER: _matchup(game=later)}),
+        publication_reader=_AdvancingPublicationReader(),
+        injuries=object(),
+        settings=_resolution_settings(),
+        player_pool=board.player_pool,
+    )
+
+    body = service.resolve(OWNER, requested_date="2026-01-15")
+
+    assert [target["game"]["game_id"] for target in body["targets"]] == [LATER]
+    assert pools == [(LATER, sorted(player[0] for player in (BROWN, BRUNSON, TATUM, WHITE)))]
+    reads = Counter(
+        name
+        for statement in statements
+        for name, shape in (
+            ("pool rows", "FROM latest_player_projections"),
+            ("closing sets", "FROM projection_closing_sets"),
+            ("events", "SELECT event_catalog.nba_game_id"),
+        )
+        if shape in statement
+    )
+    # The Slate: the day's events, then its roster's events and rows; the named game's full read.
+    assert reads == {"events": 3, "pool rows": 2, "closing sets": 1}
