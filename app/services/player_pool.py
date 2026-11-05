@@ -117,6 +117,33 @@ class PlayerPool:
         return freshness
 
 
+@dataclass(frozen=True, slots=True)
+class RosterPlayer:
+    """One Player Pool player, without markets."""
+
+    canonical_player_id: int
+    team_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class PoolRoster:
+    """Who a Player Pool lists and how fresh it is, without lines or prices: what a Slate counts."""
+
+    players: tuple[RosterPlayer, ...]
+    team_counts: Mapping[int, int]
+    freshness: Mapping[str, Any]
+    game_states: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+
+    @classmethod
+    def of(cls, pool: PlayerPool) -> PoolRoster:
+        return cls(
+            tuple(RosterPlayer(player.canonical_player_id, player.team_id) for player in pool.players),
+            pool.team_counts,
+            pool.freshness,
+            pool.game_states,
+        )
+
+
 @dataclass(slots=True)
 class _PlayerContribution:
     team_id: int
@@ -165,6 +192,20 @@ class PlayerPoolSnapshotReaderWriter(Protocol):
 
 class PlayerPoolReader(Protocol):
     def get_pool(self, *, season: str, game_ids: Iterable[str]) -> PlayerPool: ...
+
+
+class PoolRosterReader(Protocol):
+    def get_pool_roster(self, *, season: str, game_ids: Iterable[str]) -> PoolRoster: ...
+
+
+@dataclass(frozen=True, slots=True)
+class FullPoolRosterReader:
+    """A ``PoolRosterReader`` over a full pool reader: it reads every line and price, then drops them."""
+
+    pool: PlayerPoolReader
+
+    def get_pool_roster(self, *, season: str, game_ids: Iterable[str]) -> PoolRoster:
+        return PoolRoster.of(self.pool.get_pool(season=season, game_ids=game_ids))
 
 
 class SingleGamePlayerPoolReader(Protocol):
@@ -651,10 +692,14 @@ class PlayerPoolService:
 
 __all__ = [
     "DFSBoardReader",
+    "FullPoolRosterReader",
     "PlayerPool",
     "PlayerPoolReader",
     "PlayerPoolService",
     "PoolPlayer",
+    "PoolRoster",
+    "PoolRosterReader",
+    "RosterPlayer",
     "SingleGamePlayerPoolReader",
     "StoredPlayerPoolReader",
 ]

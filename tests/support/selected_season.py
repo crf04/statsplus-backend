@@ -31,7 +31,7 @@ from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 from app.services.matchup_injuries import unavailable_injury_result
 from app.services.matchup_reuse import ComposedMatchupCache, PublicationSnapshotReuse
 from app.services.matchup_selection import MatchupSelectionService
-from app.services.matchup_snapshot import capture_matchup_snapshot
+from app.services.matchup_snapshot import capture_matchup_labels
 from app.services.next_opponent import NextOpponentService
 from app.services.player_game_log_repository import PlayerGameLogRepository
 from app.services.player_service import PlayerProfileReader, PlayerService
@@ -213,7 +213,7 @@ class SelectedWorld(World):
             settings=settings(),
             clock=lambda: NOW,
             publication_reader=self.reader,
-            matchup_snapshot=lambda reader: capture_matchup_snapshot(settings(), reader),
+            matchup_snapshot=lambda reader: capture_matchup_labels(settings(), reader),
         )
         self.selections = MatchupSelectionService(
             event_catalog=self.service.event_catalog,

@@ -7,7 +7,7 @@ import pytest
 from app.config.settings import NBASeasonSettings, RuntimeSettings
 from app.errors import InvalidInputError, ProviderUnavailableError, ResourceNotFoundError
 from app.services.matchup_injuries import MatchupInjuryResult
-from app.services.player_pool import PlayerPool, PoolPlayer
+from app.services.player_pool import FullPoolRosterReader, PlayerPool, PoolPlayer, PoolRoster, RosterPlayer
 from app.services.slate_service import SlateService
 
 
@@ -366,7 +366,7 @@ def test_slate_uses_live_pool_counts_and_provider_freshness():
     pool = RecordedPlayerPool(expected)
     service = _service(
         [_event("0022500001", "2026-01-03T00:00:00+00:00")],
-        player_pool=pool,
+        player_pool=FullPoolRosterReader(pool),
     )
 
     payload = service.get_slate("2026-01-02")
@@ -401,7 +401,7 @@ def test_slate_exposes_each_database_projection_state_without_recomputing_it():
             _event("0022500001", "2026-01-03T00:00:00+00:00"),
             _event("0022500002", "2026-01-03T01:00:00+00:00"),
         ],
-        player_pool=pool,
+        player_pool=FullPoolRosterReader(pool),
     )
 
     games = service.get_slate("2026-01-02")["games"]
@@ -422,7 +422,7 @@ def test_slate_targetable_counts_apply_the_same_stored_out_override_as_matchup()
     injuries = RecordedStoredInjuries({10})
     service = _service(
         [_event("0022500001", "2026-01-03T00:00:00+00:00")],
-        player_pool=pool,
+        player_pool=FullPoolRosterReader(pool),
         injuries=injuries,
     )
 
@@ -431,6 +431,77 @@ def test_slate_targetable_counts_apply_the_same_stored_out_override_as_matchup()
     assert payload["games"][0]["away_team"]["targetable_player_count"] == 1
     assert payload["games"][0]["home_team"]["targetable_player_count"] == 1
     assert injuries.calls[0][0:2] == (("0022500001",), "2025-26")
+
+
+class CountingCatalog(RecordedCatalog):
+    def __init__(self, events, freshness):
+        super().__init__(events, freshness)
+        self.counted = []
+
+    def count_events(self, season):
+        self.counted.append(season)
+        return super().count_events(season)
+
+    def get_adjacent_season(self, season, *, below, inclusive=False):
+        nearer = (lambda held: held < season) if below else (lambda held: held > season)
+        held = [held for held in ("2025-26",) if nearer(held) or (inclusive and held == season)]
+        return held[0] if held else None
+
+
+def test_a_slate_read_counts_its_seasons_events_once():
+    catalog = CountingCatalog(
+        [
+            _event("0022500001", "2025-12-31T00:00:00+00:00"),
+            _event("0022500002", "2026-01-03T00:00:00+00:00"),
+            _event("0022500003", "2026-01-06T00:00:00+00:00"),
+        ],
+        {"fresh": True, "last_success_at": "2026-01-02T10:00:00+00:00", "event_count": 3},
+    )
+    service = SlateService(
+        catalog,
+        settings=RuntimeSettings(environment="testing"),
+        clock=lambda: datetime(2026, 1, 2, 15, tzinfo=UTC),
+    )
+
+    body = service.get_slate("2026-01-02")
+
+    assert (body["previous_game_date"], body["next_game_date"]) == ("2025-12-30", "2026-01-05")
+    assert catalog.counted == ["2025-26"]
+
+
+class RosterOnlyPool:
+    """A reader whose pool with lines must not be read: the Slate counts players."""
+
+    def __init__(self, roster):
+        self.roster = roster
+
+    def get_pool(self, *, season, game_ids):
+        raise AssertionError("the Slate read lines and prices it never shows")
+
+    def get_pool_roster(self, *, season, game_ids):
+        return self.roster
+
+
+def test_slate_counts_a_readers_pool_roster_without_reading_its_lines():
+    roster = PoolRoster(
+        (RosterPlayer(10, 1), RosterPlayer(11, 1), RosterPlayer(20, 2)),
+        {1: 2, 2: 1},
+        {"status": "fresh"},
+        {"0022500001": {"state": "live", "observed_at": "2026-01-02T12:00:00+00:00"}},
+    )
+    service = _service(
+        [_event("0022500001", "2026-01-03T00:00:00+00:00")],
+        player_pool=RosterOnlyPool(roster),
+        injuries=RecordedStoredInjuries({10}),
+    )
+
+    game = service.get_slate("2026-01-02")["games"][0]
+
+    assert (game["away_team"]["targetable_player_count"], game["home_team"]["targetable_player_count"]) == (
+        1,
+        1,
+    )
+    assert game["projection_state"] == {"state": "live", "observed_at": "2026-01-02T12:00:00+00:00"}
 
 
 def test_slate_reads_every_events_stored_injuries_with_one_call():
@@ -446,7 +517,7 @@ def test_slate_reads_every_events_stored_injuries_with_one_call():
             _event("0022500002", "2026-01-03T01:00:00+00:00"),
             _event("0022500003", "2026-01-03T02:00:00+00:00"),
         ],
-        player_pool=pool,
+        player_pool=FullPoolRosterReader(pool),
         injuries=injuries,
     )
 
@@ -646,7 +717,7 @@ def test_an_unpinned_slate_reads_a_past_date_from_its_own_season_after_rollover(
     )
     pool = RecordedPlayerPool(PlayerPool(players=(), team_counts={}, freshness={}))
     injuries = RecordedStoredInjuries(())
-    service = _rollover_service(catalog, player_pool=pool, injuries=injuries)
+    service = _rollover_service(catalog, player_pool=FullPoolRosterReader(pool), injuries=injuries)
 
     payload = service.get_slate("2026-04-10")
 
@@ -663,7 +734,7 @@ def test_an_unpinned_slate_for_an_uncollected_season_is_empty_not_unavailable():
         }
     )
     pool = RecordedPlayerPool(PlayerPool(players=(), team_counts={}, freshness={}))
-    service = _rollover_service(catalog, player_pool=pool)
+    service = _rollover_service(catalog, player_pool=FullPoolRosterReader(pool))
 
     payload = service.get_slate()
 
