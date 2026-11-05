@@ -25,7 +25,7 @@ import logging
 from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import delete, func, insert, select, text, update
@@ -35,8 +35,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.domain.nba_events import is_started_event, player_game_log_season_type
 from app.domain.utc import assume_utc
 from app.models.closing_lines import ClosingLine, ClosingLinePurchase, ClosingLineSpend
+from app.models.event_catalog import EventCatalogEntry
 from app.models.player_game_log import PlayerGameLog
-from app.models.sportsbook_odds import SportsbookPropQuote
+from app.models.sportsbook_odds import OddsApiPoll, SportsbookPropQuote
 from app.providers.odds_api import BOOK_ALLOWLIST, MARKET_CATEGORIES, ParsedEventOdds
 
 logger = logging.getLogger(__name__)
@@ -649,39 +650,37 @@ class ClosingLineReader:
         return result
 
     def _closing_quotes(self, player_id: int, game_ids: Sequence[str]) -> list[tuple[str, str, str, float]]:
-        """``(game, market, book, line)`` of the player's latest closing snapshot per game.
+        """``(game, market, book, line)`` of the player's quotes in each game's close.
 
-        A game has one closing poll unless a postponement reopened it; then the
-        newest snapshot is the close, and a book it no longer carried is not
-        read from the older one.
+        The close is the game's applicable closing poll (``applicable_closing_polls``),
+        chosen for the whole game before the player is looked at: a player, or a
+        book, that the newest close no longer carried has no line, and an empty
+        close leaves the game with none.
         """
 
         table = SportsbookPropQuote.__table__
         with self.engine.connect() as connection:
+            closes = applicable_closing_polls(connection, game_ids)
+            if not closes:
+                return []
             rows = connection.execute(
                 select(
                     table.c.canonical_game_id,
                     table.c.market_category,
                     table.c.book,
                     table.c.line,
-                    table.c.observed_at,
                 ).where(
                     table.c.canonical_player_id == player_id,
-                    table.c.canonical_game_id.in_(list(game_ids)),
+                    table.c.poll_id.in_(sorted(closes.values())),
                     table.c.is_closing.is_(True),
                     table.c.market_category.in_(LEDGER_CATEGORIES[ALL_MARKETS]),
                     table.c.book.in_(BOOK_ORDER),
                 )
             ).all()
-        newest: dict[str, datetime] = {}
-        for row in rows:
-            observed = assume_utc(row.observed_at)
-            if row.canonical_game_id not in newest or observed > newest[row.canonical_game_id]:
-                newest[row.canonical_game_id] = observed
         return [
-            (row.canonical_game_id, row.market_category, row.book, float(row.line))
-            for row in rows
-            if assume_utc(row.observed_at) == newest[row.canonical_game_id]
+            (game_id, market, book, float(line))
+            for game_id, market, book, line in rows
+            if closes.get(game_id) is not None
         ]
 
     def for_player(self, player_id: int, game_ids: Sequence[str]) -> dict[str, ClosingLineValue]:
@@ -710,19 +709,72 @@ class ClosingLineReader:
         return _best_by_book(rows)
 
 
-def games_with_closing_quotes(engine: Engine, game_ids: Iterable[str]) -> set[str]:
-    """The games of ``game_ids`` with at least one closing quote stored."""
+#: How far a closing poll's ``commence_time`` may sit from the Event Catalog's
+#: tip and still close that tip: the rule ``OddsCollectionCoordinator._upcoming``
+#: uses to decide a game's closing poll is done.  A postponement moves the tip
+#: further than this, so the old close stops applying.
+CLOSING_TIP_TOLERANCE = timedelta(hours=1)
+
+
+def applicable_closing_polls(connection: Connection, game_ids: Iterable[str]) -> dict[str, int]:
+    """``{game id: poll id}`` of each game's close, the newest closing poll for its tip.
+
+    A closing poll counts when it answered (``complete`` or ``empty``; a
+    ``failed`` one stored nothing) and was taken for the game's current tip
+    within ``CLOSING_TIP_TOLERANCE``.  A game the Event Catalog does not hold
+    has no tip to match, so its newest closing poll is its close.  An empty
+    close is still the close: it carries no quotes, so the game has no lines.
+    """
 
     ids = sorted({str(game_id) for game_id in game_ids})
     if not ids:
-        return set()
+        return {}
+    polls = OddsApiPoll.__table__
+    events = EventCatalogEntry.__table__
+    tips = {
+        str(game_id): assume_utc(tip)
+        for game_id, tip in connection.execute(
+            select(events.c.nba_game_id, events.c.scheduled_at).where(events.c.nba_game_id.in_(ids))
+        )
+    }
+    newest: dict[str, tuple[datetime, int]] = {}
+    for game_id, poll_id, commence, completed in connection.execute(
+        select(polls.c.canonical_game_id, polls.c.poll_id, polls.c.commence_time, polls.c.completed_at).where(
+            polls.c.canonical_game_id.in_(ids),
+            polls.c.is_closing.is_(True),
+            polls.c.outcome.in_(("complete", "empty")),
+        )
+    ):
+        tip = tips.get(str(game_id))
+        if tip is not None and (commence is None or abs(assume_utc(commence) - tip) > CLOSING_TIP_TOLERANCE):
+            continue
+        key = (
+            assume_utc(completed) if completed is not None else datetime.min.replace(tzinfo=UTC),
+            int(poll_id),
+        )
+        if str(game_id) not in newest or key > newest[str(game_id)]:
+            newest[str(game_id)] = key
+    return {game_id: poll_id for game_id, (_, poll_id) in newest.items()}
+
+
+def games_with_closing_quotes(engine: Engine, game_ids: Iterable[str]) -> set[str]:
+    """The games of ``game_ids`` whose close (``applicable_closing_polls``) stored a quote.
+
+    A game whose only closing poll was for an earlier tip, or whose close was
+    empty, reads as no lines in the game logs, so it is not covered: the gap
+    check names it and the 2026-27 backfill buys it.
+    """
+
     table = SportsbookPropQuote.__table__
     with engine.connect() as connection:
+        closes = applicable_closing_polls(connection, game_ids)
+        if not closes:
+            return set()
         return {
             str(game_id)
             for (game_id,) in connection.execute(
                 select(table.c.canonical_game_id)
-                .where(table.c.canonical_game_id.in_(ids), table.c.is_closing.is_(True))
+                .where(table.c.poll_id.in_(sorted(closes.values())), table.c.is_closing.is_(True))
                 .distinct()
             )
         }
@@ -851,6 +903,7 @@ def coverage_report(
 __all__ = [
     "ALL_MARKETS",
     "BOOK_ORDER",
+    "CLOSING_TIP_TOLERANCE",
     "COVERAGE_MINUTES",
     "LEDGER_CATEGORIES",
     "LIVE_CLOSING_FIRST_SEASON",
@@ -864,6 +917,7 @@ __all__ = [
     "RecordedGame",
     "RunRefused",
     "StoredPurchase",
+    "applicable_closing_polls",
     "choose_closing_lines",
     "closing_quote_gaps",
     "coverage_report",

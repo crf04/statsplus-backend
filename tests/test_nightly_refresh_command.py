@@ -1132,6 +1132,7 @@ def test_the_nightly_gap_check_says_so_when_every_started_game_is_closed(tmp_pat
         remaining=90000,
         is_closing=True,
         quotes=[ResolvedQuote(LEBRON, "PTS", "draftkings", 24.5, -110, -110, observed)],
+        commence_time=TIPS[DEN_LAL],
     )
 
     assert nightly_refresh._check_closing_quotes(world.engine, "2026-27") is True

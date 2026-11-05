@@ -362,3 +362,49 @@ def test_a_started_game_the_catalog_has_not_marked_final_is_bought_too(world):
     )
 
     assert [game.game_id for game in backfill.plan().pending] == [DEN_LAL]
+
+
+# -- the gap check follows the game's current close (review of #703) ----------
+
+
+def _reschedule(world, game_id, tip):
+    from sqlalchemy import update
+
+    from app.models.event_catalog import EventCatalogEntry
+
+    table = EventCatalogEntry.__table__
+    with world.engine.begin() as connection:
+        connection.execute(update(table).where(table.c.nba_game_id == game_id).values(scheduled_at=tip))
+
+
+def test_a_game_closed_only_for_an_earlier_tip_is_a_gap(world):
+    _reschedule(world, BOS_NYK, TIPS[BOS_NYK] + timedelta(days=2))
+
+    assert _gaps(world) == [DEN_LAL, BOS_NYK]
+    assert [game.game_id for game in _backfill(world, _client(), covered=_covered(world)).plan().pending] == [
+        DEN_LAL,
+        BOS_NYK,
+    ]
+
+
+def test_a_game_whose_current_close_was_empty_is_a_gap(world):
+    new_tip = TIPS[BOS_NYK] + timedelta(days=2)
+    _reschedule(world, BOS_NYK, new_tip)
+    world.quotes.record_unstored_poll(
+        odds_event_id=BOS_NYK_EVENT,
+        game_id=BOS_NYK,
+        started_at=new_tip - timedelta(minutes=7),
+        completed_at=new_tip - timedelta(minutes=7),
+        outcome="empty",
+        is_closing=True,
+        cost=0,
+        commence_time=new_tip,
+    )
+
+    assert _gaps(world) == [DEN_LAL, BOS_NYK]
+
+
+def _covered(world):
+    from app.services.closing_lines import games_with_closing_quotes
+
+    return games_with_closing_quotes(world.engine, (DEN_LAL, GSW_LAC, BOS_NYK))

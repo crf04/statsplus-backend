@@ -393,3 +393,119 @@ def test_a_filter_keeps_each_rows_own_closing_lines(dependencies, client, live_e
         (27, {"value": 24.5, "book": "draftkings"}),
         (31, {"value": 29.5, "book": "fanduel"}),
     ]
+
+
+# -- a re-closed game reads its current close only (review of #703) ----------
+
+FIRST_TIP = datetime(2026, 11, 2, 0, 0, tzinfo=UTC)
+#: The postponed game's new tip, two days later.
+NEW_TIP = FIRST_TIP + timedelta(days=2)
+
+
+def _catalog_tip(engine, game_id, tip):
+    from app.models.event_catalog import EventCatalogEntry
+
+    with engine.begin() as connection:
+        connection.execute(
+            insert(EventCatalogEntry.__table__).values(
+                nba_game_id=game_id,
+                season="2026-27",
+                home_team_id=1610612743,
+                home_team_name="Nuggets",
+                home_team_tricode="DEN",
+                away_team_id=1610612747,
+                away_team_name="Lakers",
+                away_team_tricode="LAL",
+                scheduled_at=tip,
+                status_text="Final",
+                status_code=3,
+                classification="Regular Season",
+                first_seen_at=FIRST_TIP - timedelta(days=30),
+                last_seen_at=tip,
+            )
+        )
+
+
+def _close(engine, game_id, tip, quotes, *, empty=False):
+    """A closing poll taken 7 minutes before ``tip``, as the live collector takes it."""
+
+    from app.services.sportsbook_quotes import ResolvedQuote, SportsbookQuoteStore
+
+    store = SportsbookQuoteStore(engine)
+    observed = tip - timedelta(minutes=7)
+    if empty:
+        store.record_unstored_poll(
+            odds_event_id=f"event-{game_id}",
+            game_id=game_id,
+            started_at=observed,
+            completed_at=observed,
+            outcome="empty",
+            is_closing=True,
+            cost=0,
+            commence_time=tip,
+        )
+        return
+    store.record_poll(
+        odds_event_id=f"event-{game_id}",
+        game_id=game_id,
+        started_at=observed,
+        completed_at=observed,
+        cost=5,
+        remaining=1000,
+        is_closing=True,
+        quotes=[
+            ResolvedQuote(player, market, book, line, -110, -110, observed)
+            for player, market, book, line in quotes
+        ],
+        commence_time=tip,
+    )
+
+
+def _first_row(client):
+    response = client.get("/api/games/game_logs?player_name=LeBron+James&season_filter=2026-27")
+    assert response.status_code == 200
+    row = response.get_json()["game_logs"][0]
+    return row["closing_lines"], row["closing_line"]
+
+
+@pytest.fixture
+def reclosed(dependencies, engine):
+    """NEW_GAMES[0] was closed at its first tip with LeBron's lines, then postponed."""
+
+    game = NEW_GAMES[0]
+    _catalog_tip(engine, game, NEW_TIP)
+    _close(engine, game, FIRST_TIP, [(LEBRON, "PTS", "draftkings", 24.5), (LEBRON, "REB", "fanduel", 7.5)])
+    _serve_2026_27(dependencies, engine, reader=ClosingLineReader(engine))
+    return engine
+
+
+def test_a_player_the_new_close_omits_has_no_closing_lines(reclosed, client):
+    _close(reclosed, NEW_GAMES[0], NEW_TIP, [(203999, "PTS", "draftkings", 29.5)])
+
+    assert _first_row(client) == ({}, None)
+
+
+def test_an_empty_new_close_leaves_the_game_with_no_closing_lines(reclosed, client):
+    _close(reclosed, NEW_GAMES[0], NEW_TIP, [], empty=True)
+
+    assert _first_row(client) == ({}, None)
+
+
+def test_an_empty_quote_set_on_the_new_close_leaves_no_closing_lines(reclosed, client):
+    _close(reclosed, NEW_GAMES[0], NEW_TIP, [])
+
+    assert _first_row(client) == ({}, None)
+
+
+def test_a_close_for_an_earlier_tip_is_not_the_games_close(reclosed, client):
+    # The postponed game's new closing poll was missed: the old close does not stand in.
+    assert _first_row(client) == ({}, None)
+
+
+def test_the_new_close_is_read_when_it_carries_the_player(reclosed, client):
+    _close(reclosed, NEW_GAMES[0], NEW_TIP, [(LEBRON, "PTS", "fanduel", 26.5)])
+
+    assert _first_row(client) == (
+        {"PTS": {"value": 26.5, "book": "fanduel"}},
+        {"value": 26.5, "book": "fanduel"},
+    )

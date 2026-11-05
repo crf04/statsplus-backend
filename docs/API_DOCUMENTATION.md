@@ -3045,8 +3045,10 @@ for that game, keyed by market, or `{}`:
   is, one book per market by the same order (DraftKings, FanDuel, BetMGM,
   Caesars, BetRivers, Fanatics: the first that posted him in that market).
 * 2026-27 onward: the closing quotes the live collector stored for that game,
-  player and market (all five markets). A postponed game closed twice reads
-  its later close. 2025-26: the backfilled table, which holds points only, so
+  player and market (all five markets), from the game's close: its newest
+  closing poll for its current tip. A player that close did not carry, an
+  empty close, and a game closed only for a tip a postponement moved carry
+  `{}` (and `closing_line` `null`). 2025-26: the backfilled table, which holds points only, so
   a 2025-26 row carries `PTS` or nothing. Earlier seasons carry `{}`.
 * Additive, always present, unaffected by filters, averages and `provenance`,
   like `closing_line`. A storage fault reads as `{}` on every row; the rest of
