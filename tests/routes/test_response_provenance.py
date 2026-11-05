@@ -538,7 +538,7 @@ class _StoredInjuries:
 
 
 def test_the_slate_states_the_least_fresh_injury_read_behind_its_counts(client, dependencies, authenticate):
-    from app.services.player_pool import PlayerPool, PoolPlayer
+    from app.services.player_pool import FullPoolRosterReader, PlayerPool, PoolPlayer
 
     pool = PlayerPool(
         players=(
@@ -569,7 +569,7 @@ def test_the_slate_states_the_least_fresh_injury_read_behind_its_counts(client, 
                 ),
             ]
         ),
-        player_pool=_SlatePool(pool),
+        player_pool=FullPoolRosterReader(_SlatePool(pool)),
         injuries=_StoredInjuries(
             {
                 # A 9-hour-old override marks LeBron out of tonight's count.

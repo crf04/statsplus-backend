@@ -33,7 +33,7 @@ from app.errors import (
     ResourceNotFoundError,
 )
 from app.services.matchup_injuries import MatchupInjuryResult
-from app.services.player_pool import PlayerPool, PlayerPoolReader, PoolPlayer
+from app.services.player_pool import PlayerPool, PoolRosterReader, RosterPlayer
 from app.services.research_season import (
     game_capture,
     refuse_evidence_after_game,
@@ -48,7 +48,7 @@ from app.services.response_provenance import (
 )
 from app.services.serving_season import merge_trailing, snapshot_trailing
 from app.services.slate_fallback import read_slate
-from app.services.slate_neighbors import neighbouring_game_dates
+from app.services.slate_neighbors import EventCounts, neighbouring_game_dates
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -59,7 +59,7 @@ class StoredInjuryOverrideReader(Protocol):
         *,
         events: Sequence[Mapping[str, Any]],
         season: str,
-        pool_players_by_game: Mapping[str, Sequence[PoolPlayer]],
+        pool_players_by_game: Mapping[str, Sequence[RosterPlayer]],
     ) -> Mapping[str, MatchupInjuryResult]: ...
 
 
@@ -79,7 +79,7 @@ class SlateService:
         settings: RuntimeSettings | None = None,
         clock: Callable[[], datetime] | None = None,
         schedule_max_age: timedelta | None = None,
-        player_pool: PlayerPoolReader | None = None,
+        player_pool: PoolRosterReader | None = None,
         injuries: StoredInjuryOverrideReader | None = None,
         injury_counts: InjuryCountReader | None = None,
         publication_reader: Any | None = None,
@@ -134,12 +134,13 @@ class SlateService:
         slate_date = self._parse_slate_date(requested_date)
         if self.event_catalog is None:
             raise ProviderUnavailableError("The NBA schedule is not available. Please try again later.")
+        counts = EventCounts(self.event_catalog)
         # The date's own season, so a past date reads its own schedule and an
         # offseason date before collection reads the previous one's (empty).
-        season = season or schedule_season(self.settings, self.event_catalog, slate_date)
+        season = season or schedule_season(self.settings, counts, slate_date)
         refuse_evidence_after_game(self.publication_reader, season)
         observed_at = assume_utc(self._clock())
-        if self.event_catalog.count_events(season) == 0:
+        if counts.count_events(season) == 0:
             # Neither the date's season nor the one before was ever collected;
             # retrying cannot change that, so it is a definite answer.
             raise ResourceNotFoundError(
@@ -186,14 +187,13 @@ class SlateService:
         pool_freshness = PlayerPool.unavailable_freshness()
         injury_freshness = UNAVAILABLE_SOURCE
         if self.player_pool is not None:
-            pool = self.player_pool.get_pool(
-                season=season,
-                game_ids={game["game_id"] for game in games},
+            pool = self.player_pool.get_pool_roster(
+                season=season, game_ids={game["game_id"] for game in games}
             )
             pool_freshness = dict(pool.freshness)
             removed_player_ids: set[int] = set()
             if self.injuries is not None:
-                pool_players_by_game: dict[str, tuple[PoolPlayer, ...]] = {}
+                pool_players_by_game: dict[str, tuple[RosterPlayer, ...]] = {}
                 for event in selected_events:
                     team_ids = {int(event[f"{side}_team"]["id"]) for side in ("away", "home")}
                     pool_players_by_game[str(event.get("nba_game_id", ""))] = tuple(
@@ -231,7 +231,7 @@ class SlateService:
             "retrieved_at": retrieved_at,
         }
         previous_game_date, next_game_date = (
-            neighbouring_game_dates(self.settings, self.event_catalog, slate_date)
+            neighbouring_game_dates(self.settings, self.event_catalog, slate_date, counts=counts)
             if neighbours
             else (None, None)
         )
