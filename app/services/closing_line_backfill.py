@@ -21,6 +21,13 @@ A resolver fix reaches the games already bought without buying them again:
 ``ClosingLineReResolve`` re-reads the quotes kept on the ledger and rewrites each
 game's lines.  It holds no client, so it can make no call and spend no credit.
 
+The same backfill fills 2026-27 gaps (crf04/statsplus#429): with ``markets`` set
+to the five standard markets, ``started_by`` and ``covered`` (the games the live
+collector already closed), it buys each started game with no closing quote
+under the ledger key ``ALL``, and ``ClosingQuoteWriter`` stores the snapshot as
+that game's closing poll in ``sportsbook_prop_quotes``, so it reads exactly as a
+live closing poll does.
+
 Nothing here formats a URL or reads the API key; the client owns both.
 """
 
@@ -37,10 +44,15 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
-from app.domain.nba_events import is_completed_non_postponed_event, player_game_log_season_type
+from app.domain.nba_events import (
+    is_completed_non_postponed_event,
+    is_started_event,
+    player_game_log_season_type,
+)
 from app.domain.utc import assume_utc, utc_now
 from app.models.player_game_log import PlayerGameLog
 from app.providers.odds_api import (
+    MARKET_CATEGORIES,
     SPORTSBOOK_REGION,
     OddsApiError,
     parse_historical_event_odds,
@@ -52,17 +64,22 @@ from app.services.closing_lines import (
     ODDS_MARKET,
     ClosingLineStore,
     CoverageReport,
+    PostedLine,
     StoredPurchase,
     choose_closing_lines,
 )
 from app.services.event_resolver import stored_timestamp
 from app.services.odds_identity import RosterNameResolver
+from app.services.sportsbook_quotes import ResolvedQuote, SportsbookQuoteStore
 
 logger = logging.getLogger(__name__)
 
 SEASON = "2025-26"
 #: ``10 x unique markets returned x regions`` for one market and one region.
 GAME_COST = 10
+#: The five standard markets a 2026-27 gap purchase buys in one call
+#: (``player_points`` ... ``player_points_rebounds_assists``): 50 credits.
+ALL_ODDS_MARKETS: tuple[str, ...] = tuple(MARKET_CATEGORIES)
 #: A historical events list costs one credit, nothing when it is empty.
 EVENTS_COST = 1
 SNAPSHOT_STEP_MINUTES = 5
@@ -108,8 +125,20 @@ class TargetGame:
         return self.tip.astimezone(SLATE_ZONE).date()
 
 
-def target_games(events: Iterable[Mapping[str, Any]]) -> list[TargetGame]:
-    """The season's completed regular-season and playoff games, in tip order."""
+def target_games(
+    events: Iterable[Mapping[str, Any]], *, started_by: datetime | None = None
+) -> list[TargetGame]:
+    """The season's completed regular-season and playoff games, in tip order.
+
+    With ``started_by``, the games that had started by then instead (a game
+    whose tip has passed, final or not; never a postponed one), as the gap
+    check counts them.
+    """
+
+    def eligible(event: Mapping[str, Any]) -> bool:
+        if started_by is not None:
+            return is_started_event(event, now=started_by)
+        return is_completed_non_postponed_event(event)
 
     games = [
         TargetGame(
@@ -119,7 +148,7 @@ def target_games(events: Iterable[Mapping[str, Any]]) -> list[TargetGame]:
             away_team_id=int(event["away_team_id"]),
         )
         for event in events
-        if player_game_log_season_type(event) is not None and is_completed_non_postponed_event(event)
+        if player_game_log_season_type(event) is not None and eligible(event)
     ]
     return sorted(games, key=lambda game: (game.tip, game.game_id))
 
@@ -342,10 +371,15 @@ class Plan:
     days: int
     #: Credits the ledger and the events-list log already hold.
     credits_recorded: int = 0
+    season: str = SEASON
+    #: The most one game call costs: 10 per market asked for.
+    game_cost: int = GAME_COST
+    #: Games left out because the live collector already stored their close.
+    covered: int = 0
 
     @property
     def estimated_credits(self) -> int:
-        return len(self.pending) * GAME_COST + self.days * EVENTS_COST
+        return len(self.pending) * self.game_cost + self.days * EVENTS_COST
 
 
 @dataclass(slots=True)
@@ -371,6 +405,14 @@ class RunSummary:
 
 
 class ClosingLineBackfill:
+    """Buy each target game's closing snapshot once.
+
+    By default: the 2025-26 points backfill, whose lines go to
+    ``closing_lines``.  ``markets``, ``writer``, ``started_by`` and ``covered``
+    make it the 2026-27 gap backfill (see the module docstring); ``season``
+    names the season in its plan and the spend it counts.
+    """
+
     def __init__(
         self,
         *,
@@ -382,6 +424,11 @@ class ClosingLineBackfill:
         max_credits: int,
         keep_remaining: int,
         clock: Callable[[], datetime] = utc_now,
+        season: str = SEASON,
+        markets: tuple[str, ...] = (ODDS_MARKET,),
+        writer: Any | None = None,
+        started_by: datetime | None = None,
+        covered: Collection[str] = (),
     ) -> None:
         if getattr(client, "regions", SPORTSBOOK_REGION) != SPORTSBOOK_REGION:
             raise ValueError("the backfill buys the sportsbook region 'us' only")
@@ -389,8 +436,13 @@ class ClosingLineBackfill:
         self._client = client
         self._mapper = event_mapper
         self._names = names
-        self._games = target_games(events)
+        self._writer = writer
+        self._season = season
+        self._markets = markets
+        self._game_cost = GAME_COST * len(markets)
+        self._games = target_games(events, started_by=started_by)
         self._by_id = {game.game_id: game for game in self._games}
+        self._covered = frozenset(str(game_id) for game_id in covered)
         self._max_credits = max_credits
         self._keep_remaining = keep_remaining
         self._clock = clock
@@ -398,9 +450,18 @@ class ClosingLineBackfill:
 
     # -- plan ---------------------------------------------------------------
 
+    def _spend_subjects(self) -> set[str]:
+        """The spend-log subjects of this season: its game days and game ids."""
+
+        return {str(game.day) for game in self._games} | set(self._by_id)
+
     def plan(self, spot_check: int | None = None) -> Plan:
         ledger = self._store.ledger()
-        pending = [game for game in self._games if ledger.get(game.game_id, "failed") == "failed"]
+        pending = [
+            game
+            for game in self._games
+            if ledger.get(game.game_id, "failed") == "failed" and game.game_id not in self._covered
+        ]
         if spot_check is not None:
             pending = spread(pending, spot_check)
         return Plan(
@@ -409,7 +470,14 @@ class ClosingLineBackfill:
             unparsed=sum(1 for game in self._games if ledger.get(game.game_id) == "received"),
             pending=tuple(pending),
             days=len({game.day for game in pending}),
-            credits_recorded=self._store.credits_recorded(),
+            credits_recorded=self._store.credits_recorded(self._spend_subjects()),
+            season=self._season,
+            game_cost=self._game_cost,
+            covered=sum(
+                1
+                for game in self._games
+                if game.game_id in self._covered and ledger.get(game.game_id, "failed") == "failed"
+            ),
         )
 
     # -- run ----------------------------------------------------------------
@@ -539,13 +607,13 @@ class ClosingLineBackfill:
         return None
 
     def _buy(self, game: TargetGame, event: Any, guard: CreditGuard, summary: RunSummary) -> str | None:
-        refusal = guard.refusal(GAME_COST)
+        refusal = guard.refusal(self._game_cost)
         if refusal is not None:
             return refusal
         requested_for = closing_snapshot_date(event.commence_time)
         try:
             response = self._client.historical_event_odds(
-                event.event_id, requested_for, markets=(ODDS_MARKET,)
+                event.event_id, requested_for, markets=self._markets
             )
         except OddsApiError as error:
             summary.failed += 1
@@ -561,7 +629,7 @@ class ClosingLineBackfill:
             if error.reason == "transport":
                 # The request may have been served and charged before the
                 # connection failed: count it against the cap, durably.
-                self._lose(guard, "lost_call", game.game_id, GAME_COST)
+                self._lose(guard, "lost_call", game.game_id, self._game_cost)
             logger.error("historical odds game=%s: %s", game.game_id, error.reason)
             if self._failure_streak >= MAX_FAILURE_STREAK:
                 return "repeated_failures"
@@ -569,7 +637,7 @@ class ClosingLineBackfill:
         self._failure_streak = 0
         # A cost header is always sent; if it is somehow missing, assume the
         # documented price rather than nothing.
-        cost = response.cost if response.cost is not None else GAME_COST
+        cost = response.cost if response.cost is not None else self._game_cost
         bought_at = self._clock()
         self._store.record_receipt(
             game_id=game.game_id,
@@ -622,11 +690,10 @@ class ClosingLineBackfill:
             summary.empty += 1
         return self._unexpected_cost(cost)
 
-    @staticmethod
-    def _unexpected_cost(cost: int) -> str | None:
+    def _unexpected_cost(self, cost: int) -> str | None:
         """A call dearer than the documented price means the plan is wrong."""
 
-        return "unexpected_cost" if cost > GAME_COST else None
+        return "unexpected_cost" if cost > self._game_cost else None
 
     def _lose(self, guard: CreditGuard, kind: str, subject: str, cost: int) -> None:
         """Charge a call that may have cost ``cost`` and logged nothing else."""
@@ -649,6 +716,9 @@ class ClosingLineBackfill:
         return None
 
     def _complete(self, game: TargetGame, purchase: StoredPurchase) -> None:
+        if self._writer is not None:
+            self._writer.complete(game, purchase)
+            return
         posted_names = {line.player_name for line in purchase.posted}
         players = self._names.resolve(game.game_id, posted_names, (game.home_team_id, game.away_team_id))
         chosen = choose_closing_lines(purchase.posted, players)
@@ -665,6 +735,85 @@ class ClosingLineBackfill:
                     key=lambda item: BOOK_ORDER.index(item[0]),
                 )
             ),
+            unresolved,
+        )
+
+
+class _AlreadyWritten(Exception):
+    """The purchase was completed by an earlier write; this one rolls back."""
+
+
+class ClosingQuoteWriter:
+    """Store a bought five-market snapshot as the game's closing poll (crf04/statsplus#429).
+
+    The quotes go through ``SportsbookQuoteStore.record_poll`` with
+    ``is_closing``, as a live closing poll's do: an ``odds_api_polls`` row for
+    the game's tip, every book's quote as a closing history row, and the
+    game's latest rows.  The poll is observed at the snapshot's own time, and
+    its cost is left on the purchase ledger, not repeated on the poll.  The
+    ledger row is marked ``complete`` in the same transaction, and only if it
+    is still ``purchased``, so finishing a purchase twice writes it once.
+    """
+
+    def __init__(self, *, ledger: ClosingLineStore, names: Any, quotes: SportsbookQuoteStore) -> None:
+        self._ledger = ledger
+        self._names = names
+        self._quotes = quotes
+
+    def complete(self, game: TargetGame, purchase: StoredPurchase) -> None:
+        posted_names = {line.player_name for line in purchase.posted}
+        players = self._names.resolve(game.game_id, posted_names, (game.home_team_id, game.away_team_id))
+        by_key: dict[tuple[int, str, str], set[PostedLine]] = {}
+        for line in purchase.posted:
+            player_id = players.get(line.player_name)
+            if player_id is not None:
+                by_key.setdefault((player_id, line.category, line.book), set()).add(line)
+        quotes = []
+        for (player_id, category, book), lines in sorted(by_key.items()):
+            # Two posted names that resolve to one player with different
+            # quotes: skipped rather than guessed at, as the parser does.
+            if len({(line.line, line.over, line.under) for line in lines}) != 1:
+                continue
+            line = min(lines, key=lambda item: item.player_name)
+            quotes.append(
+                ResolvedQuote(
+                    canonical_player_id=player_id,
+                    category=category,
+                    book=book,
+                    line=line.line,
+                    over=line.over,
+                    under=line.under,
+                    last_update=line.last_update,
+                )
+            )
+        unresolved = len(posted_names - players.keys())
+
+        def claim(connection: Any) -> None:
+            if not self._ledger.claim_completion(connection, game.game_id, unresolved=unresolved):
+                raise _AlreadyWritten
+
+        try:
+            self._quotes.record_poll(
+                odds_event_id=purchase.odds_event_id,
+                game_id=game.game_id,
+                started_at=purchase.snapshot_at,
+                completed_at=purchase.snapshot_at,
+                cost=None,
+                remaining=None,
+                is_closing=True,
+                quotes=quotes,
+                unresolved_count=unresolved,
+                commence_time=game.tip,
+                fence=claim,
+            )
+        except _AlreadyWritten:
+            logger.info("game %s: its closing quotes were already written", game.game_id)
+            return
+        logger.info(
+            "game %s closing_quotes=%d players=%d unresolved_names=%d",
+            game.game_id,
+            len(quotes),
+            len({quote.canonical_player_id for quote in quotes}),
             unresolved,
         )
 
@@ -772,15 +921,27 @@ class ClosingLineReResolve:
 # -- reporting ----------------------------------------------------------------
 
 
+#: Games a plan names one by one; a longer plan names the first ones.
+PENDING_SHOWN = 20
+
+
 def format_plan(plan: Plan, *, dry_run: bool, max_credits: int | None = None) -> list[str]:
     lines = [
-        f"games in {SEASON} (regular season and playoffs): {plan.games_total}",
+        f"games in {plan.season} (regular season and playoffs): {plan.games_total}",
         f"already recorded: {plan.already_stored}",
+    ]
+    if plan.covered:
+        lines.append(f"closed by the live collector (not bought): {plan.covered}")
+    lines += [
         f"to buy: {len(plan.pending)} games over {plan.days} game days",
         f"estimated credits: {plan.estimated_credits} "
-        f"({len(plan.pending)} x {GAME_COST} for the games + {plan.days} x {EVENTS_COST} "
+        f"({len(plan.pending)} x {plan.game_cost} for the games + {plan.days} x {EVENTS_COST} "
         "for the event lists, an upper bound)",
     ]
+    for game in plan.pending[:PENDING_SHOWN]:
+        lines.append(f"  {game.game_id} {game.day} tip {game.tip.strftime('%Y-%m-%dT%H:%MZ')}")
+    if len(plan.pending) > PENDING_SHOWN:
+        lines.append(f"  ... and {len(plan.pending) - PENDING_SHOWN} more")
     if max_credits is not None:
         lines.append(
             f"credits already spent by earlier runs: {plan.credits_recorded}; "
@@ -855,12 +1016,14 @@ def format_coverage(report: CoverageReport, ledger_credits: int) -> list[str]:
 
 
 __all__ = [
+    "ALL_ODDS_MARKETS",
     "EVENTS_COST",
     "GAME_COST",
     "SEASON",
     "BoxScoreNames",
     "ClosingLineBackfill",
     "ClosingLineReResolve",
+    "ClosingQuoteWriter",
     "CreditGuard",
     "Plan",
     "ReResolveSummary",

@@ -121,6 +121,7 @@ from app.services.team_matchup_publications import (
     publication_base_for_stream,
     publication_stream,
     resolve_governed_l15_date_from_by_team,
+    resolve_governed_season_is_complete,
     resolve_governed_team_game_ids,
 )
 
@@ -1031,6 +1032,7 @@ def _compose_nba_observation_payload(
     provenance_ids: set[str],
     expected_game_ids_by_team: Mapping[int, frozenset[str]],
     expected_l15_date_from_by_team: Mapping[int, str] | None = None,
+    season_complete: bool = False,
 ) -> dict[str, Any]:
     """Derive one governed NBA payload only from immutable observations."""
 
@@ -1117,8 +1119,14 @@ def _compose_nba_observation_payload(
             # can therefore authorize only the manifest slate on which the
             # observation was accepted by the governed collection service.
             # A later collection may not retrospectively label those mutable
-            # full-season totals with an older immutable cutoff.
-            if slate_date_for_instant(_aware(observation.accepted_at)) != slate_date_for_instant(cutoff):
+            # full-season totals with an older immutable cutoff -- unless the
+            # bound Event Catalog shows the Regular Season finished by that
+            # cutoff, when the totals can no longer change (statsplus#416's
+            # 2025-26 backfill).  The games-played check below still binds
+            # every team to the governed games.
+            if not season_complete and slate_date_for_instant(
+                _aware(observation.accepted_at)
+            ) != slate_date_for_instant(cutoff):
                 raise _ProviderWindowUnavailable("provider_unbounded_as_of")
         else:
             endpoint_window = scope.get("endpoint_window")
@@ -6152,6 +6160,17 @@ class PublicationService(_SessionService):
                     provenance_ids=provenance_ids,
                     expected_game_ids_by_team=expected_game_ids_by_team or {},
                     expected_l15_date_from_by_team=expected_l15_date_from_by_team,
+                    season_complete=(
+                        publication_base_for_stream(stream_key) == "play_types"
+                        and resolve_governed_season_is_complete(
+                            self.l15_expectation_resolver,
+                            season,
+                            _aware(cutoff),
+                            manifest_id=authority.manifest_id,
+                            event_catalog_publication_id=authority.event_catalog_publication_id,
+                            event_catalog_checksum=authority.event_catalog_checksum,
+                        )
+                    ),
                 )
             except _ProviderWindowUnavailable as error:
                 raise ControlPlaneError(str(error)) from error
