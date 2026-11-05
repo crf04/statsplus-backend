@@ -33,6 +33,7 @@ from app.models.collection_control import (
     PublicationPointer,
     PublicationVersion,
 )
+from app.models.job import DataRefreshJob
 from app.services.collection_control import (
     NBA_TEAM_IDS,
     CollectionControlService,
@@ -271,6 +272,17 @@ def build_production(url, engine):
     PublicationService(engine).enqueue(
         "player_game_logs", season="2026-27", cutoff=datetime(2026, 11, 5, 8, 0, tzinfo=UTC)
     )
+    with engine.begin() as connection:
+        connection.execute(
+            DataRefreshJob.__table__.insert().values(
+                job_id="queued-refresh",
+                operation="update_database",
+                status="queued",
+                progress=0.0,
+                created_at=CUTOFF,
+                attempt_count=0,
+            )
+        )
     return url, engine, manifest
 
 
@@ -351,6 +363,16 @@ def _state(engine):
                     )
                 ).all()
             ),
+            "refresh_jobs": sorted(
+                connection.execute(
+                    select(
+                        DataRefreshJob.job_id,
+                        DataRefreshJob.status,
+                        DataRefreshJob.attempt_count,
+                        DataRefreshJob.started_at,
+                    )
+                ).all()
+            ),
             "pointers": sorted(
                 connection.execute(
                     select(
@@ -415,6 +437,7 @@ def test_the_backfill_gives_2025_26_turnovers_and_trips_a_play_types_component(p
     assert after["manifests"] == before["manifests"]
     assert after["observations"] == before["observations"] + 22
     assert ("player_game_logs", "2026-27", "queued", 1) in after["jobs"]
+    assert after["refresh_jobs"] == before["refresh_jobs"]
     summary = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert summary["streams"][TEAM_STREAM]["teams"] == 30
     assert summary["streams"][TEAM_STREAM]["rows_by_play_type"] == {category: 30 for category in PLAY_TYPES}

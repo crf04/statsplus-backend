@@ -454,11 +454,20 @@ def main(argv: Sequence[str] | None = None, *, provider: Any | None = None) -> i
     if provider is None and proxy is None and not args.no_proxy:
         parser.error("COLLECTOR_NBA_PROXY_URL is not set; pass --no-proxy to call stats.nba.com directly")
 
-    from sqlalchemy import create_engine
-
     from app.collector.provider import NBAStatsProviderAdapter
+    from app.config.settings import RuntimeSettings
+    from app.utils.db import get_engine
 
-    engine = create_engine(args.database_url)
+    # The runtime's own engine (Railway's postgres:// URL normalized, the
+    # configured pool) without building the app, whose startup would dispatch
+    # queued refresh jobs.
+    engine = get_engine(
+        RuntimeSettings(
+            environment="development",
+            database={"url": args.database_url},
+            auth={"firebase_admin_disabled": True},
+        )
+    )
     try:
         status, summary = run_backfill(
             engine,
