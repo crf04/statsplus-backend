@@ -3387,3 +3387,26 @@ def test_output_failure_occurs_only_after_commit(monkeypatch, tmp_path):
     assert calls == ["commit", "close", "publish"]
     assert args._database_transaction_committed is True
     assert args._artifact_session is None
+
+
+def _fractional_v3_rows(metric: str, value: float):
+    from tests.support.traditional_opponent_family import v3_payload
+
+    rows = v3_payload()
+    for row in rows:
+        row["team_tricode"] = NBA_TEAM_ID_TO_TRICODE[row["team_id"]]
+        row["counts"][metric] = value
+    return json.dumps(rows)
+
+
+def test_parity_decoder_accepts_fractional_v3_possessions():
+    rows = _decode_ledger_rows(
+        _fractional_v3_rows("possessions", 101.4), stream_key="traditional_opponent_season"
+    )
+
+    assert len(rows) == 30
+
+
+def test_parity_decoder_still_rejects_fractional_points():
+    with pytest.raises(MatchupParityError):
+        _decode_ledger_rows(_fractional_v3_rows("points", 101.4), stream_key="traditional_opponent_season")
