@@ -186,7 +186,7 @@ class TargetResolutionService:
         with request_read_scope(engine, repeatable_read=True) as read_scope:
             matchups = self._request_matchups(
                 read_scope=None if engine is None else read_scope,
-                pool_read=self._pool_read(games, targets),
+                pool_read=self._pool_read(games, targets, connection=read_scope[0]),
             )
             for target in targets:
                 resolved = self._resolve_target(
@@ -231,12 +231,17 @@ class TargetResolutionService:
         return slate if slate["games"] else self.slates.get_slate(slate["slate_date"])
 
     def _pool_read(
-        self, games: Mapping[str, tuple[Mapping[str, Any], str, str]], targets: Sequence[Mapping[str, Any]]
+        self,
+        games: Mapping[str, tuple[Mapping[str, Any], str, str]],
+        targets: Sequence[Mapping[str, Any]],
+        *,
+        connection: Any | None = None,
     ) -> PoolRead | None:
         """One read of the pool of every game a Target names, which each composes from.
 
         The Slate counted from a roster read of every game; a Target composes
-        only the games it names, so only theirs are read in full.
+        only the games it names, so only theirs are read in full.  On the
+        request's ``connection`` it reads in the snapshot the games compose in.
         """
 
         if self.player_pool is None or self.settings is None:
@@ -245,7 +250,7 @@ class TargetResolutionService:
         seasons = {event_season(self.settings, game_id, None) for game_id in named}
         if len(seasons) != 1:
             return None
-        return self.player_pool.read_games(season=seasons.pop(), game_ids=named)
+        return self.player_pool.read_games(season=seasons.pop(), game_ids=named, connection=connection)
 
     def _request_matchups(
         self, *, read_scope: tuple[Any, Any] | None = None, pool_read: PoolRead | None = None

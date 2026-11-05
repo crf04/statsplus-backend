@@ -625,7 +625,7 @@ class Publications:
         return SimpleNamespace(generation=self.generation, retained_history=())
 
 
-def _cached_service(composer, redis_client, games, *, publications=None, settings=None):
+def _cached_service(composer, redis_client, games, *, publications=None, settings=None, engine=None):
     return SlateEdgesService(
         slates=FakeSlate(games),
         matchups=composer,
@@ -633,6 +633,7 @@ def _cached_service(composer, redis_client, games, *, publications=None, setting
         injuries=object(),
         settings=settings or RuntimeSettings(environment="testing", nba={"current_season": "2025-26"}),
         redis_client=redis_client,
+        engine=engine,
     )
 
 
@@ -1125,7 +1126,16 @@ def test_the_edges_and_their_matchups_write_what_the_previous_release_wrote():
     }
 
 
-def test_the_slate_and_every_games_matchup_count_from_one_pool_read():
+class _SelectedPublications(Publications):
+    selected_season = "2025-26"
+
+
+@pytest.mark.parametrize("selected", (False, True), ids=("default season", "selected season"))
+def test_the_slate_and_every_games_matchup_count_from_one_pool_read(selected):
+    """With a selected season, the read is on the connection every game composes on."""
+
+    from sqlalchemy import create_engine
+
     from app.services.player_pool import PlayerPool, PoolRoster
 
     games, payloads = _two_games()
@@ -1147,11 +1157,11 @@ def test_the_slate_and_every_games_matchup_count_from_one_pool_read():
         def roster(self, game_ids=None):
             return PoolRoster((), {}, {"status": "slate"})
 
-    class Reader:
-        reads: ClassVar = []
+    reads = []
 
-        def read_games(self, *, season, game_ids):
-            self.reads.append((season, tuple(game_ids)))
+    class Reader:
+        def read_games(self, *, season, game_ids, connection=None):
+            reads.append((season, tuple(game_ids), connection))
             return Read()
 
     class Slate(FakeSlate):
@@ -1160,18 +1170,26 @@ def test_the_slate_and_every_games_matchup_count_from_one_pool_read():
             slate["roster"] = player_pool.get_pool_roster(season="2025-26", game_ids=("G1", "G2"))
             return slate
 
-    class Composer(SnapshotComposer):
-        seen: ClassVar = []
+    seen = []
 
-        def get_matchup_from_snapshot(self, *, game_id, pool_read=None, **kwargs):
-            self.seen.append(pool_read.pool((game_id,)).freshness["status"])
+    class Composer(SnapshotComposer):
+        def get_matchup_from_snapshot(self, *, game_id, pool_read=None, read_scope=(None, None), **kwargs):
+            seen.append((pool_read.pool((game_id,)).freshness["status"], read_scope[0]))
             return super().get_matchup_from_snapshot(game_id=game_id, **kwargs)
 
-    service = _cached_service(Composer(payloads), None, games)
+    service = _cached_service(
+        Composer(payloads),
+        None,
+        games,
+        publications=_SelectedPublications() if selected else None,
+        engine=create_engine("sqlite://"),
+    )
     service.slates = Slate(games)
     service.player_pool = Reader()
 
     service.get_edges("2026-04-10")
 
-    assert Reader.reads == [("2025-26", ("G1", "G2"))]
-    assert Composer.seen == ["G1", "G2"]
+    ((season, game_ids, connection),) = reads
+    assert (season, game_ids) == ("2025-26", ("G1", "G2"))
+    assert seen == [("G1", connection), ("G2", connection)]
+    assert (connection is not None) is selected

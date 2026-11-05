@@ -222,7 +222,9 @@ class PoolRead(Protocol):
 
 
 class PoolReadReader(Protocol):
-    def read_games(self, *, season: str, game_ids: Iterable[str]) -> PoolRead: ...
+    def read_games(
+        self, *, season: str, game_ids: Iterable[str], connection: Connection | None = None
+    ) -> PoolRead: ...
 
 
 class KeptPoolRead:
@@ -233,12 +235,13 @@ class KeptPoolRead:
     per game.
     """
 
-    def __init__(self, reader: PoolReadReader) -> None:
+    def __init__(self, reader: PoolReadReader, connection: Connection | None = None) -> None:
         self._reader = reader
+        self._connection = connection
         self.read: PoolRead | None = None
 
     def get_pool_roster(self, *, season: str, game_ids: Iterable[str]) -> PoolRoster:
-        self.read = self._reader.read_games(season=season, game_ids=game_ids)
+        self.read = self._reader.read_games(season=season, game_ids=game_ids, connection=self._connection)
         return self.read.roster()
 
 

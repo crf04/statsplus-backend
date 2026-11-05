@@ -3444,28 +3444,37 @@ class LatestProjectionPlayerPoolReader:
         *,
         roster: bool = False,
     ) -> PoolRead:
-        """``roster`` reads only the columns a ``PoolRoster`` is built from."""
+        """``roster`` reads only the columns a ``PoolRoster`` is built from.
+
+        The events and the pool rows are read in one snapshot, the caller's
+        on ``connection``, so a game's event and its rows always agree.
+        """
 
         if season != self.scope.query.season:
             return self._for_season(season)._read_games(season, game_ids, connection, roster=roster)
         requested_games = tuple(sorted({str(game_id) for game_id in game_ids}))
-        events = self._requested_events(season, requested_games, connection) if requested_games else []
-        started = self._start_fences(events)
-        live_games = tuple(game for game in requested_games if game not in started)
-        return PoolRead(
-            reader=self,
-            season=season,
-            game_ids=requested_games,
-            events={str(event.get("nba_game_id", "")): event for event in events},
-            started=started,
-            live=(
-                self._read_pool_state(season, live_games, connection, roster=roster) if live_games else None
-            ),
-            closing_rows=(
-                self._read_closing_rows(season, tuple(started), connection, roster=roster) if started else ()
-            ),
-            narrow=roster,
-        )
+        with self._pool_snapshot(connection) as connection:
+            events = self._requested_events(season, requested_games, connection) if requested_games else []
+            started = self._start_fences(events)
+            live_games = tuple(game for game in requested_games if game not in started)
+            return PoolRead(
+                reader=self,
+                season=season,
+                game_ids=requested_games,
+                events={str(event.get("nba_game_id", "")): event for event in events},
+                started=started,
+                live=(
+                    self._read_pool_state(season, live_games, connection, roster=roster)
+                    if live_games
+                    else None
+                ),
+                closing_rows=(
+                    self._read_closing_rows(season, tuple(started), connection, roster=roster)
+                    if started
+                    else ()
+                ),
+                narrow=roster,
+            )
 
     def _pool_from(
         self, read: PoolRead, requested_games: tuple[str, ...], *, roster: bool

@@ -2884,9 +2884,11 @@ class _NamedPools:
 
     def __init__(self):
         self.reads = []
+        self.connections = []
 
-    def read_games(self, *, season, game_ids):
+    def read_games(self, *, season, game_ids, connection=None):
         self.reads.append((season, frozenset(game_ids)))
+        self.connections.append(connection)
         return SimpleNamespace(
             season=season,
             game_ids=tuple(sorted(game_ids)),
@@ -2895,7 +2897,17 @@ class _NamedPools:
         )
 
 
-def test_resolve_reads_the_pool_of_every_game_a_target_names_once_and_no_other(targets):
+class _SelectedSeasonPublications(_AdvancingPublicationReader):
+    selected_season = matchup_doubles.SEASON
+
+    def snapshot(self, stream_keys, *, season, projection_only_keys=None, **_):
+        return super().snapshot(stream_keys, season=season, projection_only_keys=projection_only_keys)
+
+
+@pytest.mark.parametrize("selected", (False, True), ids=("default season", "selected season"))
+def test_resolve_reads_the_pool_of_every_game_a_target_names_once_and_no_other(targets, selected):
+    """With a selected season, the read is on the connection every game composes on."""
+
     okc_game_id, mia_game_id, idle_game_id = "0022500900", "0022500901", "0022500902"
     okc_game = _game(
         game_id=okc_game_id,
@@ -2917,8 +2929,8 @@ def test_resolve_reads_the_pool_of_every_game_a_target_names_once_and_no_other(t
     _create(targets, opponent="DEN", qualifiers=(TRANSITION,))
 
     class Composer(_RecordedSnapshotMatchups):
-        def get_matchup_from_snapshot(self, *, game_id, pool_read=None, **kwargs):
-            self.pools = [*getattr(self, "pools", []), pool_read.pool((game_id,))]
+        def get_matchup_from_snapshot(self, *, game_id, pool_read=None, read_scope=(None, None), **kwargs):
+            self.pools = [*getattr(self, "pools", []), (pool_read.pool((game_id,)), read_scope[0])]
             return super().get_matchup_from_snapshot(
                 game_id=game_id,
                 publication_snapshot=kwargs["publication_snapshot"],
@@ -2931,16 +2943,21 @@ def test_resolve_reads_the_pool_of_every_game_a_target_names_once_and_no_other(t
         targets=targets,
         slates=FakeSlate(games=[okc_game, mia_game, idle_game]),
         matchups=composer,
-        publication_reader=_AdvancingPublicationReader(),
+        publication_reader=_SelectedSeasonPublications() if selected else _AdvancingPublicationReader(),
         injuries=object(),
         settings=_resolution_settings(),
         player_pool=pools,
+        engine=create_engine("sqlite://"),
     )
 
     service.resolve(OWNER, requested_date=SLATE_DATE)
 
     assert pools.reads == [(matchup_doubles.SEASON, frozenset({okc_game_id, mia_game_id}))]
-    assert sorted(composer.pools) == [(okc_game_id,), (mia_game_id,)]
+    (connection,) = pools.connections
+    assert sorted(composer.pools, key=str) == sorted(
+        [((okc_game_id,), connection), ((mia_game_id,), connection)], key=str
+    )
+    assert (connection is not None) is selected
 
 
 def test_resolve_reads_no_pool_when_no_target_plays(targets):

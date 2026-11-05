@@ -120,17 +120,19 @@ class SlateEdgesService:
         a malformed one is its ``invalid_input`` refusal; ``fallback`` is the
         Slate's ``previous_game_day``/``next_game_day`` rule (``slate_fallback.read_slate``)."""
 
-        pools = None if self.player_pool is None else KeptPoolRead(self.player_pool)
-        slate = read_slate(partial(self._slate, player_pool=pools), requested_date, fallback)
-        # Each game's schedule facts are its own season's (crf04/statsplus#330 AC9).
-        for game in slate["games"]:
-            refuse_evidence_after_game(self.publication_reader, season_for_game_id(game["game_id"]))
         # A selection's capture and every game's reads share one REPEATABLE
         # READ snapshot, as a selected Matchup's do, so a prune that commits
         # in between cannot empty a later game's projection reads.  None of
         # them writes.  Otherwise each game composes on a scope of its own.
+        # The Slate's pool read is the games' pool, so it reads in that
+        # snapshot too.
         engine = None if selected_season(self.publication_reader) is None else self._engine
         with request_read_scope(engine, repeatable_read=True) as read_scope:
+            pools = None if self.player_pool is None else KeptPoolRead(self.player_pool, read_scope[0])
+            slate = read_slate(partial(self._slate, player_pool=pools), requested_date, fallback)
+            # Each game's schedule facts are its own season's (crf04/statsplus#330 AC9).
+            for game in slate["games"]:
+                refuse_evidence_after_game(self.publication_reader, season_for_game_id(game["game_id"]))
             matchups = self._request_matchups(
                 read_scope=None if engine is None else read_scope,
                 pool_read=None if pools is None else pools.read,
