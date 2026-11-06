@@ -480,9 +480,13 @@ def test_the_provider_requests_advanced_per_game_def_rating(monkeypatch):
         date_to=DATE_TO, season=SEASON, season_type="Regular Season", last_n_games=15
     )
 
-    assert {key: requested[key] for key in ("measure_type_detailed_defense", "per_mode_detailed")} == {
+    assert {
+        key: requested[key]
+        for key in ("measure_type_detailed_defense", "per_mode_detailed", "season_type_all_star")
+    } == {
         "measure_type_detailed_defense": "Advanced",
         "per_mode_detailed": "PerGame",
+        "season_type_all_star": "Regular Season",
     }
     assert (requested["last_n_games"], requested["date_to_nullable"], requested["season"]) == (
         "15",
@@ -492,11 +496,12 @@ def test_the_provider_requests_advanced_per_game_def_rating(monkeypatch):
     assert len(frame) == 30
 
 
-def test_a_non_numeric_def_rating_is_a_provider_contract_failure():
+@pytest.mark.parametrize("rating", ["n/a", 0.0, -101.2])
+def test_a_non_numeric_or_non_positive_def_rating_is_a_provider_contract_failure(rating):
     from app.collector.contracts import ProviderContractError
 
     rows = advanced_rows()
-    rows[3]["DEF_RATING"] = "n/a"
+    rows[3]["DEF_RATING"] = rating
 
     with pytest.raises(ProviderContractError):
         normalize_defensive_rating_response(
@@ -537,3 +542,44 @@ def test_ingestion_refuses_a_rating_read_outside_its_issued_window(plane):
             gzip.compress(raw),
             compressed=True,
         )
+
+
+def test_a_stored_non_positive_rating_publishes_nothing(plane):
+    """Composition re-proves the rating, whatever a collector claimed."""
+
+    from sqlalchemy.orm import Session
+
+    from app.models.collection_control import CollectionObservation
+
+    plane.upload(advanced_rows(games=DAYS))
+    good = plane.compose(SEASON_STREAM)
+    plane.upload(advanced_rows(_ratings(LAL=130.0), games=DAYS), name="tampered")
+    with Session(plane.engine) as session, session.begin():
+        observation = session.scalars(
+            select(CollectionObservation).where(
+                CollectionObservation.client_observation_id.like("%tampered%")
+            )
+        ).one()
+        payload = json.loads(observation.payload)
+        next(r for r in payload["records"] if r["team_id"] == 1610612747)["DEF_RATING"] = 0.0
+        observation.payload = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        observation.checksum = hashlib.sha256(observation.payload.encode()).hexdigest()
+
+    with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
+        plane.compose(SEASON_STREAM)
+    assert plane.active(SEASON_STREAM).publication_id == good.publication_id
+
+
+def test_a_def_rating_publication_its_governance_does_not_prove_ranks_nothing(plane):
+    plane.upload(advanced_rows(games=DAYS))
+    plane.compose(SEASON_STREAM)
+
+    class OtherGames:
+        def resolve_team_game_ids(self, season, cutoff, *, window, **kwargs):
+            return {int(team_id): frozenset({"0022500999"}) for team_id in NBA_TEAM_IDS}
+
+    governed = plane.rankings()
+    ungoverned = TeamFilterRankingService(governed.publication_reader, governance_resolver=OtherGames())
+
+    assert governed.ranked_teams("DRTG", SEASON)[:10] == TEN_HIGHEST
+    assert ungoverned.ranked_teams("DRTG", SEASON) == []

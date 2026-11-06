@@ -244,3 +244,40 @@ def test_without_a_2025_26_anchor_publication_nothing_is_fetched(production, cap
 
     assert _summary(capsys)["refused"] == f"anchor_not_serving_2025_26:{ANCHOR}"
     assert provider.calls == []
+
+
+def test_an_answer_that_returns_to_an_earlier_value_is_published_again(production, capsys):
+    url, engine, _manifest = production
+
+    class Provider(AdvancedProvider):
+        def __init__(self, lakers):
+            super().__init__()
+            self.lakers = lakers
+
+        def fetch_team_advanced_ratings(self, **kwargs):
+            rows = super().fetch_team_advanced_ratings(**kwargs)
+            return [{**row, "DEF_RATING": self.lakers} if row["TEAM_NAME"] == "LAL" else row for row in rows]
+
+    served = []
+    for lakers in (114.8, 119.9, 114.8):
+        assert _run(url, provider=Provider(lakers)) == 0
+        served.append(_active_rows(engine, SEASON_STREAM)[1]["LAL"]["per48"]["DEF_RATING"])
+
+    assert served == [114.8, 119.9, 114.8]
+    assert _summary(capsys)["streams"][SEASON_STREAM]["published"]["serving"] is True
+
+
+def test_a_season_that_is_not_the_published_season_is_refused_before_any_fetch(production, capsys):
+    url, engine, _manifest = production
+    with engine.begin() as connection:
+        connection.execute(
+            PublicationPointer.__table__.delete().where(
+                PublicationPointer.__table__.c.stream_key == "player_game_logs"
+            )
+        )
+    provider = AdvancedProvider()
+
+    assert _run(url, provider=provider) == 2
+
+    assert _summary(capsys)["refused"] == "published_season_not_2025_26"
+    assert provider.calls == []

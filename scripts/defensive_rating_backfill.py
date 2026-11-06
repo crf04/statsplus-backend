@@ -204,16 +204,27 @@ def _report(envelope: ObservationEnvelope) -> dict[str, Any]:
     return {"teams": len(records), "games_played": sorted({int(r["games_played"]) for r in records})}
 
 
-def _is_new(session: Session, envelope: ObservationEnvelope) -> bool:
-    return (
-        session.scalar(
-            select(CollectionObservation.observation_id).where(
-                CollectionObservation.collector_id == COLLECTOR_ID,
-                CollectionObservation.client_observation_id == envelope.client_observation_id,
-            )
+def _is_new(session: Session, authority: Authority, window: str, envelope: ObservationEnvelope) -> bool:
+    """Whether NBA's answer differs from the window's latest accepted one.
+
+    Composition reads the latest accepted observation, so an answer that
+    returns to an earlier value (A, then B, then A) is new evidence again,
+    not a duplicate of the first.
+    """
+
+    latest = session.scalars(
+        select(CollectionObservation)
+        .where(
+            CollectionObservation.manifest_id == authority.manifest_id,
+            CollectionObservation.observation_type == DEFENSIVE_RATING_OBSERVATION,
+            CollectionObservation.season == SEASON,
         )
-        is None
-    )
+        .order_by(CollectionObservation.accepted_at.desc(), CollectionObservation.observation_id.desc())
+    ).all()
+    for observation in latest:
+        if json.loads(observation.scope).get("window") == window:
+            return observation.checksum != envelope.checksum
+    return True
 
 
 def _accept(
@@ -230,7 +241,9 @@ def _accept(
     session.add(
         CollectionObservation(
             observation_id=str(uuid.uuid4()),
-            client_observation_id=envelope.client_observation_id,
+            # The payload-derived id plus the run, so an answer seen before can
+            # be accepted again when NBA returns to it.
+            client_observation_id=f"{envelope.client_observation_id[:96]}:{now.strftime('%Y%m%dT%H%M%S%f')}",
             collector_id=COLLECTOR_ID,
             environment=authority.environment,
             provider=envelope.provider,
@@ -275,7 +288,9 @@ def _retry_failed(session: Session, publications: PublicationService, stream_key
     return 1
 
 
-def _published(engine, stream_key: str, authority: Authority) -> dict[str, Any]:
+def _published(
+    engine, stream_key: str, authority: Authority, envelope: ObservationEnvelope
+) -> dict[str, Any]:
     with Session(engine) as session:
         job = session.scalar(
             select(CompositionJob).where(
@@ -286,6 +301,8 @@ def _published(engine, stream_key: str, authority: Authority) -> dict[str, Any]:
         )
         active = _active(session, stream_key)
         rows = json.loads(active.payload).get("rows", ()) if active is not None else ()
+        fetched = {int(r["team_id"]): float(r["DEF_RATING"]) for r in envelope.payload["records"]}
+        served = {int(row["team_id"]): float(row["per48"]["DEF_RATING"]) for row in rows}
         return {
             "job_status": job.status if job is not None else None,
             "last_error": job.last_error if job is not None else None,
@@ -293,6 +310,7 @@ def _published(engine, stream_key: str, authority: Authority) -> dict[str, Any]:
             "teams": len(rows),
             "serving": active is not None
             and len(rows) == 30
+            and served == fetched
             and active.season == SEASON
             and active.manifest_id == authority.manifest_id
             and _aware(active.cutoff) == authority.cutoff,
@@ -325,7 +343,7 @@ def run_backfill(
     )
     with Session(engine) as session, session.begin():
         for stream_key, window in STREAMS.items():
-            new = _is_new(session, fetched[window])
+            new = _is_new(session, authority, window, fetched[window])
             summary["streams"][stream_key]["new_observations"] = int(new)
             if dry_run:
                 continue
@@ -338,7 +356,9 @@ def run_backfill(
         return EXIT_OK, summary
     summary["composed_jobs"] = compose_queued()(SEASON)
     for stream_key in STREAMS:
-        summary["streams"][stream_key]["published"] = _published(engine, stream_key, authority)
+        summary["streams"][stream_key]["published"] = _published(
+            engine, stream_key, authority, fetched[STREAMS[stream_key]]
+        )
     failed = any(not stream["published"]["serving"] for stream in summary["streams"].values())
     return (EXIT_REFUSED if failed else EXIT_OK), summary
 
