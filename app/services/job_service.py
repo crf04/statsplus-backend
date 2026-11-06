@@ -69,6 +69,17 @@ KNOWN_REFRESH_OPERATIONS: Final[frozenset[str]] = frozenset(
 #: Stable, non-exposing summary written when a job fails without a safe reason.
 DEFAULT_FAILURE_SUMMARY: Final[str] = "The data refresh operation could not complete."
 
+#: Claims a job gets before an expired lease fails it instead of starting
+#: another attempt.  A handler that returns or raises records its own result,
+#: so only a worker that stopped renewing (a deploy, ``max_requests``
+#: recycling, or a handler that kills its process) leaves a row to reclaim.
+#: Two such interruptions are survivable; a third points at the job itself.
+MAX_REFRESH_ATTEMPTS: Final[int] = 3
+
+EXHAUSTED_ATTEMPTS_SUMMARY: Final[str] = (
+    f"The data refresh stopped responding {MAX_REFRESH_ATTEMPTS} times and was not retried."
+)
+
 #: Set to ``"1"`` by a pre-forking server (``gunicorn.conf.py``) before it
 #: builds the app in its master process.  The app-scoped coordinator is then
 #: constructed without recovery dispatch or a poller thread, and the server
@@ -533,8 +544,29 @@ class DataRefreshJobService:
         condition = (DataRefreshJob.job_id == job_id) & (
             (DataRefreshJob.status == JOB_STATUS_QUEUED) | stale_filter
         )
+        exhausted = (
+            (DataRefreshJob.job_id == job_id)
+            & stale_filter
+            & (DataRefreshJob.attempt_count >= MAX_REFRESH_ATTEMPTS)
+        )
         try:
             with self._session_factory() as session:
+                failed = session.execute(
+                    update(DataRefreshJob)
+                    .where(exhausted)
+                    .values(
+                        status=JOB_STATUS_FAILED,
+                        finished_at=now,
+                        error_summary=EXHAUSTED_ATTEMPTS_SUMMARY,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        heartbeat_at=None,
+                    )
+                )
+                if failed.rowcount == 1:
+                    session.commit()
+                    logger.error("Data refresh job %s failed: %s", job_id, EXHAUSTED_ATTEMPTS_SUMMARY)
+                    return None
                 result = session.execute(
                     update(DataRefreshJob)
                     .where(condition)
