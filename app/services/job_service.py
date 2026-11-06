@@ -617,30 +617,33 @@ class DataRefreshJobService:
     ) -> None:
         interval = min(max(self._lease_seconds / 3.0, 0.05), 5.0)
         while not stop_event.wait(interval):
-            if not self._renew_lease(claimed_job):
+            try:
+                renewed = self._renew_lease(claimed_job)
+            except OperationalError:
+                # The lease is unchanged, so the next beat can still renew it
+                # before it expires.
+                logger.warning("Could not renew refresh job %s; retrying", claimed_job.job_id, exc_info=True)
+                continue
+            if not renewed:
+                logger.warning(
+                    "Refresh job %s lost its lease; its handler can no longer publish or record a result",
+                    claimed_job.job_id,
+                )
                 return
 
     def _renew_lease(self, claimed_job: ClaimedJob) -> bool:
         now = self._clock()
-        try:
-            with self._session_factory() as session:
-                result = session.execute(
-                    update(DataRefreshJob)
-                    .where(self._owned_lease_condition(claimed_job, now))
-                    .values(
-                        lease_expires_at=now + timedelta(seconds=self._lease_seconds),
-                        heartbeat_at=now,
-                    )
+        with self._session_factory() as session:
+            result = session.execute(
+                update(DataRefreshJob)
+                .where(self._owned_lease_condition(claimed_job, now))
+                .values(
+                    lease_expires_at=now + timedelta(seconds=self._lease_seconds),
+                    heartbeat_at=now,
                 )
-                session.commit()
-                return result.rowcount == 1
-        except OperationalError:
-            logger.debug(
-                "Could not renew refresh job %s",
-                claimed_job.job_id,
-                exc_info=True,
             )
-            return False
+            session.commit()
+            return result.rowcount == 1
 
     def _owned_job(self, claimed_job: ClaimedJob):
         now = self._clock()
