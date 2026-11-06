@@ -667,7 +667,14 @@ class PlayerService:
 
             # Get team ID
             team_dict = pd.DataFrame(self._get_teams())
-            team_id = team_dict.loc[team_dict["full_name"] == opp_team, "id"].values[0]
+            team_ids = team_dict.loc[team_dict["full_name"] == opp_team, "id"].values
+            if len(team_ids) == 0:
+                # The page clears its opponent when the player changes, so this
+                # tab can be read before one is chosen; no opponent is an empty
+                # tab, not an error.
+                logger.info("No archetype opponent for %r", opp_team)
+                return []
+            team_id = team_ids[0]
 
             gl = self._archetype_frame(player_ids, int(team_id))
             if gl.empty:

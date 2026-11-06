@@ -211,6 +211,36 @@ def test_archetype_profile_for_an_unclustered_player_is_empty_without_an_error(t
     assert [r.getMessage() for r in caplog.records if r.levelname == "ERROR"] == []
 
 
+@pytest.mark.parametrize("opponent", [None, "", "Not A Team"])
+def test_archetype_profile_without_a_known_opponent_is_empty_without_an_error(
+    tmp_path, monkeypatch, caplog, opponent
+):
+    # The page clears its opponent when the player changes, so the Archetype
+    # tab can read once before the default opponent is chosen.  No opponent
+    # means no comparison to make: an empty tab, not an error (Sentry
+    # PYTHON-FLASK-Q).
+    engine = _archetype_engine(tmp_path)
+    logs = _StoredArchetypeLogs([_game_log_record()])
+    monkeypatch.setattr(
+        PlayerService,
+        "_get_teams",
+        staticmethod(lambda: [{"full_name": "Boston Celtics", "id": 1610612738}]),
+    )
+    service = PlayerService(
+        engine,
+        PlayerProfileReader.unavailable(),
+        settings=_settings(),
+        game_logs=logs,
+    )
+
+    with caplog.at_level("DEBUG", logger="app.services.player_service"):
+        result = service.get_player_profile("LeBron James", "Archetype", opponent)
+
+    assert result == []
+    assert logs.calls == []
+    assert [r.getMessage() for r in caplog.records if r.levelname == "ERROR"] == []
+
+
 def test_archetype_profile_omits_a_row_without_usable_season_baselines(tmp_path, monkeypatch):
     engine = create_engine(f"sqlite:///{tmp_path / 'players.sqlite3'}")
     pd.DataFrame([{"full_name": "LeBron James", "id": 2544}]).to_sql(
