@@ -8,7 +8,9 @@ trunk's apart from those additive keys, which carry their resting values.
 player row; they are stripped too and pinned on their own.  #407 makes PTS and
 FGA read the Traditional ``OPP_PTS`` and ``OPP_FGA`` rows, which the seeded
 legacy facts lack, so those windows name ``team_defense:traditional``; that
-entry is stripped too and pinned on its own.
+entry is stripped too and pinned on its own.  #437 drops the impossible
+``Less Than 10 ft`` 3PA/3PM Defense Sheet rows, so they are removed from the
+golden before comparing and their absence is pinned on its own.
 The golden file is trunk's (622a98b4) output of ``_responses``, captured by
 running this module's ``__main__`` against a ``git archive`` of that commit;
 regenerate it only from trunk.  Publication ids are random, so they are
@@ -151,10 +153,27 @@ def _without_serving_season_keys(responses: dict) -> dict:
     return stripped
 
 
+_IMPOSSIBLE_ROWS = frozenset({"Less Than 10 ft:FG3A", "Less Than 10 ft:FG3M"})
+
+
+def _shot_type_sheets(matchup: dict) -> list[list[dict]]:
+    return [body["defense_sheet"]["shot_types"] for body in (matchup["league"], *matchup["teams"])]
+
+
+def _golden_without_impossible_rows() -> dict:
+    golden = json.loads(GOLDEN.read_text())
+    for rows in _shot_type_sheets(golden["matchup"]):
+        rows[:] = [row for row in rows if row["key"] not in _IMPOSSIBLE_ROWS]
+    return golden
+
+
 def test_before_a_cutover_matchup_slate_and_edges_equal_trunk_but_for_the_serving_season_keys(tmp_path):
     responses = _responses(tmp_path)
 
-    assert _without_serving_season_keys(responses) == json.loads(GOLDEN.read_text())
+    assert _without_serving_season_keys(responses) == _golden_without_impossible_rows()
+    assert all(
+        row["key"] not in _IMPOSSIBLE_ROWS for rows in _shot_type_sheets(responses["matchup"]) for row in rows
+    )
     sections = responses["matchup"]["experience"]["sections"]
     assert {
         section: (sections[section]["season"], sections[section]["window_games"])
