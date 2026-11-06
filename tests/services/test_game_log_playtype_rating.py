@@ -90,12 +90,14 @@ class _RequiredSnapshotReader:
         projection_only_keys=frozenset(),
         decoded_only_keys=frozenset(),
     ):
+        # NBA.com's Defensive Rating is captured only for a DRTG filter, which
+        # no request here names (crf04/statsplus#447).
         assert set(stream_keys) == {
             "player_game_logs",
             *PLAYER_DIET_PUBLICATION_STREAM_KEYS,
             *TEAM_FILTER_PUBLICATION_STREAM_KEYS,
             *TEAM_MATCHUP_PUBLICATION_STREAM_KEYS["season"],
-        }
+        } - {"defensive_rating_season"}
         assert season == "2025-26"
         assert projection_only_keys == frozenset({"player_game_logs"})
         # The diet shares and team windows are read from the decode cache, so

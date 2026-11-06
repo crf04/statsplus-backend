@@ -54,6 +54,8 @@ fails closed with `ledger_parity_cohort_incomplete`.
 | `exact_shot_zones_opponent_*` | nba | no |
 | `grouped_shot_types_opponent_*` | nba | no |
 | `synergy_play_types_opponent_season` | nba | no |
+| `defensive_rating_season` | nba | no |
+| `defensive_rating_l15` | nba | no |
 | `synergy_play_types_opponent_l15` | nba | never activates; `provider_window_unsupported` |
 
 NBA-owned surfaces are written through the governed publication capability and
@@ -540,9 +542,53 @@ deletes nothing — neither the immutable v1 payloads nor their audit evidence.
 | `publication_family_coupled` | 409 | A per-stream operation would split the family. |
 | `publication_family_authority_mismatch` | 400 | The target pair does not rest on one season, cutoff, and authority. |
 
+### Activating NBA.com Defensive Rating
+
+`DRTG` reads `defensive_rating_season`, NBA.com's `DEF_RATING`
+(crf04/statsplus#447). Until that stream serves a season, `DRTG` is omitted
+from the Team Profile, ranks nothing as a Team Filter, and has no Next
+Opponent entry for that season. The streams compose from the residential
+collector's `defensive_rating` observation; nothing else changes. In order:
+
+1. Deploy. Both streams register disabled.
+2. Enable each for its first collection (admin, reason only):
+   `POST /admin/collection/streams/defensive_rating_season/activate` and the
+   same for `defensive_rating_l15`, each with
+   `{"reason": "enable for first collection"}`.
+3. Collect the finished 2025-26 season first, from a machine with the
+   residential proxy in `COLLECTOR_NBA_PROXY_URL` (it rides on the manifest of
+   the active 2025-26 `exact_shot_zones_opponent_season` Publication and
+   publishes both streams; a stream with no Publication activates its first
+   composition whatever its season, so 2025-26 goes first):
+
+   ```bash
+   python scripts/defensive_rating_backfill.py --database-url "$DATABASE_URL" --dry-run
+   python scripts/defensive_rating_backfill.py --database-url "$DATABASE_URL"
+   ```
+
+   The dry run reports 30 teams per window, `games_played` `[82]` for the
+   Season and `[15]` for the Last 15. The run reports `serving: true` for both
+   streams; a rerun reports `new_observations: 0`.
+4. For 2026-27, add `defensive_rating` to the residential collector identity's
+   surfaces (a new surface needs a new identity; see RESIDENTIAL_COLLECTOR.md),
+   then issue one 2026-27 manifest whose scopes are the current manifest's plus
+   `defensive_rating_season` and `defensive_rating_l15`.
+   `player-shooting-refresh` copies them forward from then on. Each 2026-27
+   composition is held as a candidate (`publication.held`, `season_held`)
+   until the Season Cutover.
+5. Confirm: `GET /api/teams/stats?category=Traditional&season=2025-26&team=...`
+   serves `DRTG` equal to NBA.com's `DEF_RATING` to 0.1, with rank 1 the
+   lowest; `teams_against[]=DRTG&rank_filter[]=10` keeps only the ten highest.
+
+A collector run NBA refuses (empty, partial or 5xx) uploads nothing, and
+composition refuses an incomplete league, so the active Publication keeps
+serving.
+
 ### Backfilling possessions for Defensive Rating
 
-`DRTG` (crf04/statsplus#433) needs the opponent's offensive possessions:
+No reader uses possessions since crf04/statsplus#447: `DRTG` reads NBA.com's
+`DEF_RATING` above. This section is kept for the `offensive_possessions` column,
+which stays. It was written when `DRTG` (crf04/statsplus#433) needed the opponent's offensive possessions:
 PBPStats' per-player `OffPoss`, extracted from the archived raw rows into the
 nullable `offensive_possessions` columns of the ledger player and team facts
 (migration `085_ledger_offensive_possessions`, which invents no value). A
@@ -605,9 +651,9 @@ site only through one operator Season Cutover, never by composition alone.
 | --- | --- | --- |
 | `game_logs` | `player_game_logs`, `player_per36` | At the Season Cutover |
 | `player_diets` | `grouped_shot_types`, `exact_shot_zones`, `player_assist_locations`, `player_rebound_types` | Every team has played at least 10 games |
-| `team_defense` | `traditional_opponent_season`, `grouped_shot_types_opponent_season`, `exact_shot_zones_opponent_season`, `synergy_play_types_opponent_season`, `assist_locations_season`, `rebound_types_season` | Every team has played at least one game (crf04/statsplus#350) |
+| `team_defense` | `traditional_opponent_season`, `grouped_shot_types_opponent_season`, `exact_shot_zones_opponent_season`, `synergy_play_types_opponent_season`, `assist_locations_season`, `rebound_types_season`, `defensive_rating_season` | Every team has played at least one game (crf04/statsplus#350) |
 | `synergy` | `synergy_play_types` | A candidate of the season exists (NBA has published) and every team has played at least 10 games |
-| `last_15` | the five `*_l15` streams | At its first composition in the season (unchanged until crf04/statsplus-backend#548) |
+| `last_15` | the six `*_l15` streams | At its first composition in the season (unchanged until crf04/statsplus-backend#548) |
 
 A family with a game count is *trailing* until its rule holds: its streams
 keep their previous-season Publication, and a read in the Published Season

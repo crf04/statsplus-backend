@@ -13,7 +13,9 @@ from app.services.game_service import GameService
 from app.services.next_opponent import NextOpponentService
 from app.services.team_filter_rankings import TeamFilterRankingService
 from tests.routes.test_team_stats import _seeded_reads
-from tests.support.publication_stubs import StubGovernance, StubReader
+from tests.support.defensive_rating import STREAM as DRTG_STREAM
+from tests.support.defensive_rating import defensive_rating_read
+from tests.support.publication_stubs import StubGovernance, StubReader, team_service
 from tests.test_game_logs import _game_logs_frame
 
 
@@ -493,7 +495,28 @@ def test_a_hidden_row_never_displaces_a_listed_copy(setup):
     assert "C&S 3PA" not in labels
 
 
-def test_defensive_rating_is_its_own_next_list_entry_on_points(setup):
+def test_defensive_rating_is_its_own_next_list_entry_matching_the_profile(setup):
+    client, reads, _ = setup
+    reads[DRTG_STREAM] = defensive_rating_read()
+
+    response = get(client)
+
+    assert response.status_code == 200
+    rows = {row["team_filter"]: row for row in response.get_json()["opponent_ranks"]}
+    drtg = rows["DRTG"]
+    assert (drtg["label"], drtg["family"], drtg["markets"]) == (
+        "Defensive rating",
+        "defensive-rating",
+        ["PTS"],
+    )
+    # LAL's NBA.com rating, the thirteenth highest of thirty.
+    assert (drtg["value"], drtg["most_rank"], drtg["ranked_teams"]) == (114.8, 13, 30)
+    profile = team_service(reads).get_team_stats("Traditional", "Los Angeles Lakers")
+    assert (profile["DRTG"], profile["DRTG_RANK"]) == (114.8, 18)
+    assert drtg["vs_league_pct"] == pytest.approx(profile["DRTG_vs_avg_pct"])
+
+
+def test_without_a_def_rating_publication_the_next_list_has_no_defensive_rating(setup):
     client, reads, _ = setup
     key = "traditional_opponent_season"
     reads[key] = replace(
@@ -509,4 +532,42 @@ def test_defensive_rating_is_its_own_next_list_entry_on_points(setup):
     assert response.status_code == 200
     rows = {row["team_filter"]: row for row in response.get_json()["opponent_ranks"]}
     assert "OPP_PTS" in rows
-    assert (rows["DRTG"]["family"], rows["DRTG"]["markets"]) == ("defensive-rating", ["PTS"])
+    assert "DRTG" not in rows
+
+
+def _game_logs(client, authenticate, team_filter, rank):
+    response = client.get(
+        "/api/games/game_logs",
+        query_string={
+            "player_name": "LeBron James",
+            "season_filter": "2025-26",
+            "teams_against[]": team_filter,
+            "rank_filter[]": rank,
+        },
+        headers=authenticate(),
+    )
+    assert response.status_code == 200, response.get_json()
+    return [game["MATCHUP"] for game in response.get_json()["game_logs"]]
+
+
+def test_the_drtg_filter_keeps_only_games_against_the_n_highest_def_ratings(setup, authenticate):
+    client, reads, _ = setup
+    reads[DRTG_STREAM] = defensive_rating_read()
+
+    # The one logged game is against LAL, the thirteenth highest rating.
+    assert _game_logs(client, authenticate, "DRTG", "10") == []
+    assert _game_logs(client, authenticate, "DRTG", "13") == ["BOS vs. LAL"]
+    assert _game_logs(client, authenticate, "DRTG", "-18") == ["BOS vs. LAL"]
+    assert _game_logs(client, authenticate, "DRTG", "-17") == []
+
+
+def test_only_a_drtg_request_captures_the_def_rating_publication(setup, dependencies, authenticate):
+    client, reads, _ = setup
+    reads[DRTG_STREAM] = defensive_rating_read()
+    reader = dependencies.game_service.publication_reader
+
+    _game_logs(client, authenticate, "OPP_PTS", "30")
+    assert DRTG_STREAM not in {stream for stream, _season in reader.calls}
+
+    _game_logs(client, authenticate, "DRTG", "30")
+    assert DRTG_STREAM in {stream for stream, _season in reader.calls}

@@ -41,6 +41,7 @@ from app.utils.tables import normalize_table_name
 from .nba_cache import NBAGameCache
 from .team_filter_rankings import (
     TEAM_FILTER_PUBLICATION_STREAM_KEYS,
+    season_stream_key,
     team_filter_ranking,
 )
 
@@ -53,6 +54,11 @@ logger = logging.getLogger(__name__)
 _PLAY_TYPE_BASE = "play_types"
 _PLAY_TYPE_STAT_KEY = "PTS"
 _DEFAULT_PLAYSTYLE_RANGE = (0.0, 200.0)
+#: Streams only a Team Filter reads (NBA.com's Defensive Rating,
+#: crf04/statsplus#447).  A request captures one only when a filter it names
+#: ranks from it, so every other answer reads, and names in its provenance,
+#: exactly the generation it did before.
+_TEAM_FILTER_ONLY_STREAM_KEYS = frozenset({season_stream_key("defensive_rating")})
 _PUBLICATION_STREAM_KEYS = tuple(
     sorted(
         {
@@ -61,12 +67,25 @@ _PUBLICATION_STREAM_KEYS = tuple(
             *TEAM_FILTER_PUBLICATION_STREAM_KEYS,
             *TEAM_MATCHUP_PUBLICATION_STREAM_KEYS["season"],
         }
+        - _TEAM_FILTER_ONLY_STREAM_KEYS
     )
 )
 _PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
-# Diet facts and team windows come from the reader's decode cache, so a cache
-# hit never selects or parses their league-wide payloads.
-_DECODED_ONLY_STREAM_KEYS = frozenset(_PUBLICATION_STREAM_KEYS) - _PROJECTION_ONLY_STREAM_KEYS
+
+
+def _snapshot_stream_keys(team_filters=()) -> tuple[str, ...]:
+    """The streams one request captures: the shared set plus its filters' own.
+
+    Diet facts and team windows come from the reader's decode cache, so a
+    cache hit never selects or parses their league-wide payloads.
+    """
+
+    needed = {
+        season_stream_key(ranking.base)
+        for ranking in (team_filter_ranking(team_filter) for team_filter in team_filters)
+        if ranking is not None
+    } & _TEAM_FILTER_ONLY_STREAM_KEYS
+    return tuple(sorted({*_PUBLICATION_STREAM_KEYS, *needed}))
 
 
 def _tracking_averages(frame: pd.DataFrame) -> dict[str, float | None]:
@@ -629,7 +648,9 @@ class GameService:
             return self._filtered_logs(player_name, query, connection=connection, session=session)
 
     def _filtered_logs(self, player_name, query: GameLogQuery, *, connection, session):
-        publication_snapshot = self._publication_snapshot(query.season_filter, session=session)
+        publication_snapshot = self._publication_snapshot(
+            query.season_filter, session=session, team_filters=query.teams_against or ()
+        )
         full_game_logs, next_team = call_with_read_scope(
             self._get_game_logs,
             player_name,
@@ -809,7 +830,7 @@ class GameService:
             for game_id, player_id in zip(frame["GAME_ID"].astype(str), frame["PLAYER_ID"], strict=False)
         ]
 
-    def _publication_snapshot(self, season, *, session=None):
+    def _publication_snapshot(self, season, *, session=None, team_filters=()):
         """Capture all immutable publications composed by this request.
 
         A season before the Published Season reads its retained Publications;
@@ -826,8 +847,9 @@ class GameService:
         keyword = {}
         if accepts_keyword(snapshot, "projection_only_keys"):
             keyword["projection_only_keys"] = _PROJECTION_ONLY_STREAM_KEYS
+        stream_keys = _snapshot_stream_keys(team_filters)
         if accepts_keyword(snapshot, "decoded_only_keys"):
-            keyword["decoded_only_keys"] = _DECODED_ONLY_STREAM_KEYS
+            keyword["decoded_only_keys"] = frozenset(stream_keys) - _PROJECTION_ONLY_STREAM_KEYS
         if session is not None and accepts_keyword(snapshot, "session"):
             keyword["session"] = session
         if (
@@ -835,7 +857,7 @@ class GameService:
             and season is not None
         ):
             season = ReadSeason(season, requested=season)
-        return snapshot(_PUBLICATION_STREAM_KEYS, season=season, **keyword)
+        return snapshot(stream_keys, season=season, **keyword)
 
     def filter_teams(self, team_filter, rank_filter, season):
         """Select opponents by Season Rankings: the first N, last N, or a rank range.

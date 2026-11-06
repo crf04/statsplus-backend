@@ -22,6 +22,7 @@ from .normalizers import (
     SHOT_TYPES,
     _flatten_frame_columns,
     _records,
+    normalize_defensive_rating_response,
     normalize_grouped_shot_response,
     normalize_opponent_grouped_shot_response,
     normalize_opponent_synergy_response,
@@ -453,6 +454,30 @@ class ResidentialScopeExecutor:
                 games_response=games,
             )
             return
+        if scope == "defensive_rating":
+            if window not in {"season", "l15"}:
+                raise ProviderContractError("provider_window_unsupported")
+            last_n_games = 15 if window == "l15" else 0
+            raw = _call(
+                self.provider,
+                "fetch_team_advanced_ratings",
+                date_to=parameters.get("date_to"),
+                season=work.season,
+                season_type="Regular Season",
+                last_n_games=last_n_games,
+            )
+            yield normalize_defensive_rating_response(
+                raw,
+                season=work.season,
+                cutoff=work.cutoff,
+                window=window,
+                endpoint_window={
+                    "last_n_games": last_n_games,
+                    "date_from": None,
+                    "date_to": parameters.get("date_to"),
+                },
+            )
+            return
         if scope in {"synergy:l15", "synergy_l15"}:
             raise ProviderContractError("provider_window_unsupported")
         raise ProviderContractError("scope_not_registered")
@@ -777,6 +802,38 @@ class _StandaloneNBAProvider:
                 per_mode_detailed="Totals",
                 date_from_nullable=date_from,
                 date_to_nullable=date_to,
+                season=season,
+                season_type_all_star=season_type,
+                league_id_nullable="00",
+                timeout=self.timeout,
+                proxy=self.proxy,
+            )
+        )
+
+    def fetch_team_advanced_ratings(
+        self,
+        *,
+        date_to: str | None,
+        season: str,
+        season_type: str,
+        last_n_games: int,
+    ) -> Any:
+        """Fetch every team's NBA.com Advanced ratings over one window.
+
+        ``MeasureType=Advanced``, ``PerMode=PerGame`` (crf04/statsplus#447).
+        One league-wide call per window: ``LastNGames=0`` is the Season and
+        ``15`` the Last 15, both bounded by the manifest's slate date.
+        """
+
+        from nba_api.stats import endpoints
+
+        return self._request(
+            lambda: endpoints.LeagueDashTeamStats(
+                measure_type_detailed_defense="Advanced",
+                per_mode_detailed="PerGame",
+                last_n_games=str(int(last_n_games)),
+                date_from_nullable="",
+                date_to_nullable=date_to or "",
                 season=season,
                 season_type_all_star=season_type,
                 league_id_nullable="00",

@@ -36,6 +36,8 @@ from app.services.team_filter_rankings import (
     TEAM_FILTER_RANKINGS,
     TeamFilterRankingService,
 )
+from tests.support.defensive_rating import DEF_RATINGS, TEN_HIGHEST
+from tests.support.defensive_rating import STREAM as DRTG_STREAM
 from tests.support.publication_stubs import (
     TRADITIONAL_METRICS,
     traditional_per48,
@@ -182,40 +184,38 @@ def test_stocks_filter_sums_the_two_published_primitives():
     assert ranked[:3] == ["GSW", "LAL", "BOS"]
 
 
-def _drtg_reads(*, possessions=True):
-    """Points and possessions per 48 whose DRTG order differs from points.
+def _drtg_reads(*, with_rating=True):
+    """A v3 traditional publication beside NBA.com's DEF_RATING publication.
 
-    MIA 100 / 80 = 125.0, GSW 120 / 100 = 120.0, BOS 110 / 100 = 110.0, and
-    every other team 100 / 100 = 100.0.
+    The traditional rows carry possessions whose points per possession would
+    rank LAL first, so a DRTG that still read them would be visibly wrong.
     """
 
-    values = {"MIA": (100.0, 80.0), "GSW": (120.0, 100.0), "BOS": (110.0, 100.0)}
-
     def per48(tricode):
-        points, team_possessions = values.get(tricode, (100.0, 100.0))
-        if not possessions:
-            return traditional_per48(points=points)
-        return traditional_per48(points=points, possessions=team_possessions)
+        if tricode == "LAL":
+            return traditional_per48(points=150.0, possessions=50.0)
+        return traditional_per48(points=100.0, possessions=100.0)
 
-    return {"traditional_opponent_season": _read("traditional_opponent_season", _league(per48))}
+    reads = {"traditional_opponent_season": _read("traditional_opponent_season", _league(per48))}
+    if with_rating:
+        reads[DRTG_STREAM] = _read(DRTG_STREAM, _league(lambda tricode: {"DEF_RATING": DEF_RATINGS[tricode]}))
+    return reads
 
 
-def test_drtg_ranks_points_per_100_possessions_highest_first():
-    service = _service(_drtg_reads())
-
-    drtg = service.ranked_teams("DRTG", SEASON)
-    points = service.ranked_teams("OPP_PTS", SEASON)
+def test_drtg_ranks_nba_def_rating_highest_first():
+    drtg = _service(_drtg_reads()).ranked_teams("DRTG", SEASON)
 
     assert len(drtg) == 30
-    assert drtg[:3] == ["MIA", "GSW", "BOS"]
-    assert points[:3] == ["GSW", "BOS", "ATL"]
+    assert drtg[:11] == [*TEN_HIGHEST, "ATL"]
+    assert drtg[-1] == "OKC"
+    assert drtg.index("LAL") == 12
 
 
-def test_a_publication_without_possessions_ranks_no_drtg_but_every_other_filter():
-    service = _service(_drtg_reads(possessions=False))
+def test_without_a_def_rating_publication_drtg_ranks_nothing_but_every_other_filter():
+    service = _service(_drtg_reads(with_rating=False))
 
     assert service.ranked_teams("DRTG", SEASON) == []
-    assert service.ranked_teams("OPP_PTS", SEASON)[:2] == ["GSW", "BOS"]
+    assert service.ranked_teams("OPP_PTS", SEASON)[0] == "LAL"
 
 
 def _shot_type_reads(values):
@@ -347,6 +347,7 @@ def test_every_filter_reads_only_its_own_season_stream():
     assert {season for _stream, season in reader.calls} == {SEASON}
     assert {stream for stream, _season in reader.calls} == {
         "traditional_opponent_season",
+        "defensive_rating_season",
         "assist_locations_season",
         "grouped_shot_types_opponent_season",
         "synergy_play_types_opponent_season",
