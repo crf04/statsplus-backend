@@ -2116,6 +2116,99 @@ def test_cycle_missing_a_disabled_publishing_stream_stays_in_attention(control_d
     assert _alerts(control_db, cycle) == [("cycle_attention", "open"), ("stale_threshold", "open")]
 
 
+def _publish_next_cutoff(control_db, stream_key, *, cutoff, at):
+    publication_id = f"pub-{stream_key}-next"
+    with control_db.begin() as connection:
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                publication_id=publication_id,
+                stream_key=stream_key,
+                season="2025-26",
+                cutoff=cutoff,
+                version=2,
+                status="active",
+                checksum="b" * 64,
+                payload="{}",
+                created_at=at,
+                fence=2,
+            )
+        )
+        connection.execute(
+            PublicationPointer.__table__.update()
+            .where(PublicationPointer.stream_key == stream_key)
+            .values(active_publication_id=publication_id, fence=2, updated_at=at)
+        )
+
+
+def _published_then_next_cutoff_served(control_db, clock, *, finish_complete):
+    operations, cycle, manifest, cutoff = _ledger_cycle(control_db, clock)
+    for stream_key in LEDGER_MANIFEST_PUBLISHING_STREAMS:
+        _point_at_active_publication(control_db, stream_key, manifest=manifest, cutoff=cutoff, at=clock[0])
+    if finish_complete:
+        operations.collection_control.finish_cycle(cycle.cycle_id, status="complete")
+    clock[0] += timedelta(days=1)
+    for stream_key in LEDGER_MANIFEST_PUBLISHING_STREAMS:
+        _publish_next_cutoff(control_db, stream_key, cutoff=cutoff + timedelta(days=1), at=clock[0])
+    clock[0] += timedelta(hours=7)
+    return operations, cycle
+
+
+def test_complete_cycle_stays_complete_after_the_next_cutoff_publishes(control_db):
+    clock = [datetime(2026, 8, 12, tzinfo=UTC)]
+    operations, cycle = _published_then_next_cutoff_served(control_db, clock, finish_complete=True)
+
+    result = operations.evaluate_cycle_alerts()
+
+    assert _cycle_state(control_db, cycle) == ("complete", None)
+    assert _last_validation(control_db, cycle) == ("passed", [])
+    assert _alerts(control_db, cycle) == []
+    assert result == {"cycles_evaluated": 1, "cycles_attention": 0, "cycles_completed": 0}
+
+
+def test_complete_cycle_that_loses_a_publication_alerts_but_stays_complete(control_db):
+    clock = [datetime(2026, 8, 12, tzinfo=UTC)]
+    operations, cycle, manifest, cutoff = _ledger_cycle(control_db, clock)
+    for stream_key in LEDGER_MANIFEST_PUBLISHING_STREAMS:
+        _point_at_active_publication(control_db, stream_key, manifest=manifest, cutoff=cutoff, at=clock[0])
+    operations.collection_control.finish_cycle(cycle.cycle_id, status="complete")
+    with control_db.begin() as connection:
+        connection.execute(
+            PublicationPointer.__table__.delete().where(PublicationPointer.stream_key == "player_per36")
+        )
+    clock[0] += timedelta(hours=7)
+
+    result = operations.evaluate_cycle_alerts()
+
+    assert _cycle_state(control_db, cycle) == ("complete", None)
+    assert _alerts(control_db, cycle) == [("cycle_attention", "open"), ("stale_threshold", "open")]
+    assert result == {"cycles_evaluated": 1, "cycles_attention": 1, "cycles_completed": 0}
+
+
+def test_cycle_that_published_its_cutoff_owes_nothing_once_the_next_cutoff_publishes(control_db):
+    clock = [datetime(2026, 8, 12, tzinfo=UTC)]
+    operations, cycle = _published_then_next_cutoff_served(control_db, clock, finish_complete=False)
+
+    result = operations.evaluate_cycle_alerts()
+
+    assert _cycle_state(control_db, cycle) == ("collecting", None)
+    assert _last_validation(control_db, cycle) == ("passed", [])
+    assert _alerts(control_db, cycle) == []
+    assert result == {"cycles_evaluated": 1, "cycles_attention": 0, "cycles_completed": 0}
+
+
+def test_failed_cycle_keeps_its_status_and_reason_past_the_attention_window(control_db):
+    clock = [datetime(2026, 8, 12, tzinfo=UTC)]
+    operations, cycle, _, _ = _ledger_cycle(control_db, clock)
+    operations.collection_control.finish_cycle(cycle.cycle_id, status="failed", reason="provider_outage")
+    clock[0] += timedelta(hours=7)
+
+    result = operations.evaluate_cycle_alerts()
+
+    assert _cycle_state(control_db, cycle) == ("failed", "provider_outage")
+    assert _alerts(control_db, cycle) == [("cycle_attention", "open"), ("first_failure", "open")]
+    assert result == {"cycles_evaluated": 1, "cycles_attention": 1, "cycles_completed": 0}
+
+
 def test_repeated_evaluation_opens_and_recovers_each_alert_once(control_db):
     clock = [datetime(2026, 8, 12, tzinfo=UTC)]
     adapter = RecordingAlertAdapter()
