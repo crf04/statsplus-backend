@@ -4051,7 +4051,10 @@ claim.  Before replacing any live table, the handler renews that claim as a
 fencing check inside the same database transaction as the table swap.  A
 stale attempt is rejected and cannot overwrite the newer attempt, although
 provider calls already in flight when a lease expires are not cancellable by
-this mechanism.
+this mechanism.  A job is claimed at most three times: when the third attempt's
+lease also expires, the next claim marks the job `failed` with the
+`failure_summary` "The data refresh stopped responding 3 times and was not
+retried.", and a new request for that operation is accepted.
 
 The deployment-owned `scripts/nightly_refresh.py --hosted-only` command is not
 an HTTP endpoint. It runs two independent steps, retrying each failed step once,
