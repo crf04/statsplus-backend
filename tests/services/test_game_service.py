@@ -540,14 +540,16 @@ def test_players_off_excludes_games_the_other_player_appeared_in(service, game_l
     assert result["GAME_ID"].tolist() == ["0001", "0004"]
 
 
-def test_players_off_does_not_exclude_an_opponents_appearance(service, game_logs, monkeypatch):
+def test_players_off_never_counts_a_game_without_a_player_who_was_never_a_teammate(
+    service, game_logs, monkeypatch
+):
     opponent = game_logs[game_logs["GAME_ID"] == "0002"].copy()
     opponent["TEAM_ABBREVIATION"] = "OPP"
     _stub_game_logs(service, monkeypatch, {"Opponent": opponent})
 
     result = run(service.filter_players_on_off(game_logs, [], ["Opponent"], "2025-26"))
 
-    assert result["GAME_ID"].tolist() == game_logs["GAME_ID"].tolist()
+    assert result["GAME_ID"].tolist() == []
 
 
 def test_common_games_requires_every_named_player(service, game_logs, monkeypatch):
@@ -578,6 +580,69 @@ def test_games_to_exclude_unions_every_named_player(service, game_logs, monkeypa
     excluded = run(service.get_games_to_exclude(game_logs, ["A", "B"], "2025-26"))
 
     assert excluded == {"0001", "0004"}
+
+
+def _logs(*games):
+    """Game-log rows from ``(game_id, date, team)``."""
+    return pd.DataFrame(
+        [{"GAME_ID": g, "GAME_DATE": d, "TEAM_ABBREVIATION": t, "MIN": 30} for g, d, t in games]
+    )
+
+
+def test_players_off_leaves_out_games_before_the_named_player_joined_the_team(service, monkeypatch):
+    # McCollum's shape (crf04/statsplus#449): three WAS games, then traded to
+    # ATL, where Johnson played two of the four.
+    mccollum = _logs(
+        ("w1", "2025-11-01", "WAS"),
+        ("w2", "2025-11-03", "WAS"),
+        ("w3", "2025-11-05", "WAS"),
+        ("a1", "2026-02-10", "ATL"),
+        ("a2", "2026-02-12", "ATL"),
+        ("a3", "2026-02-14", "ATL"),
+        ("a4", "2026-02-16", "ATL"),
+    )
+    johnson = _logs(
+        ("x1", "2025-11-02", "ATL"),
+        ("x2", "2025-11-04", "ATL"),
+        ("a1", "2026-02-10", "ATL"),
+        ("a3", "2026-02-14", "ATL"),
+    )
+    _stub_game_logs(service, monkeypatch, {"Jalen Johnson": johnson})
+
+    result = run(service.filter_players_on_off(mccollum, [], ["Jalen Johnson"], "2025-26"))
+
+    assert result["GAME_ID"].tolist() == ["a2", "a4"]
+
+
+def test_players_off_leaves_out_games_after_the_named_player_moved_to_another_team(service, monkeypatch):
+    primary = _logs(
+        ("g1", "2026-01-01", "LAL"),
+        ("g2", "2026-01-05", "LAL"),
+        ("g3", "2026-01-10", "LAL"),
+        ("g4", "2026-01-15", "LAL"),
+    )
+    traded = _logs(
+        ("g1", "2026-01-01", "LAL"),
+        ("b1", "2026-01-08", "BOS"),
+        ("b2", "2026-01-12", "BOS"),
+    )
+    _stub_game_logs(service, monkeypatch, {"Traded": traded})
+
+    result = run(service.filter_players_on_off(primary, [], ["Traded"], "2025-26"))
+
+    assert result["GAME_ID"].tolist() == ["g2"]
+
+
+def test_players_off_counts_games_an_inactive_teammate_missed_as_without(service, monkeypatch):
+    # Ayo without Edwards (crf04/statsplus#449): Edwards played the first two
+    # MIN games and has no row since.
+    ayo = _logs(*((f"m{n}", f"2026-10-{20 + 2 * n}", "MIN") for n in range(1, 6)))
+    edwards = ayo[ayo["GAME_ID"].isin(["m1", "m2"])]
+    _stub_game_logs(service, monkeypatch, {"Anthony Edwards": edwards})
+
+    result = run(service.filter_players_on_off(ayo, [], ["Anthony Edwards"], "2026-27"))
+
+    assert result["GAME_ID"].tolist() == ["m3", "m4", "m5"]
 
 
 # --- team ranking ----------------------------------------------------------
