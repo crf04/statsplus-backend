@@ -29,6 +29,7 @@ from app.models.collection_control import (
     OperatorJob,
     PublicationObservation,
     PublicationPointer,
+    PublicationPointerHistory,
     PublicationRepairGroup,
     PublicationRepairGroupMember,
     PublicationStream,
@@ -2187,6 +2188,99 @@ def test_complete_cycle_that_loses_a_publication_alerts_but_stays_complete(contr
 def test_cycle_that_published_its_cutoff_owes_nothing_once_the_next_cutoff_publishes(control_db):
     clock = [datetime(2026, 8, 12, tzinfo=UTC)]
     operations, cycle = _published_then_next_cutoff_served(control_db, clock, finish_complete=False)
+
+    result = operations.evaluate_cycle_alerts()
+
+    assert _cycle_state(control_db, cycle) == ("collecting", None)
+    assert _last_validation(control_db, cycle) == ("passed", [])
+    assert _alerts(control_db, cycle) == []
+    assert result == {"cycles_evaluated": 1, "cycles_attention": 0, "cycles_completed": 0}
+
+
+def _cut_over_to_next_season(control_db, stream_key, *, cutoff, at):
+    """Move the pointer to a 2026-27 publication, recording each pointer move's history."""
+
+    history = PublicationPointerHistory.__table__
+    publication_id = f"pub-{stream_key}-2026-27"
+    with control_db.begin() as connection:
+        current = connection.execute(
+            select(PublicationVersion.publication_id, PublicationVersion.season)
+            .join(
+                PublicationPointer,
+                PublicationPointer.active_publication_id == PublicationVersion.publication_id,
+            )
+            .where(PublicationPointer.stream_key == stream_key)
+        ).first()
+        if current is not None:
+            connection.execute(
+                history.insert().values(
+                    history_id=f"history-{stream_key}-1",
+                    stream_key=stream_key,
+                    publication_id=current.publication_id,
+                    season=current.season,
+                    fence=1,
+                    activated_at=at,
+                )
+            )
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                publication_id=publication_id,
+                stream_key=stream_key,
+                season="2026-27",
+                cutoff=cutoff,
+                version=1,
+                status="active",
+                checksum="c" * 64,
+                payload="{}",
+                created_at=at,
+                fence=2,
+            )
+        )
+        connection.execute(
+            PublicationPointer.__table__.delete().where(PublicationPointer.stream_key == stream_key)
+        )
+        connection.execute(
+            PublicationPointer.__table__.insert().values(
+                stream_key=stream_key, active_publication_id=publication_id, fence=2, updated_at=at
+            )
+        )
+        connection.execute(
+            history.insert().values(
+                history_id=f"history-{stream_key}-2",
+                stream_key=stream_key,
+                publication_id=publication_id,
+                season="2026-27",
+                fence=2,
+                activated_at=at,
+            )
+        )
+
+
+def test_next_seasons_publications_do_not_complete_a_cycle_that_never_published(control_db):
+    clock = [datetime(2026, 8, 12, tzinfo=UTC)]
+    operations, cycle, _, cutoff = _ledger_cycle(control_db, clock)
+    clock[0] += timedelta(hours=7)
+    for stream_key in LEDGER_MANIFEST_PUBLISHING_STREAMS:
+        _cut_over_to_next_season(control_db, stream_key, cutoff=cutoff + timedelta(days=90), at=clock[0])
+
+    result = operations.evaluate_cycle_alerts()
+
+    assert _cycle_state(control_db, cycle) == ("attention", "cycle_window_expired")
+    assert _last_validation(control_db, cycle) == ("attention", LEDGER_MANIFEST_PUBLISHING_STREAMS)
+    assert _alerts(control_db, cycle) == [("cycle_attention", "open"), ("stale_threshold", "open")]
+    assert result == {"cycles_evaluated": 1, "cycles_attention": 1, "cycles_completed": 0}
+    with pytest.raises(ControlPlaneError, match="cycle_incomplete"):
+        operations.finish_cycle(cycle.cycle_id, status="complete", actor="operator", reason="looks done")
+
+
+def test_cycle_stays_delivered_by_its_retained_publications_after_season_cutover(control_db):
+    clock = [datetime(2026, 8, 12, tzinfo=UTC)]
+    operations, cycle, manifest, cutoff = _ledger_cycle(control_db, clock)
+    for stream_key in LEDGER_MANIFEST_PUBLISHING_STREAMS:
+        _point_at_active_publication(control_db, stream_key, manifest=manifest, cutoff=cutoff, at=clock[0])
+    clock[0] += timedelta(hours=7)
+    for stream_key in LEDGER_MANIFEST_PUBLISHING_STREAMS:
+        _cut_over_to_next_season(control_db, stream_key, cutoff=cutoff + timedelta(days=90), at=clock[0])
 
     result = operations.evaluate_cycle_alerts()
 
