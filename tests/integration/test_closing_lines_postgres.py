@@ -198,7 +198,7 @@ def test_the_2026_27_gap_backfill_on_postgres_writes_a_closing_poll_once_and_the
             event_mapper=world.event_mapper,
             names=world.names,
             events=events,
-            max_credits=60,
+            max_credits=90,
             keep_remaining=5000,
             clock=lambda: CLOCK,
             season=season,
