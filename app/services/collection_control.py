@@ -150,6 +150,7 @@ COLLECTOR_LEASE_RETRY_SECONDS = 1
 COMPOSITION_BUSY_RETRY_SECONDS = 30
 STALE_ALERT_SECONDS = 60 * 60
 ATTENTION_ALERT_SECONDS = 6 * 60 * 60
+LIFECYCLE_EVALUATED_STATUSES = ("collecting", "attention", "failed", "complete")
 MAX_EVENT_CATALOG_GAMES = 3_000
 MAX_ATHLETE_CATALOG_IDENTITIES = 100_000
 USAGE_WINDOW_SECONDS = 24 * 60 * 60
@@ -4525,37 +4526,10 @@ class CollectionControlService(_SessionService):
             if cycle.status in {"complete", "no_game", "superseded"}:
                 raise ControlPlaneError("cycle_immutable")
             if status == "complete":
-                exempt = set(
-                    session.scalars(
-                        select(GovernedNotApplicable.stream_key).where(
-                            GovernedNotApplicable.cycle_id == cycle_id
-                        )
-                    )
-                )
                 manifest = session.get(CollectionManifest, cycle.manifest_id)
                 if manifest is None:
                     raise ControlPlaneError("manifest_expired")
-                enabled = _manifest_streams(session, manifest)
-                l15_ready = _manifest_l15_ready(self.engine, manifest)
-                missing = []
-                for stream in enabled:
-                    if stream.publication_strategy in NON_PUBLISHING_STRATEGIES:
-                        continue
-                    if stream.stream_key in exempt:
-                        continue
-                    if not l15_ready and stream.stream_key.endswith("_l15"):
-                        # The Last-15 window has not opened; its absence is a
-                        # designed waiting state, not missing work.
-                        continue
-                    pointer = session.get(PublicationPointer, stream.stream_key)
-                    publication = (
-                        session.get(PublicationVersion, pointer.active_publication_id)
-                        if pointer and pointer.active_publication_id
-                        else None
-                    )
-                    if publication is None or _aware(publication.cutoff) != _aware(cycle.cutoff):
-                        missing.append(stream.stream_key)
-                if missing:
+                if _cycle_missing_streams(session, self.engine, cycle, manifest):
                     raise ControlPlaneError("cycle_incomplete")
             cycle.status, cycle.completed_at, cycle.attention_reason = status, now, reason
         return cycle
@@ -9250,9 +9224,7 @@ class CollectionOperationsService(_SessionService):
         control = self.collection_control or CollectionControlService(self.engine, clock=self.clock)
         evaluated_cycle_ids: list[str] = []
         with self.session() as session, session.begin():
-            query = select(CollectionCycle).where(
-                CollectionCycle.status.in_(("collecting", "attention", "failed", "complete"))
-            )
+            query = select(CollectionCycle).where(CollectionCycle.status.in_(LIFECYCLE_EVALUATED_STATUSES))
             if cycle_id is not None:
                 if session.get(CollectionCycle, cycle_id) is None:
                     raise ControlPlaneError("cycle_not_found")
@@ -9261,41 +9233,14 @@ class CollectionOperationsService(_SessionService):
             for cycle in cycles:
                 evaluated += 1
                 evaluated_cycle_ids.append(cycle.cycle_id)
-                governed = set(
-                    session.scalars(
-                        select(GovernedNotApplicable.stream_key).where(
-                            GovernedNotApplicable.cycle_id == cycle.cycle_id
-                        )
-                    )
-                )
-                missing = []
                 manifest = session.get(CollectionManifest, cycle.manifest_id)
-                streams = _manifest_streams(session, manifest) if manifest is not None else []
-                l15_ready = _manifest_l15_ready(self.engine, manifest)
-                for stream in streams:
-                    if (
-                        stream.publication_strategy in NON_PUBLISHING_STRATEGIES
-                        or stream.stream_key in governed
-                    ):
-                        continue
-                    if not l15_ready and stream.stream_key.endswith("_l15"):
-                        # A closed Last-15 window is a designed waiting state,
-                        # not missing work that should alert.
-                        continue
-                    pointer = session.get(PublicationPointer, stream.stream_key)
-                    publication = (
-                        session.get(PublicationVersion, pointer.active_publication_id)
-                        if pointer and pointer.active_publication_id
-                        else None
-                    )
-                    if publication is None or _aware(publication.cutoff) != _aware(cycle.cutoff):
-                        missing.append(stream.stream_key)
+                missing = _cycle_missing_streams(session, self.engine, cycle, manifest)
                 session.add(
                     ValidationSummary(
                         summary_id=_uuid(),
                         cycle_id=cycle.cycle_id,
                         status="attention" if missing else "passed",
-                        counts=_json({"missing_streams": sorted(missing)}),
+                        counts=_json({"missing_streams": missing}),
                         created_at=current,
                     )
                 )
@@ -9317,12 +9262,7 @@ class CollectionOperationsService(_SessionService):
                     # locked and reloaded first, so a cycle superseded by
                     # another session since it was read is left alone instead
                     # of being overwritten with ``complete``.
-                    current_row = session.scalar(
-                        select(CollectionCycle)
-                        .where(CollectionCycle.cycle_id == cycle.cycle_id)
-                        .with_for_update()
-                        .execution_options(populate_existing=True)
-                    )
+                    current_row = _lock_cycle(session, cycle.cycle_id)
                     if current_row is not None and current_row.status == "attention":
                         control.finish_cycle(cycle.cycle_id, status="complete", session=session)
                         completed += 1
@@ -9344,13 +9284,28 @@ class CollectionOperationsService(_SessionService):
                             now=current,
                         )
                 if missing and not work_pending and age >= ATTENTION_ALERT_SECONDS:
-                    cycle.status, cycle.attention_reason = "attention", "cycle_window_expired"
-                    if self._open_lifecycle_alert(
-                        session,
-                        cycle_id=cycle.cycle_id,
-                        severity="critical",
-                        code="cycle_attention",
-                        now=current,
+                    # Only a collecting cycle moves to attention; a failed or
+                    # complete one keeps its status and only alerts.  The row
+                    # is locked and reloaded first, so a cycle superseded by
+                    # another session since it was read is left alone.
+                    current_row = _lock_cycle(session, cycle.cycle_id)
+                    if current_row is not None and current_row.status == "collecting":
+                        control.finish_cycle(
+                            cycle.cycle_id,
+                            status="attention",
+                            reason="cycle_window_expired",
+                            session=session,
+                        )
+                    if (
+                        current_row is not None
+                        and current_row.status in LIFECYCLE_EVALUATED_STATUSES
+                        and self._open_lifecycle_alert(
+                            session,
+                            cycle_id=cycle.cycle_id,
+                            severity="critical",
+                            code="cycle_attention",
+                            now=current,
+                        )
                     ):
                         attention += 1
         # Notifications leave only after the alert rows are durable, so a
@@ -9705,28 +9660,10 @@ class CollectionOperationsService(_SessionService):
                 )
             )
             manifest = session.get(CollectionManifest, cycle.manifest_id)
-            streams = _manifest_streams(session, manifest) if manifest is not None else []
-            l15_ready = _manifest_l15_ready(self.engine, manifest)
-            missing: list[str] = []
-            for stream in streams:
-                if stream.publication_strategy in NON_PUBLISHING_STRATEGIES:
-                    continue
-                if stream.stream_key in governed:
-                    continue
-                if not l15_ready and stream.stream_key.endswith("_l15"):
-                    # A closed Last-15 window is not missing work.
-                    continue
-                pointer = session.get(PublicationPointer, stream.stream_key)
-                publication = (
-                    session.get(PublicationVersion, pointer.active_publication_id)
-                    if pointer and pointer.active_publication_id
-                    else None
-                )
-                if publication is None or _aware(publication.cutoff) != _aware(cycle.cutoff):
-                    missing.append(stream.stream_key)
+            missing = _cycle_missing_streams(session, self.engine, cycle, manifest)
             return {
                 "complete": not missing,
-                "missing_streams": sorted(missing),
+                "missing_streams": missing,
                 "governed_not_applicable": sorted(governed),
             }
 
@@ -9984,6 +9921,55 @@ def _completed_game_count(payload: str, *, cutoff: datetime) -> int:
                 count += 1
         return count
     return 0
+
+
+def _cycle_missing_streams(
+    session: Session,
+    engine: Engine,
+    cycle: CollectionCycle,
+    manifest: CollectionManifest | None,
+) -> list[str]:
+    """The publishing streams a cycle still owes, sorted.
+
+    A stream is owed until its active publication is at or after the cycle's
+    cutoff.  A later cutoff's publication replaces this one's, so a cycle that
+    published (or was overtaken) owes nothing once the next cutoff publishes.
+    """
+
+    governed = set(
+        session.scalars(
+            select(GovernedNotApplicable.stream_key).where(GovernedNotApplicable.cycle_id == cycle.cycle_id)
+        )
+    )
+    streams = _manifest_streams(session, manifest) if manifest is not None else []
+    l15_ready = _manifest_l15_ready(engine, manifest)
+    missing = []
+    for stream in streams:
+        if stream.publication_strategy in NON_PUBLISHING_STRATEGIES or stream.stream_key in governed:
+            continue
+        if not l15_ready and stream.stream_key.endswith("_l15"):
+            # A closed Last-15 window is a designed waiting state, not missing work.
+            continue
+        pointer = session.get(PublicationPointer, stream.stream_key)
+        publication = (
+            session.get(PublicationVersion, pointer.active_publication_id)
+            if pointer and pointer.active_publication_id
+            else None
+        )
+        if publication is None or _aware(publication.cutoff) < _aware(cycle.cutoff):
+            missing.append(stream.stream_key)
+    return sorted(missing)
+
+
+def _lock_cycle(session: Session, cycle_id: str) -> CollectionCycle | None:
+    """Lock and reload one cycle, so a transition sees another session's commit."""
+
+    return session.scalar(
+        select(CollectionCycle)
+        .where(CollectionCycle.cycle_id == cycle_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
 
 
 def _manifest_streams(session: Session, manifest: CollectionManifest) -> list[PublicationStream]:

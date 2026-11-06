@@ -5572,7 +5572,11 @@ season. Lifecycle audits are
 append-only and include token issue/use, rotation/revocation, and rejected
 same-ID/different-checksum observations. Maintenance emits deterministic
 first-failure, stale-threshold, six-hour attention, and recovery alerts while
-suppressing false failure/stale alerts when work is queued or running.
+suppressing false failure/stale alerts when work is queued or running. A cycle
+owes a publishing stream until the stream's active publication reaches the
+cycle's cutoff, so a later cutoff's publication settles it. Only a collecting
+cycle moves to `attention`, through `finish_cycle` under a row lock; a failed or
+complete cycle keeps its status, and a superseded one is left alone.
 
 Publication versions retain normalized references to exact accepted
 Observation IDs in `publication_observations`. Garbage collection follows
