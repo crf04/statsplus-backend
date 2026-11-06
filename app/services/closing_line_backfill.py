@@ -22,7 +22,7 @@ A resolver fix reaches the games already bought without buying them again:
 game's lines.  It holds no client, so it can make no call and spend no credit.
 
 The same backfill fills 2026-27 gaps (crf04/statsplus#429): with ``markets`` set
-to the five standard markets, ``started_by`` and ``covered`` (the games the live
+to every standard market, ``started_by`` and ``covered`` (the games the live
 collector already closed), it buys each started game with no closing quote
 under the ledger key ``ALL``, and ``ClosingQuoteWriter`` stores the snapshot as
 that game's closing poll in ``sportsbook_prop_quotes``, so it reads exactly as a
@@ -77,8 +77,8 @@ logger = logging.getLogger(__name__)
 SEASON = "2025-26"
 #: ``10 x unique markets returned x regions`` for one market and one region.
 GAME_COST = 10
-#: The five standard markets a 2026-27 gap purchase buys in one call
-#: (``player_points`` ... ``player_points_rebounds_assists``): 50 credits.
+#: The standard markets a 2026-27 gap purchase buys in one call:
+#: ``GAME_COST`` credits each.
 ALL_ODDS_MARKETS: tuple[str, ...] = tuple(MARKET_CATEGORIES)
 #: A historical events list costs one credit, nothing when it is empty.
 EVENTS_COST = 1
@@ -744,7 +744,7 @@ class _AlreadyWritten(Exception):
 
 
 class ClosingQuoteWriter:
-    """Store a bought five-market snapshot as the game's closing poll (crf04/statsplus#429).
+    """Store a bought all-market snapshot as the game's closing poll (crf04/statsplus#429).
 
     The quotes go through ``SportsbookQuoteStore.record_poll`` with
     ``is_closing``, as a live closing poll's do: an ``odds_api_polls`` row for

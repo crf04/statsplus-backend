@@ -35,14 +35,19 @@ SUPPORTED_REGIONS = (DFS_REGION, SPORTSBOOK_REGION)
 #: The standard (non-alternate) player markets and their Matchup categories.
 #: Demons and goblins (PrizePicks) and non-default multipliers (Underdog,
 #: Pick6) are served only under ``<market>_alternate`` keys, so a request that
-#: names these five never asks for them and the parser never maps them.
+#: names these never asks for them and the parser never maps them.
 MARKET_CATEGORIES: Mapping[str, str] = {
     "player_points": "PTS",
     "player_rebounds": "REB",
     "player_assists": "AST",
     "player_threes": "3PM",
     "player_points_rebounds_assists": "PRA",
+    "player_points_rebounds": "PR",
+    "player_points_assists": "PA",
+    "player_rebounds_assists": "RA",
 }
+#: Credits one ``/events/{id}/odds`` call costs: one per market, one region.
+CALL_COST = len(MARKET_CATEGORIES)
 
 #: Regulated US books only (owner decision, crf04/statsplus#185 section 12).
 #: Offshore books (BetOnline, BetUS, Bovada, LowVig, MyBookie) are never
@@ -432,7 +437,7 @@ class OddsApiClient:
         return EventsResult(parse_events(body), parse_quota(headers))
 
     def event_odds(self, event_id: str) -> EventOddsResult:
-        """One event's five standard prop markets for this client's region."""
+        """One event's standard prop markets for this client's region."""
 
         path = f"/v4/sports/{SPORT_KEY}/events/{event_id}/odds"
         body, headers = self._get(
@@ -625,6 +630,7 @@ def team_tricode(name: str) -> str | None:
 
 __all__ = [
     "BOOK_ALLOWLIST",
+    "CALL_COST",
     "DFS_BOOK_ALLOWLIST",
     "DFS_REGION",
     "MARKET_CATEGORIES",

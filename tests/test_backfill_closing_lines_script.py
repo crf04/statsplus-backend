@@ -462,7 +462,7 @@ def test_a_2026_27_dry_run_names_the_games_it_would_buy_and_their_credits(world_
         "already recorded: 0",
         "closed by the live collector (not bought): 2",
         "to buy: 1 games over 1 game days",
-        "estimated credits: 51 (1 x 50 for the games + 1 x 1 for the event lists, an upper bound)",
+        "estimated credits: 81 (1 x 80 for the games + 1 x 1 for the event lists, an upper bound)",
         f"  {DEN_LAL} 2025-11-04 tip 2025-11-05T00:30Z",
         "credits already spent by earlier runs: 0; cap for the whole backfill (--max-credits): 15000",
         "dry run: no call was made",
@@ -482,11 +482,11 @@ def test_a_2026_27_run_buys_the_gap_and_a_rerun_spends_nothing(
     client.bodies[DEN_LAL_EVENT] = load("historical_event_odds_den_lal_five_markets")
 
     assert (
-        script.main(["--season", "2026-27", "--max-credits", "60", "--database-url", world_2026_27.url]) == 0
+        script.main(["--season", "2026-27", "--max-credits", "90", "--database-url", world_2026_27.url]) == 0
     )
     first = capsys.readouterr().out
     assert (
-        script.main(["--season", "2026-27", "--max-credits", "60", "--database-url", world_2026_27.url]) == 0
+        script.main(["--season", "2026-27", "--max-credits", "90", "--database-url", world_2026_27.url]) == 0
     )
     second = capsys.readouterr().out
 

@@ -1834,7 +1834,7 @@ backends omit both fields.
 
 `book_lines` (#377, crf04/statsplus#185) is additive and always present: sportsbook
 player-prop lines from The Odds API, keyed by category (a subset of `PTS`,
-`REB`, `AST`, `3PM`, `PRA`). It is `{}` for a Historical or Unscheduled
+`REB`, `AST`, `3PM`, `PRA`, `PR`, `PA`, `RA`). It is `{}` for a Historical or Unscheduled
 Matchup, for a game with no quotes, and whenever collection is off. It is a
 sibling of `provenance`, not part of it: a book never appears in `provenance`,
 `posted_markets`, `stat_categories`, the Targets pool, or the DFS board, so a
@@ -3051,12 +3051,13 @@ for that game, keyed by market, or `{}`:
   "closing_lines": { "PTS": { "value": 24.5, "book": "draftkings" }, "REB": { "value": 7.5, "book": "fanduel" } } }
 ```
 
-* Markets are `PTS`, `REB`, `AST`, `3PM` and `PRA`; a market without a line is
+* Markets are `PTS`, `REB`, `AST`, `3PM`, `PRA`, `PR`, `PA` and `RA`; a market without a line is
   absent, never `null`. Each entry is `{value, book}` exactly as `closing_line`
   is, one book per market by the same order (DraftKings, FanDuel, BetMGM,
   Caesars, BetRivers, Fanatics: the first that posted him in that market).
 * 2026-27 onward: the closing quotes the live collector stored for that game,
-  player and market (all five markets), from the game's close: its newest
+  player and market (all standard markets; `PR`, `PA` and `RA` only for games
+  closed after they were added), from the game's close: its newest
   closing poll for its current tip that stored a quote (an empty poll never
   replaces an earlier close for the same tip). A player that close did not
   carry, and a game closed only for a tip a postponement moved, carry `{}`

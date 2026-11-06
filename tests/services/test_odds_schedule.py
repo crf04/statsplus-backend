@@ -266,19 +266,19 @@ def test_the_closing_fetch_is_only_allowed_from_tip_minus_10_until_tip_minus_5()
 
 def test_budget_needs_for_one_game_seen_from_9pm_the_night_before():
     # 14 calls normal; 8 degraded (night, day 10/12/14, final 16/17/18,
-    # closing); the closing alone.
-    assert budget_needs(NIGHT_BEFORE, [GameClock(TIP)]) == (70, 40, 5)
+    # closing); the closing alone, at 8 credits a call.
+    assert budget_needs(NIGHT_BEFORE, [GameClock(TIP)]) == (112, 64, 8)
     # A noon tip: night, six final polls from 9:00, closing; degraded polls
     # final at 9, 10 and 11.
-    assert budget_needs(NIGHT_BEFORE, [GameClock(NOON)]) == (40, 25, 5)
-    assert budget_needs(NIGHT_BEFORE, [GameClock(TIP), GameClock(NOON)]) == (110, 65, 10)
+    assert budget_needs(NIGHT_BEFORE, [GameClock(NOON)]) == (64, 40, 8)
+    assert budget_needs(NIGHT_BEFORE, [GameClock(TIP), GameClock(NOON)]) == (176, 104, 16)
 
 
 def test_budget_needs_drops_the_night_poll_once_it_is_populated_and_everything_after_closing():
-    assert budget_needs(et(4, 23), [GameClock(TIP)]) == (70, 40, 5)
-    assert budget_needs(et(4, 23), [GameClock(TIP, last_populated_at=et(4, 22))]) == (65, 35, 5)
+    assert budget_needs(et(4, 23), [GameClock(TIP)]) == (112, 64, 8)
+    assert budget_needs(et(4, 23), [GameClock(TIP, last_populated_at=et(4, 22))]) == (104, 56, 8)
     # Mid-afternoon: day 13, 14, 15 (degraded 13, 15), final and closing.
-    assert budget_needs(et(5, 13), [GameClock(TIP, last_populated_at=et(5, 12))]) == (50, 30, 5)
+    assert budget_needs(et(5, 13), [GameClock(TIP, last_populated_at=et(5, 12))]) == (80, 48, 8)
     assert budget_needs(et(5, 18, 51), [GameClock(TIP, closing_done=True)]) == (0, 0, 0)
     assert budget_needs(TIP, [GameClock(TIP)]) == (0, 0, 0)
 
@@ -299,12 +299,12 @@ def test_budget_needs_is_what_the_planner_spends_from_that_instant(tip):
 @pytest.mark.parametrize(
     "remaining, expected",
     [
-        (1070, Tier.NORMAL),  # 70 available covers the normal cadence
-        (1069, Tier.DEGRADED),  # one credit short of normal
-        (1040, Tier.DEGRADED),  # exactly the 40 the degraded cadence needs
-        (1039, Tier.CLOSING),  # short of degraded; closing is only 5
-        (6, Tier.CLOSING),  # reserve funds the closing; 6-1 >= 5
-        (5, Tier.HALTED),  # a call would take the quota to 0
+        (1112, Tier.NORMAL),  # 112 available covers the normal cadence
+        (1111, Tier.DEGRADED),  # one credit short of normal
+        (1064, Tier.DEGRADED),  # exactly the 64 the degraded cadence needs
+        (1063, Tier.CLOSING),  # short of degraded; closing is only 8
+        (9, Tier.CLOSING),  # reserve funds the closing; 9-1 >= 8
+        (8, Tier.HALTED),  # a call would take the quota to 0
         (None, Tier.NORMAL),  # nothing observed yet
     ],
 )
@@ -373,13 +373,13 @@ def test_other_polls_cannot_spend_the_reserve_but_closings_can():
     day_now = TIP - timedelta(hours=5)
     closing_now = TIP - timedelta(minutes=9)
 
-    day = plan(day_now, events, remaining=1010)
-    closings = plan(closing_now, events, remaining=1010)
+    day = plan(day_now, events, remaining=1016)
+    closings = plan(closing_now, events, remaining=1016)
 
-    assert [c.kind for c in day.calls] == ["day", "day"]  # 1005, 1000; a third would dip to 995
+    assert [c.kind for c in day.calls] == ["day", "day"]  # 1008, 1000; a third would dip to 992
     assert [c.kind for c in closings.calls] == ["closing"] * 3  # closings may use the reserve
-    assert [c.kind for c in plan(closing_now, events, remaining=11).calls] == ["closing", "closing"]
-    # 11 -> 6 -> 1: the second call leaves 1 and a third would reach 0.
+    assert [c.kind for c in plan(closing_now, events, remaining=17).calls] == ["closing", "closing"]
+    # 17 -> 9 -> 1: the second call leaves 1 and a third would go below 0.
 
 
 def test_closings_are_planned_before_other_polls():
@@ -411,7 +411,7 @@ def month_of_games(per_day, first_day=datetime(2026, 11, 1, tzinfo=UTC)):
 
 def replay(tips, *, plan_credits=20000, posted_lead=None, reserve=1000):
     """Drive the planner beat by beat from the night before the first game.
-    The fake API charges 5 once props are posted (``posted_lead`` before tip,
+    The fake API charges ``CALL_COST`` once props are posted (``posted_lead`` before tip,
     or always when None) and answers empty, free, before."""
 
     clocks = {i: GameClock(tip) for i, tip in enumerate(tips)}
@@ -465,19 +465,20 @@ def replay(tips, *, plan_credits=20000, posted_lead=None, reserve=1000):
     }
 
 
-def test_an_average_month_of_222_games_costs_16390_credits_with_props_up_the_night_before():
-    # Tips every 30 minutes from 18:00 ET: 13, 14, 14, 15, 15, 16, 16, 17 paid
-    # calls (each half hour later adds half a day poll), so a day of 8 games
-    # is 120 calls and a day of 7 is 103.
+def test_an_average_month_of_222_games_degrades_part_way_and_keeps_every_closing():
+    # Tips every 30 minutes from 18:00 ET.  At the normal cadence a day of 8
+    # games is 120 calls and a day of 7 is 103: 3278 calls, 26224 credits at
+    # 8 a call, more than the plan, so the guard degrades part of the month.
     tips = month_of_games([8, 8, 8, 8, 8] + [7] * 26)
     assert len(tips) == 222
 
     result = replay(tips)
 
-    assert result["spent"] == (5 * 120 + 26 * 103) * CALL_COST == 16390
+    assert result["spent"] == 18952
+    assert result["lowest"] == 1048
     assert result["closings"] == 222
     assert result["after_tip"] == 0
-    assert result["tiers"] == {Tier.NORMAL}
+    assert result["tiers"] == {Tier.NORMAL, Tier.DEGRADED}
 
 
 def test_an_empty_night_costs_nothing():
@@ -486,20 +487,22 @@ def test_an_empty_night_costs_nothing():
 
     result = replay(tips, posted_lead=timedelta(hours=12))
 
-    assert result["spent"] == 16390 - 222 * CALL_COST == 15280
-    assert result["tiers"] == {Tier.NORMAL}
+    assert result["spent"] == 18264
+    assert result["closings"] == 222
+    assert result["tiers"] == {Tier.NORMAL, Tier.DEGRADED}
 
 
-def test_a_peak_month_of_250_games_stays_at_normal_cadence_above_the_reserve():
+def test_a_peak_month_of_250_games_degrades_and_stays_above_the_reserve():
     # 30 days of 8 and one of 10, whose 22:00 and 22:30 ET tips take 17 and 18.
     tips = month_of_games([8] * 30 + [10])
     assert len(tips) == 250
 
     result = replay(tips)
 
-    assert result["spent"] == (30 * 120 + 120 + 17 + 18) * CALL_COST == 18775
-    assert result["lowest"] == 20000 - 18775
-    assert result["tiers"] == {Tier.NORMAL}
+    assert result["spent"] == 18960
+    assert result["lowest"] == 1040
+    assert result["closings"] == 250
+    assert result["tiers"] == {Tier.NORMAL, Tier.DEGRADED}
 
 
 def test_ceiling_load_of_15_games_a_day_degrades_and_stays_under_the_plan():

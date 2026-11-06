@@ -16,7 +16,6 @@ from app.errors import _sanitize_diagnostic_detail
 from app.providers.odds_api import (
     BOOK_ALLOWLIST,
     DFS_BOOK_ALLOWLIST,
-    MARKET_CATEGORIES,
     OddsApiClient,
     OddsApiError,
     install_log_redaction,
@@ -74,7 +73,7 @@ def test_events_list_is_decoded_and_requested_as_a_free_window():
     assert timeout == 7
 
 
-def test_event_odds_asks_for_the_us_region_five_markets_in_american_odds():
+def test_event_odds_asks_for_the_us_region_standard_markets_in_american_odds():
     session = Session(FakeResponse(200, load("event_odds_five_markets"), quota_headers(19990, 10, 5)))
 
     result = client_for(session).event_odds("9e6c2f0a1b7d4c3e8a5f6b7c8d9e0f12")
@@ -83,7 +82,8 @@ def test_event_odds_asks_for_the_us_region_five_markets_in_american_odds():
     assert url.endswith("/v4/sports/basketball_nba/events/9e6c2f0a1b7d4c3e8a5f6b7c8d9e0f12/odds")
     assert params["regions"] == "us"
     assert params["markets"] == (
-        "player_points,player_rebounds,player_assists,player_threes," "player_points_rebounds_assists"
+        "player_points,player_rebounds,player_assists,player_threes,player_points_rebounds_assists,"
+        "player_points_rebounds,player_points_assists,player_rebounds_assists"
     )
     assert params["oddsFormat"] == "american"
     assert (result.cost, result.quota.remaining, result.quota.used, result.quota.last_cost) == (
@@ -103,7 +103,8 @@ def test_the_dfs_beat_requests_only_the_us_dfs_region_and_no_alternate_market():
     assert url.endswith("/v4/sports/basketball_nba/events/9e6c2f0a1b7d4c3e8a5f6b7c8d9e0f12/odds")
     assert params["regions"] == "us_dfs"
     assert params["markets"] == (
-        "player_points,player_rebounds,player_assists,player_threes," "player_points_rebounds_assists"
+        "player_points,player_rebounds,player_assists,player_threes,player_points_rebounds_assists,"
+        "player_points_rebounds,player_points_assists,player_rebounds_assists"
     )
     assert "_alternate" not in params["markets"]
     assert "bookmakers" not in params
@@ -130,7 +131,13 @@ def test_a_dfs_response_keeps_prizepicks_standard_lines_and_nothing_else():
     assert {quote.book for quote in parsed.quotes} == {"prizepicks"}
     assert parsed.bookmaker_count == 4
     # The goblin (22.5) and demon (32.5) arrive under player_points_alternate.
-    assert {quote.market_key for quote in parsed.quotes} == set(MARKET_CATEGORIES)
+    assert {quote.market_key for quote in parsed.quotes} == {
+        "player_points",
+        "player_rebounds",
+        "player_assists",
+        "player_threes",
+        "player_points_rebounds_assists",
+    }
     points = {quote.player_name: quote.line for quote in parsed.quotes if quote.category == "PTS"}
     # LeBron's alternate has two points; Jokic's has one (24.5), which would be
     # taken for a second PTS quote and a line conflict if the market were mapped.
@@ -178,6 +185,23 @@ def test_five_market_response_normalizes_to_allowlisted_quotes():
         "player_threes",
         "player_points_rebounds_assists",
     }
+
+
+def test_the_combo_markets_parse_to_pr_pa_and_ra():
+    # Trimmed from a live us-region response (ORL @ PHX, 2026-11-06).
+    parsed = parse_event_odds(load("event_odds_combo_markets"))
+
+    assert sorted(
+        (q.player_name, q.category, q.market_key, q.book, q.line, q.over, q.under) for q in parsed.quotes
+    ) == [
+        ("Devin Booker", "PA", "player_points_assists", "draftkings", 30.5, -109, -121),
+        ("Devin Booker", "PR", "player_points_rebounds", "draftkings", 28.5, -118, -112),
+        ("Devin Booker", "RA", "player_rebounds_assists", "draftkings", 8.5, -135, 103),
+        ("Franz Wagner", "PA", "player_points_assists", "draftkings", 30.5, -108, -121),
+        ("Franz Wagner", "PR", "player_points_rebounds", "draftkings", 29.5, -111, -119),
+        ("Franz Wagner", "RA", "player_rebounds_assists", "draftkings", 12.5, -126, -104),
+    ]
+    assert parsed.dropped_books == frozenset({"bovada"})
 
 
 def test_offshore_books_are_dropped_by_the_allowlist():

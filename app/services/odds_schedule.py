@@ -16,8 +16,8 @@ from enum import Enum
 from functools import lru_cache
 from zoneinfo import ZoneInfo
 
-#: Credits one ``/events/{id}/odds`` call costs: 5 markets x 1 region.
-CALL_COST = 5
+from app.providers.odds_api import CALL_COST
+
 #: The one extra fetch before tip, stored as the closing snapshot.
 CLOSING_OPENS = timedelta(minutes=10)
 #: The closing fetch is jittered to the beat, so tip-10 to tip-5; a missed one

@@ -68,13 +68,16 @@ PROVIDER = DFS_PRIZEPICKS
 
 #: PrizePicks' own statistic labels, which the Statistic Catalog already maps
 #: for provider ``prizepicks`` (``statistic_catalog.yaml``).  The key is the
-#: Odds API market; only the five standard markets are ever requested.
+#: Odds API market; only the standard markets are ever requested.
 STATISTIC_LABELS: Mapping[str, str] = {
     "player_points": "Points",
     "player_rebounds": "Rebounds",
     "player_assists": "Assists",
     "player_threes": "3PM",
     "player_points_rebounds_assists": "PRA",
+    "player_points_rebounds": "PR",
+    "player_points_assists": "PA",
+    "player_rebounds_assists": "RA",
 }
 
 #: The same labels by Matchup category, to name a line already in the archive.

@@ -74,6 +74,26 @@ class FakeResponse:
         return self._body
 
 
+def with_combo_markets(body, book, player, lines):
+    """``body`` with ``book`` posting ``player``'s PR, PA and RA at ``lines``
+    (``{market key: (line, over, under)}``)."""
+
+    for bookmaker in body["bookmakers"]:
+        if bookmaker["key"] == book:
+            bookmaker["markets"].extend(
+                {
+                    "key": key,
+                    "last_update": "2026-10-21T14:58:00Z",
+                    "outcomes": [
+                        {"name": "Over", "description": player, "price": over, "point": line},
+                        {"name": "Under", "description": player, "price": under, "point": line},
+                    ],
+                }
+                for key, (line, over, under) in lines.items()
+            )
+    return body
+
+
 def quota_headers(remaining=19995, used=5, last=5):
     return {
         "x-requests-remaining": str(remaining),
