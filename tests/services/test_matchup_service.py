@@ -892,7 +892,7 @@ def test_unknown_shot_type_degrades_without_leaking_a_divergent_key():
     shot_types = (
         ("shot_types", "catch_and_shoot", "FG3A", 7.0),
         ("shot_types", "pullups", "FG3A", 7.0),
-        ("shot_types", "less_than_10_ft", "FG3A", 7.0),
+        ("shot_types", "less_than_10_ft", "FG2A", 7.0),
         ("shot_types", "running_jumpers", "FG3A", 7.0),
     )
 

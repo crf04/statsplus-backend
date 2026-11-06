@@ -466,6 +466,8 @@ def test_shot_rows_list_the_combined_markets_on_both_matchups(tmp_path):
                 ("FG2M", ["PTS", "FGM", "FG2M", "PA", "PR", "PRA"]),
                 ("FG3M", ["3PM", "PTS", "FGM", "PA", "PR", "PRA"]),
             )
+            # No three is taken inside 10 ft: the sheet has no such row (statsplus#437).
+            if (shot_type, stat) != ("Less Than 10 ft", "FG3M")
         },
     }
 
@@ -495,8 +497,20 @@ def test_shot_rows_list_the_combined_markets_on_both_matchups(tmp_path):
                 f"{shot_type}:{stat}": ["FGA", stat]
                 for shot_type in ("Catch and Shoot", "Pullups", "Less Than 10 ft")
                 for stat in ("FG2A", "FG3A")
+                if (shot_type, stat) != ("Less Than 10 ft", "FG3A")
             },
         }
+        league_keys = {row["key"] for row in payload["league"]["defense_sheet"]["shot_types"]}
+        assert (
+            league_keys
+            == {row["key"] for row in sheet["shot_types"]}
+            == {
+                f"{shot_type}:{stat}"
+                for shot_type in ("Catch and Shoot", "Pullups", "Less Than 10 ft")
+                for stat in ("PTS", "FG2M", "FG2A", "FG3M", "FG3A")
+                if shot_type != "Less Than 10 ft" or stat not in ("FG3M", "FG3A")
+            }
+        )
 
 
 def test_unscheduled_matchup_omits_every_per_game_part(tmp_path):

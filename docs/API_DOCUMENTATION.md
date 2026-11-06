@@ -1529,6 +1529,11 @@ six Bases, in this order:
 play_types, shot_zones, shot_types, assist_locations, traditional, rebound_types
 ```
 
+`shot_types` lists no `Less Than 10 ft:FG3A` or `Less Than 10 ft:FG3M` row
+(crf04/statsplus#437): no three is taken inside 10 ft, so those stored metrics
+hold only stray mis-tags whose ranks would read −100% or thousands of percent.
+The scores still read them, where the player's own threes there weigh nothing.
+
 `rebound_types` (crf04/statsplus#234) is the ledger-owned Rebound Types Base,
 listed directly after `traditional`. Its rows have exactly the shape of the
 `assist_locations` rows above and are keyed, like every Base's rows, in

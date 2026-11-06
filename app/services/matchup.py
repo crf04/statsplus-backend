@@ -124,6 +124,13 @@ _GOVERNED_SHOT_ZONES = frozenset(SHOT_ZONE_SLICES)
 _SHOT_TYPE_DISPLAY_SLICES = dict(SHOT_TYPE_STORED_TO_DISPLAY)
 _SHOT_TYPE_STORED_SLICES = dict(SHOT_TYPE_DISPLAY_TO_STORED)
 _GOVERNED_SHOT_TYPES = frozenset(SHOT_TYPE_SLICES)
+# No three is taken inside 10 ft, so these rows hold only stray mis-tags (a
+# 2026-27 league average of 0.006 3PA per 48) that rank teams -100% or +2900%.
+# The Defense Sheet omits them; the scores still read them, where his own
+# threes there weigh nothing (crf04/statsplus#437).
+_IMPOSSIBLE_SHEET_IDENTITIES = frozenset(
+    ("shot_types", "less_than_10_ft", stat_key) for stat_key in ("FG3A", "FG3M")
+)
 _STAT_MARKETS = {
     "PTS": ("PTS", "PA", "PR", "PRA"),
     "POSS": ("PTS",),
@@ -2851,6 +2858,7 @@ class MatchupService:
             for identity in metric_index.league
             if identity[0] != "shot_zones" or identity[1] in _GOVERNED_SHOT_ZONES
             if identity[0] != "shot_types" or identity[1] in _SHOT_TYPE_DISPLAY_SLICES
+            if identity not in _IMPOSSIBLE_SHEET_IDENTITIES
         }
         return tuple(
             sorted(
