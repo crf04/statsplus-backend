@@ -9931,10 +9931,15 @@ def _cycle_missing_streams(
 ) -> list[str]:
     """The publishing streams a cycle still owes, sorted.
 
-    A stream is owed until its active publication is at or after the cycle's
-    cutoff.  A later cutoff's publication replaces this one's, so a cycle that
-    published (or was overtaken) owes nothing once the next cutoff publishes.
+    A stream is owed until its publication for the cycle's season is at or
+    after the cycle's cutoff.  A later cutoff's publication replaces this
+    one's, so a cycle that published (or was overtaken) owes nothing once the
+    next cutoff publishes.  Once the pointer serves another season, the
+    cycle's season is read from its retained publication, as a past-season
+    read is; another season's publication never covers the cycle.
     """
+
+    from app.services.database_first_activation import DatabaseFirstPublicationReader
 
     governed = set(
         session.scalars(
@@ -9956,6 +9961,11 @@ def _cycle_missing_streams(
             if pointer and pointer.active_publication_id
             else None
         )
+        if publication is not None and publication.season != cycle.season:
+            retained = DatabaseFirstPublicationReader._retained_rows(
+                session, (stream.stream_key,), cycle.season, projection_keys=()
+            )
+            publication = retained[stream.stream_key][2] if stream.stream_key in retained else None
         if publication is None or _aware(publication.cutoff) < _aware(cycle.cutoff):
             missing.append(stream.stream_key)
     return sorted(missing)
