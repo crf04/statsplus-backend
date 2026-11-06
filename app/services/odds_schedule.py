@@ -87,13 +87,13 @@ WINDOWS = (
         "final",
         lambda tip: tip - FINAL_OPENS,
         lambda tip: tip - CLOSING_OPENS,
-        {Tier.NORMAL: HOURLY / 2, Tier.DEGRADED: HOURLY},
+        {Tier.NORMAL: HOURLY / 2, Tier.DEGRADED: HOURLY / 2},
     ),
     Window(
         "day",
         lambda tip: _eastern(tip, 0, 10),
         lambda tip: tip - FINAL_OPENS,
-        {Tier.NORMAL: HOURLY, Tier.DEGRADED: 2 * HOURLY},
+        {Tier.NORMAL: HOURLY},
     ),
     # Books post opening lines the evening before; one populated poll keeps them.
     Window(
