@@ -157,7 +157,8 @@ def test_what_each_instant_plans_for_a_7pm_tip():
     assert kinds(et(5, 10), last=et(4, 22), populated=et(4, 22)) == ["day"]
     assert kinds(et(5, 10, 30), last=et(5, 10)) == []
     assert kinds(et(5, 16, 30), last=et(5, 16)) == ["final"]
-    assert kinds(et(5, 16, 30), last=et(5, 16), tier=Tier.DEGRADED) == []
+    assert kinds(et(5, 16, 30), last=et(5, 16), tier=Tier.DEGRADED) == ["final"]
+    assert kinds(et(5, 10), last=et(4, 22), populated=et(4, 22), tier=Tier.DEGRADED) == []
     assert kinds(et(5, 18, 52), last=et(5, 18, 30)) == ["closing"]
 
 
@@ -203,15 +204,15 @@ def test_the_night_the_clocks_fall_back_holds_five_hourly_empty_polls():
     ]
 
 
-def test_degraded_tier_doubles_the_day_and_final_spacing_and_keeps_night_and_closing():
+def test_degraded_tier_drops_the_day_polls_and_keeps_night_final_and_closing():
     assert walk(TIP, NIGHT_BEFORE, Tier.DEGRADED) == [
         ("04 22:00", "night"),
-        ("05 10:00", "day"),
-        ("05 12:00", "day"),
-        ("05 14:00", "day"),
         ("05 16:00", "final"),
+        ("05 16:30", "final"),
         ("05 17:00", "final"),
+        ("05 17:30", "final"),
         ("05 18:00", "final"),
+        ("05 18:30", "final"),
         ("05 18:50", "closing"),
     ]
 
@@ -265,20 +266,20 @@ def test_the_closing_fetch_is_only_allowed_from_tip_minus_10_until_tip_minus_5()
 
 
 def test_budget_needs_for_one_game_seen_from_9pm_the_night_before():
-    # 14 calls normal; 8 degraded (night, day 10/12/14, final 16/17/18,
-    # closing); the closing alone, at 8 credits a call.
+    # 14 calls normal; 8 degraded (night, six final polls, closing: no day
+    # polls); the closing alone, at 8 credits a call.
     assert budget_needs(NIGHT_BEFORE, [GameClock(TIP)]) == (112, 64, 8)
-    # A noon tip: night, six final polls from 9:00, closing; degraded polls
-    # final at 9, 10 and 11.
-    assert budget_needs(NIGHT_BEFORE, [GameClock(NOON)]) == (64, 40, 8)
-    assert budget_needs(NIGHT_BEFORE, [GameClock(TIP), GameClock(NOON)]) == (176, 104, 16)
+    # A noon tip has no day window: night, six final polls from 9:00 and the
+    # closing in both tiers.
+    assert budget_needs(NIGHT_BEFORE, [GameClock(NOON)]) == (64, 64, 8)
+    assert budget_needs(NIGHT_BEFORE, [GameClock(TIP), GameClock(NOON)]) == (176, 128, 16)
 
 
 def test_budget_needs_drops_the_night_poll_once_it_is_populated_and_everything_after_closing():
     assert budget_needs(et(4, 23), [GameClock(TIP)]) == (112, 64, 8)
     assert budget_needs(et(4, 23), [GameClock(TIP, last_populated_at=et(4, 22))]) == (104, 56, 8)
-    # Mid-afternoon: day 13, 14, 15 (degraded 13, 15), final and closing.
-    assert budget_needs(et(5, 13), [GameClock(TIP, last_populated_at=et(5, 12))]) == (80, 48, 8)
+    # Mid-afternoon: day 13, 14, 15 (none degraded), final and closing.
+    assert budget_needs(et(5, 13), [GameClock(TIP, last_populated_at=et(5, 12))]) == (80, 56, 8)
     assert budget_needs(et(5, 18, 51), [GameClock(TIP, closing_done=True)]) == (0, 0, 0)
     assert budget_needs(TIP, [GameClock(TIP)]) == (0, 0, 0)
 
@@ -474,8 +475,8 @@ def test_an_average_month_of_222_games_degrades_part_way_and_keeps_every_closing
 
     result = replay(tips)
 
-    assert result["spent"] == 18952
-    assert result["lowest"] == 1048
+    assert result["spent"] == 18984
+    assert result["lowest"] == 1016
     assert result["closings"] == 222
     assert result["after_tip"] == 0
     assert result["tiers"] == {Tier.NORMAL, Tier.DEGRADED}
@@ -487,7 +488,7 @@ def test_an_empty_night_costs_nothing():
 
     result = replay(tips, posted_lead=timedelta(hours=12))
 
-    assert result["spent"] == 18264
+    assert result["spent"] == 18120
     assert result["closings"] == 222
     assert result["tiers"] == {Tier.NORMAL, Tier.DEGRADED}
 
@@ -499,8 +500,8 @@ def test_a_peak_month_of_250_games_degrades_and_stays_above_the_reserve():
 
     result = replay(tips)
 
-    assert result["spent"] == 18960
-    assert result["lowest"] == 1040
+    assert result["spent"] == 18968
+    assert result["lowest"] == 1032
     assert result["closings"] == 250
     assert result["tiers"] == {Tier.NORMAL, Tier.DEGRADED}
 

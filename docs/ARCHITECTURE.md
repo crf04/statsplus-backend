@@ -4919,8 +4919,8 @@ empty response costs nothing.
 | --- | --- | --- | --- |
 | `night` | 22:00 ET the day before tip day to 02:00 ET | hourly until one populated response, then none | same |
 | (pause) | 02:00 to 10:00 ET on tip day | none | none |
-| `day` | 10:00 ET to tip-3 hours | hourly | every 2 hours |
-| `final` | tip-3 hours to tip-10 minutes | every 30 minutes | hourly |
+| `day` | 10:00 ET to tip-3 hours | hourly | none |
+| `final` | tip-3 hours to tip-10 minutes | every 30 minutes | every 30 minutes |
 | `closing` | tip-10 to tip-5 minutes | one fetch | one fetch |
 
 A later window takes precedence and cuts an earlier one short, so a noon tip
@@ -5095,8 +5095,10 @@ later adds half a day pull (a 6pm tip takes 13, a 10pm tip 17), a noon tip takes
 the purchase does not add a call (see above). A typical month of 222 games
 tipping 6pm to 9:30pm ET takes 3,278 calls at the normal cadence, 26,224
 credits, more than the 19,000 spendable above the 1,000-credit reserve, so the
-guard degrades part of the month: the replay spends 18,952 and keeps every
-closing (a peak month of 250 games spends 18,960). On a larger plan the same
+guard degrades part of the month: the replay spends 18,984 and keeps every
+closing (a peak month of 250 games spends 18,968). `degraded` drops the day
+polls and keeps the final window at 30 minutes, so lines stay fresh close to
+tip and a 7pm tip still takes 8 calls. On a larger plan the same
 month stays at the normal cadence. Each repeating window's polls are slots on a grid
 from where the window opens (hourly from 10:00 ET, every 30 minutes from tip
 minus 3 h); a beat may serve a slot up to two minutes early, but late or early
