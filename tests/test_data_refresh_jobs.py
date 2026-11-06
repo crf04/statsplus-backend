@@ -420,6 +420,7 @@ def test_worker_that_lost_its_lease_says_so_and_cannot_write(job_engine, caplog)
             if warned():
                 break
             threading.Event().wait(0.1)
+        finished_by_second = second.get(job_id)
         release.set()
         worker.join(timeout=5)
 
@@ -429,6 +430,7 @@ def test_worker_that_lost_its_lease_says_so_and_cannot_write(job_engine, caplog)
     assert final["status"] == JOB_STATUS_SUCCEEDED
     assert final["attempt_count"] == 2
     assert final["progress"] == 1.0
+    assert final == finished_by_second
     first.shutdown()
     second.shutdown()
 
