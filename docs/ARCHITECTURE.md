@@ -5050,9 +5050,9 @@ beat (every 5 min, the odds cron service, ODDS_API_REGIONS=us_dfs)
 * **Freshness.** The archive treats every provider as live for 15 minutes after
   confirmation, which an hourly poll cannot meet, so the registry gives
   `prizepicks` a 90-minute window (one poll interval plus half an hour for a
-  retry). In the `degraded` tier (a poll every two hours) a line is therefore
-  live for 90 of every 120 minutes, and from 90 minutes after the night pull
-  until 10:00 ET no line is live. The pool's aggregate times (live and
+  retry). In the `degraded` tier there are no day polls, so from 90 minutes
+  after the night pull until the final window opens (tip-3 hours) no line is
+  live; the final window's 30-minute polls keep it live until tip. The pool's aggregate times (live and
   closing) are the oldest of the default-window providers, so the hourly
   provider is not read as the pool's age.
 * **Closing.** The beat freezes `prizepicks` closing sets for started games on
