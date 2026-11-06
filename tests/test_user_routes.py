@@ -43,7 +43,6 @@ def user_service(monkeypatch):
         ("/api/user/profile", "get"),
         ("/api/user/profile", "put"),
         ("/api/user/stats", "get"),
-        ("/api/user/deactivate", "post"),
         ("/api/user/sync", "post"),
     ],
 )
@@ -244,26 +243,12 @@ def test_activity_ping_reports_an_unsuccessful_update(client, authenticate, user
 # --- POST /deactivate ------------------------------------------------------
 
 
-def test_deactivate_confirms_a_successful_soft_delete(client, authenticate, user_service):
+def test_deactivate_is_not_a_route(client, authenticate):
     headers = authenticate()
-    user_service.deactivate_user = lambda uid: True
 
     response = client.post("/api/user/deactivate", headers=headers)
 
-    assert response.status_code == 200
-    assert response.get_json() == {
-        "success": True,
-        "message": "Account deactivated successfully",
-    }
-
-
-def test_deactivate_reports_a_failed_soft_delete(client, authenticate, user_service):
-    headers = authenticate()
-    user_service.deactivate_user = lambda uid: False
-
-    response = client.post("/api/user/deactivate", headers=headers)
-
-    assert_error(response, 500, "operation_failed", "Failed to deactivate account.")
+    assert response.status_code == 404
 
 
 # --- POST /sync ------------------------------------------------------------
