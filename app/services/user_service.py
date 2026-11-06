@@ -785,35 +785,6 @@ class UserService:
         finally:
             session.close()
 
-    def deactivate_user(self, firebase_uid: str) -> bool:
-        """
-        Deactivate a user account (soft delete).
-
-        Args:
-            firebase_uid (str): Firebase user ID
-
-        Returns:
-            bool: True if deactivation successful, False otherwise
-        """
-        session = self._get_session()
-        try:
-            user = session.query(User).filter_by(firebase_uid=firebase_uid).first()
-            if user:
-                user.is_active = False
-                session.commit()
-                logger.info(f"Deactivated user: {user.email}")
-                return True
-            else:
-                logger.warning(f"User not found for UID: {firebase_uid}")
-                return False
-        except SQLAlchemyError as e:
-            session.rollback()
-            raise_if_query_timeout(e)
-            logger.error(f"Database error in deactivate_user: {e}")
-            return False
-        finally:
-            session.close()
-
     def get_user_stats(self, firebase_uid: str) -> dict[str, Any] | None:
         """
         Get basic statistics for a user account.
