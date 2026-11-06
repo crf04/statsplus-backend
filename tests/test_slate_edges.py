@@ -1114,11 +1114,12 @@ def test_the_edges_and_their_matchups_write_what_the_previous_release_wrote():
         key: hashlib.sha256(zlib.decompress(payload)).hexdigest()
         for key, payload in redis_client.values.items()
     } == {
-        "matchup:composed:v9:63952f169500c0f16ee6e26a1fa039c628e922f4396473fec91fb6671591d4d9": (
-            "1e52e4b117ba6fd9f993eef34d2dc4993c5ec2c5602d63f8389d4d3c902a64a2"
+        # v10 (statsplus#437): the Defense Sheets no longer carry the inside-10-ft 3PA/3PM rows.
+        "matchup:composed:v10:d167a3535a1ebe19bc9fcb178a76565b8d05bdb8ffcff4a6fb226bb010ca58bf": (
+            "eb90e3bae268ac86ca0a4c5c35e889594e03f6f98942b574cf9613f612ae794f"
         ),
-        "matchup:composed:v9:3b7194d21d74e3f46a3225e7b06bb010c292d4057839c57f98055df397884daf": (
-            "b5345cc554cbf6241d257c47247feb7857cf96bc33ae1fcf4f403a4cacd8087a"
+        "matchup:composed:v10:ccd4c789df40d15ac49f43050c6427624cd8eba160edac330dd1caaebd16f666": (
+            "5fee7925e35cc8d4484d29a03396148c68ce048edb0d45c42663589db7576d0c"
         ),
         "slate:edges:v7:6f5df36dc5f1b18940a2bffdbf5efc9545f60fdf8583a1501c9bdecfd990c967": (
             "85542ea8a3695da15ec4c69b0a37cc79b2a6b26a62c64788446e568f105c1552"
