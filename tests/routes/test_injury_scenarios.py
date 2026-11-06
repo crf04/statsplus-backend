@@ -799,8 +799,9 @@ def test_a_shift_just_under_ten_percent_is_not_flagged(client, authenticate, wor
 
 
 def test_without_games_equal_the_game_log_players_off_filter(client, authenticate, world):
-    # LeBron missed the opener and the second game; nothing says he changed teams.
-    world.logs.rows[(LEBRON, CURRENT)] = world.logs.rows[(LEBRON, CURRENT)][2:]
+    # LeBron missed g2 and g3, inside his window from g1; nothing says he changed teams.
+    rows = world.logs.rows[(LEBRON, CURRENT)]
+    world.logs.rows[(LEBRON, CURRENT)] = rows[:1] + rows[3:]
     headers = authenticate()
 
     expected_games, expected_points = 0, 0
@@ -812,7 +813,7 @@ def test_without_games_equal_the_game_log_players_off_filter(client, authenticat
         ).get_json()
         expected_games += len(body["game_logs"])
         expected_points += sum(row["PTS"] for row in body["game_logs"])
-    assert (expected_games, expected_points) == (7, 167)  # g1,g2,g6-g8 and h3,h4
+    assert (expected_games, expected_points) == (7, 167)  # g2,g3,g6-g8 and h3,h4
 
     pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
     assert pts["without"]["games"] == expected_games

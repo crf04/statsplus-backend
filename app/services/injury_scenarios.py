@@ -48,7 +48,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.services.posted_lines import posted_line
 from app.services.research_season import previous_nba_season, schedule_season
-from app.services.rotation_service import classify_games, rotation_split
+from app.services.rotation_service import absent_windows, classify_games, rotation_split
 
 #: Statuses that get a scenario; Probable and Available get none.
 SCENARIO_STATUSES = ("Out", "Doubtful", "Questionable")
@@ -132,7 +132,7 @@ class _Logs:
         """Frame for the absence rule; an empty one when he has no rows."""
 
         if self.frame is None:
-            return pd.DataFrame({"GAME_ID": [], "TEAM_ABBREVIATION": []})
+            return pd.DataFrame({"GAME_ID": [], "GAME_DATE": [], "TEAM_ABBREVIATION": []})
         return self.frame
 
     def team_rows(self, team: str) -> pd.DataFrame | None:
@@ -290,7 +290,8 @@ class _RotationReads:
 
         if season not in self._memo:
             lines = self.request.rotation_lines(self.rotations, self.team, season)
-            without, played = classify_games(lines, [self.injured_id])
+            windows = absent_windows(self.rotations, season, self.team, [self.injured_id]) if lines else {}
+            without, played = classify_games(lines, windows)
             self._memo[season] = (lines, without, played)
         return self._memo[season]
 

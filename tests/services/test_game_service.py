@@ -532,12 +532,12 @@ def test_players_on_keeps_only_games_both_players_appeared_in(service, game_logs
 
 
 def test_players_off_excludes_games_the_other_player_appeared_in(service, game_logs, monkeypatch):
-    teammate = game_logs[game_logs["GAME_ID"].isin(["0002", "0003"])]
+    teammate = game_logs[game_logs["GAME_ID"].isin(["0001", "0003"])]
     _stub_game_logs(service, monkeypatch, {"Teammate": teammate})
 
     result = run(service.filter_players_on_off(game_logs, [], ["Teammate"], "2025-26"))
 
-    assert result["GAME_ID"].tolist() == ["0001", "0004"]
+    assert result["GAME_ID"].tolist() == ["0002", "0004"]
 
 
 def test_players_off_never_counts_a_game_without_a_player_who_was_never_a_teammate(
@@ -572,14 +572,14 @@ def test_games_to_exclude_unions_every_named_player(service, game_logs, monkeypa
         service,
         monkeypatch,
         {
-            "A": game_logs[game_logs["GAME_ID"] == "0001"],
-            "B": game_logs[game_logs["GAME_ID"] == "0004"],
+            "A": game_logs[game_logs["GAME_ID"].isin(["0001", "0002"])],
+            "B": game_logs[game_logs["GAME_ID"].isin(["0001", "0004"])],
         },
     )
 
     excluded = run(service.get_games_to_exclude(game_logs, ["A", "B"], "2025-26"))
 
-    assert excluded == {"0001", "0004"}
+    assert excluded == {"0001", "0002", "0004"}
 
 
 def _logs(*games):

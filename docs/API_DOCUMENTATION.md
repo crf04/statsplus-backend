@@ -3259,7 +3259,7 @@ Query parameters:
 | `player_name` | Yes | Player name; resolved against the requested `season_filter`'s Athlete Catalog first (exact case-insensitive match, then fuzzy), preferring the namesake active for that season when multiple catalog rows share a display name, falling back to the legacy `player_information` table when no catalog exists for that season |
 | `minutes_filter` | No | Comma-separated min,max minutes. Default `0,48` |
 | `players_on[]` | No | Teammates that must have a game-log appearance in the same game for the same team; this is game-level played/didn't-play evidence, not lineup-stint evidence |
-| `players_off[]` | No | Teammates that must have no game-log appearance in the same game for the same team; multiple names exclude the union of their appearances |
+| `players_off[]` | No | Teammates that must have no game-log appearance in the same game for the same team, counted only inside each one's team window: from his first game for that team in the season until his first later game for another team (crf04/statsplus#449). A game outside the window is excluded; multiple names keep only games inside every window with no appearance by any of them |
 | `date_filter` | No | `YYYY-MM-DD` start date that trims the player's own game logs. It never reshapes Team Filter rankings, which are always whole-Regular-Season |
 | `date_to` | No | `YYYY-MM-DD` inclusive end date that trims the player's own game logs; with `date_filter` it selects an inclusive range (#307). It never reshapes Team Filter rankings, which are always whole-Regular-Season. An unparsable value, or one earlier than `date_filter`, is rejected with `400` `invalid_input` |
 | `teams_against[]` | No | Opponent filter names such as `OPP_PTS`. Every filter ranks opponents from the durable Season publications for the requested `season_filter` (#198); a request-time provider call is no longer made for any combination of filters. A season with no Season publication ranks no opponents, so the filter resolves to an empty result rather than borrowing another season's rankings. The authoritative accepted set (and its legacy aliases) is not enumerated here except by example: a rejection's `details` carry the full canonical `supported_values` and `supported_aliases` (#145). An entry may instead be a Defense Sheet row reference, `sheet:<base>:<row key>`, which ranks that Sheet row's Season allowed per 48 (#308; see Filtering Reference) |
@@ -3616,10 +3616,12 @@ no `provenance` block (see [Response provenance](#response-provenance)).
 `without` (crf04/statsplus#239) compares a team's stored rotation games with the
 named player or players **absent** against those with them **present**, over the
 whole `season`; `last_n` is rejected because a "last 5" without sample is rarely
-a sample. A named player is *absent* in a game when his box-score line for that
-team shows 0 minutes (DNP or inactive) and *present* when it shows more than 0;
-a game where he has no line for the team (not yet on the roster) is excluded.
-*Without games* are those where every named player is absent, *with games*
+a sample. A named player's *team window* runs from his first game for the team
+in the season until his first later game for another team, open-ended if he
+never moves (crf04/statsplus#449). Inside it he is *absent* in a game when he
+has no box-score line for the team (inactive) or a 0-minute line (DNP), and
+*present* when his line shows more than 0; a game outside his window is
+excluded. *Without games* are those where every named player is absent, *with games*
 those where every one is present; a mixed game is excluded. A subject's line is
 his box-score line for the team, a DNP counts as 0 minutes, and a game where he
 has no line for the team is excluded from his split.
