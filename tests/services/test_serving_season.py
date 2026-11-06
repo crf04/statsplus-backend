@@ -36,6 +36,7 @@ def test_the_readiness_rules_name_each_familys_streams_and_threshold():
         "team_defense": (
             [
                 "assist_locations_season",
+                "defensive_rating_season",
                 "exact_shot_zones_opponent_season",
                 "grouped_shot_types_opponent_season",
                 "rebound_types_season",
@@ -53,6 +54,7 @@ def test_the_readiness_rules_name_each_familys_streams_and_threshold():
         "last_15": (
             [
                 "assist_locations_l15",
+                "defensive_rating_l15",
                 "exact_shot_zones_opponent_l15",
                 "grouped_shot_types_opponent_l15",
                 "rebound_types_l15",

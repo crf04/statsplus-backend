@@ -1467,6 +1467,83 @@ def normalize_opponent_zone_response(
     return observation
 
 
+#: The thirty NBA franchises.  This package ships without ``app``, so the
+#: identities are repeated here (``app.domain.nba_teams`` owns them).
+NBA_TEAM_IDS = frozenset(range(1610612737, 1610612767))
+DEFENSIVE_RATING_METRIC = "DEF_RATING"
+
+
+def normalize_defensive_rating_response(
+    response: Any,
+    *,
+    season: str,
+    cutoff: datetime | str,
+    window: str,
+    endpoint_window: Mapping[str, Any],
+) -> NormalizedObservation:
+    """Every team's NBA.com ``DEF_RATING`` for one window (crf04/statsplus#447).
+
+    The response is ``LeagueDashTeamStats`` with ``MeasureType=Advanced``: one
+    row per team carrying ``TEAM_ID``, ``GP`` and ``DEF_RATING``.  The rating
+    is kept exactly as NBA.com publishes it.  The observation is complete only
+    when it names each of the thirty teams once; an empty or partial league
+    is incomplete and the collector uploads nothing, and a non-numeric rating
+    is a contract failure.
+    """
+
+    if window not in {"season", "l15"}:
+        raise ProviderContractError("provider_window_unsupported")
+    scope = {
+        "window": window,
+        "subject": "team",
+        "phase": "Regular Season",
+        "value_mode": "rating",
+        "season": _canonical_season(season),
+        "season_type": "Regular Season",
+        "endpoint_window": dict(endpoint_window),
+    }
+    records: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for row in _records(response):
+        team_id = _positive_id(_required(row, "TEAM_ID", "team_id"))
+        if team_id not in NBA_TEAM_IDS:
+            raise ProviderContractError("identity_unresolved")
+        if team_id in seen:
+            raise ProviderContractError("duplicate_identity")
+        seen.add(team_id)
+        games = _number(_required(row, "GP", "games_played"), integer=True)
+        rating = _number(_required(row, DEFENSIVE_RATING_METRIC, "def_rating"))
+        if games <= 0 or rating <= 0:
+            raise ProviderContractError("value_invariant_failed")
+        records.append(
+            {
+                "team_id": team_id,
+                "category": DEFENSIVE_RATING_METRIC,
+                "games_played": games,
+                DEFENSIVE_RATING_METRIC: rating,
+            }
+        )
+    records.sort(key=lambda record: record["team_id"])
+    complete = seen == NBA_TEAM_IDS
+    return NormalizedObservation(
+        observation_type="defensive_rating",
+        scope=scope,
+        season=_canonical_season(season),
+        cutoff=_timestamp(cutoff),
+        payload={
+            "base": "defensive_rating",
+            "records": records,
+            "coverage": {
+                "teams": len(records),
+                "complete": complete,
+                "scope": dict(scope),
+            },
+        },
+        provenance=_provenance(endpoint="team_advanced_ratings", scope=scope, records=len(records)),
+        complete=complete,
+    )
+
+
 def _require_opponent_contract(
     observation: NormalizedObservation,
     *,
@@ -1515,6 +1592,7 @@ __all__ = [
     "SHOT_TYPES",
     "SHOT_ZONES",
     "ZoneReconciliationError",
+    "normalize_defensive_rating_response",
     "normalize_grouped_shot_response",
     "normalize_opponent_grouped_shot_response",
     "normalize_opponent_synergy_response",

@@ -1054,7 +1054,9 @@ def test_query_defaults_to_published_season_after_calendar_rollover(monkeypatch)
     assert dependencies.player_service.get_all_players() == ["Jayson Tatum"]
     rows = team_service(_traditional_reads()).publications.season_rows("traditional", "2025-26")
     dependencies.team_service.publications = SimpleNamespace(
-        season_rows=lambda base, season: rows if season == "2025-26" else None
+        season_rows_by_base=lambda bases, season, **kwargs: {
+            base: rows if season == "2025-26" and base == "traditional" else None for base in bases
+        }
     )
     team_profile = dependencies.team_service.get_team_stats("Traditional", "Los Angeles Lakers")
     assert team_profile["OPP_PTS"] == 120.0

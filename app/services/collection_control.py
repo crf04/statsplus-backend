@@ -61,6 +61,8 @@ from app.domain.publication_integrity import (
 )
 from app.domain.slate_time import slate_date_for_instant
 from app.domain.team_matchup_taxonomy import (
+    DEFENSIVE_RATING_BASE,
+    DEFENSIVE_RATING_METRIC,
     NBA_PUBLICATION_TAXONOMY,
     PLAY_TYPE_STATS,
     PLAY_TYPES,
@@ -172,6 +174,8 @@ FRESHNESS_RULE_SECONDS = {
 #: never published itself.  A cycle owes an active publication at its cutoff
 #: only for the remaining, publishing streams.
 NON_PUBLISHING_STRATEGIES = frozenset({"request_time", "never_schedule", "atomic_replace"})
+#: The collector observation behind both Defensive Rating streams.
+DEFENSIVE_RATING_OBSERVATION = "defensive_rating"
 NBA_TEAM_IDS = frozenset(str(1610612737 + index) for index in range(30))
 NBA_TEAM_ID_TO_TRICODE = {str(key): value for key, value in _NBA_TEAM_ID_TO_TRICODE.items()}
 NBA_TRICODE_TO_TEAM_ID = dict(_NBA_TEAM_TRICODE_TO_ID)
@@ -189,6 +193,9 @@ STREAM_BASES: dict[str, frozenset[str]] = {
     publication_stream("shot_zones", "season"): frozenset({"shot_zones"}),
     publication_stream("shot_zones", "l15"): frozenset({"shot_zones"}),
     "assist_locations": frozenset({"assist_locations"}),
+    DEFENSIVE_RATING_OBSERVATION: frozenset({DEFENSIVE_RATING_BASE}),
+    publication_stream(DEFENSIVE_RATING_BASE, "season"): frozenset({DEFENSIVE_RATING_BASE}),
+    publication_stream(DEFENSIVE_RATING_BASE, "l15"): frozenset({DEFENSIVE_RATING_BASE}),
 }
 STREAM_REQUIRED_SLICES: dict[str, frozenset[str]] = {
     "synergy_play_types": frozenset(PLAY_TYPES),
@@ -199,6 +206,8 @@ STREAM_REQUIRED_SLICES: dict[str, frozenset[str]] = {
     publication_stream("shot_types", "l15"): frozenset(SHOT_TYPE_DISPLAY_TO_STORED),
     publication_stream("shot_zones", "season"): frozenset(SHOT_ZONE_SLICES),
     publication_stream("shot_zones", "l15"): frozenset(SHOT_ZONE_SLICES),
+    publication_stream(DEFENSIVE_RATING_BASE, "season"): frozenset({DEFENSIVE_RATING_METRIC}),
+    publication_stream(DEFENSIVE_RATING_BASE, "l15"): frozenset({DEFENSIVE_RATING_METRIC}),
     "assist_locations": frozenset(
         {
             "Arc3Assists",
@@ -220,6 +229,7 @@ OBSERVATION_BASES: dict[str, str] = {
     "shot_types_opponent": "shot_types",
     "shot_zones_opponent": "shot_zones",
     "assist_locations": "assist_locations",
+    DEFENSIVE_RATING_OBSERVATION: DEFENSIVE_RATING_BASE,
 }
 
 
@@ -596,6 +606,35 @@ _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
         "windows": ("l15",),
         "enabled": False,
     },
+    # NBA.com's team Defensive Rating (crf04/statsplus#447): one league-wide
+    # ``LeagueDashTeamStats`` Advanced read per window, governed like the
+    # opponent shot surfaces above.  DRTG reads the Season stream.
+    {
+        "stream_key": publication_stream(DEFENSIVE_RATING_BASE, "season"),
+        "provider": "nba",
+        "owner": "residential_collector",
+        "scope": "season",
+        "required": (DEFENSIVE_RATING_OBSERVATION,),
+        "schema": (1, 2),
+        "complete": "base_complete",
+        "strategy": "snapshot_replace",
+        "freshness": "cutoff_current",
+        "windows": ("season",),
+        "enabled": False,
+    },
+    {
+        "stream_key": publication_stream(DEFENSIVE_RATING_BASE, "l15"),
+        "provider": "nba",
+        "owner": "residential_collector",
+        "scope": "l15",
+        "required": (DEFENSIVE_RATING_OBSERVATION,),
+        "schema": (1, 2),
+        "complete": "base_complete",
+        "strategy": "snapshot_replace",
+        "freshness": "cutoff_current",
+        "windows": ("l15",),
+        "enabled": False,
+    },
     {
         "stream_key": "dfs_boards",
         "provider": "railway",
@@ -673,6 +712,13 @@ def _collector_scope_descriptors(
     opponent_zones = (
         "shot_zones_opponent" if ("shot_zones_opponent" in authorized or zone_stream_windows) else None
     )
+    rating_windows = {
+        window
+        for window in ("season", "l15")
+        if publication_stream(DEFENSIVE_RATING_BASE, window) in authorized
+    }
+    if DEFENSIVE_RATING_OBSERVATION in authorized and not rating_windows:
+        rating_windows = {"season", "l15"}
     if opponent_shots and not shot_stream_windows:
         shot_stream_windows = {"season", "l15"}
     if opponent_zones and not zone_stream_windows:
@@ -774,6 +820,19 @@ def _collector_scope_descriptors(
                 )
             if opponent_zones and window in zone_stream_windows:
                 descriptors.append({"scope": opponent_zones, "parameters": dict(governed)})
+    for window in ("season", "l15"):
+        # One league-wide read per window.  Last 15 opens league-wide, so its
+        # read is issued only once the Event Catalog proves every team's window.
+        if window not in rating_windows or (
+            window == "l15" and l15_date_from_by_team is not None and not l15_date_from_by_team
+        ):
+            continue
+        descriptors.append(
+            {
+                "scope": DEFENSIVE_RATING_OBSERVATION,
+                "parameters": {"window": window, "subject": "team", "date_to": date_to},
+            }
+        )
     return descriptors
 
 
@@ -905,7 +964,7 @@ def _validate_activation_candidate_payload(
             stream: stream
             for stream in (
                 publication_stream(base, window)
-                for base in ("play_types", "shot_types", "shot_zones")
+                for base in ("play_types", "shot_types", "shot_zones", DEFENSIVE_RATING_BASE)
                 for window in ("season", "l15")
             )
         },
@@ -1039,6 +1098,17 @@ def _compose_nba_observation_payload(
 
     base = publication_base_for_stream(stream_key)
     window = "l15" if stream_key.endswith("_l15") else "season"
+    if base == DEFENSIVE_RATING_BASE:
+        return _compose_defensive_rating_payload(
+            session,
+            stream=stream,
+            window=window,
+            season=season,
+            cutoff=cutoff,
+            manifest_id=manifest_id,
+            provenance_ids=provenance_ids,
+            expected_game_ids_by_team=expected_game_ids_by_team,
+        )
     required_types = set(json.loads(stream.required_observations))
     expected_metrics = set(NBA_PUBLICATION_TAXONOMY.get(base or "", ()))
     expected_teams = {int(team_id) for team_id in NBA_TEAM_IDS}
@@ -1236,6 +1306,130 @@ def _compose_nba_observation_payload(
             }
         )
     return {"rows": rows, "source_observations": sources}
+
+
+def _compose_defensive_rating_payload(
+    session: Session,
+    *,
+    stream: PublicationStream,
+    window: str,
+    season: str,
+    cutoff: datetime,
+    manifest_id: str,
+    provenance_ids: set[str],
+    expected_game_ids_by_team: Mapping[int, frozenset[str]],
+) -> dict[str, Any]:
+    """Derive one window's NBA.com ``DEF_RATING`` publication (crf04/statsplus#447).
+
+    The window is one league-wide observation.  A retried collection appends
+    a fresh one, so every accepted observation must carry this manifest's
+    authority and the latest wins.  Its read must be the issued window --
+    ``LastNGames`` 0 or 15 up to the cutoff's slate date -- and it must rate
+    each of the thirty teams once, over exactly the games the Event Catalog
+    governs for that team.  Anything less publishes nothing, so the active
+    Publication keeps serving.  The row value is the rating as NBA.com
+    publishes it.
+    """
+
+    required_types = set(json.loads(stream.required_observations))
+    expected_teams = {int(team_id) for team_id in NBA_TEAM_IDS}
+    if set(expected_game_ids_by_team) != expected_teams:
+        raise ValueError("publication governance is incomplete")
+    expected_date_to = slate_date_for_instant(cutoff).strftime("%m/%d/%Y")
+    latest: tuple[CollectionObservation, Mapping[str, Any]] | None = None
+    for observation_id in sorted(provenance_ids):
+        observation = session.get(CollectionObservation, observation_id)
+        if observation is None:
+            continue
+        if (
+            observation.manifest_id != manifest_id
+            or observation.season != season
+            or _aware(observation.cutoff) != cutoff
+            or observation.provider != stream.provider
+            or observation.observation_type not in required_types
+        ):
+            raise ValueError("publication observation authority mismatch")
+        try:
+            scope = json.loads(observation.scope)
+            document = json.loads(observation.payload)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ValueError("publication observation malformed") from error
+        if (
+            not isinstance(scope, Mapping)
+            or str(scope.get("window", "")).casefold() != window
+            or not isinstance(document, Mapping)
+            or not hmac.compare_digest(_checksum(observation.payload), observation.checksum)
+        ):
+            raise ValueError("publication observation integrity mismatch")
+        endpoint_window = scope.get("endpoint_window")
+        if (
+            scope.get("value_mode") != "rating"
+            or scope.get("season") != season
+            or scope.get("season_type") != "Regular Season"
+            or not isinstance(endpoint_window, Mapping)
+            or endpoint_window.get("last_n_games") != (15 if window == "l15" else 0)
+            or endpoint_window.get("date_from") is not None
+            or endpoint_window.get("date_to") != expected_date_to
+        ):
+            raise ValueError("provider_window_unverified")
+        if latest is None or (_aware(observation.accepted_at), observation.observation_id) > (
+            _aware(latest[0].accepted_at),
+            latest[0].observation_id,
+        ):
+            latest = (observation, document)
+    if latest is None:
+        raise ValueError("publication observation rows missing")
+    observation, document = latest
+    records = document.get("records")
+    if not isinstance(records, list):
+        raise ValueError("publication observation rows missing")
+    ratings: dict[int, float] = {}
+    for record in records:
+        if not isinstance(record, Mapping):
+            raise ValueError("publication observation row malformed")
+        try:
+            team_id = int(record["team_id"])
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            raise ValueError("publication team identity missing") from error
+        if team_id not in expected_teams or team_id in ratings:
+            raise ValueError("publication team identity invalid")
+        games_played = record.get("games_played")
+        if (
+            isinstance(games_played, bool)
+            or not isinstance(games_played, (int, float))
+            or not float(games_played).is_integer()
+            or int(games_played) != len(expected_game_ids_by_team[team_id])
+        ):
+            raise ValueError("publication games played mismatch")
+        rating = record.get(DEFENSIVE_RATING_METRIC)
+        if isinstance(rating, bool) or not isinstance(rating, (int, float)):
+            raise ValueError("publication observation value invalid")
+        rating = float(rating)
+        if not math.isfinite(rating) or rating <= 0:
+            raise ValueError("publication observation value invalid")
+        ratings[team_id] = rating
+    if set(ratings) != expected_teams:
+        raise ValueError("publication observation league incomplete")
+    rows = []
+    for team_id in sorted(expected_teams):
+        game_ids = sorted(expected_game_ids_by_team[team_id])
+        if not game_ids:
+            raise ValueError("publication governed game set empty")
+        rows.append(
+            {
+                "team_id": team_id,
+                "team_tricode": NBA_TEAM_ID_TO_TRICODE[str(team_id)],
+                "game_ids": game_ids,
+                "game_count": len(game_ids),
+                "per48": {DEFENSIVE_RATING_METRIC: ratings[team_id]},
+            }
+        )
+    return {
+        "rows": rows,
+        "source_observations": [
+            {"observation_id": observation.observation_id, "checksum": observation.checksum}
+        ],
+    }
 
 
 #: One player shot-type record's rich evidence, and where each value is
@@ -3972,8 +4166,10 @@ class CollectionControlService(_SessionService):
                                 in {
                                     "shot_types_opponent",
                                     "shot_zones_opponent",
+                                    DEFENSIVE_RATING_OBSERVATION,
                                 }
                                 or scope.endswith("_opponent_l15")
+                                or scope == publication_stream(DEFENSIVE_RATING_BASE, "l15")
                                 for scope in authorized_scopes
                             )
                             else {}
@@ -4378,8 +4574,10 @@ class CollectionControlService(_SessionService):
                             in {
                                 "shot_types_opponent",
                                 "shot_zones_opponent",
+                                DEFENSIVE_RATING_OBSERVATION,
                             }
                             or scope.endswith("_opponent_l15")
+                            or scope == publication_stream(DEFENSIVE_RATING_BASE, "l15")
                             for scope in authorized_scopes
                         )
                         else {}
@@ -5036,6 +5234,12 @@ class ObservationIngestionService(_SessionService):
                         and str(scope_value.get("window", "")).casefold() == "l15"
                         else {}
                     ),
+                )
+                _validate_team_rating_window_scope(
+                    scope_value,
+                    observation_type=observation_type,
+                    season=str(envelope["season"]),
+                    cutoff=_aware(manifest.cutoff),
                 )
                 allowed_scopes = set(json.loads(manifest.scopes))
                 if observation_type not in allowed_scopes and "*" not in allowed_scopes:
@@ -10400,6 +10604,40 @@ def _validate_observation_scope_identity(
             raise ValueError("opponent observation team invalid") from error
         if team_id != scoped_team_id:
             raise ValueError("opponent observation team mismatch")
+
+
+def _validate_team_rating_window_scope(
+    scope: Any,
+    *,
+    observation_type: str,
+    season: str,
+    cutoff: datetime,
+) -> None:
+    """Bind a league-wide rating observation to its issued endpoint window.
+
+    The read is ``LastNGames`` 0 or 15 up to the manifest's slate date, with
+    no team and no start date, exactly as the descriptor issued it.
+    """
+
+    if observation_type != DEFENSIVE_RATING_OBSERVATION:
+        return
+    if not isinstance(scope, Mapping):
+        raise ControlPlaneError("manifest_scope_mismatch")
+    window = str(scope.get("window", "")).casefold()
+    endpoint_window = scope.get("endpoint_window")
+    if (
+        window not in {"season", "l15"}
+        or scope.get("season") != season
+        or scope.get("season_type") != "Regular Season"
+        or scope.get("phase") != "Regular Season"
+        or scope.get("value_mode") != "rating"
+        or "team_id" in scope
+        or not isinstance(endpoint_window, Mapping)
+        or endpoint_window.get("last_n_games") != (15 if window == "l15" else 0)
+        or endpoint_window.get("date_from") is not None
+        or endpoint_window.get("date_to") != slate_date_for_instant(cutoff).strftime("%m/%d/%Y")
+    ):
+        raise ControlPlaneError("manifest_scope_mismatch")
 
 
 def _validate_opponent_window_scope(

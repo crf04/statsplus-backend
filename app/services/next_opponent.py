@@ -11,6 +11,8 @@ from app.domain.nba_events import (
 )
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.team_matchup_taxonomy import (
+    DEFENSIVE_RATING_BASE,
+    DEFENSIVE_RATING_METRIC,
     PLAY_TYPES,
     SHOT_TYPE_SLICES,
     SHOT_ZONE_SLICES,
@@ -56,7 +58,7 @@ def _metric_families():
             "threes",
             ("FG3M", "PTS"),
         ),
-        key("traditional", "points", per="possessions"): ("defensive-rating", ("PTS",)),
+        key(DEFENSIVE_RATING_BASE, DEFENSIVE_RATING_METRIC): ("defensive-rating", ("PTS",)),
     }
     for metric in ("two_point", "at_rim", "short_mid_range", "long_mid_range"):
         families[key("assist_locations", metric + "_assists")] = ("2pt-assists", ("AST",))
@@ -196,6 +198,9 @@ class NextOpponentService:
             rows_by_base = self.rankings.season_rows_by_base(
                 (
                     "traditional",
+                    # Listed beside the traditional rows, where DRTG sat
+                    # while it was a ledger metric.
+                    DEFENSIVE_RATING_BASE,
                     "play_types",
                     "assist_locations",
                     "shot_zones",

@@ -59,9 +59,24 @@ NBA_PUBLICATION_STREAMS: dict[str, str] = {
 }
 NBA_PUBLICATION_WINDOWS: tuple[str, ...] = ("season", "l15")
 NBA_PUBLICATION_BASES = frozenset(NBA_PUBLICATION_STREAMS)
+#: NBA.com's team Defensive Rating, ``DEF_RATING`` from ``LeagueDashTeamStats``
+#: ``MeasureType=Advanced`` (crf04/statsplus#447).  It is governed and
+#: composed exactly as the Matchup bases above are -- one row per team, the
+#: window's governed game set, manifest and cutoff authority -- but it is not
+#: a Matchup surface: the Defense Sheet and the Matchup materializer read
+#: ``NBA_PUBLICATION_STREAMS`` only, so this base never reaches them.  Its row
+#: value is the provider's rating as published, not a per-48 rate.
+DEFENSIVE_RATING_BASE = "defensive_rating"
+DEFENSIVE_RATING_METRIC = "DEF_RATING"
+NBA_TEAM_RATING_STREAMS: dict[str, str] = {DEFENSIVE_RATING_BASE: "defensive_rating_{window}"}
+#: Every governed NBA-owned team-window stream template: the Matchup bases
+#: plus the team ratings.  Composition, activation, and the publication
+#: decoder read this; Matchup assembly reads ``NBA_PUBLICATION_STREAMS``.
+NBA_GOVERNED_PUBLICATION_STREAMS: dict[str, str] = {**NBA_PUBLICATION_STREAMS, **NBA_TEAM_RATING_STREAMS}
+NBA_GOVERNED_PUBLICATION_BASES = frozenset(NBA_GOVERNED_PUBLICATION_STREAMS)
 NBA_PUBLICATION_STREAM_KEYS = frozenset(
     template.format(window=window)
-    for template in NBA_PUBLICATION_STREAMS.values()
+    for template in NBA_GOVERNED_PUBLICATION_STREAMS.values()
     for window in NBA_PUBLICATION_WINDOWS
 )
 NBA_PUBLICATION_METRIC_KEYS = {
@@ -74,6 +89,7 @@ NBA_PUBLICATION_METRIC_KEYS = {
     "shot_zones": tuple(
         f"{slice_key}_{stat_key}" for slice_key in SHOT_ZONE_SLICES for stat_key in SHOT_ZONE_STATS
     ),
+    DEFENSIVE_RATING_BASE: (DEFENSIVE_RATING_METRIC,),
 }
 #: Shot types also carry a derived ``PTS`` Sheet row: points allowed,
 #: ``2*FG2M + 3*FG3M``.  It is computed at read time from the published
@@ -279,11 +295,15 @@ __all__ = [
     "DEFENSE_SHEET_BASES",
     "DEFENSE_SHEET_FILTER_PREFIX",
     "DEFENSE_SHEET_ROW_METRICS",
+    "DEFENSIVE_RATING_BASE",
+    "DEFENSIVE_RATING_METRIC",
     "LEDGER_DEFENSE_SHEET_METRICS",
     "LEDGER_OWNED_MATCHUP_STREAM_KEYS",
     "LEDGER_OWNED_MATCHUP_STREAM_PREFIX",
     "LEDGER_OWNED_MATCHUP_SURFACES",
     "LEDGER_PARITY_MATCHUP_SURFACES",
+    "NBA_GOVERNED_PUBLICATION_BASES",
+    "NBA_GOVERNED_PUBLICATION_STREAMS",
     "NBA_PUBLICATION_BASES",
     "NBA_PUBLICATION_METRIC_KEYS",
     "NBA_PUBLICATION_OPTIONAL_METRIC_KEYS",
@@ -291,6 +311,7 @@ __all__ = [
     "NBA_PUBLICATION_STREAM_KEYS",
     "NBA_PUBLICATION_TAXONOMY",
     "NBA_PUBLICATION_WINDOWS",
+    "NBA_TEAM_RATING_STREAMS",
     "PLAY_TYPES",
     "PLAY_TYPE_OPTIONAL_STATS",
     "PLAY_TYPE_STATS",
