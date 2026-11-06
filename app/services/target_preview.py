@@ -16,12 +16,15 @@ is composed from it through ``MatchupService.get_matchup_from_snapshot``.  The
 projection-only narrowing is the intersection of the two reads' own, so a
 stream is read payload-less only where both reads would.
 
-*One season.*  A season other than the published one (requested, or the
+*One season.*  A season before the published one (requested, or the
 2025-26 default) reads the Backtest from that season's retained Generation
 alone.  ``today`` is about tonight's players, which such a season says
 nothing about, and pairing it with a second capture would break the
 one-generation promise, so it is ``null`` (#104); so is a published season
-any of whose streams had to be read retained.
+any of whose streams had to be read retained.  The next season, read
+Unpublished, captures the Matchup's streams with its held candidates, so its
+``today`` judges tonight's players on that season
+(crf04/statsplus-backend#727).
 
 *No provider, no write.*  The Matchup route may refresh injuries from the
 provider and publish a snapshot when the stored override is stale; that is its
@@ -129,6 +132,7 @@ class TargetPreviewService:
             season,
             self._capture,
             BACKTEST_PUBLICATION_STREAM_KEYS,
+            also_keys=MATCHUP_PUBLICATION_STREAM_KEYS,
             projection_only_keys=BACKTEST_PROJECTION_ONLY_STREAM_KEYS,
             decoded_only_keys=BACKTEST_DECODED_ONLY_STREAM_KEYS,
         )
@@ -146,7 +150,7 @@ class TargetPreviewService:
             )
         previewed = self.backtests.backtest_target(draft, publication_snapshot=snapshot, season=choice)
         if choice.past or getattr(snapshot, "retained_history", ()):
-            # A season that is not the published one says nothing about
+            # A season before the published one says nothing about
             # tonight's players, and a retained read is not the Generation
             # tonight's Matchup is in.  No Slate is read, so no source is.
             return {

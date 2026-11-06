@@ -76,9 +76,13 @@ class BacktestSeason:
 
     @property
     def past(self) -> bool:
-        """Whether this season is not the published one, so says nothing of tonight."""
+        """Whether this season is before the published one, so says nothing of tonight.
 
-        return self.season != self.published
+        The next season, read Unpublished before its cutover, is tonight's
+        season too, so it is not past (crf04/statsplus-backend#727).
+        """
+
+        return int(self.season[:4]) < int(self.published[:4])
 
     def thinness(self, settings: MatchupScoreSettings) -> MatchupScoreSettings:
         """The Diet thinness floors this season's players are judged under.
@@ -177,6 +181,7 @@ class BacktestSeasons:
         stream_keys: Iterable[str],
         *,
         choice: BacktestSeason | None = None,
+        also_keys: Iterable[str] = (),
         projection_only_keys: frozenset[str] = frozenset(),
         decoded_only_keys: frozenset[str] = frozenset(),
         session: Any | None = None,
@@ -187,6 +192,7 @@ class BacktestSeasons:
         no ``choice`` and nothing requested, one live capture decides the
         published season (as ``published_capture`` does) and the default
         season is read against it.  The returned capture is ``evidence`` for the season.
+        ``also_keys`` are the streams ``live_capture`` reads beside ``stream_keys``.
         """
 
         captured = live = None
@@ -196,12 +202,13 @@ class BacktestSeasons:
             captured, live = published_capture(self.settings, self.publication_reader, live_capture)
             diets = self._game_log_capture(captured, session) if _lacks_diets(live) else None
             choice = self.choose(captured, live, diets=diets)
-        if not choice.past and choice.season != captured:
+        if choice.season == choice.published and choice.season != captured:
             live = live_capture(choice.season)
         return choice, self.evidence(
             choice,
             live,
             stream_keys,
+            also_keys=also_keys,
             projection_only_keys=projection_only_keys,
             decoded_only_keys=decoded_only_keys,
             session=session,
@@ -213,6 +220,7 @@ class BacktestSeasons:
         live: Any,
         stream_keys: Iterable[str],
         *,
+        also_keys: Iterable[str] = (),
         projection_only_keys: frozenset[str] = frozenset(),
         decoded_only_keys: frozenset[str] = frozenset(),
         session: Any | None = None,
@@ -226,7 +234,9 @@ class BacktestSeasons:
         result's ``retained_history`` names the rows that were.  A live
         Publication that exists but cannot be read (corrupt, unauthorised,
         without its projection) is unavailable too, never an empty season;
-        see ``_readable`` for the reads that still serve.
+        see ``_readable`` for the reads that still serve.  An Unpublished
+        Season's capture also reads ``also_keys``, refusing none of them, as
+        the live capture does.
         """
 
         keys = tuple(stream_keys)
@@ -238,7 +248,7 @@ class BacktestSeasons:
         if choice.mode is BacktestMode.RETAINED:
             return self.retained_snapshot(choice, keys, **shape)
         if choice.mode is BacktestMode.UNPUBLISHED:
-            snapshot = self._unpublished_capture(choice, keys, **shape)
+            snapshot = self._unpublished_capture(choice, tuple(dict.fromkeys((*keys, *also_keys))), **shape)
             _refuse_unserved(choice, snapshot, keys, frozenset(keys))
             return snapshot
         read_stream = getattr(live, "read", None)
