@@ -343,15 +343,14 @@ class GameService:
                 publication_snapshot=publication_snapshot,
                 connection=connection,
             )
-            exclude_game_ids |= set(player_logs["GAME_ID"]) - self._games_without(
-                player_logs, player_gamelogs
-            )
+            without, _ = self._absence_split(player_logs, player_gamelogs)
+            exclude_game_ids |= set(player_logs["GAME_ID"]) - without
 
         return exclude_game_ids
 
     @staticmethod
-    def _games_without(player_logs, absent_player_logs):
-        """Ids of ``player_logs``' games inside the absent player's team window that he has no row in."""
+    def _absence_split(player_logs, absent_player_logs):
+        """Ids of ``player_logs``' games inside the absent player's team window: those he has no row in, then those he has."""
         appearances = list(
             zip(
                 pd.to_datetime(absent_player_logs["GAME_DATE"]).dt.date,
@@ -363,16 +362,16 @@ class GameService:
         appeared = set(
             zip(absent_player_logs["GAME_ID"], absent_player_logs["TEAM_ABBREVIATION"], strict=True)
         )
-        return {
-            game_id
-            for game_id, team, day in zip(
-                player_logs["GAME_ID"],
-                player_logs["TEAM_ABBREVIATION"],
-                pd.to_datetime(player_logs["GAME_DATE"]).dt.date,
-                strict=True,
-            )
-            if windows[team] is not None and windows[team].contains(day) and (game_id, team) not in appeared
-        }
+        without, played = set(), set()
+        for game_id, team, day in zip(
+            player_logs["GAME_ID"],
+            player_logs["TEAM_ABBREVIATION"],
+            pd.to_datetime(player_logs["GAME_DATE"]).dt.date,
+            strict=True,
+        ):
+            if windows[team] is not None and windows[team].contains(day):
+                (played if (game_id, team) in appeared else without).add(game_id)
+        return without, played
 
     def get_player_logs_by_id(self, player_id, season, *, publication_snapshot=None):
         """One player's stored logs for a season, by canonical id."""
@@ -434,15 +433,18 @@ class GameService:
         )
         return {int(row.player_id) for row in rows}
 
-    def games_without_player(self, player_logs, absent_player_logs):
+    def games_without_and_with_player(self, player_logs, absent_player_logs):
         """The ``players_off`` absence rule, for logs already read by id.
 
         Same rule as ``get_games_to_exclude``: a game of team T counts as
         "without" the absent player when it falls inside his team window for T
-        (crf04/statsplus#449) and he has no game-log row for T that day.
-        Returns the ids of ``player_logs``' games that qualify.
+        (crf04/statsplus#449) and he has no game-log row for T that day, and as
+        "with" him when it falls inside the window and he has one.  Returns the
+        ids of ``player_logs``' games on each side; a game outside the window is
+        on neither.
         """
-        return {str(game_id) for game_id in self._games_without(player_logs, absent_player_logs)}
+        without, played = self._absence_split(player_logs, absent_player_logs)
+        return {str(game_id) for game_id in without}, {str(game_id) for game_id in played}
 
     def filter_players_on_off(
         self,

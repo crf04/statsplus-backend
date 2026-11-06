@@ -633,9 +633,7 @@ def test_players_off_leaves_out_games_after_the_named_player_moved_to_another_te
     assert result["GAME_ID"].tolist() == ["g2"]
 
 
-def test_players_off_leaves_out_a_game_on_the_named_players_first_day_for_another_team(
-    service, monkeypatch
-):
+def test_players_off_leaves_out_a_game_on_the_named_players_first_day_for_another_team(service, monkeypatch):
     primary = _logs(
         ("g1", "2026-01-01", "LAL"),
         ("g2", "2026-01-05", "LAL"),

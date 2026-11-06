@@ -4,7 +4,7 @@ For each player the stored report lists as Questionable, Doubtful or Out, this
 combines three kinds of evidence about every rotation teammate:
 
 * the full-game split in games the injured player missed, by the game-log
-  ``players_off`` absence rule (``GameService.games_without_player``);
+  ``players_off`` absence rule (``GameService.games_without_and_with_player``);
 * the per-36 split while the injured player is off the floor, from
   ``OnOffService``;
 * the teammate's record against today's posted line in those missed games.
@@ -186,10 +186,14 @@ class _OnOffReads:
 class _WindowSeason:
     """One season of a pair's window."""
 
-    def __init__(self, season: str, rows: pd.DataFrame, without: set[str], sliceable: bool) -> None:
+    def __init__(
+        self, season: str, rows: pd.DataFrame, without: set[str], played: set[str], sliceable: bool
+    ) -> None:
         self.season = season
         self.rows = rows
         self.without = without
+        #: Games inside the injured player's team window that he played.
+        self.played = played
         #: Whether on/off totals for this season match the window's games: false
         #: when either player changed teams in it.
         self.sliceable = sliceable
@@ -518,14 +522,8 @@ class InjuryScenarioService:
                 injured_logs[s].other_team_rows(team) is not None
                 or mates[s].other_team_rows(team) is not None
             )
-            window.append(
-                _WindowSeason(
-                    s,
-                    rows,
-                    self.games.games_without_player(rows, injured_logs[s].absent_frame()),
-                    sliceable=not changed,
-                )
-            )
+            without, played = self.games.games_without_and_with_player(rows, injured_logs[s].absent_frame())
+            window.append(_WindowSeason(s, rows, without, played, sliceable=not changed))
         if not window:
             return None
         all_rows = pd.concat([w.rows for w in window])
@@ -744,7 +742,7 @@ class _Teammate:
         frames, spans = [], []
         for w in self.window:
             ids = w.rows["GAME_ID"].astype(str)
-            chosen = w.rows[~ids.isin(w.without)] if with_player else w.rows[ids.isin(w.without)]
+            chosen = w.rows[ids.isin(w.played if with_player else w.without)]
             if not chosen.empty:
                 frames.append(chosen)
                 spans.append(w.season)
