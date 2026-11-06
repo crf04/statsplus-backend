@@ -499,6 +499,10 @@ def test_shot_rows_list_the_combined_markets_on_both_matchups(tmp_path):
                 for stat in ("FG2A", "FG3A")
                 if (shot_type, stat) != ("Less Than 10 ft", "FG3A")
             },
+            # Each shot type's overall attempts row (#454) reads FGA alone.
+            **{
+                f"{shot_type}:FGA": ["FGA"] for shot_type in ("Catch and Shoot", "Pullups", "Less Than 10 ft")
+            },
         }
         league_keys = {row["key"] for row in payload["league"]["defense_sheet"]["shot_types"]}
         assert (
@@ -507,7 +511,7 @@ def test_shot_rows_list_the_combined_markets_on_both_matchups(tmp_path):
             == {
                 f"{shot_type}:{stat}"
                 for shot_type in ("Catch and Shoot", "Pullups", "Less Than 10 ft")
-                for stat in ("PTS", "FG2M", "FG2A", "FG3M", "FG3A")
+                for stat in ("PTS", "FGM", "FGA", "FG2M", "FG2A", "FG3M", "FG3A")
                 if shot_type != "Less Than 10 ft" or stat not in ("FG3M", "FG3A")
             }
         )

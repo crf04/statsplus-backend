@@ -530,10 +530,14 @@ def slice_markets(base: str, slice_key: str, stat_key: str) -> tuple[str, ...]:
     their parts.  A shot zone's markets depend on the slice as well as the
     statistic -- only a three-point zone's makes bear on 3PM, and only a
     two-point zone's on FG2M -- so the zone cases are stated before the
-    statistic table.  Public so the mapping has
-    one definition; the Defense Sheet payload is its only caller.
+    statistic table.  A shot type's derived overall makes and attempts rows
+    (crf04/statsplus#454) are each read for their own market only.  Public so
+    the mapping has one definition; the Defense Sheet payload is its only
+    caller.
     """
 
+    if base == "shot_types" and stat_key in ("FGM", "FGA"):
+        return (stat_key,)
     if base == "shot_zones":
         if slice_key in _TWO_POINT_SHOT_ZONES:
             if stat_key == "FGA":

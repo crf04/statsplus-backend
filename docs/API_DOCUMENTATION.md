@@ -1534,6 +1534,14 @@ play_types, shot_zones, shot_types, assist_locations, traditional, rebound_types
 hold only stray mis-tags whose ranks would read −100% or thousands of percent.
 The scores still read them, where the player's own threes there weigh nothing.
 
+Each shot type also has three derived rows, summed at read time from its
+published stats and never part of a publication: `<slice>:PTS`
+(`2 x FG2M + 3 x FG3M`, crf04/statsplus#315), and `<slice>:FGM`
+(`FG2M + FG3M`) and `<slice>:FGA` (`FG2A + FG3A`, crf04/statsplus#454). They
+rank and compare to the league like every other row. `<slice>:FGM` lists only
+`["FGM"]` and `<slice>:FGA` only `["FGA"]` in `markets`: each is the overall row
+those markets display, and no Matchup Score reads a derived row.
+
 `rebound_types` (crf04/statsplus#234) is the ledger-owned Rebound Types Base,
 listed directly after `traditional`. Its rows have exactly the shape of the
 `assist_locations` rows above and are keyed, like every Base's rows, in
@@ -6852,7 +6860,7 @@ on exactly the metric the Matchup showed:
 | --- | --- |
 | `play_types` | `PRBallHandler:PTS`, `Isolation:POSS`, `PRBallHandler:TOV`, `Isolation:FTT` (each play type with `PTS`, `POSS`, `TOV` and `FTT`; a Season Publication composed before #416 has no `TOV` or `FTT` rows, and a filter on one then ranks no opponent) |
 | `shot_zones` | `Restricted Area:FGM`, `Mid-Range:FGA`, `Corner 3:FGM` (each governed zone with `FGM` and `FGA`) |
-| `shot_types` | `Catch and Shoot:FG3M`, `Pullups:FG2A`, `Less Than 10 ft:FG2M` (each shot type with `FG2M`, `FG2A`, `FG3M`, `FG3A`, plus the derived `PTS`, e.g. `Catch and Shoot:PTS`, which ranks `2 x FG2M + 3 x FG3M`, the same order as the Sheet row and as the `C&S PTS` filter) |
+| `shot_types` | `Catch and Shoot:FG3M`, `Pullups:FG2A`, `Less Than 10 ft:FG2M` (each shot type with `FG2M`, `FG2A`, `FG3M`, `FG3A`, plus the derived `PTS`, e.g. `Catch and Shoot:PTS`, which ranks `2 x FG2M + 3 x FG3M`, the same order as the Sheet row and as the `C&S PTS` filter, and the derived `FGM` and `FGA`, e.g. `Pullups:FGA`, which rank `FG2M + FG3M` and `FG2A + FG3A`) |
 | `assist_locations` | `Assists`, `Arc3Assists`, `Corner3Assists`, `AtRimAssists`, `ShortMidRangeAssists`, `LongMidRangeAssists` |
 | `traditional` | `OPP_PTS`, `OPP_REB`, `OPP_AST`, `OPP_FGM`, `OPP_FGA`, `OPP_FG3M`, `OPP_FG3A`, `OPP_FTM`, `OPP_FTA`, `OPP_TOV`, `OPP_STL`, `OPP_BLK` (each ranks the per-48 allowed the Sheet row shows) |
 

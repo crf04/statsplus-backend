@@ -75,16 +75,23 @@ NBA_PUBLICATION_METRIC_KEYS = {
         f"{slice_key}_{stat_key}" for slice_key in SHOT_ZONE_SLICES for stat_key in SHOT_ZONE_STATS
     ),
 }
-#: Shot types also carry a derived ``PTS`` Sheet row: points allowed,
-#: ``2*FG2M + 3*FG3M``.  It is computed at read time from the published
-#: FG2M and FG3M metrics and is never part of a publication payload.
-SHOT_TYPE_POINTS_STAT = "PTS"
+#: Shot types also carry derived Sheet rows, each a linear combination of
+#: one slice's published stats: points allowed (``2*FG2M + 3*FG3M``) and
+#: overall makes and attempts (crf04/statsplus#454).  They are computed at
+#: read time and are never part of a publication payload.
+SHOT_TYPE_DERIVED_STATS: dict[str, tuple[tuple[str, float], ...]] = {
+    "PTS": (("FG2M", 2.0), ("FG3M", 3.0)),
+    "FGM": (("FG2M", 1.0), ("FG3M", 1.0)),
+    "FGA": (("FG2A", 1.0), ("FG3A", 1.0)),
+}
 
 
-def shot_type_points_terms(slice_key: str) -> tuple[tuple[str, float], ...]:
-    """The published metrics (with coefficients) that make one slice's points."""
+def shot_type_derived_terms(slice_key: str, stat_key: str) -> tuple[tuple[str, float], ...]:
+    """The published metrics (with coefficients) behind one slice's derived stat."""
 
-    return ((f"{slice_key}_FG2M", 2.0), (f"{slice_key}_FG3M", 3.0))
+    return tuple(
+        (f"{slice_key}_{stat}", coefficient) for stat, coefficient in SHOT_TYPE_DERIVED_STATS[stat_key]
+    )
 
 
 NBA_PUBLICATION_TAXONOMY = {base: frozenset(keys) for base, keys in NBA_PUBLICATION_METRIC_KEYS.items()}
@@ -230,16 +237,19 @@ DEFENSE_SHEET_ROW_METRICS: dict[str, dict[str, str]] = {
     for base in TEAM_FILTER_SHEET_BASES
 }
 for _slice_key in SHOT_TYPE_SLICES:
-    DEFENSE_SHEET_ROW_METRICS["shot_types"][
-        defense_sheet_row_key("shot_types", _slice_key, SHOT_TYPE_POINTS_STAT)
-    ] = f"{_slice_key}_{SHOT_TYPE_POINTS_STAT}"
+    for _stat_key in SHOT_TYPE_DERIVED_STATS:
+        DEFENSE_SHEET_ROW_METRICS["shot_types"][
+            defense_sheet_row_key("shot_types", _slice_key, _stat_key)
+        ] = f"{_slice_key}_{_stat_key}"
 
 
 def derived_metric_terms(base: str, metric_key: str) -> tuple[tuple[str, float], ...] | None:
     """The published terms behind a derived Sheet metric, else ``None``."""
 
-    if base == "shot_types" and metric_key.endswith(f"_{SHOT_TYPE_POINTS_STAT}"):
-        return shot_type_points_terms(metric_key[: -len(SHOT_TYPE_POINTS_STAT) - 1])
+    if base == "shot_types":
+        slice_key, _, stat_key = metric_key.rpartition("_")
+        if stat_key in SHOT_TYPE_DERIVED_STATS:
+            return shot_type_derived_terms(slice_key, stat_key)
     return None
 
 
@@ -294,8 +304,8 @@ __all__ = [
     "PLAY_TYPES",
     "PLAY_TYPE_OPTIONAL_STATS",
     "PLAY_TYPE_STATS",
+    "SHOT_TYPE_DERIVED_STATS",
     "SHOT_TYPE_DISPLAY_TO_STORED",
-    "SHOT_TYPE_POINTS_STAT",
     "SHOT_TYPE_SLICES",
     "SHOT_TYPE_STATS",
     "SHOT_TYPE_STORED_TO_DISPLAY",
@@ -312,5 +322,5 @@ __all__ = [
     "matchup_stream_key",
     "nba_publication_taxonomies",
     "publication_metric_identity",
-    "shot_type_points_terms",
+    "shot_type_derived_terms",
 ]
