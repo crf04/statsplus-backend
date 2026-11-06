@@ -393,7 +393,7 @@ Which streams each route lists:
 | Unscheduled Matchup | the Matchup snapshot's streams | `{}` |
 | Game logs | `player_game_logs`, the four Player Diet streams, and the five Season Defense Sheet streams | `{}` |
 | Targets resolve | the one snapshot every composed Matchup shared, plus any retained Publication a composed Matchup read; `[]` when no Target composed a Matchup | the Slate's `schedule`; `pool`, `injuries` of the composed Matchups' own reads (the Slate's when none was composed) |
-| Draft Target preview | the preview's single union capture, narrowed to the Backtest's streams when no Matchup was composed (idle opponent, or a preview whose `today` is `null` because it reads a season other than the published one or a retained Publication) | as Targets resolve; `{}` when `today` is `null` for a non-published-season or retained read, which reads no Slate |
+| Draft Target preview | the preview's single union capture, narrowed to the Backtest's streams when no Matchup was composed (idle opponent, or a preview whose `today` is `null` because it reads a season before the published one or a retained Publication) | as Targets resolve; `{}` when `today` is `null` for a past-season or retained read, which reads no Slate |
 
 Game logs list the Season Defense Sheet streams whether or not the query has
 `teams_against` filters: every row's `PLAYTYPE_RTG` crosses the player's
@@ -6672,10 +6672,14 @@ Saving the draft and expanding its Backtest shows the same numbers.
 `today` says whether the draft fires on the **current** ET Slate Date; there is
 no date parameter, and the evaluation is season to date.
 
-- `null` when the preview reads a season other than `published_season`
+- `null` when the preview reads a season before `published_season`
   (requested or default), or a published season any of whose streams was read
   retained: neither is the Generation tonight's
-  Matchup is in, and the preview never pairs it with a second capture.
+  Matchup is in, and the preview never pairs it with a second capture. The
+  next season, read Unpublished (`2026-27` while `2025-26` is published), is
+  tonight's season: its one capture holds the Matchup's streams' candidates
+  too, so its `today` counts tonight's players on that season
+  (crf04/statsplus-backend#727).
 - `null` when the opponent has no game today.
 - Otherwise `game` is the resolve response's game object, and `fit_count` is
   the number of opposing participants meeting every Qualifier by the

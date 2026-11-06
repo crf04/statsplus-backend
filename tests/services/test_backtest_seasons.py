@@ -40,9 +40,11 @@ from app.services.target_backtest import (
     BACKTEST_PUBLICATION_STREAM_KEYS,
     TargetBacktestService,
 )
-from app.services.target_preview import TargetPreviewService
+from app.services.target_preview import PREVIEW_PUBLICATION_STREAM_KEYS, TargetPreviewService
+from app.services.target_resolution import TargetResolutionService
 from app.services.user_service import UserService
 from tests import test_target_backtest as bt
+from tests import test_target_resolution as res
 from tests.support.season_rollover import cut_over_if_held
 
 OWNER = "test-uid"
@@ -721,7 +723,7 @@ def test_a_2026_27_backtest_current_with_its_game_logs_names_no_lag(world):
 def test_a_2026_27_preview_names_each_diet_that_trails_its_game_logs(world):
     _hold_new_season(world, cutoffs={"exact_shot_zones": DIET_CUTOFF})
 
-    body = _preview(world, NEW)
+    body = _preview(world, NEW, TonightFits())
 
     assert body["lagging_inputs"] == [
         {
@@ -881,17 +883,57 @@ def test_2026_27_season_minutes_list_its_held_opponent_roster(world):
     }
 
 
-def test_a_2026_27_preview_reads_its_held_candidates_and_has_no_today(world):
-    """The Lab's and MCP ``backtest_draft_target``'s read."""
+class TonightsMatchup:
+    """Tonight's Matchup, recording the season and the generation it was composed in."""
+
+    def __init__(self):
+        self.calls = []
+
+    def get_matchup_from_snapshot(self, *, game_id, publication_snapshot, injuries, season):
+        self.calls.append(
+            (
+                game_id,
+                season,
+                {key: (read.season, read.status) for key, read in publication_snapshot.reads.items()},
+            )
+        )
+        return res._matchup()
+
+
+def test_a_2026_27_preview_reads_its_held_candidates_and_counts_tonights_fits_in_2026_27(world):
+    """The Lab's and MCP ``backtest_draft_target``'s read (crf04/statsplus-backend#727)."""
 
     _hold_new_season(world)
+    matchups = TonightsMatchup()
+    draft = world.users.validate_target_draft(opponent="OKC", qualifiers=[CORNER_THREE], season=NEW)
 
-    body = _preview(world, NEW)
+    body = TargetPreviewService(
+        backtests=world.backtests(),
+        resolutions=TargetResolutionService(targets=object(), slates=res.FakeSlate(), matchups=matchups),
+        matchups=matchups,
+        injuries=None,
+        settings=world.settings,
+        publication_reader=world.reader,
+    ).preview(draft, season=NEW)
 
     _assert_held_2026_27(body)
-    assert body["today"] is None
+    # Corner Sniper's 0.4 share fits; Rim Runner's 0.1 does not.
+    assert (body["today"]["game"]["game_id"], body["today"]["fit_count"]) == (res.GAME_ID, 1)
+    [(game_id, season, reads)] = matchups.calls
+    assert (game_id, season) == (res.GAME_ID, NEW)
+    # Tonight's Matchup reads the 2026-27 held candidates, never 2025-26's.
+    assert {key: reads[key] for key in BACKTEST_PUBLICATION_STREAM_KEYS} == {
+        "player_game_logs": (NEW, "candidate"),
+        "exact_shot_zones": (NEW, "candidate"),
+        "grouped_shot_types": (NEW, "candidate"),
+        "player_assist_locations": (NEW, "candidate"),
+        "synergy_play_types": (NEW, "candidate"),
+    }
+    assert set(reads) == set(PREVIEW_PUBLICATION_STREAM_KEYS)
     assert [
-        (entry["stream_key"], entry["season"], entry["status"]) for entry in body["provenance"]["generation"]
+        (entry["stream_key"], entry["season"], entry["status"])
+        for entry in body["provenance"]["generation"]
+        if entry["stream_key"] in BACKTEST_PUBLICATION_STREAM_KEYS
     ] == [
         ("exact_shot_zones", NEW, "candidate"),
         ("grouped_shot_types", NEW, "candidate"),
@@ -1246,11 +1288,11 @@ class NoTonight:
         raise AssertionError("a past-season preview has no today")
 
 
-def _preview(world, season):
+def _preview(world, season, resolutions=None):
     draft = world.users.validate_target_draft(opponent="OKC", qualifiers=[CORNER_THREE], season=season)
     return TargetPreviewService(
         backtests=world.backtests(),
-        resolutions=NoTonight(),
+        resolutions=resolutions or NoTonight(),
         matchups=object(),
         injuries=None,
         settings=world.settings,

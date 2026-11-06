@@ -455,8 +455,8 @@ def preview_target():
     Returns:
         JSON response with the backtest for the draft (its ``target`` carries
         the derived title and no id) and ``today``: ``null`` when the opponent
-        is idle on the current slate date or the season is not the published
-        one, else
+        is idle on the current slate date or the season is before the
+        published one, else
         the game and the fit count
     """
     data = _target_body()
