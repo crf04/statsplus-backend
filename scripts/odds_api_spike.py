@@ -40,6 +40,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.providers.odds_api import (
+    CALL_COST,
     DFS_REGION,
     REGION_ALLOWLISTS,
     SUPPORTED_REGIONS,
@@ -62,7 +63,7 @@ class _Budget:
         self.limit, self.spent = limit, 0
 
     def call(self, client: OddsApiClient, event_id: str):
-        if self.spent + 5 > self.limit:
+        if self.spent + CALL_COST > self.limit:
             raise SystemExit(f"credit cap reached ({self.spent}/{self.limit})")
         result = client.event_odds(event_id)
         self.spent += result.cost

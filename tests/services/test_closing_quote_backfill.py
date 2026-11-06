@@ -187,6 +187,9 @@ def test_the_backfill_buys_only_the_gap_game_for_all_five_markets_at_its_closing
                 "player_assists",
                 "player_threes",
                 "player_points_rebounds_assists",
+                "player_points_rebounds",
+                "player_points_assists",
+                "player_rebounds_assists",
             ),
         )
     ]
@@ -312,16 +315,16 @@ def test_the_cap_counts_only_this_seasons_spend(world):
             )
         )
 
-    summary = _backfill(world, _client(), max_credits=51).run()
+    summary = _backfill(world, _client(), max_credits=81).run()
 
     assert (summary.bought, summary.credits, summary.stop) == (1, 51, None)
 
 
-def test_the_plan_names_the_gap_and_estimates_fifty_credits_a_game(world):
+def test_the_plan_names_the_gap_and_estimates_eighty_credits_a_game(world):
     plan = _backfill(world, _client()).plan()
 
     assert [game.game_id for game in plan.pending] == [DEN_LAL]
-    assert (plan.games_total, plan.covered, plan.estimated_credits) == (3, 2, 51)
+    assert (plan.games_total, plan.covered, plan.estimated_credits) == (3, 2, 81)
 
 
 def test_an_hourly_quote_is_not_a_close_so_the_game_is_still_a_gap(world):

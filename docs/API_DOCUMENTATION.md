@@ -3046,7 +3046,7 @@ for that game, keyed by market, or `{}`:
   "closing_lines": { "PTS": { "value": 24.5, "book": "draftkings" }, "REB": { "value": 7.5, "book": "fanduel" } } }
 ```
 
-* Markets are `PTS`, `REB`, `AST`, `3PM` and `PRA`; a market without a line is
+* Markets are `PTS`, `REB`, `AST`, `3PM`, `PRA`, `PR`, `PA` and `RA`; a market without a line is
   absent, never `null`. Each entry is `{value, book}` exactly as `closing_line`
   is, one book per market by the same order (DraftKings, FanDuel, BetMGM,
   Caesars, BetRivers, Fanatics: the first that posted him in that market).

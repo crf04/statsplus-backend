@@ -5086,16 +5086,18 @@ beat (every 5 min, the odds cron service, ODDS_API_REGIONS=us_dfs)
   is untouched. The feed needs the projection archive, so it refuses the
   read-only demo database.
 
-**Credits.** A call costs unique markets returned x one region, at most 5, and
-an empty response is free. With props up the night before, a 7pm ET tip takes
-14 paid calls = 70 credits: the night pull, hourly 10:00 to 15:00 ET (6),
+**Credits.** A call costs unique markets returned x one region, at most 8
+(`CALL_COST`), and an empty response is free. With props up the night before,
+a 7pm ET tip takes 14 paid calls = 112 credits: the night pull, hourly 10:00 to 15:00 ET (6),
 every 30 minutes 16:00 to 18:30 ET (6), and the closing fetch. Each half hour
 later adds half a day pull (a 6pm tip takes 13, a 10pm tip 17), a noon tip takes
 8, props first posted after 02:00 ET save the night pull, and a failure after
 the purchase does not add a call (see above). A typical month of 222 games
-tipping 6pm to 9:30pm ET therefore costs 16,390 credits (about 16,000 for 230
-games), and a peak month of 250 games 18,775, under the 19,000 spendable above
-the 1,000-credit reserve. Each repeating window's polls are slots on a grid
+tipping 6pm to 9:30pm ET takes 3,278 calls at the normal cadence, 26,224
+credits, more than the 19,000 spendable above the 1,000-credit reserve, so the
+guard degrades part of the month: the replay spends 18,952 and keeps every
+closing (a peak month of 250 games spends 18,960). On a larger plan the same
+month stays at the normal cadence. Each repeating window's polls are slots on a grid
 from where the window opens (hourly from 10:00 ET, every 30 minutes from tip
 minus 3 h); a beat may serve a slot up to two minutes early, but late or early
 beats never add one. `budget_needs` counts the same slots, so the guard sees
