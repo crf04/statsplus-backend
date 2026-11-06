@@ -8,13 +8,15 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 import threading
 from datetime import UTC, datetime, timedelta
 from threading import Barrier, Event, Thread
 
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.errors import DuplicateOperationError, ProviderUnavailableError
@@ -312,6 +314,155 @@ def test_expired_worker_cannot_publish_after_reclaim(job_engine):
 
     first.shutdown()
     second.shutdown()
+
+
+def _fail_heartbeat_renewals(engine, times):
+    """Make the next ``times`` heartbeat lease renewals hit a locked database."""
+
+    failures = {"left": times, "fired": Event()}
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def locked(conn, cursor, statement, parameters, context, executemany):
+        if not threading.current_thread().name.startswith("data-refresh-heartbeat"):
+            return
+        if failures["left"] == 0 or not statement.startswith("UPDATE data_refresh_jobs"):
+            return
+        failures["left"] -= 1
+        if failures["left"] == 0:
+            failures["fired"].set()
+        raise OperationalError(statement, parameters, sqlite3.OperationalError("database is locked"))
+
+    return failures["fired"]
+
+
+def _start_blocking_job(job_engine, now, runs, release):
+    started = Event()
+    executor = _ManualExecutor()
+
+    def refresh(*, progress_callback, publication_fence):
+        del publication_fence
+        runs.append("first")
+        started.set()
+        assert release.wait(timeout=10)
+        progress_callback(0.5, "Fetched")
+
+    service = DataRefreshJobService(
+        job_engine,
+        executor=executor,
+        clock=lambda: now[0],
+        handlers={"update_database": refresh},
+        lease_seconds=0.6,
+        dispatch_on_startup=False,
+        start_poller=False,
+    )
+    queued = service.start("update_database")
+    worker = Thread(target=executor.calls[0][0], args=executor.calls[0][1])
+    worker.start()
+    assert started.wait(timeout=5)
+    return service, queued["job_id"], worker
+
+
+def _second_worker(job_engine, now, runs):
+    return DataRefreshJobService(
+        job_engine,
+        executor=SynchronousExecutor(),
+        clock=lambda: now[0],
+        handlers={"update_database": adapt_zero_arg_handler(lambda: runs.append("second"))},
+        lease_seconds=0.6,
+        dispatch_on_startup=False,
+        start_poller=False,
+    )
+
+
+def test_transient_renewal_error_keeps_the_lease_from_a_second_worker(job_engine):
+    """One locked-database blip must not let another worker run the same job."""
+
+    now = [_fixed_clock()]
+    runs = []
+    release = Event()
+    renewal_failed = _fail_heartbeat_renewals(job_engine, times=1)
+    first, job_id, worker = _start_blocking_job(job_engine, now, runs, release)
+    assert renewal_failed.wait(timeout=5)
+
+    # Fake time passes the claim's lease while the first handler still runs;
+    # each real second gives its heartbeat several beats to renew.
+    for _ in range(2):
+        now[0] += timedelta(seconds=0.4)
+        threading.Event().wait(1.0)
+
+    second = _second_worker(job_engine, now, runs)
+    assert second.dispatch_once() == 0
+    assert runs == ["first"]
+
+    release.set()
+    worker.join(timeout=5)
+    final = first.get(job_id)
+    assert final["status"] == JOB_STATUS_SUCCEEDED
+    assert final["attempt_count"] == 1
+    first.shutdown()
+    second.shutdown()
+
+
+def test_worker_that_lost_its_lease_says_so_and_cannot_write(job_engine, caplog):
+    now = [_fixed_clock()]
+    runs = []
+    release = Event()
+    with caplog.at_level(logging.WARNING, logger="app.services.job_service"):
+        first, job_id, worker = _start_blocking_job(job_engine, now, runs, release)
+        now[0] += timedelta(seconds=5)
+        second = _second_worker(job_engine, now, runs)
+        assert second.dispatch_once() == 1
+
+        def warned():
+            return [record.levelno for record in caplog.records if job_id in record.getMessage()]
+
+        for _ in range(50):
+            if warned():
+                break
+            threading.Event().wait(0.1)
+        release.set()
+        worker.join(timeout=5)
+
+    assert warned() == [logging.WARNING]
+    final = second.get(job_id)
+    assert runs == ["first", "second"]
+    assert final["status"] == JOB_STATUS_SUCCEEDED
+    assert final["attempt_count"] == 2
+    assert final["progress"] == 1.0
+    first.shutdown()
+    second.shutdown()
+
+
+def test_job_that_keeps_killing_its_worker_fails_instead_of_retrying_forever(job_engine):
+    """A row whose every attempt dies with its process stops being reclaimed."""
+
+    now = [_fixed_clock()]
+
+    def crashing_worker():
+        # The handler takes its process down, so the claimed row is never
+        # finished; only lease expiry tells the next process.
+        return DataRefreshJobService(
+            job_engine,
+            executor=_ManualExecutor(),
+            clock=lambda: now[0],
+            handlers={"update_database": adapt_zero_arg_handler(lambda: True)},
+            dispatch_on_startup=False,
+            start_poller=False,
+        )
+
+    job_id = crashing_worker().start("update_database")["job_id"]
+    claims = []
+    for _ in range(6):
+        now[0] += timedelta(seconds=61)
+        claims.append(crashing_worker().dispatch_once())
+
+    assert claims == [1, 1, 0, 0, 0, 0]
+    final = crashing_worker().get(job_id)
+    assert final["status"] == JOB_STATUS_FAILED
+    assert final["attempt_count"] == 3
+    assert final["failure_summary"] == "The data refresh stopped responding 3 times and was not retried."
+    assert final["finished_at"] is not None
+    assert crashing_worker().start("update_database")["status"] == JOB_STATUS_QUEUED
 
 
 def test_dispatch_claim_is_atomic_across_two_workers(job_engine):
