@@ -633,6 +633,38 @@ def test_players_off_leaves_out_games_after_the_named_player_moved_to_another_te
     assert result["GAME_ID"].tolist() == ["g2"]
 
 
+def test_players_off_leaves_out_a_game_on_the_named_players_first_day_for_another_team(
+    service, monkeypatch
+):
+    primary = _logs(
+        ("g1", "2026-01-01", "LAL"),
+        ("g2", "2026-01-05", "LAL"),
+        ("g3", "2026-01-08", "LAL"),
+    )
+    traded = _logs(("g1", "2026-01-01", "LAL"), ("b1", "2026-01-08", "BOS"))
+    _stub_game_logs(service, monkeypatch, {"Traded": traded})
+
+    result = run(service.filter_players_on_off(primary, [], ["Traded"], "2025-26"))
+
+    assert result["GAME_ID"].tolist() == ["g2"]
+
+
+def test_players_off_leaves_out_games_before_a_named_player_traded_in_joined(service, monkeypatch):
+    # He played for BOS first, then joined LAL on 01-10 and sat 01-15.
+    primary = _logs(
+        ("g1", "2026-01-01", "LAL"),
+        ("g2", "2026-01-05", "LAL"),
+        ("g3", "2026-01-10", "LAL"),
+        ("g4", "2026-01-15", "LAL"),
+    )
+    traded_in = _logs(("b1", "2025-12-30", "BOS"), ("g3", "2026-01-10", "LAL"))
+    _stub_game_logs(service, monkeypatch, {"Traded In": traded_in})
+
+    result = run(service.filter_players_on_off(primary, [], ["Traded In"], "2025-26"))
+
+    assert result["GAME_ID"].tolist() == ["g4"]
+
+
 def test_players_off_counts_games_an_inactive_teammate_missed_as_without(service, monkeypatch):
     # Ayo without Edwards (crf04/statsplus#449): Edwards played the first two
     # MIN games and has no row since.

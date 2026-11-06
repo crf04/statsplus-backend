@@ -968,6 +968,20 @@ def test_an_injured_player_who_changed_teams_resets_the_pair(client, authenticat
     assert pts["off_floor"]["minutes"] == 100
 
 
+def test_a_game_before_the_injured_player_joined_is_on_neither_side(client, authenticate, world):
+    # LeBron opens for BOS on 10-21 and first plays for LAL on 10-25, so
+    # Reaves's 10-23 LAL game is outside his LAL window: neither with nor without.
+    lebron = world.logs.rows[(LEBRON, CURRENT)]
+    lebron[0]["TEAM_ABBREVIATION"] = "BOS"
+    del lebron[1]
+    world.logs.rows[(REAVES, CURRENT)][1]["PTS"] = 100
+
+    pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
+
+    assert pts["without"] == {"avg": 25.0, "games": 3, "season_span": "2026-27"}
+    assert (pts["baseline"]["games"], pts["baseline"]["avg"]) == (3, 20.0)
+
+
 def _mates(client, authenticate):
     scenario = _scenario(_scenarios(client, authenticate), LEBRON)
     return {r["player_id"] for r in scenario["branches"][1]["rows"]}
