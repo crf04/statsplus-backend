@@ -9,8 +9,8 @@ recorded is never bought again, so a rerun spends 0 credits on it.
 
   --season 2026-27  the gap backfill instead: each started regular-season or
                     playoff game with no closing quote from the live collector
-                    is bought at the same snapshot for all five standard
-                    markets (50 credits a game) and stored as that game's
+                    is bought at the same snapshot for every standard
+                    market (80 credits a game) and stored as that game's
                     closing poll in sportsbook_prop_quotes.  It prints the
                     games still without closing quotes afterwards.
                     --re-resolve does not apply.  The default is 2025-26.

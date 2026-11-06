@@ -65,6 +65,7 @@ from tests.support.odds_world import (
     event_row,
     load,
     quota_headers,
+    with_combo_markets,
 )
 
 PP_LEBRON = {"PTS": 27.5, "REB": 7.5, "AST": 7.5, "3PM": 2.5, "PRA": 42.5}
@@ -124,6 +125,25 @@ def test_a_beat_leaves_prizepicks_lines_in_the_pool_under_provider_prizepicks(wo
     # The line is as old as the response that carried it, not as the beat.
     received = (NOW + timedelta(seconds=7)).isoformat()
     assert pool.freshness["providers"] == {"prizepicks": {"status": "fresh", "retrieved_at": received}}
+
+
+def test_prizepicks_combo_markets_become_pr_pa_and_ra_lines(world):
+    body = with_combo_markets(
+        load("event_odds_us_dfs"),
+        "prizepicks",
+        "LeBron James",
+        {
+            "player_points_rebounds": (35.5, -137, -137),
+            "player_points_assists": (34.5, -137, -137),
+            "player_rebounds_assists": (14.5, -137, -137),
+        },
+    )
+    world.dfs_coordinator(_dfs_client(odds=body)).run()
+
+    pool = world.pool_reader().get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    lebron = _players(pool)[LEBRON]
+    assert dict(lebron.lines["prizepicks"]) == {**PP_LEBRON, "PR": 35.5, "PA": 34.5, "RA": 14.5}
+    assert lebron.provenance == {"prizepicks": ("3PM", "AST", "PA", "PR", "PRA", "PTS", "RA", "REB")}
 
 
 def test_the_other_dfs_apps_in_the_same_response_are_never_stored(world):
@@ -222,6 +242,9 @@ def test_the_beat_over_the_real_client_requests_only_us_dfs_and_no_alternate_mar
         "player_assists",
         "player_threes",
         "player_points_rebounds_assists",
+        "player_points_rebounds",
+        "player_points_assists",
+        "player_rebounds_assists",
     ]
     assert not any("alternate" in str(value) for value in odds.values())
     pool = world.pool_reader().get_pool_for_game(season=SEASON, game_id=GAME_ID)

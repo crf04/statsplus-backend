@@ -31,6 +31,7 @@ from tests.support.odds_world import (
     FakeClient,
     build_world,
     load,
+    with_combo_markets,
 )
 
 
@@ -143,6 +144,30 @@ def test_a_beat_stores_resolved_quotes_and_counts_the_unresolved(world):
         "normal",
     )
     assert state["unresolved_total"] == 2
+
+
+def test_book_lines_carry_the_combo_markets_a_book_posts(world):
+    body = with_combo_markets(
+        load("event_odds_five_markets"),
+        "draftkings",
+        "LeBron James",
+        {
+            "player_points_rebounds": (35.5, -115, -105),
+            "player_points_assists": (34.5, -110, -110),
+            "player_rebounds_assists": (14.5, 105, -125),
+        },
+    )
+    world.coordinator(FakeClient(odds=body)).run()
+
+    lines = SportsbookQuoteReader(world.engine).book_lines(GAME_ID)[LEBRON]
+    assert {
+        category: [(b["book"], b["line"], b["over"], b["under"]) for b in lines[category]["books"]]
+        for category in ("PR", "PA", "RA")
+    } == {
+        "PR": [("draftkings", 35.5, -115, -105)],
+        "PA": [("draftkings", 34.5, -110, -110)],
+        "RA": [("draftkings", 14.5, 105, -125)],
+    }
 
 
 def test_the_beat_is_idempotent_within_the_hour(world):
@@ -592,9 +617,9 @@ def test_the_budget_counts_a_populated_night_poll_as_taken(world):
     coordinator.run()
 
     # At 23:00 ET this game still needs 8 day polls, 6 final and the closing
-    # (75 credits); the 22:00 ET game needs its night poll too, 9 day, 6
-    # final and the closing (85).  1160 leaves exactly 160 above the reserve.
-    client.discovery_quota = OddsQuota(1160, 18840, 0)
+    # (120 credits); the 22:00 ET game needs its night poll too, 9 day, 6
+    # final and the closing (136).  1256 leaves exactly 256 above the reserve.
+    client.discovery_quota = OddsQuota(1256, 18744, 0)
     world.clock[0] = night + timedelta(hours=1)
     result = coordinator.run()
 
@@ -604,13 +629,13 @@ def test_the_budget_counts_a_populated_night_poll_as_taken(world):
 def test_the_guard_rechecks_remaining_credits_before_every_paid_call(world):
     events = load("events")[:2]
     events[1]["commence_time"] = (TIP + timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    # Twenty minutes out, the two catalog games still need 35 credits (a final
+    # Twenty minutes out, the two catalog games still need 56 credits (a final
     # poll and the closing for this one; four final polls and the closing for
-    # the 22:00 ET tip).  Discovery says 1035, so both due final polls fit above
-    # the 1000 reserve; a shared-key consumer then spends 31 and our first
+    # the 22:00 ET tip).  Discovery says 1056, so both due final polls fit above
+    # the 1000 reserve; a shared-key consumer then spends 52 and our first
     # response says 999.
     client = FakeClient(events=events, remaining=1004)
-    client.discovery_quota = OddsQuota(1035, 18965, 0)
+    client.discovery_quota = OddsQuota(1056, 18944, 0)
     world.clock[0] = TIP - timedelta(minutes=20)
 
     result = world.coordinator(client).run()

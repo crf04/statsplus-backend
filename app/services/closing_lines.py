@@ -48,7 +48,7 @@ ODDS_MARKET = "player_points"
 MARKET_CATEGORY = MARKET_CATEGORIES[ODDS_MARKET]
 
 #: The ledger key (``closing_line_purchases.market_category``) of a purchase of
-#: all five standard markets in one call: the 2026-27 gap backfill
+#: every standard market in one call: the 2026-27 gap backfill
 #: (crf04/statsplus#429), whose quotes become closing quotes in
 #: ``sportsbook_prop_quotes`` rather than rows of ``closing_lines``.
 ALL_MARKETS = "ALL"
@@ -94,7 +94,7 @@ class RunRefused(RuntimeError):
 class PostedLine:
     """One book's posted line for a player name, as the response said it.
 
-    A points purchase keeps only the book, name and line; a five-market
+    A points purchase keeps only the book, name and line; an all-market
     purchase also keeps the category, prices and update time, so its quotes
     are stored exactly as a live closing poll stores them.
     """
@@ -241,7 +241,7 @@ class ClosingLineStore:
     """The purchase ledger, the spend log and the closing-line table.
 
     ``market`` is the ledger key the store reads and writes purchases under:
-    ``PTS`` for the 2025-26 points backfill, ``ALL`` for a five-market purchase.
+    ``PTS`` for the 2025-26 points backfill, ``ALL`` for an all-market purchase.
     The line table, ``complete`` and the re-resolve read are the points
     backfill's only.
     """
@@ -617,7 +617,7 @@ class ClosingLineReader:
 
         From ``LIVE_CLOSING_FIRST_SEASON`` on the lines are the live collector's
         closing quotes (``sportsbook_prop_quotes`` with ``is_closing``) in the
-        five standard markets; before it they are the backfilled
+        standard markets; before it they are the backfilled
         ``closing_lines`` table (2025-26: points only).  The book is the first
         of ``BOOK_ORDER`` that posted the player in that market.  A game with no
         line is absent, and a storage fault is logged and reads as "no lines".

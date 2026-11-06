@@ -1,0 +1,166 @@
+{
+  "id": "2a76b31e02d1416de069a995589515fc",
+  "sport_key": "basketball_nba",
+  "sport_title": "NBA",
+  "commence_time": "2026-11-06T02:10:00Z",
+  "home_team": "Phoenix Suns",
+  "away_team": "Orlando Magic",
+  "bookmakers": [
+    {
+      "key": "draftkings",
+      "title": "DraftKings",
+      "markets": [
+        {
+          "key": "player_points_assists",
+          "last_update": "2026-11-06T01:39:37Z",
+          "outcomes": [
+            {
+              "name": "Over",
+              "description": "Devin Booker",
+              "price": -109,
+              "point": 30.5
+            },
+            {
+              "name": "Under",
+              "description": "Devin Booker",
+              "price": -121,
+              "point": 30.5
+            },
+            {
+              "name": "Over",
+              "description": "Franz Wagner",
+              "price": -108,
+              "point": 30.5
+            },
+            {
+              "name": "Under",
+              "description": "Franz Wagner",
+              "price": -121,
+              "point": 30.5
+            }
+          ]
+        },
+        {
+          "key": "player_points_rebounds",
+          "last_update": "2026-11-06T01:39:37Z",
+          "outcomes": [
+            {
+              "name": "Over",
+              "description": "Franz Wagner",
+              "price": -111,
+              "point": 29.5
+            },
+            {
+              "name": "Under",
+              "description": "Franz Wagner",
+              "price": -119,
+              "point": 29.5
+            },
+            {
+              "name": "Over",
+              "description": "Devin Booker",
+              "price": -118,
+              "point": 28.5
+            },
+            {
+              "name": "Under",
+              "description": "Devin Booker",
+              "price": -112,
+              "point": 28.5
+            }
+          ]
+        },
+        {
+          "key": "player_rebounds_assists",
+          "last_update": "2026-11-06T01:39:37Z",
+          "outcomes": [
+            {
+              "name": "Over",
+              "description": "Franz Wagner",
+              "price": -126,
+              "point": 12.5
+            },
+            {
+              "name": "Under",
+              "description": "Franz Wagner",
+              "price": -104,
+              "point": 12.5
+            },
+            {
+              "name": "Over",
+              "description": "Devin Booker",
+              "price": -135,
+              "point": 8.5
+            },
+            {
+              "name": "Under",
+              "description": "Devin Booker",
+              "price": 103,
+              "point": 8.5
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "bovada",
+      "title": "Bovada",
+      "markets": [
+        {
+          "key": "player_points_assists",
+          "last_update": "2026-11-06T01:38:31Z",
+          "outcomes": [
+            {
+              "name": "Over",
+              "description": "Anthony Black",
+              "price": -160,
+              "point": 18.5
+            },
+            {
+              "name": "Under",
+              "description": "Anthony Black",
+              "price": 120,
+              "point": 18.5
+            }
+          ]
+        },
+        {
+          "key": "player_points_rebounds",
+          "last_update": "2026-11-06T01:38:31Z",
+          "outcomes": [
+            {
+              "name": "Over",
+              "description": "Anthony Black",
+              "price": -165,
+              "point": 18.5
+            },
+            {
+              "name": "Under",
+              "description": "Anthony Black",
+              "price": 125,
+              "point": 18.5
+            }
+          ]
+        },
+        {
+          "key": "player_rebounds_assists",
+          "last_update": "2026-11-06T01:38:31Z",
+          "outcomes": [
+            {
+              "name": "Over",
+              "description": "Anthony Black",
+              "price": -275,
+              "point": 7.5
+            },
+            {
+              "name": "Under",
+              "description": "Anthony Black",
+              "price": 200,
+              "point": 7.5
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

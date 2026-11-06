@@ -4877,7 +4877,7 @@ from the DFS Projection archive and registry (crf04/statsplus#185 section 6):
 two-sided prices are native columns, the book is a column rather than a
 provider, and nothing here feeds DFS `provenance`, the Targets pool, or the DFS
 board. The code is `app/providers/odds_api.py` (the only module that builds a
-URL; parses the five standard prop markets; the allowlist of regulated US
+URL; parses the eight standard prop markets; the allowlist of regulated US
 books), `app/services/odds_identity.py` (event and player resolution),
 `app/services/odds_schedule.py` (pure cadence and credit-guard policy),
 `app/services/odds_collection.py` (the coordinator),
@@ -5003,7 +5003,7 @@ the frontend already renders as "PP".
 ```text
 beat (every 5 min, the odds cron service, ODDS_API_REGIONS=us_dfs)
   → GET /events (free) → canonical game; plan_cycle → due games
-  → GET /events/{id}/odds?regions=us_dfs&markets=<the five standard markets>
+  → GET /events/{id}/odds?regions=us_dfs&markets=<the eight standard markets>
   → parse: only bookmaker "prizepicks"; underdog, pick6, dabble_us_dfs dropped
   → roster-scoped name resolution (oddsapi) → canonical athlete, team, game
   → odds_api_polls row first (counts as the hour's poll; "unpublished")
@@ -5014,9 +5014,14 @@ beat (every 5 min, the odds cron service, ODDS_API_REGIONS=us_dfs)
   → the Player Pool reader serves it; closing sets are frozen after tip
 ```
 
-* **Region and markets.** The request names `us_dfs` and the five standard
-  markets (points, rebounds, assists, threes, points + rebounds + assists) and
-  nothing else. PrizePicks demons and goblins (and Underdog and Pick6 non-default
+* **Region and markets.** The request names `us_dfs` and the eight standard
+  markets (points, rebounds, assists, threes, points + rebounds + assists,
+  points + rebounds, points + assists, rebounds + assists) and nothing else.
+  A call costs one credit per market, 8 for a populated response; the budget
+  guard's `CALL_COST` is the length of `MARKET_CATEGORIES`, so a market added
+  there is costed too. On the 20,000-credit plan an average month of about
+  220 games no longer fits the normal cadence and degrades for part of the
+  month, keeping every closing snapshot. PrizePicks demons and goblins (and Underdog and Pick6 non-default
   multipliers) are served only under `<market>_alternate` keys, which are never
   requested and never mapped. The sportsbook `us` region is never requested by
   this feed.
@@ -5324,7 +5329,7 @@ season >= LIVE_CLOSING_FIRST_SEASON ("2026-27")
     "closing done" rule) of the Event Catalog tip; a game the catalog does not
     hold takes its newest quoted closing poll
   → sportsbook_prop_quotes WHERE poll_id IN those polls, is_closing, the
-    player, the five markets, the allowlisted books
+    player, the standard markets, the allowlisted books
 earlier seasons
   → closing_lines (2025-26: PTS only)
 then per (game, market): the first book of closing_lines.BOOK_ORDER
@@ -5354,9 +5359,8 @@ spend log) with three differences:
   their current tip (`games_with_closing_quotes`): exactly the games the gap
   check names, including one whose only close for its tip was empty or that
   was closed only for an earlier tip;
-* one call buys all five markets (`player_points`, `player_rebounds`,
-  `player_assists`, `player_threes`, `player_points_rebounds_assists`) at the
-  same last 5-minute mark before tip: 50 credits a game, recorded on one
+* one call buys all eight standard markets (`MARKET_CATEGORIES`) at the
+  same last 5-minute mark before tip: 80 credits a game, recorded on one
   ledger row under `market_category = 'ALL'` before parsing, with every
   allowlisted quote and its prices kept on the row;
 * `ClosingQuoteWriter` stores them with `SportsbookQuoteStore.record_poll(...,
