@@ -2936,8 +2936,8 @@ Sheet's Traditional row ranks, so tied teams share a rank exactly as the Sheet
 shows them. The line types are `PTS` (Points Allowed), `REB`, `AST`, `FGM`,
 `FGA`, `FG3M`, `FG3A`, `FTM`, `FTA`, `STL`, `BLK`, `TOV` and `STKS` (Steals +
 Blocks, ranked as the Opposing Team Profile ranks it). The label is the
-metric's opponent-filter label, or the Sheet row label (`FG made`,
-`FG attempts`, `FT made`) where no Team Filter offers the metric. Combos and
+metric's opponent-filter label, or `FG Made Allowed`, `FG Attempts Allowed`
+or `FT Made Allowed` where no Team Filter offers the metric. Combos and
 `FD_PTS` have no entry. The ranks come from the same Season publication
 generation the response reads, and no filter changes them. A metric the
 publication lacks has no entry, and the object is `{}` when the season cannot

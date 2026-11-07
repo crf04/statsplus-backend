@@ -93,12 +93,12 @@ _OPPONENT_RANK_ROWS = {
     "TOV": "OPP_TOV",
     "STKS": "OPP_STOCKS",
 }
-#: The opponent-filter label of each row, else the Defense Sheet's own label
+#: The opponent-filter label of each row, else one worded the same way
 #: for the rows no Team Filter offers.
 _OPPONENT_RANK_LABELS: dict[str, str] = {
-    "OPP_FGM": "FG made",
-    "OPP_FGA": "FG attempts",
-    "OPP_FTM": "FT made",
+    "OPP_FGM": "FG Made Allowed",
+    "OPP_FGA": "FG Attempts Allowed",
+    "OPP_FTM": "FT Made Allowed",
     **json.loads(
         (Path(__file__).resolve().parent.parent / "assets" / "opponent_filter_labels.json").read_text()
     ),

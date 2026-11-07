@@ -1029,13 +1029,13 @@ def test_game_logs_carry_each_opponents_season_rank_per_line_type_over_http(
     assert ranked == {
         "PTS": ("Points Allowed", {"MIA": 30, "LAL": 29, "CHI": 1, "BOS": 2}),
         "REB": ("Rebounds Allowed", {"MIA": 1, "LAL": 29, "CHI": 30, "BOS": 2}),
-        "FGM": ("FG made", {"MIA": 1, "LAL": 30, "CHI": 2, "BOS": 29}),
+        "FGM": ("FG Made Allowed", {"MIA": 1, "LAL": 30, "CHI": 2, "BOS": 29}),
     }
     assert len(opponent_ranks["PTS"]["ranks"]) == 30
     assert opponent_ranks["STKS"]["label"] == "Steals + Blocks"
     assert opponent_ranks["FG3M"]["label"] == "3s Allowed"
-    assert opponent_ranks["FGA"]["label"] == "FG attempts"
-    assert opponent_ranks["FTM"]["label"] == "FT made"
+    assert opponent_ranks["FGA"]["label"] == "FG Attempts Allowed"
+    assert opponent_ranks["FTM"]["label"] == "FT Made Allowed"
     # Combos and fantasy points have no single allowed metric.
     assert sorted(opponent_ranks) == [
         "AST",
