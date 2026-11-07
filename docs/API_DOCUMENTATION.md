@@ -1819,9 +1819,10 @@ always present: the Over and Under price of the pick behind each `lines` entry,
 
 `player_source`, `stat_categories`, and `focal_game_line` are additive and
 always present. `player_source` is `player_pool` for a stored pool player and
-`game_logs` for a Historical Matchup participant. `stat_categories` is always
-exactly the key set of `scores`; in current mode it equals `posted_markets`,
-and in historical mode it is the governed Statistic Catalog crossed with the
+`game_logs` for a Historical Matchup participant. In current mode
+`stat_categories` equals `posted_markets` and the key set of `scores` is a
+superset of it (crf04/statsplus#457); in historical mode `stat_categories` is
+exactly the key set of `scores`, the governed Statistic Catalog crossed with the
 score-input contract rather than any DFS archive. `focal_game_line` is `null`
 in current mode.
 
@@ -1884,7 +1885,7 @@ with a logged error and never fails the route.
 this player is too slight to lean on. It is the same rule a score component
 marks itself `thin` with, asked of the whole Base rather than of the slices one
 component consumed, and it is always present for all five Bases -- a component
-only exists where its market was posted and its window available, so `scores`
+only exists where its inputs were stored and its window available, so `scores`
 cannot answer this on its own. A Base is thin when its stored Diet is not a
 usable partition of that Base (including a Base with no stored fact at all,
 which no score would consume), when exact Synergy play-type coverage falls
@@ -1946,11 +1947,15 @@ assist-location floor because six slices dilute a share faster than five and
 team rebounds outnumber assists about 1.7 to 1), on top of the shared
 rules above. Targets and Qualifiers do not use this Base.
 
-`scores` has exactly one row for every `stat_categories` value and no other
-row. In current mode `stat_categories` equals `posted_markets`, so a stored
-pool player still has exactly one row per posted market and no unposted row; a
+`scores` has one row for every scoreable category in the governed Statistic
+Catalog, posted or not, plus any posted market outside it
+(crf04/statsplus#457): CourtAI holds lines from only some books, so a market
+with no line in its data may still be offered. A stored pool player's
+`stat_categories` and `posted_markets` stay the markets with a line, so its
+`scores` keys are a superset of them; a market whose score inputs are missing
+reads as on an Unscheduled Matchup (`missing_inputs`, no `blend`). A
 Historical Matchup participant carries `posted_markets: []` and is keyed by the
-governed categories instead. Each row always carries independent `season` and
+governed categories. Each row always carries independent `season` and
 `last_15` windows. A
 component cell's `value` is the fractional difference from a league-average
 matchup (`0.08` renders as `+8%`), calculated as the sum across that Base's

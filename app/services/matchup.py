@@ -2156,6 +2156,10 @@ class MatchupService:
     ) -> dict[str, Any]:
         memo: dict[tuple[str, str], dict[str, Any]] = {}
         withhold = player.source == GAME_LOG_SOURCE
+        # Every scoreable category is scored, posted or not (#457): CourtAI
+        # holds lines from only some books, so an unposted market may still be
+        # offered.
+        markets = dict.fromkeys((*player.market_categories, *self._historical_categories))
         return {
             market: {
                 window_name: self._presented_window(
@@ -2173,7 +2177,7 @@ class MatchupService:
                 )
                 for window_name, window in windows.items()
             }
-            for market in player.market_categories
+            for market in markets
         }
 
     @staticmethod

@@ -1056,7 +1056,7 @@ def test_a_cached_response_keeps_its_trailing_families_under_the_current_schema(
     assert (cold["trailing"], warm["trailing"]) == ([DEFENSE_TRAILING], [DEFENSE_TRAILING])
     # A body cached before ``trailing`` (schema 2) or the preview cards'
     # ``players`` (schema 3) existed is never served.
-    assert [key.split(":")[2] for key in redis_client.values] == ["v7"]
+    assert [key.split(":")[2] for key in redis_client.values] == ["v8"]
 
 
 def test_the_edges_and_their_matchups_write_what_the_previous_release_wrote():
@@ -1114,14 +1114,14 @@ def test_the_edges_and_their_matchups_write_what_the_previous_release_wrote():
         key: hashlib.sha256(zlib.decompress(payload)).hexdigest()
         for key, payload in redis_client.values.items()
     } == {
-        # v10 (statsplus#437): the Defense Sheets no longer carry the inside-10-ft 3PA/3PM rows.
-        "matchup:composed:v10:d167a3535a1ebe19bc9fcb178a76565b8d05bdb8ffcff4a6fb226bb010ca58bf": (
+        # v11/v8 (statsplus#457): every scoreable market is scored, posted or not.
+        "matchup:composed:v11:a79bbd57219a64d081b1b6332f918dae72175b412a2a7ac9ee8c365f44b4bf8b": (
             "eb90e3bae268ac86ca0a4c5c35e889594e03f6f98942b574cf9613f612ae794f"
         ),
-        "matchup:composed:v10:ccd4c789df40d15ac49f43050c6427624cd8eba160edac330dd1caaebd16f666": (
+        "matchup:composed:v11:902479b5184c36a2c57a151148b9c86e9ab2123ae9a6a61d5e34400eab2a909e": (
             "5fee7925e35cc8d4484d29a03396148c68ce048edb0d45c42663589db7576d0c"
         ),
-        "slate:edges:v7:6f5df36dc5f1b18940a2bffdbf5efc9545f60fdf8583a1501c9bdecfd990c967": (
+        "slate:edges:v8:f2b5d2e3e358f64770d498231bba15c2f8a60e43e0bba6a9f3b49b5d368af658": (
             "85542ea8a3695da15ec4c69b0a37cc79b2a6b26a62c64788446e568f105c1552"
         ),
     }
@@ -1194,3 +1194,55 @@ def test_the_slate_and_every_games_matchup_count_from_one_pool_read(selected):
     assert (season, game_ids) == ("2025-26", ("G1", "G2"))
     assert seen == [("G1", connection), ("G2", connection)]
     assert (connection is not None) is selected
+
+
+def test_a_player_with_no_pts_line_enters_the_edges_on_his_pts_score():
+    """statsplus#457: a market without a line in CourtAI's data is still
+    scored, so a player posted only in REB carries the same PTS edge as one
+    posted in PTS."""
+
+    from types import SimpleNamespace
+
+    import tests.services.test_matchup_service as doubles
+    from app.services.matchup_injuries import unavailable_injury_result
+    from app.services.player_game_log_repository import PlayerGameLogRepository
+    from app.services.statistic_catalog import StatisticCatalog
+    from tests.test_matchup_reuse import _real_snapshot
+
+    def edges(markets):
+        composer = doubles._service(
+            pool=doubles._posted_pool(markets), statistic_catalog=StatisticCatalog.load_default()
+        )
+        repo = SimpleNamespace(_publication_reader=object())
+        composer.player_logs.get_read_freshness = (
+            lambda season, publication_snapshot: PlayerGameLogRepository.get_read_freshness(
+                repo, season, publication_snapshot=publication_snapshot
+            )
+        )
+        games = [composer._game(doubles._event())]
+
+        class Slate:
+            def get_slate(self, requested_date=None):
+                return {"slate_date": requested_date, "games": games}
+
+        class Publications:
+            def snapshot(self, stream_keys, *, season, **_):
+                return _real_snapshot(age=0)
+
+        class Injuries:
+            def get_injuries(self, *, event, season, pool_players):
+                return unavailable_injury_result("disabled")
+
+        (game,) = SlateEdgesService(
+            slates=Slate(),
+            matchups=composer,
+            publication_reader=Publications(),
+            injuries=Injuries(),
+            settings=composer.settings,
+        ).get_edges("2026-01-15")["games"]
+        return game
+
+    unposted, posted = edges(("REB",)), edges(("PTS",))
+
+    assert unposted["scores"] == [{"canonical_id": 2544, "value": -0.011875}]
+    assert unposted == posted

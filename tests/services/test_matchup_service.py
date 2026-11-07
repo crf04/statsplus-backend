@@ -3812,3 +3812,61 @@ def test_a_held_pool_read_on_sqlite_takes_a_games_event_and_pool_from_one_snapsh
     assert document["game"]["away_team"]["tricode"] == "LAL"
     assert document["game"]["away_team"]["targetable_player_count"] == 1
     assert len(document["players"]) == 1
+
+
+def _posted_pool(markets):
+    return PlayerPool(
+        players=(
+            PoolPlayer(
+                2544,
+                "LeBron James",
+                LAL,
+                markets,
+                {"prizepicks": markets},
+                lines={"prizepicks": {market: 10.5 for market in markets}},
+            ),
+        ),
+        team_counts={LAL: 1},
+        freshness={"status": "fresh", "retrieved_at": RETRIEVED_AT.isoformat(), "providers": {}},
+    )
+
+
+def test_a_scheduled_row_is_scored_in_every_scoreable_market_while_lines_stay_on_posted_ones():
+    """statsplus#457: CourtAI holds lines from only some books, so a market with
+    no line in its data is still scored; only lines stay posted-only."""
+
+    catalog = StatisticCatalog.load_default()
+    (player,) = _service(pool=_posted_pool(("PTS", "REB")), statistic_catalog=catalog).get_matchup(
+        game_id=GAME_ID
+    )["players"]
+    (posted_ast,) = _service(pool=_posted_pool(("AST",)), statistic_catalog=catalog).get_matchup(
+        game_id=GAME_ID
+    )["players"]
+
+    assert set(player["scores"]) == {
+        "PTS",
+        "REB",
+        "AST",
+        "3PM",
+        "PRA",
+        "PA",
+        "PR",
+        "RA",
+        "FGA",
+        "FGM",
+        "FG2A",
+        "FG2M",
+        "FG3A",
+        "FTA",
+        "FTM",
+        "STL",
+        "BLK",
+        "STKS",
+        "TOV",
+    }
+    assert all(set(score) == {"season", "last_15"} for score in player["scores"].values())
+    assert player["stat_categories"] == ["PTS", "REB"]
+    assert player["posted_markets"] == ["PTS", "REB"]
+    assert player["lines"] == {"prizepicks": {"PTS": 10.5, "REB": 10.5}}
+    # An unposted market reads exactly the score it shows once posted.
+    assert player["scores"]["AST"] == posted_ast["scores"]["AST"]
