@@ -2930,14 +2930,18 @@ changes it, including one that matches no games. It is `null` when the season
 holds no games for the player.
 
 Opponent ranks (crf04/statsplus#456): `opponent_ranks` maps a chart line type
-to its opponent-filter `label` and `ranks`, each team tricode's whole-season
-rank in that metric per 48, 1-30 with 30 = allows the most. The line types and
-their metrics are `PTS` (Points Allowed), `REB`, `AST`, `FG3M`, `FG3A`, `FTA`,
-`STL`, `BLK`, `TOV` and `STKS` (Steals + Blocks); combos, `FD_PTS`, `FGM`,
-`FGA` and `FTM` have no entry. The ranks come from the same Season publication
-the response's Team Filters rank, and no filter changes them. A team the
-ranking omits is absent from `ranks`, a metric that ranks no team has no entry,
-and the object is `{}` when the season cannot be ranked.
+to a `label` and `ranks`, each team tricode's whole-season rank in that metric
+per 48, 1-30 with 30 = allows the most. The ranks are the Matchup Defense
+Sheet's Traditional row ranks, so tied teams share a rank exactly as the Sheet
+shows them. The line types are `PTS` (Points Allowed), `REB`, `AST`, `FGM`,
+`FGA`, `FG3M`, `FG3A`, `FTM`, `FTA`, `STL`, `BLK`, `TOV` and `STKS` (Steals +
+Blocks, ranked as the Opposing Team Profile ranks it). The label is the
+metric's opponent-filter label, or the Sheet row label (`FG made`,
+`FG attempts`, `FT made`) where no Team Filter offers the metric. Combos and
+`FD_PTS` have no entry. The ranks come from the same Season publication
+generation the response reads, and no filter changes them. A metric the
+publication lacks has no entry, and the object is `{}` when the season cannot
+be ranked.
 
 Every successful response also carries the shared
 [`provenance`](#response-provenance) block naming the Publications it read.

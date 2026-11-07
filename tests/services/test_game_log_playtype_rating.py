@@ -122,11 +122,14 @@ class _SnapshotRankings:
         self.required_snapshot = required_snapshot
 
     def rank_all(self, team_filters, season, *, publication_snapshot=None):
-        # The Team Filter first, then the opponent ranks' metrics (#456).
-        assert next(iter(team_filters)) == "OPP_PTS"
+        assert tuple(team_filters) == ("OPP_PTS",)
         assert season == "2025-26"
         assert publication_snapshot is self.required_snapshot
-        return {team_filter: ["GSW"] for team_filter in team_filters}
+        return {"OPP_PTS": ["GSW"]}
+
+    def season_rows_by_base(self, bases, season, *, publication_snapshot=None):
+        assert publication_snapshot is self.required_snapshot
+        return {base: None for base in bases}
 
 
 class _DietReader:

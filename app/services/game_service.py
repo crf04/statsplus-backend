@@ -24,6 +24,7 @@ from sqlalchemy.engine import Engine
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.domain.play_type_matchup import complete_play_type_shares, play_type_matchup
+from app.domain.team_matchup_taxonomy import LEDGER_DEFENSE_SHEET_METRICS
 from app.domain.team_window import team_window
 from app.models.game_logs import GameLogQuery, GameLogResponse
 from app.services.database_first_activation import ReadSeason
@@ -36,13 +37,18 @@ from app.services.request_reads import request_read_scope
 from app.services.research_season import research_season, season_context
 from app.services.response_provenance import provenance_block
 from app.services.serving_season import snapshot_trailing
-from app.services.team_matchup_query import TEAM_MATCHUP_PUBLICATION_STREAM_KEYS
+from app.services.team_matchup_query import (
+    TEAM_MATCHUP_PUBLICATION_STREAM_KEYS,
+    combined_league_column,
+    publication_league_table,
+)
 from app.utils.cache_config import get_redis_client
 from app.utils.tables import normalize_table_name
 
 from .nba_cache import NBAGameCache
 from .team_filter_rankings import (
     TEAM_FILTER_PUBLICATION_STREAM_KEYS,
+    TEAM_FILTER_RANKINGS,
     team_filter_ranking,
 )
 
@@ -54,6 +60,8 @@ logger = logging.getLogger(__name__)
 # page reads.
 _PLAY_TYPE_BASE = "play_types"
 _PLAY_TYPE_STAT_KEY = "PTS"
+_TRADITIONAL_BASE = "traditional"
+_TRADITIONAL_SHEET_METRICS = LEDGER_DEFENSE_SHEET_METRICS[_TRADITIONAL_BASE]
 _DEFAULT_PLAYSTYLE_RANGE = (0.0, 200.0)
 _PUBLICATION_STREAM_KEYS = tuple(
     sorted(
@@ -66,27 +74,35 @@ _PUBLICATION_STREAM_KEYS = tuple(
     )
 )
 _PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
-#: The Team Filter behind each chart line type's ``opponent_ranks`` entry
-#: (crf04/statsplus#456): the Matchup's Traditional "allowed" row per market,
-#: plus stocks.  FGM, FGA and FTM have Traditional rows but no opponent-filter
-#: label, and combos and fantasy points have no single allowed metric.
-_OPPONENT_RANK_FILTERS = {
+#: The Defense Sheet Traditional row behind each chart line type's
+#: ``opponent_ranks`` entry (crf04/statsplus#456), plus stocks, which the Sheet
+#: has no row for and the Opposing Team Profile ranks as steals + blocks.
+#: Combos and fantasy points have no single allowed metric.
+_OPPONENT_RANK_ROWS = {
     "PTS": "OPP_PTS",
     "REB": "OPP_REB",
     "AST": "OPP_AST",
+    "FGM": "OPP_FGM",
+    "FGA": "OPP_FGA",
     "FG3M": "OPP_FG3M",
     "FG3A": "OPP_FG3A",
+    "FTM": "OPP_FTM",
     "FTA": "OPP_FTA",
     "STL": "OPP_STL",
     "BLK": "OPP_BLK",
     "TOV": "OPP_TOV",
     "STKS": "OPP_STOCKS",
 }
-_OPPONENT_FILTER_LABELS: dict[str, str] = json.loads(
-    (Path(__file__).resolve().parent.parent / "assets" / "opponent_filter_labels.json").read_text()
-)
-#: The product rank scale: 30 allows the most, 1 the fewest.
-_RANK_TEAM_LIMIT = 30
+#: The opponent-filter label of each row, else the Defense Sheet's own label
+#: for the rows no Team Filter offers.
+_OPPONENT_RANK_LABELS: dict[str, str] = {
+    "OPP_FGM": "FG made",
+    "OPP_FGA": "FG attempts",
+    "OPP_FTM": "FT made",
+    **json.loads(
+        (Path(__file__).resolve().parent.parent / "assets" / "opponent_filter_labels.json").read_text()
+    ),
+}
 # Diet facts and team windows come from the reader's decode cache, so a cache
 # hit never selects or parses their league-wide payloads.
 _DECODED_ONLY_STREAM_KEYS = frozenset(_PUBLICATION_STREAM_KEYS) - _PROJECTION_ONLY_STREAM_KEYS
@@ -126,21 +142,32 @@ def _records(frame: pd.DataFrame):
     return json.loads(frame.to_json(orient="records", date_format="iso"))
 
 
-def _opponent_ranks(rankings):
-    """Each line type's Season rank per opponent, ranked teams only.
+def _opponent_ranks(rows):
+    """Each line type's Defense Sheet rank per opponent, ranked teams only.
 
-    A ranking is most-allowed first, so its first team holds rank 30.
+    The Sheet's competition rank: 30 allows the most and tied teams share a
+    rank.  A publication that predates a row's metric has no entry for it.
     """
 
+    if rows is None:
+        return {}
+    table = publication_league_table(rows)
+    tricodes = {row.team_id: row.team_tricode for row in rows}
+    columns = {
+        line_type: (
+            table.get(_TRADITIONAL_SHEET_METRICS[row])
+            if row in _TRADITIONAL_SHEET_METRICS
+            else combined_league_column(table, TEAM_FILTER_RANKINGS[row].numerator)
+        )
+        for line_type, row in _OPPONENT_RANK_ROWS.items()
+    }
     return {
         line_type: {
-            "label": _OPPONENT_FILTER_LABELS[team_filter],
-            "ranks": {
-                tricode: _RANK_TEAM_LIMIT - position for position, tricode in enumerate(rankings[team_filter])
-            },
+            "label": _OPPONENT_RANK_LABELS[_OPPONENT_RANK_ROWS[line_type]],
+            "ranks": {tricodes[team_id]: rank for team_id, rank in column.ranks.items()},
         }
-        for line_type, team_filter in _OPPONENT_RANK_FILTERS.items()
-        if rankings[team_filter]
+        for line_type, column in columns.items()
+        if column is not None
     }
 
 
@@ -704,17 +731,16 @@ class GameService:
             publication_snapshot=publication_snapshot,
         )
 
-        # Rank the opponent filters and the opponent ranks' metrics from one
-        # publication generation, so two rankings cannot disagree about which
+        # Resolve opponent filters into one intersecting team set, read from
+        # one publication generation so two filters cannot disagree about which
         # season and which activation they ranked.
-        rank_filters = tuple(dict.fromkeys((*query.teams_against, *_OPPONENT_RANK_FILTERS.values())))
-        rankings = self._season_rankings(
-            rank_filters,
-            query.season_filter,
-            publication_snapshot=publication_snapshot,
-        )
         resolved_teams = None
         if query.teams_against:
+            rankings = self._season_rankings(
+                query.teams_against,
+                query.season_filter,
+                publication_snapshot=publication_snapshot,
+            )
             for index, team_filter in enumerate(query.teams_against):
                 matching = set(self._select_rank(rankings[team_filter], query.rank_filter[index]))
                 resolved_teams = matching if resolved_teams is None else resolved_teams & matching
@@ -808,7 +834,9 @@ class GameService:
             next_game=self._get_team_name_by_id(next_team),
             player_id=player_id,
             posted_line=self._posted_line_for(player_id, player_name, query, full_game_logs),
-            opponent_ranks=_opponent_ranks(rankings),
+            opponent_ranks=self._opponent_ranks(
+                query.season_filter, publication_snapshot=publication_snapshot
+            ),
             # Every stream the capture holds feeds this response: the logs,
             # the Diets and the Season Defense Sheet behind PLAYTYPE_RTG and
             # any Team Filter ranking.
@@ -926,6 +954,19 @@ class GameService:
             season,
             publication_snapshot=publication_snapshot,
         )
+
+    def _opponent_ranks(self, season, *, publication_snapshot=None):
+        """Rank the opponents' Traditional Season rows as the Defense Sheet does."""
+
+        if self.team_filter_rankings is None:
+            return {}
+        rows_by_base = call_with_read_scope(
+            self.team_filter_rankings.season_rows_by_base,
+            (_TRADITIONAL_BASE,),
+            season,
+            publication_snapshot=publication_snapshot,
+        )
+        return _opponent_ranks(rows_by_base[_TRADITIONAL_BASE])
 
     @staticmethod
     def _select_rank(ranked, rank_filter):
