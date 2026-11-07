@@ -485,6 +485,9 @@ class _StubRankings:
         self.calls.append((tuple(team_filters), season))
         return {team_filter: list(self.ranked) for team_filter in team_filters}
 
+    def season_rows_by_base(self, bases, season):
+        return {base: None for base in bases}
+
 
 def _make_service(monkeypatch, mock_db_engine, mock_redis_client):
     settings = RuntimeSettings(
@@ -954,6 +957,148 @@ def test_a_url_encoded_sheet_row_filters_game_logs_over_http(
         "BOS vs. LAL",
         "BOS @ MIA",
     ]
+
+
+def _traditional_ranked_service(monkeypatch, mock_db_engine, mock_redis_client, rows):
+    from app.services.team_filter_rankings import TeamFilterRankingService
+    from tests.support.publication_stubs import StubGovernance, StubReader, read
+
+    stream = "traditional_opponent_season"
+    service = GameService(
+        mock_db_engine,
+        mock_redis_client,
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season="2024-25"),
+        ),
+        team_filter_rankings=TeamFilterRankingService(
+            StubReader({stream: read(stream, rows)}),
+            governance_resolver=StubGovernance(),
+        ),
+    )
+    monkeypatch.setattr(service, "_get_game_logs", lambda name, season: (_game_logs_frame(), None))
+    return service
+
+
+def _opponent_rank_league():
+    """A league that orders points, rebounds and field goals made differently.
+
+    Every team not named allows the default, so twenty-seven teams tie in
+    each metric and share one rank, as the Defense Sheet shows them.
+    """
+
+    from tests.support.publication_stubs import league, traditional_per48
+
+    points = {"MIA": 130.0, "LAL": 120.0, "CHI": 90.0}
+    offensive_rebounds = {"CHI": 9.0, "LAL": 5.0, "MIA": 0.5}
+    field_goals_made = {"LAL": 50.0, "BOS": 45.0, "MIA": 30.0}
+    steals = {"MIA": 20.0, "LAL": 15.0}
+    blocks = {"CHI": 12.0}
+    return league(
+        lambda tricode: traditional_per48(
+            points=points.get(tricode, 110.0),
+            offensive_rebounds=offensive_rebounds.get(tricode, 1.0),
+            field_goals_made=field_goals_made.get(tricode, 40.0),
+            steals=steals.get(tricode, 2.0),
+            blocks=blocks.get(tricode, 2.0),
+        )
+    )
+
+
+def test_game_logs_carry_each_opponents_season_rank_per_line_type_over_http(
+    monkeypatch, mock_db_engine, mock_redis_client, dependencies, client
+):
+    """#456: 30 allows the most of the line type's metric, 1 the fewest."""
+
+    import app.utils.auth as auth
+
+    monkeypatch.setattr(auth, "get_firebase_app", lambda: None)
+    dependencies.game_service = _traditional_ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, _opponent_rank_league()
+    )
+
+    response = client.get("/api/games/game_logs?player_name=LeBron%20James&season_filter=2024-25")
+
+    assert response.status_code == 200, response.get_json()
+    opponent_ranks = response.get_json()["opponent_ranks"]
+    ranked = {
+        line_type: (
+            entry["label"],
+            {tricode: entry["ranks"][tricode] for tricode in ("MIA", "LAL", "CHI", "BOS")},
+        )
+        for line_type, entry in opponent_ranks.items()
+        if line_type in ("PTS", "REB", "FGM", "STKS")
+    }
+    # BOS ties the other twenty-six unnamed teams and shares their rank.
+    assert ranked == {
+        "PTS": ("Points Allowed", {"MIA": 30, "LAL": 29, "CHI": 1, "BOS": 2}),
+        "REB": ("Rebounds Allowed", {"MIA": 1, "LAL": 29, "CHI": 30, "BOS": 2}),
+        "FGM": ("FG Made Allowed", {"MIA": 1, "LAL": 30, "CHI": 2, "BOS": 29}),
+        # Steals + blocks: MIA 22, LAL 17, CHI 14, the rest 4.
+        "STKS": ("Steals + Blocks", {"MIA": 30, "LAL": 29, "CHI": 28, "BOS": 1}),
+    }
+    assert len(opponent_ranks["PTS"]["ranks"]) == 30
+    assert opponent_ranks["FG3M"]["label"] == "3s Allowed"
+    assert opponent_ranks["FGA"]["label"] == "FG Attempts Allowed"
+    assert opponent_ranks["FTM"]["label"] == "FT Made Allowed"
+    # Combos and fantasy points have no single allowed metric.
+    assert sorted(opponent_ranks) == [
+        "AST",
+        "BLK",
+        "FG3A",
+        "FG3M",
+        "FGA",
+        "FGM",
+        "FTA",
+        "FTM",
+        "PTS",
+        "REB",
+        "STKS",
+        "STL",
+        "TOV",
+    ]
+
+
+def test_an_opponents_points_rank_is_its_defense_sheet_points_allowed_rank(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    """#456 acceptance 4: the tooltip and the Matchup's Sheet agree, ties included."""
+
+    from datetime import date
+
+    from app.services.team_matchup_query import TeamMatchupQueryService
+    from app.services.traditional_opponent_publications import normalize_traditional_opponent_window
+    from tests.support.publication_stubs import RETRIEVED_AT, SEASON
+
+    rows = _opponent_rank_league()
+    service = _traditional_ranked_service(monkeypatch, mock_db_engine, mock_redis_client, rows)
+    window = TeamMatchupQueryService._publication_base_window(
+        SEASON,
+        cutoff=date(2026, 1, 10),
+        window_games=None,
+        base="traditional",
+        rows=normalize_traditional_opponent_window(rows, stream_key="traditional_opponent_season").teams,
+        retrieved_at=RETRIEVED_AT,
+    )
+    boston = next(metric.rank for metric in window.team_metrics[1610612738] if metric.stat_key == "OPP_PTS")
+
+    result = service.get_filtered_logs("LeBron James", GameLogQuery(season_filter="2024-25"))
+
+    assert boston == 2
+    assert result["opponent_ranks"]["PTS"]["ranks"]["BOS"] == 2
+
+
+def test_game_logs_carry_no_opponent_ranks_when_the_league_is_incomplete(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    service = _traditional_ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, _opponent_rank_league()[:29]
+    )
+
+    result = service.get_filtered_logs("LeBron James", GameLogQuery(season_filter="2024-25"))
+
+    assert result["opponent_ranks"] == {}
+    assert len(result["game_logs"]) == 3
 
 
 def test_date_to_trims_the_logs_and_filtered_averages_only(monkeypatch, mock_db_engine, mock_redis_client):

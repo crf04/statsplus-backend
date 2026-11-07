@@ -99,6 +99,9 @@ class _StubRankings:
         self.calls.append((tuple(team_filters), season))
         return {team_filter: list(self.ranked) for team_filter in team_filters}
 
+    def season_rows_by_base(self, bases, season):
+        return {base: None for base in bases}
+
 
 @pytest.fixture
 def service(game_engine, monkeypatch):

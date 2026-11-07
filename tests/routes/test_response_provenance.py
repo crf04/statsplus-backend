@@ -421,6 +421,7 @@ def test_game_logs_return_the_generation_their_logs_were_read_from(
         "averages",
         "game_logs",
         "next_game",
+        "opponent_ranks",
         "player_id",
         "posted_line",
         "provenance",
