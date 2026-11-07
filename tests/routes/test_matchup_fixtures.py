@@ -2892,8 +2892,10 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
     assert payload["injuries"]["teams"][0]["submission_state"] == "unknown"
     assert payload["injuries"]["teams"][0]["entries"][0]["canonical_player_id"] == 2544
     scores = payload["players"][0]["scores"]
-    assert set(scores) == set(COMMON_POSTED_MARKETS)
-    for market, score in scores.items():
+    # Every scoreable market is scored, posted or not (statsplus#457).
+    assert set(scores) == {*COMMON_POSTED_MARKETS, "FGM", "FG2M", "FTA", "FTM"}
+    for market in COMMON_POSTED_MARKETS:
+        score = scores[market]
         for window_name in ("season", "last_15"):
             window = score[window_name]
             assert isinstance(window["components"], dict)
