@@ -5107,7 +5107,6 @@ Most user endpoints require Firebase auth:
 GET /api/user/profile
 PUT /api/user/profile
 GET /api/user/stats
-POST /api/user/deactivate
 GET /api/user/admin/stats
 POST /api/user/sync
 ```

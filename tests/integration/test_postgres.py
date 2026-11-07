@@ -241,19 +241,6 @@ def test_update_last_login_reports_failure_for_an_unknown_user(user_service):
     assert user_service.update_last_login("does-not-exist") is False
 
 
-def test_deactivate_user_removes_them_from_the_active_count(user_service):
-    user_service.create_or_update_user(FIREBASE_USER)
-    assert user_service.get_all_active_users_count() == 1
-
-    assert user_service.deactivate_user(FIREBASE_USER["uid"]) is True
-
-    assert user_service.get_all_active_users_count() == 0
-
-
-def test_deactivate_reports_failure_for_an_unknown_user(user_service):
-    assert user_service.deactivate_user("does-not-exist") is False
-
-
 def test_user_stats_are_computable_against_postgres_timestamps(user_service):
     """Postgres returns timezone-aware timestamps; the stats math must cope."""
     user_service.create_or_update_user(FIREBASE_USER)

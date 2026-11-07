@@ -114,7 +114,6 @@ class _TimedOutSession:
         lambda service: service.get_user_by_firebase_uid("uid"),
         lambda service: service.get_user_by_email("a@example.com"),
         lambda service: service.update_last_login("uid"),
-        lambda service: service.deactivate_user("uid"),
         lambda service: service.get_all_active_users_count(),
     ],
 )

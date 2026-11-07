@@ -206,28 +206,6 @@ def submit_feedback():
     return jsonify({"sent": True}), 201
 
 
-@user_bp.route("/deactivate", methods=["POST"])
-@require_auth
-@route_error_boundary("Failed to deactivate account.")
-def deactivate_account():
-    """
-    Deactivate user account (soft delete).
-
-    Returns:
-        JSON response confirming account deactivation
-    """
-    current_user = get_current_user()
-    if not current_user:
-        raise AuthenticationRequiredError()
-
-    # Deactivate user account
-    success = user_service.deactivate_user(current_user["uid"])
-
-    if success:
-        return jsonify({"success": True, "message": "Account deactivated successfully"})
-    raise OperationFailedError("Failed to deactivate account.")
-
-
 def _authenticated_uid():
     """Return the caller's Firebase UID or refuse the request."""
     current_user = get_current_user()
