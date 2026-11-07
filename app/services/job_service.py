@@ -69,6 +69,17 @@ KNOWN_REFRESH_OPERATIONS: Final[frozenset[str]] = frozenset(
 #: Stable, non-exposing summary written when a job fails without a safe reason.
 DEFAULT_FAILURE_SUMMARY: Final[str] = "The data refresh operation could not complete."
 
+#: Claims a job gets before an expired lease fails it instead of starting
+#: another attempt.  A handler that returns or raises records its own result,
+#: so only a worker that stopped renewing (a deploy, ``max_requests``
+#: recycling, or a handler that kills its process) leaves a row to reclaim.
+#: Two such interruptions are survivable; a third points at the job itself.
+MAX_REFRESH_ATTEMPTS: Final[int] = 3
+
+EXHAUSTED_ATTEMPTS_SUMMARY: Final[str] = (
+    f"The data refresh stopped responding {MAX_REFRESH_ATTEMPTS} times and was not retried."
+)
+
 #: Set to ``"1"`` by a pre-forking server (``gunicorn.conf.py``) before it
 #: builds the app in its master process.  The app-scoped coordinator is then
 #: constructed without recovery dispatch or a poller thread, and the server
@@ -533,8 +544,29 @@ class DataRefreshJobService:
         condition = (DataRefreshJob.job_id == job_id) & (
             (DataRefreshJob.status == JOB_STATUS_QUEUED) | stale_filter
         )
+        exhausted = (
+            (DataRefreshJob.job_id == job_id)
+            & stale_filter
+            & (DataRefreshJob.attempt_count >= MAX_REFRESH_ATTEMPTS)
+        )
         try:
             with self._session_factory() as session:
+                failed = session.execute(
+                    update(DataRefreshJob)
+                    .where(exhausted)
+                    .values(
+                        status=JOB_STATUS_FAILED,
+                        finished_at=now,
+                        error_summary=EXHAUSTED_ATTEMPTS_SUMMARY,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        heartbeat_at=None,
+                    )
+                )
+                if failed.rowcount == 1:
+                    session.commit()
+                    logger.error("Data refresh job %s failed: %s", job_id, EXHAUSTED_ATTEMPTS_SUMMARY)
+                    return None
                 result = session.execute(
                     update(DataRefreshJob)
                     .where(condition)
@@ -617,30 +649,33 @@ class DataRefreshJobService:
     ) -> None:
         interval = min(max(self._lease_seconds / 3.0, 0.05), 5.0)
         while not stop_event.wait(interval):
-            if not self._renew_lease(claimed_job):
+            try:
+                renewed = self._renew_lease(claimed_job)
+            except OperationalError:
+                # The lease is unchanged, so the next beat can still renew it
+                # before it expires.
+                logger.warning("Could not renew refresh job %s; retrying", claimed_job.job_id, exc_info=True)
+                continue
+            if not renewed:
+                logger.warning(
+                    "Refresh job %s lost its lease; its handler can no longer publish or record a result",
+                    claimed_job.job_id,
+                )
                 return
 
     def _renew_lease(self, claimed_job: ClaimedJob) -> bool:
         now = self._clock()
-        try:
-            with self._session_factory() as session:
-                result = session.execute(
-                    update(DataRefreshJob)
-                    .where(self._owned_lease_condition(claimed_job, now))
-                    .values(
-                        lease_expires_at=now + timedelta(seconds=self._lease_seconds),
-                        heartbeat_at=now,
-                    )
+        with self._session_factory() as session:
+            result = session.execute(
+                update(DataRefreshJob)
+                .where(self._owned_lease_condition(claimed_job, now))
+                .values(
+                    lease_expires_at=now + timedelta(seconds=self._lease_seconds),
+                    heartbeat_at=now,
                 )
-                session.commit()
-                return result.rowcount == 1
-        except OperationalError:
-            logger.debug(
-                "Could not renew refresh job %s",
-                claimed_job.job_id,
-                exc_info=True,
             )
-            return False
+            session.commit()
+            return result.rowcount == 1
 
     def _owned_job(self, claimed_job: ClaimedJob):
         now = self._clock()

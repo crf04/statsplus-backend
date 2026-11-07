@@ -29,6 +29,7 @@ from app.domain.team_matchup_taxonomy import (
     SHOT_ZONE_SLICES,
     SHOT_ZONE_STATS,
     defense_sheet_row_key,
+    shot_type_derived_terms,
 )
 from app.errors import InvalidInputError
 from app.services.database_first_activation import ReadSeason
@@ -414,8 +415,8 @@ def opponent_profile_metrics(base, table):
         for shot in SHOT_TYPE_SLICES:
             columns = [(stat, ((shot + "_" + stat, 1.0),)) for stat in SHOT_TYPE_STATS]
             columns += [
-                ("PTS", ((shot + "_FG2M", 2.0), (shot + "_FG3M", 3.0))),
-                ("FGA", ((shot + "_FG2A", 1.0), (shot + "_FG3A", 1.0))),
+                ("PTS", shot_type_derived_terms(shot, "PTS")),
+                ("FGA", shot_type_derived_terms(shot, "FGA")),
             ]
             for stat, terms in columns:
                 definition = TeamFilterRanking(base, terms)

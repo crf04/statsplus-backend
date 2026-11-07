@@ -31,6 +31,7 @@ from app.domain.team_matchup_taxonomy import (
     defense_sheet_filter,
     derived_metric_terms,
     matchup_stream_key,
+    shot_type_derived_terms,
 )
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.models.catalogs import LESS_THAN_TEN_FEET_FILTER
@@ -130,10 +131,7 @@ def _shot_type(slice_key: str, stat_key: str) -> TeamFilterRanking:
 
 
 def _shot_type_points(slice_key: str) -> TeamFilterRanking:
-    return TeamFilterRanking(
-        _SHOT_TYPES,
-        ((f"{slice_key}_FG3M", 3.0), (f"{slice_key}_FG2M", 2.0)),
-    )
+    return TeamFilterRanking(_SHOT_TYPES, shot_type_derived_terms(slice_key, "PTS"))
 
 
 def _traditional(metric_key: str) -> TeamFilterRanking:

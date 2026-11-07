@@ -799,8 +799,9 @@ def test_a_shift_just_under_ten_percent_is_not_flagged(client, authenticate, wor
 
 
 def test_without_games_equal_the_game_log_players_off_filter(client, authenticate, world):
-    # LeBron missed the opener and the second game; nothing says he changed teams.
-    world.logs.rows[(LEBRON, CURRENT)] = world.logs.rows[(LEBRON, CURRENT)][2:]
+    # LeBron missed g2 and g3, inside his window from g1; nothing says he changed teams.
+    rows = world.logs.rows[(LEBRON, CURRENT)]
+    world.logs.rows[(LEBRON, CURRENT)] = rows[:1] + rows[3:]
     headers = authenticate()
 
     expected_games, expected_points = 0, 0
@@ -812,7 +813,7 @@ def test_without_games_equal_the_game_log_players_off_filter(client, authenticat
         ).get_json()
         expected_games += len(body["game_logs"])
         expected_points += sum(row["PTS"] for row in body["game_logs"])
-    assert (expected_games, expected_points) == (7, 167)  # g1,g2,g6-g8 and h3,h4
+    assert (expected_games, expected_points) == (7, 167)  # g2,g3,g6-g8 and h3,h4
 
     pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
     assert pts["without"]["games"] == expected_games
@@ -965,6 +966,20 @@ def test_an_injured_player_who_changed_teams_resets_the_pair(client, authenticat
     assert pts["baseline"]["games"] == 5 and pts["baseline"]["season_span"] == "2026-27"
     assert pts["off_floor"]["season_span"] == "2026-27"
     assert pts["off_floor"]["minutes"] == 100
+
+
+def test_a_game_before_the_injured_player_joined_is_on_neither_side(client, authenticate, world):
+    # LeBron opens for BOS on 10-21 and first plays for LAL on 10-25, so
+    # Reaves's 10-23 LAL game is outside his LAL window: neither with nor without.
+    lebron = world.logs.rows[(LEBRON, CURRENT)]
+    lebron[0]["TEAM_ABBREVIATION"] = "BOS"
+    del lebron[1]
+    world.logs.rows[(REAVES, CURRENT)][1]["PTS"] = 100
+
+    pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
+
+    assert pts["without"] == {"avg": 25.0, "games": 3, "season_span": "2026-27"}
+    assert (pts["baseline"]["games"], pts["baseline"]["avg"]) == (3, 20.0)
 
 
 def _mates(client, authenticate):

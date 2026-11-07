@@ -72,6 +72,37 @@ def test_recovery_does_not_overwrite_a_cycle_superseded_by_another_session(engin
     assert _cycle_state(engine, cycle) == ("superseded", "cycle_window_expired")
 
 
+class _SupersedesBeforeAttention(CollectionOperationsService):
+    """Another session supersedes the cycle after this evaluation has read it."""
+
+    def _open_lifecycle_alert(self, session, *, cycle_id, severity, code, now):
+        if code == "stale_threshold":
+            with self.engine.begin() as other:
+                other.execute(
+                    CollectionCycle.__table__.update()
+                    .where(CollectionCycle.cycle_id == cycle_id)
+                    .values(status="superseded", superseded_at=now)
+                )
+        return super()._open_lifecycle_alert(
+            session, cycle_id=cycle_id, severity=severity, code=code, now=now
+        )
+
+
+def test_attention_does_not_overwrite_a_cycle_superseded_by_another_session(engine):
+    clock = [datetime(2026, 8, 12, tzinfo=UTC)]
+    operations, cycle, _, _ = _ledger_cycle(engine, clock)
+    clock[0] += timedelta(hours=7)
+
+    racing = _SupersedesBeforeAttention(
+        engine, collection_control=operations.collection_control, clock=lambda: clock[0]
+    )
+    result = racing.evaluate_cycle_alerts()
+
+    assert _cycle_state(engine, cycle) == ("superseded", None)
+    assert _alerts(engine, cycle) == [("stale_threshold", "open")]
+    assert result["cycles_attention"] == 0
+
+
 class _HoldsFirstAttentionSend(RecordingAlertAdapter):
     """Blocks the first cycle_attention send until released, like a slow SMTP call."""
 

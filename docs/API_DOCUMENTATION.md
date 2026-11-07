@@ -1534,6 +1534,14 @@ play_types, shot_zones, shot_types, assist_locations, traditional, rebound_types
 hold only stray mis-tags whose ranks would read −100% or thousands of percent.
 The scores still read them, where the player's own threes there weigh nothing.
 
+Each shot type also has three derived rows, summed at read time from its
+published stats and never part of a publication: `<slice>:PTS`
+(`2 x FG2M + 3 x FG3M`, crf04/statsplus#315), and `<slice>:FGM`
+(`FG2M + FG3M`) and `<slice>:FGA` (`FG2A + FG3A`, crf04/statsplus#454). They
+rank and compare to the league like every other row. `<slice>:FGM` lists only
+`["FGM"]` and `<slice>:FGA` only `["FGA"]` in `markets`: each is the overall row
+those markets display, and no Matchup Score reads a derived row.
+
 `rebound_types` (crf04/statsplus#234) is the ledger-owned Rebound Types Base,
 listed directly after `traditional`. Its rows have exactly the shape of the
 `assist_locations` rows above and are keyed, like every Base's rows, in
@@ -2921,6 +2929,20 @@ images are named by. It comes from the player's season log, so no filter
 changes it, including one that matches no games. It is `null` when the season
 holds no games for the player.
 
+Opponent ranks (crf04/statsplus#456): `opponent_ranks` maps a chart line type
+to a `label` and `ranks`, each team tricode's whole-season rank in that metric
+per 48, 1-30 with 30 = allows the most. The ranks are the Matchup Defense
+Sheet's Traditional row ranks, so tied teams share a rank exactly as the Sheet
+shows them. The line types are `PTS` (Points Allowed), `REB`, `AST`, `FGM`,
+`FGA`, `FG3M`, `FG3A`, `FTM`, `FTA`, `STL`, `BLK`, `TOV` and `STKS` (Steals +
+Blocks, ranked as the Opposing Team Profile ranks it). The label is the
+metric's opponent-filter label, or `FG Made Allowed`, `FG Attempts Allowed`
+or `FT Made Allowed` where no Team Filter offers the metric. Combos and
+`FD_PTS` have no entry. The ranks come from the same Season publication
+generation the response reads, and no filter changes them. A metric the
+publication lacks has no entry, and the object is `{}` when the season cannot
+be ranked.
+
 Every successful response also carries the shared
 [`provenance`](#response-provenance) block naming the Publications it read.
 
@@ -2932,7 +2954,8 @@ Every successful response also carries the shared
   "season_game_count": 71,
   "next_game": null,
   "player_id": 2544,
-  "posted_line": null
+  "posted_line": null,
+  "opponent_ranks": { "PTS": { "label": "Points Allowed", "ranks": { "BOS": 27, "LAL": 3 } } }
 }
 ```
 
@@ -3259,7 +3282,7 @@ Query parameters:
 | `player_name` | Yes | Player name; resolved against the requested `season_filter`'s Athlete Catalog first (exact case-insensitive match, then fuzzy), preferring the namesake active for that season when multiple catalog rows share a display name, falling back to the legacy `player_information` table when no catalog exists for that season |
 | `minutes_filter` | No | Comma-separated min,max minutes. Default `0,48` |
 | `players_on[]` | No | Teammates that must have a game-log appearance in the same game for the same team; this is game-level played/didn't-play evidence, not lineup-stint evidence |
-| `players_off[]` | No | Teammates that must have no game-log appearance in the same game for the same team; multiple names exclude the union of their appearances |
+| `players_off[]` | No | Teammates that must have no game-log appearance in the same game for the same team, counted only inside each one's team window: from his first game for that team in the season until his first later game for another team (crf04/statsplus#449). A game outside the window is excluded; multiple names keep only games inside every window with no appearance by any of them |
 | `date_filter` | No | `YYYY-MM-DD` start date that trims the player's own game logs. It never reshapes Team Filter rankings, which are always whole-Regular-Season |
 | `date_to` | No | `YYYY-MM-DD` inclusive end date that trims the player's own game logs; with `date_filter` it selects an inclusive range (#307). It never reshapes Team Filter rankings, which are always whole-Regular-Season. An unparsable value, or one earlier than `date_filter`, is rejected with `400` `invalid_input` |
 | `teams_against[]` | No | Opponent filter names such as `OPP_PTS`. Every filter ranks opponents from the durable Season publications for the requested `season_filter` (#198); a request-time provider call is no longer made for any combination of filters. A season with no Season publication ranks no opponents, so the filter resolves to an empty result rather than borrowing another season's rankings. The authoritative accepted set (and its legacy aliases) is not enumerated here except by example: a rejection's `details` carry the full canonical `supported_values` and `supported_aliases` (#145). An entry may instead be a Defense Sheet row reference, `sheet:<base>:<row key>`, which ranks that Sheet row's Season allowed per 48 (#308; see Filtering Reference) |
@@ -3616,10 +3639,12 @@ no `provenance` block (see [Response provenance](#response-provenance)).
 `without` (crf04/statsplus#239) compares a team's stored rotation games with the
 named player or players **absent** against those with them **present**, over the
 whole `season`; `last_n` is rejected because a "last 5" without sample is rarely
-a sample. A named player is *absent* in a game when his box-score line for that
-team shows 0 minutes (DNP or inactive) and *present* when it shows more than 0;
-a game where he has no line for the team (not yet on the roster) is excluded.
-*Without games* are those where every named player is absent, *with games*
+a sample. A named player's *team window* runs from his first game for the team
+in the season until his first later game for another team, open-ended if he
+never moves (crf04/statsplus#449). Inside it he is *absent* in a game when he
+has no box-score line for the team (inactive) or a 0-minute line (DNP), and
+*present* when his line shows more than 0; a game outside his window is
+excluded. *Without games* are those where every named player is absent, *with games*
 those where every one is present; a mixed game is excluded. A subject's line is
 his box-score line for the team, a DNP counts as 0 minutes, and a game where he
 has no line for the team is excluded from his split.
@@ -4051,7 +4076,10 @@ claim.  Before replacing any live table, the handler renews that claim as a
 fencing check inside the same database transaction as the table swap.  A
 stale attempt is rejected and cannot overwrite the newer attempt, although
 provider calls already in flight when a lease expires are not cancellable by
-this mechanism.
+this mechanism.  A job is claimed at most three times: when the third attempt's
+lease also expires, the next claim marks the job `failed` with the
+`failure_summary` "The data refresh stopped responding 3 times and was not
+retried.", and a new request for that operation is accepted.
 
 The deployment-owned `scripts/nightly_refresh.py --hosted-only` command is not
 an HTTP endpoint. It runs two independent steps, retrying each failed step once,
@@ -6846,7 +6874,7 @@ on exactly the metric the Matchup showed:
 | --- | --- |
 | `play_types` | `PRBallHandler:PTS`, `Isolation:POSS`, `PRBallHandler:TOV`, `Isolation:FTT` (each play type with `PTS`, `POSS`, `TOV` and `FTT`; a Season Publication composed before #416 has no `TOV` or `FTT` rows, and a filter on one then ranks no opponent) |
 | `shot_zones` | `Restricted Area:FGM`, `Mid-Range:FGA`, `Corner 3:FGM` (each governed zone with `FGM` and `FGA`) |
-| `shot_types` | `Catch and Shoot:FG3M`, `Pullups:FG2A`, `Less Than 10 ft:FG2M` (each shot type with `FG2M`, `FG2A`, `FG3M`, `FG3A`, plus the derived `PTS`, e.g. `Catch and Shoot:PTS`, which ranks `2 x FG2M + 3 x FG3M`, the same order as the Sheet row and as the `C&S PTS` filter) |
+| `shot_types` | `Catch and Shoot:FG3M`, `Pullups:FG2A`, `Less Than 10 ft:FG2M` (each shot type with `FG2M`, `FG2A`, `FG3M`, `FG3A`, plus the derived `PTS`, e.g. `Catch and Shoot:PTS`, which ranks `2 x FG2M + 3 x FG3M`, the same order as the Sheet row and as the `C&S PTS` filter, and the derived `FGM` and `FGA`, e.g. `Pullups:FGA`, which rank `FG2M + FG3M` and `FG2A + FG3A`) |
 | `assist_locations` | `Assists`, `Arc3Assists`, `Corner3Assists`, `AtRimAssists`, `ShortMidRangeAssists`, `LongMidRangeAssists` |
 | `traditional` | `OPP_PTS`, `OPP_REB`, `OPP_AST`, `OPP_FGM`, `OPP_FGA`, `OPP_FG3M`, `OPP_FG3A`, `OPP_FTM`, `OPP_FTA`, `OPP_TOV`, `OPP_STL`, `OPP_BLK` (each ranks the per-48 allowed the Sheet row shows) |
 

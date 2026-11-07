@@ -357,3 +357,62 @@ def test_each_team_player_is_insufficient_on_his_own_without_games(client, tmp_p
         ("Steady", 4, False),
         ("Traded In", 2, True),
     ]
+
+
+EDWARDS, DOSUNMU, RANDLE = 40, 41, 42
+
+
+def _min(n, date, *lines):
+    return game(f"00226000{n:02d}", date, "MIN", "BOS", lines)
+
+
+def test_an_inactive_player_with_no_line_counts_as_without(client, tmp_path, dependencies):
+    # MIN without Edwards (crf04/statsplus#449): he played the first two games
+    # and is inactive, with no box-score line, in the four since.
+    repository = migrated_repository(tmp_path)
+    ayo = lambda m: line(DOSUNMU, "Ayo Dosunmu", "MIN", minutes=m)  # noqa: E731
+    randle = line(RANDLE, "Julius Randle", "MIN", minutes=34)
+    store(
+        repository,
+        *(
+            _min(
+                n,
+                f"2026-10-{10 + 2 * n}",
+                line(EDWARDS, "Anthony Edwards", "MIN", minutes=36),
+                ayo(20),
+                randle,
+            )
+            for n in (1, 2)
+        ),
+        *(_min(n, f"2026-10-{10 + 2 * n}", ayo(30), randle) for n in (3, 4, 5, 6)),
+        season="2026-27",
+    )
+    dependencies.rotation_service = service_for(
+        repository, Catalog((DOSUNMU, "Ayo Dosunmu", "MIN")), default_season="2026-27"
+    )
+
+    team = _get(client, "team=MIN&without=Anthony%20Edwards").get_json()["without"]
+    player = _get(client, "player_name=Ayo%20Dosunmu&without=Anthony%20Edwards").get_json()["without"]
+
+    assert (team["games_without"], team["games_with"]) == (4, 2)
+    assert (player["without"]["games"], player["without"]["minutes"]) == (4, 30.0)
+    assert (player["with"]["games"], player["with"]["minutes"]) == (2, 20.0)
+
+
+def test_games_after_the_absent_player_moved_to_another_team_are_left_out(client, tmp_path, dependencies):
+    repository = migrated_repository(tmp_path)
+    steady = line(AUSAR, "Steady", "DET", minutes=20)
+    mover = lambda m: line(CADE, "Moved On", "DET", minutes=m)  # noqa: E731
+    store(
+        repository,
+        _g(1, "2026-01-01", mover(30), steady),
+        _g(2, "2026-01-03", mover(0), steady),
+        game("0022500099", "2026-01-04", "BOS", "NYK", [line(CADE, "Moved On", "BOS", minutes=25)]),
+        _g(3, "2026-01-05", steady),
+        _g(4, "2026-01-07", steady),
+    )
+    dependencies.rotation_service = service_for(repository, Catalog())
+
+    without = _get(client, "team=DET&without=Moved%20On").get_json()["without"]
+
+    assert (without["games_without"], without["games_with"]) == (1, 1)

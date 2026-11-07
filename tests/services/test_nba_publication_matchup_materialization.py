@@ -1239,7 +1239,7 @@ def test_publication_per48_values_and_metric_key_order_are_preserved(tmp_path):
     )
     assert metric.allowed_per_48 == float(CANONICAL_TEAM_IDS[0])
     # The stored facts stay the four published stats; the window adds the
-    # read-time points row (#315) on top of them.
+    # read-time points (#315), makes and attempts (#454) rows on top of them.
     assert {item.stat_key for item in snapshot.facts if item.base == "shot_types"} == {
         "FG2A",
         "FG2M",
@@ -1252,6 +1252,8 @@ def test_publication_per48_values_and_metric_key_order_are_preserved(tmp_path):
         "FG3A",
         "FG3M",
         "PTS",
+        "FGM",
+        "FGA",
     }
 
 

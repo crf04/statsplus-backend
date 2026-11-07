@@ -21,6 +21,7 @@ from fractions import Fraction
 from typing import Any
 
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
+from app.domain.team_window import TeamWindow, team_window
 from app.errors import InvalidInputError, ResourceNotFoundError
 from app.services.athlete_resolver import catalog_athlete_matches, normalize_athlete_name
 from app.services.rotation_derivation import clock_text
@@ -114,24 +115,36 @@ def _summary(lines: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 
 # -- rotation split (crf04/statsplus#239) ------------------------------------
 #
-# A *without* game is a stored team game in which every named player has a
-# box-score line for the team showing 0 minutes; a *with* game is one in which
-# every named player's line shows more than 0.  A game where any named player
-# has no line for the team, or the named players disagree, is neither.
+# A *without* game is a stored team game inside every named player's team
+# window (crf04/statsplus#449) in which each has no line or a 0-minute line; a
+# *with* game is one in which every named player's line shows more than 0.  A
+# game outside any named player's window, or where they disagree, is neither.
+
+
+def absent_windows(
+    repository: Any, season: str, team: str, absent_ids: Iterable[int]
+) -> dict[int, TeamWindow | None]:
+    """Each absent player's team window for ``team``, from his stored lines for every team."""
+
+    appearances: dict[int, list[tuple[Any, str]]] = {player_id: [] for player_id in absent_ids}
+    for row in repository.player_games(season, player_ids=list(appearances)):
+        appearances[row["player_id"]].append((row["game_date"], row["team_tricode"]))
+    return {player_id: team_window(rows, team) for player_id, rows in appearances.items()}
 
 
 def classify_games(
     lines_by_game: Mapping[str, Mapping[int, Mapping[str, Any]]],
-    absent_ids: Sequence[int],
+    windows: Mapping[int, TeamWindow | None],
 ) -> tuple[list[str], list[str]]:
-    """Game ids (in input order) where all of ``absent_ids`` sat, and where all played."""
+    """Game ids (in input order) where every absent player sat, and where all played."""
 
     without: list[str] = []
     played: list[str] = []
     for game_id, lines in lines_by_game.items():
-        if any(player_id not in lines for player_id in absent_ids):
+        day = next(iter(lines.values()))["game_date"]
+        if not all(window is not None and window.contains(day) for window in windows.values()):
             continue
-        present = [lines[player_id]["minutes_cs"] > 0 for player_id in absent_ids]
+        present = [player_id in lines and lines[player_id]["minutes_cs"] > 0 for player_id in windows]
         if not any(present):
             without.append(game_id)
         elif all(present):
@@ -519,7 +532,9 @@ class RotationService:
     ) -> dict[str, Any]:
         lines_by_game, names = self._team_lines(season, team)
         absent = self._resolve_absent(without, names, team, subject_id=athlete.player_id)
-        without_ids, with_ids = classify_games(lines_by_game, list(absent))
+        without_ids, with_ids = classify_games(
+            lines_by_game, absent_windows(self.repository, season, team, absent)
+        )
         subject = athlete.player_id
         without_lines = [lines_by_game[g][subject] for g in without_ids if subject in lines_by_game[g]]
         with_lines = [lines_by_game[g][subject] for g in with_ids if subject in lines_by_game[g]]
@@ -559,7 +574,9 @@ class RotationService:
                 public_details={"reason": "no_rotation_data"},
             )
         absent = self._resolve_absent(without, names, team, subject_id=None)
-        without_ids, with_ids = classify_games(lines_by_game, list(absent))
+        without_ids, with_ids = classify_games(
+            lines_by_game, absent_windows(self.repository, season, team, absent)
+        )
         sides: dict[int, tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]] = {}
         for game_id in without_ids:
             for player_id, line in lines_by_game[game_id].items():
@@ -720,4 +737,4 @@ class RotationService:
         return [dict(row) for row in own_rows if row["team_tricode"] == team][:last_n]
 
 
-__all__ = ["MIN_WITHOUT_GAMES", "RotationService", "classify_games", "rotation_split"]
+__all__ = ["MIN_WITHOUT_GAMES", "RotationService", "absent_windows", "classify_games", "rotation_split"]
