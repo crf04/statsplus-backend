@@ -992,11 +992,15 @@ def _opponent_rank_league():
     points = {"MIA": 130.0, "LAL": 120.0, "CHI": 90.0}
     offensive_rebounds = {"CHI": 9.0, "LAL": 5.0, "MIA": 0.5}
     field_goals_made = {"LAL": 50.0, "BOS": 45.0, "MIA": 30.0}
+    steals = {"MIA": 20.0, "LAL": 15.0}
+    blocks = {"CHI": 12.0}
     return league(
         lambda tricode: traditional_per48(
             points=points.get(tricode, 110.0),
             offensive_rebounds=offensive_rebounds.get(tricode, 1.0),
             field_goals_made=field_goals_made.get(tricode, 40.0),
+            steals=steals.get(tricode, 2.0),
+            blocks=blocks.get(tricode, 2.0),
         )
     )
 
@@ -1023,16 +1027,17 @@ def test_game_logs_carry_each_opponents_season_rank_per_line_type_over_http(
             {tricode: entry["ranks"][tricode] for tricode in ("MIA", "LAL", "CHI", "BOS")},
         )
         for line_type, entry in opponent_ranks.items()
-        if line_type in ("PTS", "REB", "FGM")
+        if line_type in ("PTS", "REB", "FGM", "STKS")
     }
     # BOS ties the other twenty-six unnamed teams and shares their rank.
     assert ranked == {
         "PTS": ("Points Allowed", {"MIA": 30, "LAL": 29, "CHI": 1, "BOS": 2}),
         "REB": ("Rebounds Allowed", {"MIA": 1, "LAL": 29, "CHI": 30, "BOS": 2}),
         "FGM": ("FG Made Allowed", {"MIA": 1, "LAL": 30, "CHI": 2, "BOS": 29}),
+        # Steals + blocks: MIA 22, LAL 17, CHI 14, the rest 4.
+        "STKS": ("Steals + Blocks", {"MIA": 30, "LAL": 29, "CHI": 28, "BOS": 1}),
     }
     assert len(opponent_ranks["PTS"]["ranks"]) == 30
-    assert opponent_ranks["STKS"]["label"] == "Steals + Blocks"
     assert opponent_ranks["FG3M"]["label"] == "3s Allowed"
     assert opponent_ranks["FGA"]["label"] == "FG Attempts Allowed"
     assert opponent_ranks["FTM"]["label"] == "FT Made Allowed"
