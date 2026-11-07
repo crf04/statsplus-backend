@@ -2929,6 +2929,16 @@ images are named by. It comes from the player's season log, so no filter
 changes it, including one that matches no games. It is `null` when the season
 holds no games for the player.
 
+Opponent ranks (crf04/statsplus#456): `opponent_ranks` maps a chart line type
+to its opponent-filter `label` and `ranks`, each team tricode's whole-season
+rank in that metric per 48, 1-30 with 30 = allows the most. The line types and
+their metrics are `PTS` (Points Allowed), `REB`, `AST`, `FG3M`, `FG3A`, `FTA`,
+`STL`, `BLK`, `TOV` and `STKS` (Steals + Blocks); combos, `FD_PTS`, `FGM`,
+`FGA` and `FTM` have no entry. The ranks come from the same Season publication
+the response's Team Filters rank, and no filter changes them. A team the
+ranking omits is absent from `ranks`, a metric that ranks no team has no entry,
+and the object is `{}` when the season cannot be ranked.
+
 Every successful response also carries the shared
 [`provenance`](#response-provenance) block naming the Publications it read.
 
@@ -2940,7 +2950,8 @@ Every successful response also carries the shared
   "season_game_count": 71,
   "next_game": null,
   "player_id": 2544,
-  "posted_line": null
+  "posted_line": null,
+  "opponent_ranks": { "PTS": { "label": "Points Allowed", "ranks": { "BOS": 27, "LAL": 3 } } }
 }
 ```
 

@@ -474,6 +474,21 @@ def _game_logs_frame():
     return pd.DataFrame(rows, columns=columns)
 
 
+#: Every request ranks its Team Filters with the opponent ranks' metrics (#456).
+_RANKED_WITH_OPPONENT_RANKS = (
+    "OPP_PTS",
+    "OPP_REB",
+    "OPP_AST",
+    "OPP_FG3M",
+    "OPP_FG3A",
+    "OPP_FTA",
+    "OPP_STL",
+    "OPP_BLK",
+    "OPP_TOV",
+    "OPP_STOCKS",
+)
+
+
 class _StubRankings:
     """Season Rankings that record every filter they were asked to rank."""
 
@@ -721,7 +736,7 @@ def test_a_date_filter_trims_the_logs_while_rankings_stay_season_wide(
 
     # MIA and LAL rank; the date keeps only the later of the two games.
     assert [row["MATCHUP"] for row in result["game_logs"]] == ["BOS @ MIA"]
-    assert service.team_filter_rankings.calls == [(("OPP_PTS",), "2024-25")]
+    assert service.team_filter_rankings.calls == [(_RANKED_WITH_OPPONENT_RANKS, "2024-25")]
 
 
 def test_the_same_team_filter_ranks_identically_with_and_without_a_date(
@@ -956,6 +971,88 @@ def test_a_url_encoded_sheet_row_filters_game_logs_over_http(
     ]
 
 
+def _traditional_ranked_service(monkeypatch, mock_db_engine, mock_redis_client, rows):
+    from app.services.team_filter_rankings import TeamFilterRankingService
+    from tests.support.publication_stubs import StubGovernance, StubReader, read
+
+    stream = "traditional_opponent_season"
+    service = GameService(
+        mock_db_engine,
+        mock_redis_client,
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season="2024-25"),
+        ),
+        team_filter_rankings=TeamFilterRankingService(
+            StubReader({stream: read(stream, rows)}),
+            governance_resolver=StubGovernance(),
+        ),
+    )
+    monkeypatch.setattr(service, "_get_game_logs", lambda name, season: (_game_logs_frame(), None))
+    return service
+
+
+def _points_allowed_league():
+    """MIA allows the most points per 48, LAL the second most, CHI the fewest."""
+
+    from tests.support.publication_stubs import league, traditional_per48
+
+    points = {"MIA": 130.0, "LAL": 120.0, "CHI": 90.0}
+    return league(lambda tricode: traditional_per48(points=points.get(tricode, 110.0)))
+
+
+def test_game_logs_carry_each_opponents_season_rank_per_line_type_over_http(
+    monkeypatch, mock_db_engine, mock_redis_client, dependencies, client
+):
+    """#456: 30 allows the most of the line type's metric, 1 the fewest."""
+
+    import app.utils.auth as auth
+
+    monkeypatch.setattr(auth, "get_firebase_app", lambda: None)
+    dependencies.game_service = _traditional_ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, _points_allowed_league()
+    )
+
+    response = client.get("/api/games/game_logs?player_name=LeBron%20James&season_filter=2024-25")
+
+    assert response.status_code == 200, response.get_json()
+    opponent_ranks = response.get_json()["opponent_ranks"]
+    points = opponent_ranks["PTS"]
+    assert points["label"] == "Points Allowed"
+    assert points["ranks"]["MIA"] == 30
+    assert points["ranks"]["LAL"] == 29
+    assert points["ranks"]["CHI"] == 1
+    assert len(points["ranks"]) == 30
+    assert opponent_ranks["STKS"]["label"] == "Steals + Blocks"
+    assert opponent_ranks["FG3M"]["label"] == "3s Allowed"
+    # Combos, fantasy points and the unlabelled Traditional rows have no entry.
+    assert sorted(opponent_ranks) == [
+        "AST",
+        "BLK",
+        "FG3A",
+        "FG3M",
+        "FTA",
+        "PTS",
+        "REB",
+        "STKS",
+        "STL",
+        "TOV",
+    ]
+
+
+def test_game_logs_carry_no_opponent_ranks_when_the_league_is_incomplete(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    service = _traditional_ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, _points_allowed_league()[:29]
+    )
+
+    result = service.get_filtered_logs("LeBron James", GameLogQuery(season_filter="2024-25"))
+
+    assert result["opponent_ranks"] == {}
+    assert len(result["game_logs"]) == 3
+
+
 def test_date_to_trims_the_logs_and_filtered_averages_only(monkeypatch, mock_db_engine, mock_redis_client):
     """#307: an inclusive end date trims logs and averages, not the season."""
 
@@ -1066,8 +1163,8 @@ def test_the_same_team_filter_ranks_identically_with_and_without_date_to(
     # The same two ranked opponents; the end date only drops the later game.
     assert matchups(date_to="2024-01-18") == ["BOS @ MIA"]
     assert service.team_filter_rankings.calls == [
-        (("OPP_PTS",), "2024-25"),
-        (("OPP_PTS",), "2024-25"),
+        (_RANKED_WITH_OPPONENT_RANKS, "2024-25"),
+        (_RANKED_WITH_OPPONENT_RANKS, "2024-25"),
     ]
 
 
@@ -1085,7 +1182,7 @@ def test_a_historical_season_never_borrows_current_season_rankings(
 
     service.get_filtered_logs("LeBron James", query)
 
-    assert service.team_filter_rankings.calls == [(("OPP_PTS",), "2023-24")]
+    assert service.team_filter_rankings.calls == [(_RANKED_WITH_OPPONENT_RANKS, "2023-24")]
 
 
 def test_route_serves_a_legacy_date_plus_team_filter_url_unchanged(

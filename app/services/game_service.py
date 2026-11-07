@@ -15,6 +15,7 @@ strings (#9).
 import json
 import logging
 from difflib import get_close_matches
+from pathlib import Path
 from typing import ClassVar
 
 import pandas as pd
@@ -65,6 +66,27 @@ _PUBLICATION_STREAM_KEYS = tuple(
     )
 )
 _PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
+#: The Team Filter behind each chart line type's ``opponent_ranks`` entry
+#: (crf04/statsplus#456): the Matchup's Traditional "allowed" row per market,
+#: plus stocks.  FGM, FGA and FTM have Traditional rows but no opponent-filter
+#: label, and combos and fantasy points have no single allowed metric.
+_OPPONENT_RANK_FILTERS = {
+    "PTS": "OPP_PTS",
+    "REB": "OPP_REB",
+    "AST": "OPP_AST",
+    "FG3M": "OPP_FG3M",
+    "FG3A": "OPP_FG3A",
+    "FTA": "OPP_FTA",
+    "STL": "OPP_STL",
+    "BLK": "OPP_BLK",
+    "TOV": "OPP_TOV",
+    "STKS": "OPP_STOCKS",
+}
+_OPPONENT_FILTER_LABELS: dict[str, str] = json.loads(
+    (Path(__file__).resolve().parent.parent / "assets" / "opponent_filter_labels.json").read_text()
+)
+#: The product rank scale: 30 allows the most, 1 the fewest.
+_RANK_TEAM_LIMIT = 30
 # Diet facts and team windows come from the reader's decode cache, so a cache
 # hit never selects or parses their league-wide payloads.
 _DECODED_ONLY_STREAM_KEYS = frozenset(_PUBLICATION_STREAM_KEYS) - _PROJECTION_ONLY_STREAM_KEYS
@@ -102,6 +124,24 @@ def _records(frame: pd.DataFrame):
         return []
 
     return json.loads(frame.to_json(orient="records", date_format="iso"))
+
+
+def _opponent_ranks(rankings):
+    """Each line type's Season rank per opponent, ranked teams only.
+
+    A ranking is most-allowed first, so its first team holds rank 30.
+    """
+
+    return {
+        line_type: {
+            "label": _OPPONENT_FILTER_LABELS[team_filter],
+            "ranks": {
+                tricode: _RANK_TEAM_LIMIT - position for position, tricode in enumerate(rankings[team_filter])
+            },
+        }
+        for line_type, team_filter in _OPPONENT_RANK_FILTERS.items()
+        if rankings[team_filter]
+    }
 
 
 class GameService:
@@ -664,16 +704,17 @@ class GameService:
             publication_snapshot=publication_snapshot,
         )
 
-        # Resolve opponent filters into one intersecting team set, read from
-        # one publication generation so two filters cannot disagree about which
+        # Rank the opponent filters and the opponent ranks' metrics from one
+        # publication generation, so two rankings cannot disagree about which
         # season and which activation they ranked.
+        rank_filters = tuple(dict.fromkeys((*query.teams_against, *_OPPONENT_RANK_FILTERS.values())))
+        rankings = self._season_rankings(
+            rank_filters,
+            query.season_filter,
+            publication_snapshot=publication_snapshot,
+        )
         resolved_teams = None
         if query.teams_against:
-            rankings = self._season_rankings(
-                query.teams_against,
-                query.season_filter,
-                publication_snapshot=publication_snapshot,
-            )
             for index, team_filter in enumerate(query.teams_against):
                 matching = set(self._select_rank(rankings[team_filter], query.rank_filter[index]))
                 resolved_teams = matching if resolved_teams is None else resolved_teams & matching
@@ -767,6 +808,7 @@ class GameService:
             next_game=self._get_team_name_by_id(next_team),
             player_id=player_id,
             posted_line=self._posted_line_for(player_id, player_name, query, full_game_logs),
+            opponent_ranks=_opponent_ranks(rankings),
             # Every stream the capture holds feeds this response: the logs,
             # the Diets and the Season Defense Sheet behind PLAYTYPE_RTG and
             # any Team Filter ranking.
