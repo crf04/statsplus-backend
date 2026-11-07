@@ -127,6 +127,10 @@ class _SnapshotRankings:
         assert publication_snapshot is self.required_snapshot
         return {"OPP_PTS": ["GSW"]}
 
+    def season_rows_by_base(self, bases, season, *, publication_snapshot=None):
+        assert publication_snapshot is self.required_snapshot
+        return {base: None for base in bases}
+
 
 class _DietReader:
     """Reads the player's shares with exactly one statement against ``engine``."""
