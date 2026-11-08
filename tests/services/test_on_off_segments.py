@@ -1104,6 +1104,45 @@ def test_cached_at_is_the_newest_write_among_the_games_the_split_includes(tmp_pa
     assert all_three["cached_at"] == "2026-11-03T09:00:00+00:00"
 
 
+def test_naming_no_player_is_each_players_summed_segments_for_the_team(covered, provider):
+    body = _service(provider, covered.engine).get("BOS", "2025-26")
+    with covered.engine.connect() as connection:
+        summed = dict(
+            connection.execute(
+                text(
+                    "SELECT player_id, SUM(duration_cs) FROM lineup_segment_players"
+                    f" WHERE team_id = {BOS} AND season = '2025-26' GROUP BY player_id"
+                )
+            ).all()
+        )
+
+    assert (body["status"], body["source"], body["on"], body["off"]) == ("ok", "statsplus", [], [])
+    # Brown's 446,270 centiseconds over the two stored games are 74.4 minutes.
+    assert [(player["player_id"], player["minutes"]) for player in body["players"]] == [
+        (BROWN, 74),
+        (1628401, 71),
+        (1630202, 70),
+        (1630573, 55),
+        (1629014, 52),
+        (1629674, 50),
+        (1642864, 24),
+        (1631248, 19),
+        (1641775, 19),
+        (1628449, 15),
+        (1630214, 15),
+        (1630568, 15),
+        (1642873, 1),
+    ]
+    assert {player["player_id"]: player["minutes"] for player in body["players"]} == {
+        player_id: (duration_cs + 3000) // 6000 for player_id, duration_cs in summed.items()
+    }
+    assert body["players"][0]["totals"]["pts"] == 55
+    assert body["games_missing"] == [
+        {"game_id": covered.rejected, "game_date": "2025-11-14", "matchup": "DET @ BOS"}
+    ]
+    assert provider.calls == []
+
+
 def test_an_on_player_who_never_played_for_the_team_has_an_empty_split(covered, provider):
     body = _service(provider, covered.engine).get("BOS", "2025-26", on=[203999])
 

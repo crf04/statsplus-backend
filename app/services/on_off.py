@@ -2,6 +2,7 @@
 
 One call asks: for this team and season, how did every teammate play while
 the ``on`` players were on the floor and the ``off`` players were off it?
+With neither list it asks for each player's full season with the team.
 Players are StatsPlus player ids.  Per-36 rates are derived here from raw
 totals and minutes.
 
@@ -110,7 +111,11 @@ class OnOffRequest:
 
 
 def build_request(team: Any, season: Any, on: Iterable[Any] = (), off: Iterable[Any] = ()) -> OnOffRequest:
-    """Validate raw inputs; anything unusable is ``InvalidInputError``."""
+    """Validate raw inputs; anything unusable is ``InvalidInputError``.
+
+    Naming no player at all is the team's full season: every minute of every
+    player, whatever the lineup (crf04/statsplus#460).
+    """
 
     abbreviation = canonical_nba_team_abbreviation(str(team or "").strip())
     if abbreviation not in NBA_TEAM_TRICODE_TO_ID:
@@ -134,8 +139,6 @@ def build_request(team: Any, season: Any, on: Iterable[Any] = (), off: Iterable[
             raise InvalidInputError(f"{label}[] accepts at most {limit} players.")
         sides.append(tuple(sorted(ids)))
     on_ids, off_ids = sides
-    if not on_ids and not off_ids:
-        raise InvalidInputError("Give at least one player in on[] or off[].")
     if set(on_ids) & set(off_ids):
         raise InvalidInputError("A player cannot be both on and off the floor.")
     return OnOffRequest(abbreviation, canonical_season, on_ids, off_ids)

@@ -344,7 +344,6 @@ def test_warm_refetches_an_entry_from_before_the_new_fields(service, provider, r
         "season=2025-26&off[]=203999",
         "team=XXX&season=2025-26&off[]=203999",
         "team=DEN&season=2025&off[]=203999",
-        "team=DEN&season=2025-26",
         "team=DEN&season=2025-26&off[]=abc",
         "team=DEN&season=2025-26&on[]=5&off[]=5",
         "team=DEN&season=2025-26&on[]=1&on[]=2&on[]=3&on[]=4&on[]=5&on[]=6",
@@ -354,6 +353,21 @@ def test_warm_refetches_an_entry_from_before_the_new_fields(service, provider, r
 def test_invalid_requests_are_400_and_never_reach_the_provider(api, provider, query):
     assert api(query).status_code == 400
     assert provider.calls == []
+
+
+def test_naming_no_player_returns_the_teams_full_season_split(api, provider, redis):
+    response = api("team=DEN&season=2025-26")
+    body = response.get_json()
+
+    assert response.status_code == 200
+    assert (body["status"], body["source"], body["on"], body["off"]) == ("ok", "pbpstats", [], [])
+    assert body["players"][0] == MURRAY
+    assert [p["player_id"] for p in body["players"]] == [1627750, 203932, 1642354, 1631223]
+    # No lineup filter goes upstream, and the entry is the existing key with both lists empty.
+    assert provider.calls == [(DEN, "2025-26", (), ())]
+    assert list(redis.data) == ["on_off:v1:DEN:2025-26:on=:off="]
+    assert api("team=DEN&season=2025-26&on[]=&off[]=").get_json() == body
+    assert len(provider.calls) == 1
 
 
 def test_without_a_cache_every_read_fetches_and_failure_is_unavailable(provider, clock):
