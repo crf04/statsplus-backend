@@ -3445,8 +3445,11 @@ server process allows 15 per minute instead.
 `GET /api/on_off?team=ABBR&season=YYYY-YY&on[]=ID&off[]=ID` (authenticated;
 #424, part of statsplus#220). For one team and season, returns every player
 with minutes while all `on[]` players were on the floor and all `off[]`
-players were off it. Ids are StatsPlus player ids (NBA person ids), at least one in total, and no id on both sides. A missing or invalid
-`team`, `season` or id is a 400.
+players were off it. Ids are StatsPlus player ids (NBA person ids), with no id on both sides. A missing or invalid
+`team`, `season` or id is a 400. With neither `on[]` nor `off[]` the answer is
+the team's full season: every player with minutes for the team, each with all
+of his minutes whatever the lineup, from the same source and cached under the
+same key shape with both lists empty (crf04/statsplus#460).
 
 ```json
 {
