@@ -10,7 +10,8 @@ FGA read the Traditional ``OPP_PTS`` and ``OPP_FGA`` rows, which the seeded
 legacy facts lack, so those windows name ``team_defense:traditional``; that
 entry is stripped too and pinned on its own.  #437 drops the impossible
 ``Less Than 10 ft`` 3PA/3PM Defense Sheet rows, so they are removed from the
-golden before comparing and their absence is pinned on its own.
+golden before comparing and their absence is pinned on its own.  statsplus#470
+adds ``leaders`` to each Slate edges game; it is stripped and pinned on its own.
 The golden file is trunk's (622a98b4) output of ``_responses``, captured by
 running this module's ``__main__`` against a ``git archive`` of that commit;
 regenerate it only from trunk.  Publication ids are random, so they are
@@ -136,6 +137,8 @@ def _without_serving_season_keys(responses: dict) -> dict:
     stripped["matchup"].pop("as_of", None)
     # Added after the trunk golden was recorded (crf04/statsplus#466).
     stripped["matchup"].pop("game_context", None)
+    for game in stripped["edges"]["games"]:
+        game.pop("leaders", None)
     for player in stripped["matchup"]["players"]:
         player.pop("last_five_games", None)
         player.pop("season_averages", None)
@@ -221,6 +224,19 @@ def test_before_a_cutover_matchup_slate_and_edges_equal_trunk_but_for_the_servin
     assert responses["matchup"]["trailing"] == []
     assert responses["slate"]["trailing"] == []
     assert responses["edges"]["trailing"] == []
+    assert [game["leaders"] for game in responses["edges"]["games"]] == [
+        [
+            {
+                "canonical_id": 2544,
+                "name": "LeBron James",
+                "tricode": "LAL",
+                "season_scoring": 31.0,
+                "market": "PTS",
+                "value": -0.02,
+                "thin": True,
+            }
+        ]
+    ]
 
 
 if __name__ == "__main__":

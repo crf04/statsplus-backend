@@ -163,7 +163,9 @@ existing `american_price`/`decimal_price` fields, which are unchanged:
   payout the leg takes part in, which depends on the entry's leg count)
 
 An adapter states the triple only when the provider prices a selection outside
-its payload — PrizePicks' entry payout table, declared in the registry. Every
+its payload — PrizePicks' entry payout table, declared in the registry, and
+Dabble's 2-pick 3x entry (`multiplier`, `entry`) on every line that is not
+near-even, or `unpriced` for a one-sided or unpriced pair (crf04/statsplus#435). Every
 other case is derived once, at the shared normalization seam, from the fields
 the adapter already retained: an American price, then a decimal price, then a
 single payout-multiplier modifier priced at entry scope, and otherwise
@@ -1230,9 +1232,10 @@ through that same derivation.
 `teams_against[]` filters rank the 30 opponents from the durable window-aware
 team matchup publications, always at the Season window
 (`app.services.team_filter_rankings`).  One map names, per Team Filter, the
-publication base and the per-48 metric keys it ranks:
+publication base and the metric keys it ranks:
 `traditional_opponent_season` covers the opponent box set (`OPP_STOCKS` sums
-the published blocks and steals), `grouped_shot_types_opponent_season` covers
+the published blocks and steals; `DRTG` divides 100 × points allowed by the
+published `possessions`), `grouped_shot_types_opponent_season` covers
 the catch-and-shoot, pull-up, and under-10-feet filters (their points columns
 are derived as `3 * FG3M + 2 * FG2M` from the made-shot counts),
 `synergy_play_types_opponent_season` ranks points per possession, and
@@ -1315,7 +1318,10 @@ nothing, which resolves to an empty opponent set rather than a new error case.
 lineup-stint filters. For every named player, the same game-log source supplies
 season rows. `players_on[]` intersects `(game_id, team)` pairs across the
 primary player and every named teammate; `players_off[]` removes the union of
-same-team pairs where any named teammate has a row. A player appearing for the
+same-team pairs where any named teammate has a row, and keeps only games inside
+each named teammate's team window, from his first game for the team in the
+season until his first later game for another team (crf04/statsplus#449). A
+player appearing for the
 opponent in the same game is therefore never treated as the primary player's
 teammate. Every named player's rows come from an active durable publication;
 unavailable coverage produces no matching games.
@@ -2449,8 +2455,10 @@ only the scores that read the missing row, which name
 `team_defense:traditional`. When the other window supplies such a row identity,
 its league/team value is null only in the legacy window even though
 traditional availability remains available; OPP_TOV/OPP_STL/OPP_BLK rows and
-defensive scores remain populated. Those nine rows are the sole row-level
-exception: every other metric identity divergence marks the affected
+defensive scores remain populated. Those nine rows are the sole traditional
+row-level exception (the other is the `play_types` `TOV`/`FTT` rows; see
+Season defensive play-type facts below): every other metric identity
+divergence marks the affected
 Base/window `unavailable/legacy_surface_incomplete` and nulls all of its rows.
 Normalization therefore validates the cross-window traditional identity union
 plus the three required defensive columns, excluding those nine for that
@@ -2942,7 +2950,10 @@ claim through a conditional update on the *same* `engine.begin()` connection.
 That update and all table swaps commit atomically; a stale attempt therefore
 fails before changing a live table and cannot overwrite a newer attempt. This
 protects publication and durable job state, but it cannot cancel provider work
-that was already in flight before a lease expired.
+that was already in flight before a lease expired. A job is claimed at most
+three times (`MAX_REFRESH_ATTEMPTS`): the claim after a third expired lease
+marks it `failed` in the same conditional update, so a handler that kills its
+worker cannot be reclaimed forever.
 
 The `DataService` refresh callables first collect every provider frame in
 memory (failures stop the job before any write), then hand the whole related
@@ -5120,10 +5131,10 @@ line, so a peak month projects from the first game days as credits per game x
 games.
 
 **Unverified until a live call** (no key existed; fixtures follow the vendor
-documentation): that `prizepicks` returns the five standard markets with Over
+documentation): that `prizepicks` returns the eight standard markets with Over
 and Under outcomes at one `point`; what `price` it states (documented only as
-"default odds"); that a populated response costs 5; how early lines are
-posted. `python scripts/odds_api_spike.py dfs` (two paid calls, at most 10
+"default odds"); that a populated response costs 8; how early lines are
+posted. `python scripts/odds_api_spike.py dfs` (two paid calls, at most 16
 credits) prints these, and `tests/live/test_odds_api_live.py` asserts the
 contract.
 
@@ -5656,7 +5667,10 @@ team ever has other than five players on court. Times are integer centiseconds.
 `RotationCollectionService` selects completed, non-postponed regular-season
 Event Catalog games with no stored rotation and, per game, fetches, derives and
 stores (`rotation_games`, `rotation_player_games`, `rotation_stints`, migration
-066, plus `rotation_attempts`). One game's failure never blocks another:
+066, plus `rotation_attempts`), and each game's lineup segments (migration
+084), which serve on/off splits for covered seasons; a game whose segments are
+refused keeps its rotation and is reported as `segments_rejected`. One game's
+failure never blocks another:
 `rejected` games (documents read, rotation untrustworthy), `failed` games (not
 fetched) and `given_up` games (3 rejections) are reported in the run summary.
 Attempted games queue behind never-tried ones, so none can starve newer games. `RotationRepository.replace_game` deletes and rewrites one game in

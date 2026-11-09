@@ -34,7 +34,7 @@ Authentication levels:
 ## Beta sign-ups and the waitlist
 
 Every user row has `access_status`, either `active` or `waitlisted` (separate
-from `is_active`, which means deactivation). Migration 062 adds the column and
+from `is_active`, a legacy flag nothing sets since the deactivation route was removed). Migration 062 adds the column and
 backfills every existing row to `active`; it also creates the `app_settings`
 table that holds the sign-up switch. The switch defaults to open, and it lives in
 Postgres, so flipping it needs no deploy and every worker sees it on its next
@@ -813,7 +813,7 @@ is produced.
 Aggregate `retrieved_at` is the oldest usable contributor snapshot, so its age
 never understates any provider observation included in the union, with one
 declared exception: a provider that the provider registry gives its own, longer
-live window (`prizepicks`, polled hourly through The Odds API, 90 minutes
+live window (`prizepicks`, polled at most hourly through The Odds API, 90 minutes
 instead of 15) is served as `fresh` through that window and reports its own
 `retrieved_at` and status under `providers`, but does not set the aggregate
 `retrieved_at` (nor a game's `observed_at`, live or closing) while any
@@ -1075,6 +1075,11 @@ that are never flagged.
   in `sits` where the row has `off_floor`), and the union of their
   `games_missing` entries (`{game_id, game_date, matchup}`, oldest first;
   `[]` when none). A split with no copy adds nothing to either.
+- `pair_window` (crf04/statsplus#467), the same on every row of a teammate in
+  both branches: `from`, the date of the first game on either side, and
+  `excluded_games`, the teammate's games for this team in the seasons read
+  that are on neither side because the two were not teammates then (before
+  the injured player joined, or before either player's last team change).
 - `limits`: `insufficient` (under 3 games without or under 150 off-floor
   minutes; never flagged), `no_line`, `stale_report`, `no_baseline`, and the
   on/off limits `on_off_not_warmed` (no cached split; a request without
@@ -1087,7 +1092,9 @@ that are never flagged.
   different seasons). Any on/off limit other than `on_off_stale` blocks the
   flag, and so does any unsliceable season in the window; the full-game numbers are still returned.
 
-The window is the current season plus last season. It starts after the later of
+The window is the current season plus last season, each read scoped to its
+season (`season_scoped`), so a current season after the Published Season counts
+its games as a selected season does. It starts after the later of
 the two players' last appearance for a different team, and last season also
 needs a game for this team by the injured player. Without a team change the
 `without` games are those `GET /api/games/game_logs?players_off[]=` returns.
@@ -1152,6 +1159,10 @@ DFS provider and writes nothing.
         { "canonical_id": 1628970, "name": "Miles Bridges", "tricode": "CHA",
           "season_scoring": 17.1, "value": -0.0823, "thin": false }
       ],
+      "leaders": [
+        { "canonical_id": 1628970, "name": "Miles Bridges", "tricode": "CHA",
+          "season_scoring": 17.1, "market": "REB", "value": 0.1104, "thin": false }
+      ],
       "scores": [ { "canonical_id": 1628970, "value": -0.0823 } ]
     }
   ],
@@ -1185,6 +1196,17 @@ DFS provider and writes nothing.
 - `effects` holds up to three of those players whose `season_scoring` is at
   least 8, ordered by `|value|` descending (ties: higher `season_scoring`, then
   lower `canonical_id`). A thin player is included, flagged `thin`.
+- `leaders` (crf04/statsplus#470, the home ticker) holds up to five rows of the
+  same shape plus `market`, one of the player-level markets `PTS`, `REB`, `AST`,
+  `3PM`, `PRA`, `PR`, `PA`, `RA`, `FGA`, `FGM`, `FG2A`, `FG2M`, `FG3A`. Each
+  player whose `season_scoring` is at least 8 contributes at most one row: his
+  season cell with the largest `|value|` across those markets (ties: that
+  market order), each market's cell read by the rule above from
+  `scores.<market>.season`. Rows are ordered as `effects` are and the first five
+  kept. STL, BLK and their sum STKS are left out because they always score the
+  opponent's team rate, so every player on a team carries the same value; TOV,
+  FTA and FTM are left out because they fall back to the team rate for about
+  half the teams early in a season.
 - `spotlight.best` is the largest positive season PTS Blend `value` across all
   games among non-thin Blends (a single component never qualifies) whose
   `season_scoring` is at least 12; `spotlight.toughest` is the most negative by
@@ -1200,17 +1222,17 @@ DFS provider and writes nothing.
   `percent_vs_league_average`. `reason` is `null` when neither of the pick's two
   slices has an opponent PTS reading; the pick is still the extreme.
 - A game whose Matchup cannot be read (a refused or incomplete stored read)
-  contributes `effects: []`, `scores: []` and no pick; the response is still
+  contributes `effects: []`, `leaders: []`, `scores: []` and no pick; the response is still
   `200`.
 - The per-game Matchups are composed one at a time in Slate order, from the one
   Publication snapshot, each reduced to its game's entry before the next. With
   Redis enabled (`ENABLE_CACHE`, and
   `SLATE_EDGES_CACHE_ENABLED`, default `true`) the whole response is also
-  cached under `slate:edges:v5:<sha256>`, keyed on the slate date, the
+  cached under `slate:edges:v9:<sha256>`, keyed on the slate date, the
   evidence season, the Publication generation (live pointers and retained
   history rows), each game's id, status and tip time, every Matchup score and
   Diet baseline setting (game-count and per-Base volume floors), and the
-  8/12 PPG and top-three limits, so a new publication or a game starting or finishing misses.
+  8/12 PPG, top-three and leader limits (markets and top five), so a new publication or a game starting or finishing misses.
   The key has no user: the response is the same for every caller. A stored
   injury or Player Pool change moves none of those, so a cached response can
   lag such a change by up to `SLATE_EDGES_CACHE_TTL_SECONDS` (default 300)
@@ -1355,7 +1377,8 @@ filters) and `"omitted": {"book_only_unnamed": 1}`, and gives each game its
   for such players is still listed in the index, with `"players": 0`.
 - `lines` and `line_prices` are the Matchup row's, for this market only.
   `line_prices` holds American prices as posted, `null` for a missing side; a
-  provider with no per-pick price (PrizePicks) is absent from it.
+  provider with no per-pick price (PrizePicks, or Dabble on a line that is not
+  near-even) is absent from it.
 - `book_lines` is the Matchup's `book_lines` entry for this market without the
   best-price flags, or `null` when no book quotes it. `as_of` is the newest
   book's update and `closing` is `true` when every listed book's quote is a
@@ -7056,7 +7079,7 @@ points and attempts. Each entry has
 `team_filter` (a named Team Filter, a `sheet:<base>:<row key>` reference such as
 `sheet:play_types:Isolation:PTS`, or null), `unit` (`count`, `percent`, or
 `league_ratio`), `family`, and `markets`. Entries that tell the same story share a
-`family`: `points`, `rebounds` (with Putback points), `assists`, `2pt-assists`,
+`family`: `points`, `defensive-rating` (Defensive Rating, crf04/statsplus#433), `rebounds` (with Putback points), `assists`, `2pt-assists`,
 `3pt-assists`, `steals-blocks`, `turnovers`, `free-throws`, `field-goals`,
 `threes`, `inside` (Restricted Area, In The Paint (Non-RA) and Inside 10 ft rows),
 `zone:<zone>`, `shot-type:<stored slice>`, or `play-type:<key>`. `markets` lists
