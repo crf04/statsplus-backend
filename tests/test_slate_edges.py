@@ -547,6 +547,18 @@ def test_a_combo_or_shot_volume_market_can_lead():
     ]
 
 
+@pytest.mark.parametrize(
+    "market", ["PTS", "REB", "AST", "3PM", "PRA", "PR", "PA", "RA", "FGA", "FGM", "FG2A", "FG2M", "FG3A"]
+)
+def test_each_player_level_market_leads_when_it_is_the_largest_cell(market):
+    others = {name: _cell(0.02) for name in ("PTS", "REB", "AST") if name != market}
+    players = [_leader_player(1, "Solo", **others, **{market: _cell(-0.09)})]
+
+    game = _edges([_game()], {"G1": _matchup(players)})["games"][0]
+
+    assert game["leaders"] == [_leader(1, "Solo", market, -0.09)]
+
+
 def test_a_player_with_only_team_rate_markets_is_no_leader():
     players = [_leader_player(1, "Defender", **EXCLUDED)]
 
