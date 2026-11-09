@@ -851,6 +851,67 @@ def test_last_seasons_logs_are_read_from_the_retained_publication(world):
     assert len(games.get_player_logs_by_id(REAVES, PRIOR)) == 4
 
 
+class UnpublishedCurrentReader:
+    """A reader whose Published Season is ``PRIOR``: ``CURRENT`` serves only a reader scoped to it."""
+
+    captures_published_season = True
+
+    def __init__(self, selected=None):
+        self.selected_season = selected
+
+    def for_season(self, season):
+        return UnpublishedCurrentReader(season)
+
+    def snapshot(self, keys, season=None, **keywords):
+        requested = season.requested if isinstance(season, ReadSeason) else season
+        served = requested is None or requested <= PRIOR or requested == self.selected_season
+        return SimpleNamespace(served=served, read=lambda key: None)
+
+
+def test_an_unpublished_slate_season_still_counts_its_games(client, authenticate, world):
+    """crf04/statsplus#467: the Slate's season after the Published Season was read as no games."""
+
+    class PublishedOnlyLogs(FakeGameLogs):
+        def get_players_logs(self, player_ids, season, publication_snapshot=None):
+            return {
+                pid: self._frame(pid, season) if publication_snapshot.served else self._frame(None, season)
+                for pid in player_ids
+            }
+
+    logs = PublishedOnlyLogs()
+    logs.rows = world.logs.rows
+    world.games.game_logs_source = logs
+    world.games.publication_reader = UnpublishedCurrentReader()
+
+    pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
+
+    # g6-g8 (26, 24, 25) and h3-h4 (26, 26); the 2026-27 games are not lost.
+    assert pts["without"] == {"avg": 25.4, "games": 5, "season_span": "2025-26 to 2026-27"}
+    assert (pts["baseline"]["games"], pts["baseline"]["season_span"]) == (7, "2025-26 to 2026-27")
+
+
+def test_rows_say_where_the_pair_window_starts_and_what_it_leaves_out(client, authenticate, world):
+    """crf04/statsplus#467: Reaves's LAL games from before LeBron joined are named, not silently dropped."""
+
+    for row in world.logs.rows[(LEBRON, PRIOR)]:
+        row["TEAM_ABBREVIATION"] = "BOS"  # LeBron was with Boston last season
+
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    for branch in ("plays", "sits"):
+        for market in ("PTS", "MIN"):
+            assert _row(scenario, branch, REAVES, market)["pair_window"] == {
+                "from": "2026-10-21",
+                "excluded_games": 4,  # h1-h4, all for LAL while LeBron was a Celtic
+            }
+
+
+def test_a_pair_together_all_along_leaves_nothing_out(client, authenticate, world):
+    pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
+
+    assert pts["pair_window"] == {"from": "2025-10-22", "excluded_games": 0}
+
+
 def test_a_stale_report_is_a_limit_on_the_scenario_and_its_rows(client, authenticate, world):
     world.now += timedelta(minutes=50)
 
@@ -980,6 +1041,8 @@ def test_a_game_before_the_injured_player_joined_is_on_neither_side(client, auth
 
     assert pts["without"] == {"avg": 25.0, "games": 3, "season_span": "2026-27"}
     assert (pts["baseline"]["games"], pts["baseline"]["avg"]) == (3, 20.0)
+    # crf04/statsplus#467: the samples start at g3; g1, g2 and h1-h4 are left out.
+    assert pts["pair_window"] == {"from": "2026-10-25", "excluded_games": 6}
 
 
 def _mates(client, authenticate):

@@ -21,7 +21,11 @@ players' last appearance for a different team (a team change resets the pair).
 With no team change, the without games are exactly those the game-log
 ``players_off`` filter returns.  On/off totals cover a whole team season and
 cannot be sliced at a trade date, so a season in which either player changed
-teams contributes full-game evidence only (``on_off_unsliceable``).  A request
+teams contributes full-game evidence only (``on_off_unsliceable``).  Each
+season is read scoped to itself, so the Slate's season counts even before it
+is the Published Season; every row's ``pair_window`` names where the window
+starts and how many of the teammate's games for the team it leaves out
+(crf04/statsplus#467).  A request
 without ``player`` reads the on/off cache only (``OnOffService.get_cached``);
 the warm fills it.  A request naming ``player`` fetches that player's missing
 or expired splits during the request (``OnOffService.get`` waiting until a request-wide deadline for the
@@ -47,7 +51,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.services.posted_lines import posted_line
-from app.services.research_season import previous_nba_season, schedule_season
+from app.services.research_season import previous_nba_season, schedule_season, season_scoped
 from app.services.rotation_service import absent_windows, classify_games, rotation_split
 
 #: Statuses that get a scenario; Probable and Available get none.
@@ -222,12 +226,26 @@ class _RequestReads:
         self._snapshots: dict[str, Any] = {}
         self._catalog: dict[str, dict[int, int]] = {}
         self._rotation_lines: dict[tuple[str, str], dict[str, dict[int, dict[str, Any]]]] = {}
+        self._games: dict[str, Any] = {}
+
+    def games(self, season: str) -> Any:
+        """The game service scoped to ``season``.
+
+        The Slate's own season can be after the Published Season (2026-27
+        while 2025-26 is published); an unscoped read of it serves no logs at
+        all, so every teammate's current-season games would silently drop out
+        (crf04/statsplus#467).
+        """
+
+        if season not in self._games:
+            self._games[season] = season_scoped(self._service.games, season)
+        return self._games[season]
 
     def snapshot(self, season: str) -> Any:
         """The season's publication snapshot, captured once and shared by every read."""
 
         if season not in self._snapshots:
-            capture = getattr(self._service.games, "capture_publication_snapshot", None)
+            capture = getattr(self.games(season), "capture_publication_snapshot", None)
             self._snapshots[season] = capture(season) if callable(capture) else None
         return self._snapshots[season]
 
@@ -235,7 +253,7 @@ class _RequestReads:
         key = (team_id, season)
         if key not in self._rosters:
             self._rosters[key] = set(
-                self._service.games.get_team_player_ids(
+                self.games(season).get_team_player_ids(
                     team_id, season, publication_snapshot=self.snapshot(season)
                 )
             )
@@ -252,8 +270,7 @@ class _RequestReads:
         missing = {int(pid) for pid in player_ids if (int(pid), season) not in self._logs}
         if not missing:
             return
-        games = self._service.games
-        batch = getattr(games, "get_players_logs_by_id", None)
+        batch = getattr(self.games(season), "get_players_logs_by_id", None)
         if not callable(batch):
             return  # the per-player read in ``logs`` serves a games seam without one
         frames = batch(missing, season, publication_snapshot=self.snapshot(season))
@@ -263,7 +280,9 @@ class _RequestReads:
     def logs(self, player_id: int, season: str) -> pd.DataFrame | None:
         key = (int(player_id), season)
         if key not in self._logs:
-            self._logs[key] = self._service._logs(*key, publication_snapshot=self.snapshot(season))
+            self._logs[key] = self.games(season).get_player_logs_by_id(
+                *key, publication_snapshot=self.snapshot(season)
+            )
         return self._logs[key]
 
     def rotation_lines(
@@ -526,6 +545,7 @@ class InjuryScenarioService:
             window.append(_WindowSeason(s, rows, without, played, sliceable=not changed))
         if not window:
             return None
+        pair_window = _pair_window(team, seasons, mates, window)
         all_rows = pd.concat([w.rows for w in window])
         in_rotation = float(all_rows["MIN"].mean()) >= ROTATION_MINUTES_PER_GAME
         name = next((mates[s].name() for s in reversed(seasons) if mates[s].name()), None)
@@ -536,6 +556,7 @@ class InjuryScenarioService:
             reads=reads,
             lines=pool_lines.get(teammate_id, {}),
             in_rotation=in_rotation,
+            pair_window=pair_window,
             rotation=self._rotation_split(teammate_id, window, _as_date(last_other), rotation_reads),
         )
 
@@ -613,6 +634,35 @@ def _as_date(value: Any) -> Any:
     """A game-log date (string or timestamp) as a ``date``; ``None`` stays ``None``."""
 
     return None if value is None else pd.Timestamp(value).date()
+
+
+def _pair_window(
+    team: str, seasons: Sequence[str], mates: Mapping[str, _Logs], window: Sequence[_WindowSeason]
+) -> dict[str, Any]:
+    """Where the pair's samples start and what they leave out.
+
+    ``from`` is the first game on either side; ``excluded_games`` counts the
+    teammate's games for ``team`` in the seasons read that are on neither
+    side, because the two were not teammates then.
+    """
+
+    counted = {game_id for w in window for game_id in (*w.without, *w.played)}
+    days = [
+        day
+        for w in window
+        for game_id, day in zip(w.rows["GAME_ID"].astype(str), w.rows["GAME_DATE"], strict=True)
+        if game_id in counted
+    ]
+    team_games = {
+        game_id
+        for s in seasons
+        if (rows := mates[s].team_rows(team)) is not None
+        for game_id in rows["GAME_ID"].astype(str)
+    }
+    return {
+        "from": _as_date(min(days)).isoformat() if days else None,
+        "excluded_games": len(team_games - counted),
+    }
 
 
 def _replacement_starters(teammates: Sequence[_Teammate]) -> list[dict[str, Any]]:
@@ -725,9 +775,12 @@ class _Teammate:
         reads: _OnOffReads,
         lines: Mapping[str, Mapping[str, float]],
         in_rotation: bool = True,
+        pair_window: dict[str, Any] | None = None,
         rotation: dict[str, Any] | None = None,
     ) -> None:
         self.teammate_id = teammate_id
+        #: The pair window's first game and his team games it leaves out.
+        self.pair_window = pair_window
         #: Whether he is in the 15+ MPG teammate set that gets scored rows.
         self.in_rotation = in_rotation
         self.rotation = rotation
@@ -812,6 +865,7 @@ class _Teammate:
         ]
         for rendered_row in rendered:
             rendered_row["rotation"] = self.rotation
+            rendered_row["pair_window"] = self.pair_window
         return rendered
 
     def _baseline(self, column, keys, with_games, with_spans, on_floor) -> dict[str, Any]:
