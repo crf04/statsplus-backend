@@ -47,6 +47,7 @@ def schedule(
     season: str,
     classification: str = "Regular Season",
     postponed: bool = False,
+    postponement_evidence: str | None = None,
 ) -> None:
     with engine.begin() as connection:
         connection.execute(
@@ -62,6 +63,7 @@ def schedule(
                 scheduled_at=datetime.fromisoformat(scheduled_at),
                 status_text="Postponed" if postponed else "Scheduled",
                 postponed_status="PPD" if postponed else None,
+                postponement_evidence=postponement_evidence,
                 classification=classification,
                 first_seen_at=SEEN_AT,
                 last_seen_at=SEEN_AT,

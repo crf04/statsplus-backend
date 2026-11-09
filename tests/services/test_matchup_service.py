@@ -3874,6 +3874,8 @@ def test_a_scheduled_row_is_scored_in_every_scoreable_market_while_lines_stay_on
 
 
 def test_the_matchup_serves_each_teams_stored_game_context(tmp_path):
+    from sqlalchemy import text
+
     from app.services.game_context import GameContextRepository
     from tests.support.game_context_world import final, migrated_engine, schedule
 
@@ -3885,6 +3887,11 @@ def test_the_matchup_serves_each_teams_stored_game_context(tmp_path):
         engine, "0022500570", "2026-01-13", (BOS, "BOS", 112, 100.0), (LAL, "LAL", 108, 100.0), season=SEASON
     )
     GameContextRepository(engine, clock=lambda: NOW).refresh(SEASON)
+    # The request reads the stored rows only: with the ledger and schedule gone it serves the same values.
+    with engine.begin() as connection:
+        connection.execute(text("DELETE FROM canonical_game_ledger_team_facts"))
+        connection.execute(text("DELETE FROM canonical_game_ledger_games"))
+        connection.execute(text("DELETE FROM event_catalog"))
     service = _service()
     service.game_context = GameContextRepository(engine)
 

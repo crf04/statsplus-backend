@@ -303,3 +303,57 @@ def test_preseason_postponed_and_unknown_games_have_no_context(tmp_path, game_id
     repository.refresh(SEASON)
 
     assert repository.read(game_id) == {"status": "unavailable", "computed_at": None, "teams": []}
+
+
+def test_rest_reads_the_schedule_not_the_ledger_and_skips_all_star_games(tmp_path):
+    engine = migrated_engine(tmp_path)
+    schedule(engine, "0022600001", "2026-10-21T23:30:00+00:00", LAC, NOP, season=SEASON)
+    # Played but not yet in the ledger: it still counts for rest.
+    schedule(engine, "0022600002", "2026-10-23T23:30:00+00:00", BOS, LAC, season=SEASON)
+    schedule(
+        engine, "0032600001", "2026-10-24T23:30:00+00:00", LAC, BOS, season=SEASON, classification="All-Star"
+    )
+    # Empty stored evidence is no postponement.
+    schedule(
+        engine, UPCOMING, "2026-10-25T23:30:00+00:00", LAC, NOP, season=SEASON, postponement_evidence="{}"
+    )
+    # LAC's only ledger game has no possessions on its side.
+    final(engine, "0022600001", "2026-10-21", (*LAC, 100, None), (*NOP, 110, 100.0), season=SEASON)
+    repository = GameContextRepository(engine, clock=lambda: FIRST_RUN)
+
+    assert repository.refresh(SEASON)["games"] == 3
+
+    lac = repository.read(UPCOMING)["teams"][0]
+    assert (lac["tricode"], lac["through_game_date"], lac["rest"]) == (
+        "LAC",
+        "2026-10-21",
+        {"previous_game_date": "2026-10-23", "rest_days": 1, "back_to_back": False},
+    )
+    assert lac["ratings"]["season"] == {
+        "games": 1,
+        "possession_games": 0,
+        "pace": None,
+        "offensive_rating": None,
+        "defensive_rating": None,
+        "net_rating": None,
+    }
+
+
+def test_a_season_refresh_reads_and_keeps_only_its_own_season(tmp_path):
+    engine = _world(tmp_path)
+    schedule(engine, "0022501200", "2026-04-10T23:30:00+00:00", LAL, NOP, season="2025-26")
+    schedule(engine, "0022501230", "2026-04-12T23:30:00+00:00", NOP, LAL, season="2025-26")
+    final(engine, "0022501200", "2026-04-10", (*LAL, 90, 100.0), (*NOP, 130, 100.0), season="2025-26")
+    GameContextRepository(engine, clock=lambda: FIRST_RUN).refresh("2025-26")
+    repository = GameContextRepository(engine, clock=lambda: FIRST_RUN)
+
+    summary = repository.refresh(SEASON)
+
+    assert (summary["games"], summary["ledger_games"], summary["removed"]) == (4, 3, 0)
+    assert repository.read(UPCOMING) == UPCOMING_CONTEXT
+    last_season = repository.read("0022501230")["teams"][0]
+    assert (last_season["tricode"], last_season["season"], last_season["last_5"][0]["margin"]) == (
+        "NOP",
+        "2025-26",
+        40,
+    )

@@ -29,6 +29,7 @@ from app.domain.utc import assume_utc
 from app.models.canonical_game_ledger import CanonicalGameLedgerGame, CanonicalGameLedgerTeamFact
 from app.models.event_catalog import EventCatalogEntry
 from app.models.game_context import GameContext, GameContextTeam
+from app.services.event_catalog_repository import EventCatalogRepository
 from app.services.request_reads import read_connection
 
 EASTERN = ZoneInfo("America/New_York")
@@ -210,7 +211,8 @@ class GameContextRepository:
         for row in rows:
             if canonical_event_kind(row["nba_game_id"], row["classification"] or "") in EXCLUDED_EVENT_KINDS:
                 continue
-            if is_postponed_event(dict(row)):
+            # Decoded as the Event Catalog serves it, so stored empty evidence ('{}') is no postponement.
+            if is_postponed_event(EventCatalogRepository._serialize(row)):
                 continue
             games.append(
                 ScheduledGame(
