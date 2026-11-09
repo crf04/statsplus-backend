@@ -1114,12 +1114,12 @@ def test_the_edges_and_their_matchups_write_what_the_previous_release_wrote():
         key: hashlib.sha256(zlib.decompress(payload)).hexdigest()
         for key, payload in redis_client.values.items()
     } == {
-        # v11/v8 (statsplus#457): every scoreable market is scored, posted or not.
-        "matchup:composed:v11:a79bbd57219a64d081b1b6332f918dae72175b412a2a7ac9ee8c365f44b4bf8b": (
-            "eb90e3bae268ac86ca0a4c5c35e889594e03f6f98942b574cf9613f612ae794f"
+        # v12/v8 (statsplus#466): every Matchup carries its stored game_context.
+        "matchup:composed:v12:2c911ce929e6fc18c53f488c9ae3264c902326c5e85f64abfeb564cf75623d70": (
+            "c6df08eabadee3a70e6f976db0b5023572ceaf6413deffeaa9794121f9d3e2db"
         ),
-        "matchup:composed:v11:902479b5184c36a2c57a151148b9c86e9ab2123ae9a6a61d5e34400eab2a909e": (
-            "5fee7925e35cc8d4484d29a03396148c68ce048edb0d45c42663589db7576d0c"
+        "matchup:composed:v12:5c0835a4443299290f09c871cbe74182d1da02674ebfab54832d63280067fdd2": (
+            "f9f5ce48a89836db75473ccc175465ec90c05ca9d457b30c0a8b5fa20eddf596"
         ),
         "slate:edges:v8:f2b5d2e3e358f64770d498231bba15c2f8a60e43e0bba6a9f3b49b5d368af658": (
             "85542ea8a3695da15ec4c69b0a37cc79b2a6b26a62c64788446e568f105c1552"

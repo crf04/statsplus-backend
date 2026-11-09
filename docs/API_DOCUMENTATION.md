@@ -1399,8 +1399,10 @@ servable under its landed stored-pool rules may populate `players`.
 Top-level fields are required:
 
 ```text
-game, experience, as_of, league, teams, players, injuries, freshness
+game, experience, as_of, league, teams, players, injuries, game_context, freshness
 ```
+
+`game_context` is described under [Game context](#game-context).
 
 `as_of` has the [Unscheduled Matchup's](#get-unscheduled-matchup) shape and
 meaning: `season` is the Published Season (a trailing section's own `season`
@@ -2237,6 +2239,64 @@ requires it. Source-specific publication timestamps and lineage remain in the
 additive provenance envelope.
 The same `provenance` object also carries the shared
 [`generation` and `sources`](#response-provenance) keys.
+
+#### Game context
+
+`game_context` (crf04/statsplus#466) is each team's context before the game:
+rest, Season and Last 10 pace and ratings, and the last five results. The
+request reads it from `game_contexts` and `game_context_teams` and computes
+nothing. `scripts/game_context_refresh.py` stores it on the ledger cron (see
+[ARCHITECTURE.md](ARCHITECTURE.md#stored-game-context-crf04statsplus466)).
+
+```json
+"game_context": {
+  "status": "available",
+  "computed_at": "2026-11-08T14:16:02+00:00",
+  "teams": [
+    {
+      "team_id": 1610612740,
+      "tricode": "NOP",
+      "is_home": false,
+      "season": "2026-27",
+      "through_game_date": "2026-11-06",
+      "rest": {"previous_game_date": "2026-11-06", "rest_days": 1, "back_to_back": false},
+      "ratings": {
+        "season": {"games": 9, "possession_games": 9, "pace": 101.8, "offensive_rating": 113.9, "defensive_rating": 113.0, "net_rating": 0.9},
+        "last_10": {"games": 9, "possession_games": 9, "pace": 101.8, "offensive_rating": 113.9, "defensive_rating": 113.0, "net_rating": 0.9}
+      },
+      "last_5": [
+        {"game_date": "2026-11-06", "opponent_tricode": "MIN", "is_home": true, "points": 109, "opponent_points": 115, "result": "L", "margin": -6}
+      ]
+    }
+  ]
+}
+```
+
+- `status` is `available` when both teams' rows are stored, otherwise
+  `unavailable` with `computed_at: null` and `teams: []`. `teams` lists the
+  away team, then the home team.
+- `computed_at` is when the stored values last changed.
+- Every value counts only games strictly before the game's Eastern date, so a
+  past game's context never includes the game itself. Ratings and results come
+  from the team's final Regular Season games in the Canonical Game Ledger.
+  `through_game_date` is the newest one counted, or null when there is none.
+- `rest` comes from the team's previous Event Catalog game of the same season,
+  excluding Preseason, All-Star and postponed games, so a game the ledger has not
+  ingested yet still counts. `rest_days` is the calendar days between the two
+  games minus 1, and `back_to_back` is true when that is 0. The season's first
+  game has null `previous_game_date` and `rest_days` and `back_to_back: false`.
+- `ratings.season` covers every counted game; `ratings.last_10`, the newest 10.
+  `games` is the window's game count and `possession_games` the games whose
+  ledger `offensive_possessions` both sides carry; only those enter the ratings:
+  offensive rating = 100 x points / own possessions, defensive rating = 100 x
+  points allowed / opponent possessions, net = offensive - defensive (computed
+  from the unrounded ratings), pace = 48 x (own + opponent possessions) / 2 /
+  team minutes. Each is rounded to 1 decimal, and null when
+  `possession_games` is 0.
+- `last_5` holds up to five results, newest first; `margin` is points minus
+  opponent points and `result` is `W` or `L`.
+
+The Unscheduled Matchup has no game and carries no `game_context`.
 
 #### Trailing inputs
 

@@ -5666,6 +5666,24 @@ service and is also the season backfill. `RotationService` serves
 `GET /api/games/rotation`, computing every average and comparison from the
 stored centiseconds.
 
+### Stored game context (crf04/statsplus#466)
+
+`game_contexts` heads one Event Catalog game and `game_context_teams` holds one
+row per team in it (migration 086, `app/models/game_context.py`): rest before
+the game, Season and Last 10 pace and offensive, defensive and net ratings with
+their game counts, and the last five results. `GameContextRepository.refresh`
+(`app/services/game_context.py`) recomputes every eligible game of a season
+(not Preseason, All-Star or postponed) from the Canonical Game Ledger's final
+games strictly before the game's Eastern date and the Event Catalog's schedule,
+in one transaction. It writes only the games whose values changed, keeps
+`computed_at` on the rest, and deletes the rows of a game that left the
+schedule, so a rerun reports every game `unchanged`. It calls no provider.
+`scripts/game_context_refresh.py` runs it nightly in the `ledger-refresh`
+service after the ledger and rotation steps, and by hand for an earlier season.
+`MatchupService` reads the two rows per game as `game_context`, on the
+request's own connection, and computes nothing. A later game-lines table
+(spread, total, team totals) is meant to join `game_contexts` by `game_id`.
+
 ### Player tracking (crf04/statsplus#349)
 
 `player_game_tracking` (migration 078, `app/models/player_tracking.py`) holds

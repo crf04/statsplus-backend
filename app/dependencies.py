@@ -177,6 +177,7 @@ def build_dependencies(
         ProviderSnapshotCacheCoordinator,
     )
     from app.services.diet_baselines import DietBaselinesService
+    from app.services.game_context import GameContextRepository
     from app.services.game_service import GameService
     from app.services.injury_scenarios import InjuryScenarioService
     from app.services.injury_snapshot_repository import InjurySnapshotRepository
@@ -812,6 +813,9 @@ def build_dependencies(
         # flag but never the key).  Disabled, the Matchup serves ``{}`` even
         # if quotes were stored earlier.
         sportsbook_reader=sportsbook_quote_reader,
+        # The stored team context (crf04/statsplus#466); the read-only demo
+        # database has no such tables.
+        game_context=None if demo_database else GameContextRepository(engine),
     )
     from app.services.slate_board import SlateBoardService
 

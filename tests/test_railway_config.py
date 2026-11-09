@@ -31,14 +31,17 @@ def test_ledger_refresh_cron_runs_inside_the_daily_manifest_window():
     # player-shooting tick issues for 03:45-11:00 Central (08:45-16:00 UTC in
     # CDT, 09:45-17:00 in CST); every run must land inside both.
     assert deploy["cronSchedule"] == "15 10,12,14 * * *"
-    # The rotation step (crf04/statsplus#223) runs after the ledger step
-    # whatever the ledger's outcome, and the run fails if either step failed.
+    # The rotation step (crf04/statsplus#223) and then the game-context step
+    # (crf04/statsplus#466) run after the ledger step whatever the earlier
+    # outcomes, and the run fails if any step failed.
     assert deploy["startCommand"] == (
         'sh -c \'python scripts/ledger_refresh.py "$LEDGER_SEASON" '
         '--database-url "$DATABASE_URL" --compose; ledger=$?; '
         'python scripts/rotation_refresh.py "$LEDGER_SEASON" '
         '--database-url "$DATABASE_URL" --max-games 60; rotations=$?; '
-        '[ "$ledger" -eq 0 ] && [ "$rotations" -eq 0 ]\''
+        'python scripts/game_context_refresh.py "$LEDGER_SEASON" '
+        '--database-url "$DATABASE_URL"; context=$?; '
+        '[ "$ledger" -eq 0 ] && [ "$rotations" -eq 0 ] && [ "$context" -eq 0 ]\''
     )
     assert deploy["preDeployCommand"] == "python scripts/migrate.py"
     assert deploy["restartPolicyType"] == "NEVER"

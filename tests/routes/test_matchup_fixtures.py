@@ -5733,6 +5733,7 @@ def test_authenticated_live_matchup_declares_the_current_experience(
         "teams",
         "players",
         "injuries",
+        "game_context",
         "freshness",
         "provenance",
         "coverage",
