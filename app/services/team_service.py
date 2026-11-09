@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from copy import copy
+from dataclasses import asdict
 
 from nba_api.stats.static import teams
 
@@ -33,9 +34,16 @@ from app.domain.team_matchup_taxonomy import (
 )
 from app.errors import InvalidInputError
 from app.services.database_first_activation import ReadSeason
+from app.services.defense_ranks import defense_ranks, sheet_selection
 from app.services.research_season import research_service, season_context, selected_season
+from app.services.response_provenance import provenance_block
 from app.services.serving_season import snapshot_trailing
-from app.services.team_filter_rankings import TEAM_FILTER_RANKINGS, TeamFilterRanking, season_stream_key
+from app.services.team_filter_rankings import (
+    TEAM_FILTER_RANKINGS,
+    SeasonLeague,
+    TeamFilterRanking,
+    season_stream_key,
+)
 from app.services.team_matchup_query import (
     LeagueMetricColumn,
     combined_league_column,
@@ -117,17 +125,34 @@ class TeamService:
         not ready serves its previous season and ``trailing`` names it.
         """
 
-        base = _category(category)[0]
-        capture = self.publication_reader.snapshot(
-            (season_stream_key(base),), season=ReadSeason(self.settings.nba.current_season)
-        )
-        scoped = copy(self)
-        scoped._selected_capture = capture
+        scoped = self._captured(_category(category)[0])
+        capture = scoped._selected_capture
         return {
             "data": scoped._get_team_stats(category, team, date),
             "season_context": season_context(self.publication_reader, capture, lambda: capture.season),
             "trailing": snapshot_trailing(capture),
         }
+
+    def get_defense_ranks(self, base, metric=None):
+        """Every team's Season Defense Sheet rows of one base (crf04/statsplus#473)."""
+
+        selection = sheet_selection(base, metric)
+        scoped = (
+            research_service(self, self.publication_reader)
+            if selected_season(self.publication_reader) is None
+            else self._captured(base)
+        )
+        return asdict(defense_ranks(base, selection, scoped._season_league(base)))
+
+    def _captured(self, base):
+        """A copy reading one capture of ``base``'s Season stream, which decides the season."""
+
+        capture = self.publication_reader.snapshot(
+            (season_stream_key(base),), season=ReadSeason(self.settings.nba.current_season)
+        )
+        scoped = copy(self)
+        scoped._selected_capture = capture
+        return scoped
 
     def _get_team_stats(self, category, team, date=None):
         """Serve one opponent's Season profile for one panel category.
@@ -155,6 +180,13 @@ class TeamService:
                 (base,), capture.season, publication_snapshot=capture
             )[base]
         return self.publications.season_rows(base, self.settings.nba.current_season)
+
+    def _season_league(self, base) -> SeasonLeague:
+        capture = self._selected_capture
+        season = self.settings.nba.current_season if capture is None else capture.season
+        if self.publications is None:
+            return SeasonLeague(season, None, None, "publication_reader_unavailable", provenance_block(None))
+        return self.publications.season_league(base, season, publication_snapshot=capture)
 
 
 def _category(category):

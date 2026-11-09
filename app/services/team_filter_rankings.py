@@ -22,9 +22,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from math import isfinite
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
+from app.domain.rebound_types import REBOUND_TYPES_BASE
 from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_STREAMS,
     PLAY_TYPES,
@@ -35,6 +37,7 @@ from app.domain.team_matchup_taxonomy import (
 )
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.models.catalogs import LESS_THAN_TEN_FEET_FILTER
+from app.services.response_provenance import provenance_block
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_BASES,
     PublicationGovernanceUnavailable,
@@ -65,12 +68,35 @@ _STREAM_KEY_BY_BASE: dict[str, str] = {
     **{base: template.format(window=_WINDOW) for base, template in NBA_PUBLICATION_STREAMS.items()},
 }
 TEAM_FILTER_PUBLICATION_STREAM_KEYS = frozenset(_STREAM_KEY_BY_BASE.values())
+#: Rebound Types ranks no Team Filter (#234), but its Season league is read
+#: like any other base's for the Defense Sheet ranks.
+_SHEET_STREAM_KEY_BY_BASE: dict[str, str] = {
+    **_STREAM_KEY_BY_BASE,
+    REBOUND_TYPES_BASE: matchup_stream_key(REBOUND_TYPES_BASE, _WINDOW),
+}
 
 
 def season_stream_key(base: str) -> str:
     """The Season publication stream one base is read from."""
 
-    return _STREAM_KEY_BY_BASE[base]
+    return _SHEET_STREAM_KEY_BY_BASE[base]
+
+
+@dataclass(frozen=True, slots=True)
+class SeasonLeague:
+    """One base's Season league as one publication read served it.
+
+    ``rows`` is the canonical thirty, or ``None`` with ``unavailable_reason``
+    naming why the league cannot be served whole.  ``cutoff`` is the
+    publication's own coverage instant, and ``provenance`` the Matchup's
+    ``provenance`` block for the one stream read.
+    """
+
+    season: str
+    rows: tuple | None
+    cutoff: str | None
+    unavailable_reason: str | None
+    provenance: dict
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +268,20 @@ class TeamFilterRankingService:
 
         return self._rows_by_base((base,), season)[base]
 
+    def season_league(self, base: str, season: str, *, publication_snapshot=None) -> SeasonLeague:
+        """Read one base's Season league with the season and cutoff it was served from."""
+
+        if self.publication_reader is None:
+            return SeasonLeague(season, None, None, "publication_reader_unavailable", provenance_block(None))
+        stream_key = _SHEET_STREAM_KEY_BY_BASE[base]
+        read = self._reads({stream_key}, season, publication_snapshot)[stream_key]
+        provenance = provenance_block(SimpleNamespace(reads={stream_key: read}))
+        rows = self._league_rows(read, stream_key, base, self._today())
+        if rows is None:
+            reason = "league_incomplete" if read.available else read.unavailable_reason or read.status
+            return SeasonLeague(read.season or season, None, None, reason, provenance)
+        return SeasonLeague(read.season or season, tuple(rows), read.cutoff, None, provenance)
+
     def season_rows_by_base(self, bases, season, *, publication_snapshot=None):
         """Read several validated Season bases from one publication generation."""
         return self._rows_by_base(bases, season, publication_snapshot=publication_snapshot)
@@ -312,17 +352,21 @@ class TeamFilterRankingService:
 
         if self.publication_reader is None:
             return {base: None for base in bases}
-        stream_by_base = {base: _STREAM_KEY_BY_BASE[base] for base in bases}
-        reads = (
-            {stream_key: publication_snapshot.read(stream_key) for stream_key in stream_by_base.values()}
-            if publication_snapshot is not None
-            else self.publication_reader.read_many(tuple(stream_by_base.values()), season=season)
-        )
-        cutoff = assume_utc(self._clock()).astimezone(EASTERN).date()
+        stream_by_base = {base: _SHEET_STREAM_KEY_BY_BASE[base] for base in bases}
+        reads = self._reads(stream_by_base.values(), season, publication_snapshot)
+        cutoff = self._today()
         return {
             base: self._league_rows(reads[stream_key], stream_key, base, cutoff)
             for base, stream_key in stream_by_base.items()
         }
+
+    def _reads(self, stream_keys, season: str, publication_snapshot) -> dict:
+        if publication_snapshot is not None:
+            return {stream_key: publication_snapshot.read(stream_key) for stream_key in stream_keys}
+        return self.publication_reader.read_many(tuple(stream_keys), season=season)
+
+    def _today(self) -> date:
+        return assume_utc(self._clock()).astimezone(EASTERN).date()
 
     def _league_rows(self, read, stream_key: str, base: str, cutoff: date):
         """Return the canonical thirty rows, or ``None`` to refuse ranking."""
@@ -443,6 +487,7 @@ class TeamFilterRankingService:
 __all__ = [
     "TEAM_FILTER_PUBLICATION_STREAM_KEYS",
     "TEAM_FILTER_RANKINGS",
+    "SeasonLeague",
     "TeamFilterRanking",
     "TeamFilterRankingService",
     "season_stream_key",
