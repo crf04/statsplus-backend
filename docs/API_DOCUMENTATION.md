@@ -1159,6 +1159,10 @@ DFS provider and writes nothing.
         { "canonical_id": 1628970, "name": "Miles Bridges", "tricode": "CHA",
           "season_scoring": 17.1, "value": -0.0823, "thin": false }
       ],
+      "leaders": [
+        { "canonical_id": 1628970, "name": "Miles Bridges", "tricode": "CHA",
+          "season_scoring": 17.1, "market": "REB", "value": 0.1104, "thin": false }
+      ],
       "scores": [ { "canonical_id": 1628970, "value": -0.0823 } ]
     }
   ],
@@ -1192,6 +1196,17 @@ DFS provider and writes nothing.
 - `effects` holds up to three of those players whose `season_scoring` is at
   least 8, ordered by `|value|` descending (ties: higher `season_scoring`, then
   lower `canonical_id`). A thin player is included, flagged `thin`.
+- `leaders` (crf04/statsplus#470, the home ticker) holds up to five rows of the
+  same shape plus `market`, one of the player-level markets `PTS`, `REB`, `AST`,
+  `3PM`, `PRA`, `PR`, `PA`, `RA`, `FGA`, `FGM`, `FG2A`, `FG2M`, `FG3A`. Each
+  player whose `season_scoring` is at least 8 contributes at most one row: his
+  season cell with the largest `|value|` across those markets (ties: that
+  market order), each market's cell read by the rule above from
+  `scores.<market>.season`. Rows are ordered as `effects` are and the first five
+  kept. STL, BLK and their sum STKS are left out because they always score the
+  opponent's team rate, so every player on a team carries the same value; TOV,
+  FTA and FTM are left out because they fall back to the team rate for about
+  half the teams early in a season.
 - `spotlight.best` is the largest positive season PTS Blend `value` across all
   games among non-thin Blends (a single component never qualifies) whose
   `season_scoring` is at least 12; `spotlight.toughest` is the most negative by
@@ -1207,17 +1222,17 @@ DFS provider and writes nothing.
   `percent_vs_league_average`. `reason` is `null` when neither of the pick's two
   slices has an opponent PTS reading; the pick is still the extreme.
 - A game whose Matchup cannot be read (a refused or incomplete stored read)
-  contributes `effects: []`, `scores: []` and no pick; the response is still
+  contributes `effects: []`, `leaders: []`, `scores: []` and no pick; the response is still
   `200`.
 - The per-game Matchups are composed one at a time in Slate order, from the one
   Publication snapshot, each reduced to its game's entry before the next. With
   Redis enabled (`ENABLE_CACHE`, and
   `SLATE_EDGES_CACHE_ENABLED`, default `true`) the whole response is also
-  cached under `slate:edges:v5:<sha256>`, keyed on the slate date, the
+  cached under `slate:edges:v9:<sha256>`, keyed on the slate date, the
   evidence season, the Publication generation (live pointers and retained
   history rows), each game's id, status and tip time, every Matchup score and
   Diet baseline setting (game-count and per-Base volume floors), and the
-  8/12 PPG and top-three limits, so a new publication or a game starting or finishing misses.
+  8/12 PPG, top-three and leader limits (markets and top five), so a new publication or a game starting or finishing misses.
   The key has no user: the response is the same for every caller. A stored
   injury or Player Pool change moves none of those, so a cached response can
   lag such a change by up to `SLATE_EDGES_CACHE_TTL_SECONDS` (default 300)
