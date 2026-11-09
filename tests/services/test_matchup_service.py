@@ -3336,6 +3336,7 @@ def test_current_matchup_declares_its_mode_and_keeps_its_existing_fields():
         "teams",
         "players",
         "injuries",
+        "game_context",
         "freshness",
         "provenance",
         "coverage",
@@ -3870,3 +3871,91 @@ def test_a_scheduled_row_is_scored_in_every_scoreable_market_while_lines_stay_on
     assert player["lines"] == {"prizepicks": {"PTS": 10.5, "REB": 10.5}}
     # An unposted market reads exactly the score it shows once posted.
     assert player["scores"]["AST"] == posted_ast["scores"]["AST"]
+
+
+def test_the_matchup_serves_each_teams_stored_game_context(tmp_path):
+    from sqlalchemy import text
+
+    from app.services.game_context import GameContextRepository
+    from tests.support.game_context_world import final, migrated_engine, schedule
+
+    engine = migrated_engine(tmp_path)
+    # Tips 00:30 UTC on 2026-01-16: the Eastern game date is 2026-01-15.
+    schedule(engine, GAME_ID, "2026-01-16T00:30:00+00:00", (LAL, "LAL"), (BOS, "BOS"), season=SEASON)
+    schedule(engine, "0022500570", "2026-01-14T00:30:00+00:00", (BOS, "BOS"), (LAL, "LAL"), season=SEASON)
+    final(
+        engine, "0022500570", "2026-01-13", (BOS, "BOS", 112, 100.0), (LAL, "LAL", 108, 100.0), season=SEASON
+    )
+    GameContextRepository(engine, clock=lambda: NOW).refresh(SEASON)
+    # The request reads the stored rows only: with the ledger and schedule gone it serves the same values.
+    with engine.begin() as connection:
+        connection.execute(text("DELETE FROM canonical_game_ledger_team_facts"))
+        connection.execute(text("DELETE FROM canonical_game_ledger_games"))
+        connection.execute(text("DELETE FROM event_catalog"))
+    service = _service()
+    service.game_context = GameContextRepository(engine)
+
+    payload = service.get_matchup(game_id=GAME_ID)
+
+    def ratings(offensive, defensive, net):
+        return {
+            "games": 1,
+            "possession_games": 1,
+            "pace": 100.0,
+            "offensive_rating": offensive,
+            "defensive_rating": defensive,
+            "net_rating": net,
+        }
+
+    assert payload["game_context"] == {
+        "status": "available",
+        "computed_at": "2026-01-15T12:00:00+00:00",
+        "teams": [
+            {
+                "team_id": LAL,
+                "tricode": "LAL",
+                "is_home": False,
+                "season": SEASON,
+                "through_game_date": "2026-01-13",
+                "rest": {"previous_game_date": "2026-01-13", "rest_days": 1, "back_to_back": False},
+                "ratings": {"season": ratings(108.0, 112.0, -4.0), "last_10": ratings(108.0, 112.0, -4.0)},
+                "last_5": [
+                    {
+                        "game_date": "2026-01-13",
+                        "opponent_tricode": "BOS",
+                        "is_home": True,
+                        "points": 108,
+                        "opponent_points": 112,
+                        "result": "L",
+                        "margin": -4,
+                    }
+                ],
+            },
+            {
+                "team_id": BOS,
+                "tricode": "BOS",
+                "is_home": True,
+                "season": SEASON,
+                "through_game_date": "2026-01-13",
+                "rest": {"previous_game_date": "2026-01-13", "rest_days": 1, "back_to_back": False},
+                "ratings": {"season": ratings(112.0, 108.0, 4.0), "last_10": ratings(112.0, 108.0, 4.0)},
+                "last_5": [
+                    {
+                        "game_date": "2026-01-13",
+                        "opponent_tricode": "LAL",
+                        "is_home": False,
+                        "points": 112,
+                        "opponent_points": 108,
+                        "result": "W",
+                        "margin": 4,
+                    }
+                ],
+            },
+        ],
+    }
+
+
+def test_a_matchup_without_stored_game_context_says_it_is_unavailable():
+    payload = _service().get_matchup(game_id=GAME_ID)
+
+    assert payload["game_context"] == {"status": "unavailable", "computed_at": None, "teams": []}

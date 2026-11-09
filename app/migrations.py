@@ -2696,6 +2696,20 @@ def _add_ledger_offensive_possessions(connection: Connection) -> None:
         )
 
 
+def _create_game_context_tables(connection: Connection) -> None:
+    """Create the stored per-game team context tables (crf04/statsplus#466).
+
+    Repeatable: ``checkfirst`` skips an existing table and never touches its
+    rows.  The parent is created before the table that references it.  Nothing
+    is backfilled: ``scripts/game_context_refresh.py`` fills a season, and
+    until then the Matchup reports its ``game_context`` unavailable.
+    """
+    from app.models.game_context import GameContext, GameContextTeam
+
+    for model in (GameContext, GameContextTeam):
+        model.__table__.create(connection, checkfirst=True)
+
+
 #: The CHECK constraints that enumerate the player Diet bases.
 _PLAYER_DIET_BASE_CONSTRAINTS: Final[frozenset[str]] = frozenset(
     {
@@ -3560,6 +3574,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(83, "083_usage_report_published", _admit_report_published_usage_event),
     Migration(84, "084_lineup_segments", _create_lineup_segment_tables),
     Migration(85, "085_ledger_offensive_possessions", _add_ledger_offensive_possessions),
+    Migration(86, "086_game_contexts", _create_game_context_tables),
 )
 
 

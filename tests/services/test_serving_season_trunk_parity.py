@@ -135,6 +135,8 @@ def _without_serving_season_keys(responses: dict) -> dict:
     for body in (stripped["matchup"], stripped["slate"], stripped["edges"]):
         body.pop("trailing", None)
     stripped["matchup"].pop("as_of", None)
+    # Added after the trunk golden was recorded (crf04/statsplus#466).
+    stripped["matchup"].pop("game_context", None)
     for game in stripped["edges"]["games"]:
         game.pop("leaders", None)
     for player in stripped["matchup"]["players"]:

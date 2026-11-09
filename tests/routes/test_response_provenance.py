@@ -291,6 +291,7 @@ def test_the_matchup_returns_the_generation_it_read_and_its_sources(
         "experience",
         "freshness",
         "game",
+        "game_context",
         "injuries",
         "league",
         "players",

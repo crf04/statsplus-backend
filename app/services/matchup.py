@@ -439,6 +439,10 @@ class SportsbookBookLinesReader(Protocol):
     ) -> Mapping[int, Mapping[str, Any]]: ...
 
 
+class GameContextReader(Protocol):
+    def read(self, game_id: str, *, connection: Connection | None = None) -> dict[str, Any]: ...
+
+
 class MatchupInjuryReader(Protocol):
     def get_injuries(
         self,
@@ -696,8 +700,12 @@ class MatchupService:
         engine: Engine | None = None,
         athlete_catalog: AthleteCatalogReader | None = None,
         sportsbook_reader: SportsbookBookLinesReader | None = None,
+        game_context: GameContextReader | None = None,
     ) -> None:
         self.event_catalog = event_catalog
+        # Each team's stored pace, ratings, results and rest before the game
+        # (crf04/statsplus#466); read, never computed, per request.
+        self.game_context = game_context
         # Sportsbook odds (#377) are reference data beside the DFS evidence:
         # never part of provenance, the pool, or Targets.
         self.sportsbook_reader = sportsbook_reader
@@ -1322,6 +1330,7 @@ class MatchupService:
                 historical=historical,
             ),
             "injuries": dict(injury_result.block),
+            "game_context": self._game_context(game_id, connection),
             "freshness": {
                 "schedule": schedule_freshness,
                 "pool": dict(pool.freshness),
@@ -2971,6 +2980,13 @@ class MatchupService:
     @staticmethod
     def _display_slice(base: str, slice_key: str) -> str:
         return defense_sheet_display_slice(base, slice_key)
+
+    def _game_context(self, game_id: str, connection: Connection | None) -> dict[str, Any]:
+        """The game's stored team context, or the unavailable block when none is stored."""
+
+        if self.game_context is None:
+            return {"status": "unavailable", "computed_at": None, "teams": []}
+        return self.game_context.read(game_id, connection=connection)
 
     @staticmethod
     def _event_team(event: Mapping[str, Any], team_id: int) -> Mapping[str, Any]:
