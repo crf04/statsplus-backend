@@ -13,9 +13,12 @@ shows (the same Blend-or-single-component rule the Matchup page uses), the
 
 Each game also lists every known season PTS score, floor-free, for the Targets
 cards; the link preview cards (``preview_read``) also get each scored player's
-name and tricode, which the public response leaves out.  A game whose Matchup cannot be read contributes no effects, no scores
-and no pick; the
-response still succeeds.
+name and tricode, which the public response leaves out.  For the home ticker,
+``leaders`` lists the game's five biggest season effects across the
+player-level markets (``LEADER_MARKETS``), one per player, by the same cell
+rule (crf04/statsplus#470).  A game
+whose Matchup cannot be read contributes no effects, no leaders, no scores and
+no pick; the response still succeeds.
 """
 
 from __future__ import annotations
@@ -60,9 +63,15 @@ EFFECT_MIN_SCORING = 8
 #: A spotlight pick has to be a player the reader has heard of.
 SPOTLIGHT_MIN_SCORING = 12
 EFFECTS_PER_GAME = 3
+#: The ticker's player-level markets, in tie-break order.  STL and BLK are left
+#: out (they always score the opponent's team rate, so every player on a team
+#: carries one value), STKS with them (their sum), and TOV, FTA and FTM (they
+#: fall back to the team rate for about half the teams early in a season).
+LEADER_MARKETS = ("PTS", "REB", "AST", "3PM", "PRA", "PR", "PA", "RA", "FGA", "FGM", "FG2A", "FG2M", "FG3A")
+LEADERS_PER_GAME = 5
 #: Bumped whenever the selection rules or the response shape change, so a
 #: stored response of the old rules is never served.
-SLATE_EDGES_CACHE_SCHEMA = 8
+SLATE_EDGES_CACHE_SCHEMA = 9
 _REASON_BASE = "play_types"
 _REASON_SLICES = 2
 
@@ -249,6 +258,7 @@ class SlateEdgesService:
         try:
             matchup = read_game_matchup(matchups, game, pool, schedule)
             players = self._scored_players(matchup)
+            leaders = self._leaders(matchup)
             picks = [
                 self._spotlight_candidate(game, matchup, entry)
                 for entry in players
@@ -257,12 +267,13 @@ class SlateEdgesService:
             listed = list(matchup.get("trailing") or ())
         except _UNREADABLE as error:
             recover()
-            players, picks, listed = [], [], []
+            players, leaders, picks, listed = [], [], [], []
             outage = isinstance(error, _OUTAGES)
         return (
             {
                 "game_id": game["game_id"],
                 "effects": self._effects(players),
+                "leaders": leaders,
                 "scores": [
                     {
                         "canonical_id": int(entry["player"]["canonical_id"]),
@@ -346,6 +357,8 @@ class SlateEdgesService:
                 "effect_min_scoring": EFFECT_MIN_SCORING,
                 "spotlight_min_scoring": SPOTLIGHT_MIN_SCORING,
                 "effects_per_game": EFFECTS_PER_GAME,
+                "leader_markets": list(LEADER_MARKETS),
+                "leaders_per_game": LEADERS_PER_GAME,
             },
         }
         digest = hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode("utf-8")).hexdigest()
@@ -401,15 +414,15 @@ class SlateEdgesService:
     # -- selection -----------------------------------------------------------
 
     @staticmethod
-    def _season_pts_cell(player: Mapping[str, Any]) -> Mapping[str, Any] | None:
-        """The season PTS score a Matchup row shows, as ``{value, thin, blend}``.
+    def _season_cell(player: Mapping[str, Any], market: str = "PTS") -> Mapping[str, Any] | None:
+        """The season ``market`` score a Matchup row shows, as ``{value, thin, blend}``.
 
         The Blend; else, when the market has no Blend and names no missing
         input, its single component (a Matchup row never shows a lone
         component standing in for a withheld Blend).
         """
 
-        window = (player.get("scores") or {}).get("PTS", {}).get("season")
+        window = (player.get("scores") or {}).get(market, {}).get("season")
         if not window:
             return None
         blend = window.get("blend")
@@ -427,7 +440,7 @@ class SlateEdgesService:
 
         scored = []
         for player in matchup["players"]:
-            cell = self._season_pts_cell(player)
+            cell = self._season_cell(player)
             if cell is None or cell["value"] is None:
                 continue
             scored.append({"player": player, "cell": cell})
@@ -460,6 +473,38 @@ class SlateEdgesService:
                 "thin": entry["cell"]["thin"],
             }
             for entry in eligible[:EFFECTS_PER_GAME]
+        ]
+
+    def _leaders(self, matchup: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """Each eligible player's largest season cell across ``LEADER_MARKETS``
+        (ties: market order), ordered as ``effects`` are; the first five."""
+
+        best = []
+        for player in matchup["players"]:
+            scoring = player["season_scoring"]
+            if scoring is None or scoring < EFFECT_MIN_SCORING:
+                continue
+            top: tuple[str, Mapping[str, Any]] | None = None
+            for market in LEADER_MARKETS:
+                cell = self._season_cell(player, market)
+                if cell is None or cell["value"] is None:
+                    continue
+                if top is None or abs(cell["value"]) > abs(top[1]["value"]):
+                    top = (market, cell)
+            if top is not None:
+                best.append({"player": player, "market": top[0], "cell": top[1]})
+        best.sort(key=self._order)
+        return [
+            {
+                "canonical_id": int(entry["player"]["canonical_id"]),
+                "name": entry["player"]["name"],
+                "tricode": entry["player"]["tricode"],
+                "season_scoring": entry["player"]["season_scoring"],
+                "market": entry["market"],
+                "value": entry["cell"]["value"],
+                "thin": entry["cell"]["thin"],
+            }
+            for entry in best[:LEADERS_PER_GAME]
         ]
 
     @staticmethod
