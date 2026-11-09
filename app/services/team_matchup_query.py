@@ -199,6 +199,24 @@ def publication_league_table(rows) -> dict[str, LeagueMetricColumn]:
     }
 
 
+def defense_sheet_columns(base: str, table) -> tuple[tuple[str, str, LeagueMetricColumn], ...]:
+    """One base's Defense Sheet columns, ``(slice_key, stat_key, column)``.
+
+    The league table covers every published key; the Sheet projects the
+    curated identities the matchup response contracts for, plus the shot
+    types' derived rows.
+    """
+
+    columns = tuple(
+        (slice_key, stat_key, table[metric_key])
+        for slice_key, stat_key, metric_key in defense_sheet_identities(base)
+        if metric_key in table
+    )
+    if base == "shot_types":
+        columns += shot_type_derived_columns(table)
+    return columns
+
+
 @dataclass(frozen=True, slots=True)
 class LeagueMatchupMetric:
     base: str
@@ -761,17 +779,7 @@ class TeamMatchupQueryService:
         # grouped shot/zone/Synergy publications project exactly the keys the
         # immutable payload supplied (never a legacy surface), and the
         # ledger-owned bases their curated rows.
-        identities = defense_sheet_identities(base)
-        # The league table covers every published key; this surface projects
-        # the curated identities the matchup response contracts for.
-        table = publication_league_table(rows)
-        columns = tuple(
-            (slice_key, stat_key, table[metric_key])
-            for slice_key, stat_key, metric_key in identities
-            if metric_key in table
-        )
-        if base == "shot_types":
-            columns += shot_type_derived_columns(table)
+        columns = defense_sheet_columns(base, publication_league_table(rows))
         league_metrics = [
             LeagueMatchupMetric(
                 base=base,
@@ -1075,4 +1083,5 @@ __all__ = [
     "TeamMatchupMetric",
     "TeamMatchupQueryService",
     "TeamMatchupWindow",
+    "defense_sheet_columns",
 ]

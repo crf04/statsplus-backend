@@ -38,6 +38,7 @@ from app.domain.play_type_matchup import complete_play_type_shares, play_type_ma
 from app.domain.rebound_types import REBOUND_TYPE_WIRE_NAMES, REBOUND_TYPES_BASE
 from app.domain.team_matchup_taxonomy import (
     DEFENSE_SHEET_BASES,
+    IMPOSSIBLE_DEFENSE_SHEET_IDENTITIES,
     LEDGER_DEFENSE_SHEET_METRICS,
     SHOT_TYPE_DISPLAY_TO_STORED,
     SHOT_TYPE_SLICES,
@@ -45,8 +46,9 @@ from app.domain.team_matchup_taxonomy import (
     SHOT_ZONE_SLICES,
     THREE_POINT_SHOT_ZONES,
     TWO_POINT_SHOT_ZONES,
-    defense_sheet_display_slice,
     defense_sheet_row_key,
+    defense_sheet_row_label,
+    defense_sheet_sort_key,
 )
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import (
@@ -124,13 +126,6 @@ _GOVERNED_SHOT_ZONES = frozenset(SHOT_ZONE_SLICES)
 _SHOT_TYPE_DISPLAY_SLICES = dict(SHOT_TYPE_STORED_TO_DISPLAY)
 _SHOT_TYPE_STORED_SLICES = dict(SHOT_TYPE_DISPLAY_TO_STORED)
 _GOVERNED_SHOT_TYPES = frozenset(SHOT_TYPE_SLICES)
-# No three is taken inside 10 ft, so these rows hold only stray mis-tags (a
-# 2026-27 league average of 0.006 3PA per 48) that rank teams -100% or +2900%.
-# The Defense Sheet omits them; the scores still read them, where his own
-# threes there weigh nothing (crf04/statsplus#437).
-_IMPOSSIBLE_SHEET_IDENTITIES = frozenset(
-    ("shot_types", "less_than_10_ft", stat_key) for stat_key in ("FG3A", "FG3M")
-)
 _STAT_MARKETS = {
     "PTS": ("PTS", "PA", "PR", "PRA"),
     "POSS": ("PTS",),
@@ -2875,14 +2870,9 @@ class MatchupService:
             for identity in metric_index.league
             if identity[0] != "shot_zones" or identity[1] in _GOVERNED_SHOT_ZONES
             if identity[0] != "shot_types" or identity[1] in _SHOT_TYPE_DISPLAY_SLICES
-            if identity not in _IMPOSSIBLE_SHEET_IDENTITIES
+            if identity not in IMPOSSIBLE_DEFENSE_SHEET_IDENTITIES
         }
-        return tuple(
-            sorted(
-                identities,
-                key=lambda value: (DEFENSE_BASES.index(value[0]), value[1], value[2]),
-            )
-        )
+        return tuple(sorted(identities, key=defense_sheet_sort_key))
 
     @classmethod
     def _league_window_value(
@@ -2971,15 +2961,7 @@ class MatchupService:
 
     @staticmethod
     def _metric_label(base: str, slice_key: str, stat_key: str) -> str:
-        display_slice = MatchupService._display_slice(base, slice_key)
-        label = display_slice.replace("_", " ").replace("-", " ")
-        if display_slice == stat_key:
-            return label
-        return f"{label} {stat_key}"
-
-    @staticmethod
-    def _display_slice(base: str, slice_key: str) -> str:
-        return defense_sheet_display_slice(base, slice_key)
+        return defense_sheet_row_label(base, slice_key, stat_key)
 
     def _game_context(self, game_id: str, connection: Connection | None) -> dict[str, Any]:
         """The game's stored team context, or the unavailable block when none is stored."""

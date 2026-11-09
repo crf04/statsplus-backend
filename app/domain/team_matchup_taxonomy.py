@@ -219,6 +219,30 @@ def defense_sheet_row_key(base: str, slice_key: str, stat_key: str) -> str:
     return display_slice if display_slice == stat_key else f"{display_slice}:{stat_key}"
 
 
+def defense_sheet_row_label(base: str, slice_key: str, stat_key: str) -> str:
+    """The ``defense_sheet[<base>][].label`` of one Sheet row."""
+
+    display_slice = defense_sheet_display_slice(base, slice_key)
+    label = display_slice.replace("_", " ").replace("-", " ")
+    return label if display_slice == stat_key else f"{label} {stat_key}"
+
+
+def defense_sheet_sort_key(identity: tuple[str, str, str]) -> tuple[int, str, str]:
+    """Order ``(base, slice_key, stat_key)`` Sheet rows as the Matchup lists them."""
+
+    base, slice_key, stat_key = identity
+    return DEFENSE_SHEET_BASES.index(base), slice_key, stat_key
+
+
+# No three is taken inside 10 ft, so these rows hold only stray mis-tags (a
+# 2026-27 league average of 0.006 3PA per 48) that rank teams -100% or +2900%.
+# The Defense Sheet omits them; the scores still read them, where his own
+# threes there weigh nothing (crf04/statsplus#437).
+IMPOSSIBLE_DEFENSE_SHEET_IDENTITIES = frozenset(
+    ("shot_types", "less_than_10_ft", stat_key) for stat_key in ("FG3A", "FG3M")
+)
+
+
 #: The Sheet bases a Team Filter may name.  Rebound Types is shown on the
 #: Matchup Defense Sheet only: ranking game logs by it directly is a separate
 #: decision (crf04/statsplus#234, out of scope), so a ``sheet:rebound_types:*``
@@ -289,6 +313,7 @@ __all__ = [
     "DEFENSE_SHEET_BASES",
     "DEFENSE_SHEET_FILTER_PREFIX",
     "DEFENSE_SHEET_ROW_METRICS",
+    "IMPOSSIBLE_DEFENSE_SHEET_IDENTITIES",
     "LEDGER_DEFENSE_SHEET_METRICS",
     "LEDGER_OWNED_MATCHUP_STREAM_KEYS",
     "LEDGER_OWNED_MATCHUP_STREAM_PREFIX",
@@ -318,6 +343,8 @@ __all__ = [
     "defense_sheet_filter",
     "defense_sheet_identities",
     "defense_sheet_row_key",
+    "defense_sheet_row_label",
+    "defense_sheet_sort_key",
     "derived_metric_terms",
     "matchup_stream_key",
     "nba_publication_taxonomies",
