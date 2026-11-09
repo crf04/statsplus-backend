@@ -34,6 +34,19 @@ def get_team_stats():
     return jsonify(team_stats)
 
 
+@team_bp.route("/defense-ranks", methods=["GET"])
+@require_auth_optional
+@route_error_boundary("Failed to retrieve defense ranks.")
+def get_defense_ranks():
+    base = request.args.get("base")
+    if not base:
+        raise InvalidInputError("base is required.", public_details={"parameters": ["base"]})
+
+    service = selected(team_service, "team", season_argument(), anonymous=True)
+    with season_refusals():
+        return jsonify(service.get_defense_ranks(base, request.args.get("metric")))
+
+
 @team_bp.route("", methods=["GET"])
 @require_auth_optional
 @route_error_boundary("Failed to retrieve teams.")

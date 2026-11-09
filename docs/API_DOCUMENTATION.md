@@ -4152,6 +4152,72 @@ which carries no publication tables -- serves nothing, which the route
 reports as `404 resource_not_found`.  A stale publication still serves its
 last-good values.
 
+### Get Defense Ranks
+
+```http
+GET /api/teams/defense-ranks
+```
+
+Every team's Season row of the Matchups Defense Sheet for one base
+(crf04/statsplus#473): the league view the CourtAI MCP reads to answer "who
+allows the most X".  Authentication is optional.
+
+Query parameters:
+
+- `base`: `play_types`, `shot_zones`, `shot_types`, `assist_locations`,
+  `traditional`, or `rebound_types`.  Required.
+- `metric`: optional.  A row's `metric` (every slice's row of it, such as
+  `FGM`) or its full `row` reference (that one row).
+- `season`: optional Evidence season, selected and refused exactly as on
+  `GET /api/teams/stats`.  The body has no `season_context`: `season` names
+  the season the base was served from, which is the previous one while the
+  base trails.
+
+```json
+{
+  "season": "2026-27",
+  "base": "shot_zones",
+  "window": "season",
+  "status": "ok",
+  "reason": null,
+  "as_of": "2026-11-08",
+  "provenance": {"generation": [{"stream_key": "exact_shot_zones_opponent_season", "...": "..."}], "sources": {}},
+  "rows": [
+    {
+      "row": "sheet:shot_zones:Restricted Area:FGM",
+      "slice": "Restricted Area",
+      "metric": "FGM",
+      "label": "Restricted Area FGM",
+      "unit": "per48",
+      "league_average": 14.2,
+      "teams": [{"tricode": "ATL", "value": 18.7, "rank": 30, "vs_league": 0.3169}]
+    }
+  ]
+}
+```
+
+Each row is the Defense Sheet row of the same reference in
+`GET /api/games/matchup`, built from the same Season publication: `row` is
+the `sheet:<base>:<row key>` a game-log Team Filter accepts (Rebound Types
+rows are not Team Filters), `label` is the Sheet's label, `value` is its
+`allowed_per_48`, `rank` its rank (1-30, 30 allows the most, ties share the
+lower rank), and `vs_league` its `percent_vs_league_average` as a fraction.
+Every row is per 48, so `unit` is `per48`.  `slice` is null for rows with no
+slice part: Traditional, Assist Locations and Rebound Types.  Rows keep the
+Sheet's order, and `teams` lists the league most-allowed first.  The Sheet
+omits the threes inside 10 ft, and so does this route.  `as_of` is the
+Eastern date (`YYYY-MM-DD`) the publication covers through, null when
+unavailable.  `provenance` is the Matchup's `provenance` block for the one
+Season stream read: its `generation` entry (the stream's publication,
+`coverage_cutoff`, freshness and reason, `unavailable` when it could not
+serve) and empty `sources`.
+
+An unknown or missing `base`, or a `metric` that names no row of the base,
+is `400 invalid_input` naming the parameter.  A base whose Season league is
+unpublished, unproven or partial is `200` with `status: "unavailable"`, a
+`reason` (such as `missing` or `league_incomplete`), and no rows, never a
+partial league.
+
 ## Data Management Endpoints
 
 These endpoints require an authenticated Firebase token with an admin claim.

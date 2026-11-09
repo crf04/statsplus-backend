@@ -740,6 +740,64 @@ def test_a_selected_2026_27_team_profile_trails_team_defense_on_2025_26(served, 
     assert (body["season_context"], body["trailing"]) == (CONTEXT, [TEAM_DEFENSE])
 
 
+# --- Defense ranks (crf04/statsplus#473) ----------------------------------------
+
+ISOLATION_RANKS = "/api/teams/defense-ranks?base=play_types&metric=sheet:play_types:Isolation:PTS"
+
+
+def _isolation_leader(body):
+    return body["season"], body["rows"][0]["teams"][0]
+
+
+def test_selected_2026_27_defense_ranks_read_its_held_play_type_defense(served, client, authenticate):
+    served.publish_play_types()
+    served.hold_opening_week()
+    held = _PLAY_TYPE_PAYLOADS[PLAY_TYPE_DEFENSE](THIN_GAMES)
+    for row in held["rows"]:
+        if row["team_id"] == BOS:
+            row["per48"] = {**row["per48"], "Isolation_PTS": 4.0}
+    served.publications.recompose_ledger(
+        PLAY_TYPE_DEFENSE,
+        season=NEW,
+        cutoff=THIN_CUTOFF,
+        payload=held,
+        provenance=THIN_PROVENANCE,
+        reason="2026-27 ledger composition",
+    )
+
+    selected = client.get(f"{ISOLATION_RANKS}&season={NEW}", headers=authenticate()).get_json()
+    omitted = client.get(ISOLATION_RANKS).get_json()
+
+    assert _isolation_leader(selected) == (
+        NEW,
+        {"tricode": "BOS", "value": 4.0, "rank": 30, "vs_league": 2.63636364},
+    )
+    assert _isolation_leader(omitted) == (OLD, {"tricode": "ATL", "value": 1.0, "rank": 1, "vs_league": 0.0})
+
+
+def test_selected_2026_27_defense_ranks_name_the_2025_26_season_they_trail_on(served, client, authenticate):
+    served.publish_play_types()
+    served.hold_opening_week()
+
+    body = client.get(f"{ISOLATION_RANKS}&season={NEW}", headers=authenticate()).get_json()
+
+    assert (body["season"], body["status"], len(body["rows"][0]["teams"])) == (OLD, "ok", 30)
+
+
+def test_defense_ranks_refuse_a_season_that_is_not_offered(served, client, authenticate):
+    response = client.get(f"{ISOLATION_RANKS}&season={NEW}", headers=authenticate())
+
+    assert _refusal(response) == (503, "season_unavailable", CONTEXT)
+
+
+def test_an_anonymous_caller_cannot_select_held_defense_ranks(served, client):
+    served.hold_opening_week()
+
+    response = client.get(f"{ISOLATION_RANKS}&season={NEW}")
+
+    assert _refusal(response) == (503, "season_unavailable", CONTEXT)
+
+
 # --- Next opponent (crf04/statsplus#415) ----------------------------------------
 
 NEXT_OPPONENT = ROUTES["next_opponent"]
