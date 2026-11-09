@@ -214,7 +214,10 @@ After both steps it runs projection archive retention once
 `scripts/projection_retention.py --execute` run of the current retention policy
 version has succeeded (see
 [docs/PROJECTION_RETENTION_OPERATIONS.md](docs/PROJECTION_RETENTION_OPERATIONS.md)),
-and its failure is logged without changing the exit status.
+and its failure is logged without changing the exit status. For 2026-27 and
+later it then names any started game with no closing quotes on stderr, with the
+`scripts/backfill_closing_lines.py --season` command that buys it; the check
+reads only and never changes the exit status.
 
 Running the command without `--hosted-only` retains the legacy operator mode.
 That mode runs six named current-season steps in this exact order: stats

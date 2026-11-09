@@ -34,7 +34,7 @@ Authentication levels:
 ## Beta sign-ups and the waitlist
 
 Every user row has `access_status`, either `active` or `waitlisted` (separate
-from `is_active`, which means deactivation). Migration 062 adds the column and
+from `is_active`, a legacy flag nothing sets since the deactivation route was removed). Migration 062 adds the column and
 backfills every existing row to `active`; it also creates the `app_settings`
 table that holds the sign-up switch. The switch defaults to open, and it lives in
 Postgres, so flipping it needs no deploy and every worker sees it on its next
@@ -813,7 +813,7 @@ is produced.
 Aggregate `retrieved_at` is the oldest usable contributor snapshot, so its age
 never understates any provider observation included in the union, with one
 declared exception: a provider that the provider registry gives its own, longer
-live window (`prizepicks`, polled hourly through The Odds API, 90 minutes
+live window (`prizepicks`, polled at most hourly through The Odds API, 90 minutes
 instead of 15) is served as `fresh` through that window and reports its own
 `retrieved_at` and status under `providers`, but does not set the aggregate
 `retrieved_at` (nor a game's `observed_at`, live or closing) while any
@@ -1377,7 +1377,8 @@ filters) and `"omitted": {"book_only_unnamed": 1}`, and gives each game its
   for such players is still listed in the index, with `"players": 0`.
 - `lines` and `line_prices` are the Matchup row's, for this market only.
   `line_prices` holds American prices as posted, `null` for a missing side; a
-  provider with no per-pick price (PrizePicks) is absent from it.
+  provider with no per-pick price (PrizePicks, or Dabble on a line that is not
+  near-even) is absent from it.
 - `book_lines` is the Matchup's `book_lines` entry for this market without the
   best-price flags, or `null` when no book quotes it. `as_of` is the newest
   book's update and `closing` is `true` when every listed book's quote is a
@@ -7018,7 +7019,7 @@ points and attempts. Each entry has
 `team_filter` (a named Team Filter, a `sheet:<base>:<row key>` reference such as
 `sheet:play_types:Isolation:PTS`, or null), `unit` (`count`, `percent`, or
 `league_ratio`), `family`, and `markets`. Entries that tell the same story share a
-`family`: `points`, `rebounds` (with Putback points), `assists`, `2pt-assists`,
+`family`: `points`, `defensive-rating` (Defensive Rating, crf04/statsplus#433), `rebounds` (with Putback points), `assists`, `2pt-assists`,
 `3pt-assists`, `steals-blocks`, `turnovers`, `free-throws`, `field-goals`,
 `threes`, `inside` (Restricted Area, In The Paint (Non-RA) and Inside 10 ft rows),
 `zone:<zone>`, `shot-type:<stored slice>`, or `play-type:<key>`. `markets` lists
