@@ -1075,6 +1075,11 @@ that are never flagged.
   in `sits` where the row has `off_floor`), and the union of their
   `games_missing` entries (`{game_id, game_date, matchup}`, oldest first;
   `[]` when none). A split with no copy adds nothing to either.
+- `pair_window` (crf04/statsplus#467), the same on every row of a teammate in
+  both branches: `from`, the date of the first game on either side, and
+  `excluded_games`, the teammate's games for this team in the seasons read
+  that are on neither side because the two were not teammates then (before
+  the injured player joined, or before either player's last team change).
 - `limits`: `insufficient` (under 3 games without or under 150 off-floor
   minutes; never flagged), `no_line`, `stale_report`, `no_baseline`, and the
   on/off limits `on_off_not_warmed` (no cached split; a request without
@@ -1087,7 +1092,9 @@ that are never flagged.
   different seasons). Any on/off limit other than `on_off_stale` blocks the
   flag, and so does any unsliceable season in the window; the full-game numbers are still returned.
 
-The window is the current season plus last season. It starts after the later of
+The window is the current season plus last season, each read scoped to its
+season (`season_scoped`), so a current season after the Published Season counts
+its games as a selected season does. It starts after the later of
 the two players' last appearance for a different team, and last season also
 needs a game for this team by the injured player. Without a team change the
 `without` games are those `GET /api/games/game_logs?players_off[]=` returns.
