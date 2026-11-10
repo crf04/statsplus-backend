@@ -50,6 +50,7 @@ import pandas as pd
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
+from app.errors import InvalidInputError
 from app.services.posted_lines import posted_line
 from app.services.research_season import previous_nba_season, schedule_season, season_scoped
 from app.services.rotation_service import absent_windows, classify_games, rotation_split
@@ -354,6 +355,7 @@ class InjuryScenarioService:
         game_id: str | None = None,
         player: str | None = None,
         *,
+        teammate: str | None = None,
         user_id: str | None = None,
     ) -> dict[str, Any]:
         listing = self.injuries.list_injuries(requested_date, None)
@@ -380,13 +382,39 @@ class InjuryScenarioService:
                 listed_out.setdefault(row["team"], set()).add(int(row["player_id"]))
         reads = _RequestReads(self, fetch_on_off=bool(wanted), user_id=user_id)
         self._prefetch(selected, season, reads)
+        teammate_ids = (
+            self._teammate_ids(teammate, selected, season, reads) if teammate and selected else None
+        )
         return {
             "date": listing["date"],
             "g_league_skipped": g_league_skipped,
             "scenarios": [
-                self._scenario(row, season, reads, listed_out.get(row["team"], set())) for row in selected
+                self._scenario(row, season, reads, listed_out.get(row["team"], set()), teammate_ids)
+                for row in selected
             ],
         }
+
+    @staticmethod
+    def _teammate_ids(
+        teammate: str, rows: Sequence[Mapping[str, Any]], season: str, reads: _RequestReads
+    ) -> set[int]:
+        """The ids ``teammate`` (an id or full name, case-insensitive) names on the scenarios' team rosters."""
+
+        wanted = str(teammate).strip().casefold()
+        found = set()
+        for row in rows:
+            team_id = NBA_TEAM_TRICODE_TO_ID[row["team"]]
+            for s in (previous_nba_season(season), season):
+                for pid in reads.roster(team_id, s):
+                    name = _Logs(reads.logs(pid, s)).name() or ""
+                    if wanted in (str(pid), name.casefold()):
+                        found.add(pid)
+        if not found:
+            raise InvalidInputError(
+                "The injury scenarios teammate is not on a listed player's team.",
+                public_details={"parameters": ["teammate"]},
+            )
+        return found
 
     def _prefetch(self, rows: Sequence[Mapping[str, Any]], season: str, reads: _RequestReads) -> None:
         """Read every log the request needs: one batch per season, whatever the scenarios.
@@ -444,7 +472,12 @@ class InjuryScenarioService:
     # -- one injured player ----------------------------------------------------
 
     def _scenario(
-        self, row: Mapping[str, Any], season: str, reads: _RequestReads, listed_out: set[int]
+        self,
+        row: Mapping[str, Any],
+        season: str,
+        reads: _RequestReads,
+        listed_out: set[int],
+        teammate_ids: set[int] | None = None,
     ) -> dict[str, Any]:
         limits = ["stale_report"] if row["stale"] else []
         scenario: dict[str, Any] = {
@@ -473,6 +506,8 @@ class InjuryScenarioService:
         evidence, rotation_starts = self._teammates(
             injured_id, row["team"], season, row["game_id"], reads, listed_out
         )
+        if teammate_ids is not None:
+            evidence = [teammate for teammate in evidence if teammate.teammate_id in teammate_ids]
         for branch in branches:
             scenario["branches"].append(
                 {

@@ -1176,6 +1176,25 @@ def test_a_g_league_assignment_opens_no_scenario_unless_named(client, authentica
     ]
 
 
+def test_teammate_returns_one_teammates_rows_and_an_unknown_name_is_refused(client, authenticate, world):
+    body = _scenarios(client, authenticate, "date=2026-11-10&teammate=austin reaves")
+
+    assert [
+        (s["injured"]["player"], {r["player_id"] for b in s["branches"] for r in b["rows"]})
+        for s in body["scenarios"]
+    ] == [
+        ("Jayson Tatum", set()),
+        ("Jaxson Hayes", {REAVES}),
+        ("LeBron James", {REAVES}),
+    ]
+    by_id = _scenarios(client, authenticate, f"date=2026-11-10&player=LeBron James&teammate={REAVES}")
+    assert {r["player_id"] for b in by_id["scenarios"][0]["branches"] for r in b["rows"]} == {REAVES}
+
+    response = client.get("/api/injury_scenarios?date=2026-11-10&teammate=Kevin Love", headers=authenticate())
+    assert response.status_code == 400
+    assert response.get_json()["error"]["details"] == {"parameters": ["teammate"]}
+
+
 def test_an_injured_player_who_changed_teams_resets_the_pair(client, authenticate, world):
     for row in world.logs.rows[(LEBRON, PRIOR)]:
         row["TEAM_ABBREVIATION"] = "BOS"  # LeBron was with Boston last season

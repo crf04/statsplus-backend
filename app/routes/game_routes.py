@@ -140,7 +140,7 @@ def get_injuries():
 @require_auth
 def get_injury_scenarios():
     """Scenarios for each Questionable, Doubtful or Out player of one ET date."""
-    unknown = sorted(set(request.args) - {"date", "game_id", "player"})
+    unknown = sorted(set(request.args) - {"date", "game_id", "player", "teammate"})
     if unknown:
         raise InvalidInputError(
             "The injury scenarios parameters are invalid.",
@@ -152,6 +152,7 @@ def get_injury_scenarios():
             request.args.get("date"),
             game_id=request.args.get("game_id"),
             player=request.args.get("player"),
+            teammate=request.args.get("teammate"),
             user_id=user.get("uid"),
         )
     )
