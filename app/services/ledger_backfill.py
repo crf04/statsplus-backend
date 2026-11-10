@@ -7,7 +7,7 @@ import json
 import threading
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import uuid4
@@ -38,6 +38,7 @@ from app.services.canonical_game_ledger import (
     ReboundTypeIdentityError,
     canonical_game_from_pbp,
 )
+from app.services.ledger_box_score import BOX_SCORE_RECONCILED_SEASON, reconcile_to_box_score
 from app.services.ledger_derivations import (
     IncompleteGameError,
     governed_assist_locations,
@@ -62,6 +63,12 @@ class LedgerLiveDataProvider(Protocol):
     ) -> dict[str, object]: ...
 
     def fetch_play_by_play(self, game_id: str) -> dict[str, object]: ...
+
+
+class LedgerBoxScoreProvider(Protocol):
+    """NBA's official box score on ``stats.nba.com``: ``{player_id: {stat: count}}``."""
+
+    def fetch_game_box_score(self, game_id: str) -> Mapping[int, Mapping[str, int]]: ...
 
 
 class LedgerAthleteCatalogReader(Protocol):
@@ -241,6 +248,8 @@ class BackfillResult:
     pending_game_ids: tuple[str, ...]
     lower_priority_remaining: int
     reason: str | None = None
+    box_score_differences: int = 0
+    unreconciled_game_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +271,7 @@ class LedgerBackfillService:
         participant_catalog: LedgerParticipantCatalogReader,
         reconciliation_sink: Callable[[str, Mapping[str, object]], None],
         observation_recorder: LedgerObservationRecorder,
+        box_score_provider: LedgerBoxScoreProvider | None = None,
         max_concurrency: int = 3,
         daily_recheck_days: int = 7,
         weekly_recheck_days: int = 30,
@@ -278,6 +288,7 @@ class LedgerBackfillService:
         self.participant_catalog = participant_catalog
         self.reconciliation_sink = reconciliation_sink
         self.observation_recorder = observation_recorder
+        self.box_score_provider = box_score_provider
         for collaborator, methods, label in (
             (athlete_catalog, ("get_catalog", "get_freshness"), "athlete_catalog"),
             (participant_catalog, ("get_participants",), "participant_catalog"),
@@ -379,7 +390,10 @@ class LedgerBackfillService:
             lower_priority_remaining = 0
 
         athlete_ids = self._athlete_ids(season, now=started_at)
+        reconciles = self.box_score_provider is not None and season >= BOX_SCORE_RECONCILED_SEASON
         failures: list[str] = []
+        unreconciled: list[str] = []
+        box_score_differences = 0
         writes = []
         processed = 0
         active_staged: set[str] = set()
@@ -391,9 +405,23 @@ class LedgerBackfillService:
             observation_id: str | None = None
             committed = False
             validated = False
+            box_score_outcome: list = []
+            differences = None
+
+            def official_box_score():
+                if not box_score_outcome:
+                    try:
+                        box_score_outcome.append(self.box_score_provider.fetch_game_box_score(game_id))
+                    except (ProviderResponseError, ProviderUnavailableError, OSError):
+                        # The game is still accepted from its provider; the
+                        # run counts it unreconciled.
+                        box_score_outcome.append(None)
+                return box_score_outcome[0]
 
             def stage_and_normalize(observation, *, final_score, source_provider="pbp"):
-                nonlocal observation_id
+                nonlocal observation_id, differences
+                if reconciles and official_box_score() is not None:
+                    observation, differences = reconcile_to_box_score(observation, official_box_score())
                 if source_provider not in {
                     "pbp",
                     "nba_live_data",
@@ -545,7 +573,16 @@ class LedgerBackfillService:
                         game_id,
                         {"kind": "fallback_evidence", "season": season, "missing_families": missing_families},
                     )
-                return game_id, write, validated, None
+                if differences is not None:
+                    self.reconciliation_sink(
+                        game_id,
+                        {
+                            "kind": "box_score_differences",
+                            "season": season,
+                            "differences": tuple(asdict(difference) for difference in differences),
+                        },
+                    )
+                return game_id, write, validated, None, differences
             except (
                 KeyError,
                 TypeError,
@@ -555,7 +592,7 @@ class LedgerBackfillService:
                 ProviderResponseError,
                 ProviderUnavailableError,
             ) as error:
-                return game_id, None, validated, _safe_reason(error)
+                return game_id, None, validated, _safe_reason(error), None
             finally:
                 if observation_id is not None:
                     if committed:
@@ -570,12 +607,16 @@ class LedgerBackfillService:
                 with ThreadPoolExecutor(max_workers=self.max_concurrency) as executor:
                     futures = [executor.submit(fetch_and_commit, target) for target in selected]
                     for future in as_completed(futures):
-                        game_id, write, validated, error = future.result()
+                        game_id, write, validated, error, found = future.result()
                         processed += int(validated)
                         if error is not None:
                             failures.append(game_id)
                         elif write is not None:
                             writes.append(write)
+                            if found is not None:
+                                box_score_differences += len(found)
+                            elif reconciles:
+                                unreconciled.append(game_id)
             finally:
                 with lifecycle_lock:
                     abandoned = tuple(active_staged)
@@ -613,6 +654,8 @@ class LedgerBackfillService:
             pending_game_ids=pending,
             lower_priority_remaining=lower_priority_remaining,
             reason=None if complete else "ledger identities do not exactly match governance",
+            box_score_differences=box_score_differences,
+            unreconciled_game_ids=tuple(sorted(unreconciled)),
         )
 
     @staticmethod
@@ -827,6 +870,11 @@ def collection_control_reconciliation_sink(
 
     def record(game_id: str, details: Mapping[str, object]) -> None:
         season = str(details.get("season", default_season))
+        if details["kind"] == "box_score_differences":
+            collection_control.reconcile_box_score_differences(
+                season=season, game_id=game_id, differences=tuple(details["differences"])
+            )
+            return
         if details["kind"] == "fallback_evidence":
             collection_control.reconcile_fallback_evidence(
                 season=season, game_id=game_id, missing_families=tuple(details["missing_families"])

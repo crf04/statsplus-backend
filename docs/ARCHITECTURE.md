@@ -1993,9 +1993,26 @@ without either family keeps one `ledger_fallback_evidence` Reconciliation Item
 (reason `evidence_incomplete`) per season and game, whose details name the game
 and the families it still lacks; each later acceptance updates that list, and
 the first acceptance with both families, from LiveData or a PBP replacement,
-resolves the item. These details are the only ones the admin reconciliation
-route and collection diagnostics show, so the streams held at
-`*_evidence_incomplete` point at the game.
+resolves the item. These details, and a box-score difference's below, are the
+only ones the admin reconciliation route and collection diagnostics show, so
+the streams held at `*_evidence_incomplete` point at the game.
+From 2026-27 every acceptance, including each daily and weekly recheck, also
+fetches NBA's official box score (`boxscoretraditionalv3` on `stats.nba.com`,
+one call per game, at least 0.6 s apart, through `NBATrackingProvider`). Each
+player's PTS, REB, OREB, DREB, AST, STL, BLK, TOV, FGM, FGA, FG3M, FG3A, FTM,
+FTA and PF are compared with the provider's row; a differing count takes the
+box score's value before normalization, the side's `team_results` total moves
+by the same amount, and the observation records the corrections under
+`_ledger_box_score_corrections` (crf04/statsplus-backend#763: PBP Stats and
+LiveData credit Darryn Peterson with 6 assists on 2026-11-02, NBA's box score
+with 5). A rebound count is compared but not applied when the game carries the
+miss-type rebound split, which must add up to the provider's rebounds. Each
+difference keeps one `ledger_box_score_difference` Reconciliation Item (reason
+`box_score_mismatch`) per game, player and stat, with both values, `applied`
+and `last_seen`; a later acceptance on which the two agree resolves it.
+`scripts/ledger_box_score_differences.py` lists the open items, and the run
+summary counts `box_score_differences`. A game whose box score cannot be
+fetched is accepted from its provider and listed in `unreconciled_game_ids`.
 Repair is operator-invoked and bounded per run by `--max-games` and the
 provider retry cap; there is no persisted per-game attempt budget, so a game
 PBP keeps refusing is re-attempted on each run. Every target also fetches its

@@ -1,12 +1,15 @@
-"""NBA.com player-tracking feeds for rebound chances and potential assists.
+"""NBA.com per-game feeds: player tracking and the official box score.
 
-Two ``stats.nba.com`` endpoints, both sent with ``nba_api``'s standard
+Three ``stats.nba.com`` endpoints, all sent with ``nba_api``'s standard
 ``STATS_HEADERS`` (hand-written headers time out from Railway):
 
 * ``boxscoreplayertrackv3``, one call per game: ``reboundChances*`` for every
   player the box score lists, 0-rebound players included;
 * ``leaguedashptstats`` (Passing, Totals), one call per game day: one GP=1 row
-  per player who played that day, with ``POTENTIAL_AST``.
+  per player who played that day, with ``POTENTIAL_AST``;
+* ``boxscoretraditionalv3``, one call per game: NBA's official box score, the
+  counts sportsbooks settle on, with next-day stat corrections that PBP Stats,
+  NBA LiveData and even ``playergamelogs`` can miss (crf04/statsplus-backend#763).
 
 The day feed's ``Rebounding`` sibling is deliberately not used: it leaves out
 every player with 0 rebounds.  Empty bodies and timeouts are retried.
@@ -14,6 +17,7 @@ every player with 0 rebounds.  Empty bodies and timeouts are retried.
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from datetime import date
@@ -26,6 +30,25 @@ from app.utils.telemetry import ProviderResponseError
 ATTEMPTS = 4
 BACKOFF_SECONDS = 2.0
 TIMEOUT_SECONDS = 30
+
+#: Ledger stat name -> ``boxscoretraditionalv3`` player statistic.
+BOX_SCORE_STATS = {
+    "PTS": "points",
+    "REB": "reboundsTotal",
+    "OREB": "reboundsOffensive",
+    "DREB": "reboundsDefensive",
+    "AST": "assists",
+    "STL": "steals",
+    "BLK": "blocks",
+    "TOV": "turnovers",
+    "FGM": "fieldGoalsMade",
+    "FGA": "fieldGoalsAttempted",
+    "FG3M": "threePointersMade",
+    "FG3A": "threePointersAttempted",
+    "FTM": "freeThrowsMade",
+    "FTA": "freeThrowsAttempted",
+    "PF": "foulsPersonal",
+}
 
 
 def _standard_headers() -> dict[str, str]:
@@ -43,12 +66,18 @@ class NBATrackingProvider:
         attempts: int = ATTEMPTS,
         backoff_seconds: float = BACKOFF_SECONDS,
         timeout: float = TIMEOUT_SECONDS,
+        pace_seconds: float = 0.0,
         sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.attempts = attempts
         self.backoff_seconds = backoff_seconds
         self.timeout = timeout
+        self.pace_seconds = pace_seconds
         self._sleep = sleep
+        self._monotonic = monotonic
+        self._pace_lock = threading.Lock()
+        self._last_box_score: float | None = None
 
     def fetch_game_rebound_chances(self, game_id: str) -> dict[int, dict[str, int | None]]:
         """``{player_id: {"minutes", "total", "offensive", "defensive"}}`` for one game.
@@ -95,6 +124,42 @@ class NBATrackingProvider:
         )
         return parse_day_passing(payload)
 
+    def fetch_game_box_score(self, game_id: str) -> dict[int, dict[str, int]]:
+        """``{player_id: {stat: count}}`` from NBA's official box score of one game.
+
+        Requests are at least ``pace_seconds`` apart, like the tracking refresh's
+        throttle between games.
+        """
+
+        from nba_api.stats.library.http import NBAStatsHTTP
+
+        with self._pace_lock:
+            if self._last_box_score is not None:
+                wait = self.pace_seconds - (self._monotonic() - self._last_box_score)
+                if wait > 0:
+                    self._sleep(wait)
+            try:
+                payload = self._call(
+                    lambda: NBAStatsHTTP()
+                    .send_api_request(
+                        endpoint="boxscoretraditionalv3",
+                        parameters={
+                            "GameID": game_id,
+                            "StartPeriod": 0,
+                            "EndPeriod": 0,
+                            "StartRange": 0,
+                            "EndRange": 0,
+                            "RangeType": 0,
+                        },
+                        headers=_standard_headers(),
+                        timeout=self.timeout,
+                    )
+                    .get_dict()
+                )
+            finally:
+                self._last_box_score = self._monotonic()
+        return parse_box_score_traditional(payload)
+
     def _call(self, request: Callable[[], Any]) -> Any:
         last: Exception | None = None
         for attempt in range(self.attempts):
@@ -133,6 +198,25 @@ def parse_box_score_player_track(payload: Any) -> dict[int, dict[str, int | None
     return players
 
 
+def parse_box_score_traditional(payload: Any) -> dict[int, dict[str, int]]:
+    """Per-player counting stats from a ``boxscoretraditionalv3`` document."""
+
+    box = payload.get("boxScoreTraditional") if isinstance(payload, dict) else None
+    if not isinstance(box, dict):
+        raise ProviderResponseError("boxscoretraditionalv3 has no boxScoreTraditional document")
+    players: dict[int, dict[str, int]] = {}
+    for side in ("homeTeam", "awayTeam"):
+        for player in (box.get(side) or {}).get("players") or []:
+            stats = player.get("statistics") or {}
+            counts = {stat: _count(stats.get(field)) for stat, field in BOX_SCORE_STATS.items()}
+            if None in counts.values() or not isinstance(player.get("personId"), int):
+                raise ProviderResponseError("boxscoretraditionalv3 has a malformed player row")
+            players[player["personId"]] = counts
+    if not players:
+        raise ProviderResponseError("boxscoretraditionalv3 lists no players yet")
+    return players
+
+
 def _minutes_played(value: Any) -> int:
     """Whole seconds played from ``"38:48"``; 0 for a DNP or a blank clock."""
 
@@ -157,4 +241,10 @@ def parse_day_passing(payload: Any) -> dict[int, int | None]:
     return {int(row[id_index]): _count(row[pot_index]) for row in sets[0]["rowSet"]}
 
 
-__all__ = ["NBATrackingProvider", "parse_box_score_player_track", "parse_day_passing"]
+__all__ = [
+    "BOX_SCORE_STATS",
+    "NBATrackingProvider",
+    "parse_box_score_player_track",
+    "parse_box_score_traditional",
+    "parse_day_passing",
+]

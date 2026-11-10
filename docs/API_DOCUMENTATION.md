@@ -4928,7 +4928,10 @@ POST /api/admin/collection/publication-rebuilds/<family>/rollback
 `GET /api/admin/collection/reconciliation` lists open items with `item_id`,
 `season`, `kind`, `reason`, and `status`; diagnostics' `reconciliation` rows
 have the same shape. Only a `ledger_fallback_evidence` item adds `details`
-(`game_id` and the comma-separated `missing_families`); other kinds keep their
+(`game_id` and the comma-separated `missing_families`), and a
+`ledger_box_score_difference` item adds `details` with `game_id`, `player_id`,
+`player_name`, `stat`, `ledger_value` (the provider's count), `box_score_value`
+(NBA's official box score), `applied` and `last_seen`; other kinds keep their
 details private.
 
 `POST /api/admin/collection/publication-rebuilds` starts one durable
