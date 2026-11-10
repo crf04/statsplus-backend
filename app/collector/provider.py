@@ -31,6 +31,7 @@ from .normalizers import (
     normalize_synergy_response,
     normalize_zone_response,
 )
+from .untracked_games import untracked_game_count
 
 
 class ProviderTransientError(RuntimeError):
@@ -115,7 +116,9 @@ def _box_score_window(evidence: Any, *, team_id: int) -> tuple[int, float]:
     return games, minutes
 
 
-def _defer_lagging_tracking(raw: Any, observation: NormalizedObservation) -> NormalizedObservation:
+def _defer_lagging_tracking(
+    raw: Any, observation: NormalizedObservation, *, untracked_games: int = 0
+) -> NormalizedObservation:
     """Return a validated observation unless its tracking trails the box score.
 
     It takes the finished observation, so it runs only once every check the
@@ -123,10 +126,15 @@ def _defer_lagging_tracking(raw: Any, observation: NormalizedObservation) -> Nor
     to find is tracking counting fewer games than the box score, which a
     later run collects once tracking catches up.  An incomplete observation
     is returned as is, so the runner refuses it exactly as on equal games.
+
+    Tracking short by exactly the window's declared untracked games is not
+    lag; composition decides whether those games are absent or restored.
     """
 
     if observation.complete and any(
-        row["TRACKING_GP"] < row["GP"] for row in _records(raw) if "TRACKING_GP" in row
+        row["TRACKING_GP"] not in {row["GP"], row["GP"] - untracked_games}
+        for row in _records(raw)
+        if "TRACKING_GP" in row
     ):
         raise ProviderContractError("provider_window_unverified")
     return observation
@@ -312,6 +320,12 @@ class ResidentialScopeExecutor:
                                 "date_from": parameters.get("date_from"),
                                 "date_to": parameters.get("date_to"),
                             },
+                        ),
+                        untracked_games=untracked_game_count(
+                            work.season,
+                            int(team_id),
+                            date_from=parameters.get("date_from"),
+                            date_to=parameters.get("date_to"),
                         ),
                     )
                 return

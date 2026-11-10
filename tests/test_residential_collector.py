@@ -3651,17 +3651,34 @@ def _patch_opponent_shot_endpoints(monkeypatch, *, tracking_gp, box_score, chang
     monkeypatch.setattr(endpoints, "LeagueDashTeamStats", TeamStats)
 
 
-def test_tracking_behind_the_box_score_defers_the_team_without_failing_the_run(tmp_path: Path, monkeypatch):
-    # NBA tracking dropped LAC @ OKC on 10/25 for a day: tracking counts six
-    # LAC games where the box score counts seven.
+TOR = 1610612761
+IND = 1610612754
+
+
+@pytest.mark.parametrize(
+    ("tracking_gp", "accepted", "deferred"),
+    [
+        # IND's 2026-11-07 game against DEN is declared untracked: tracking
+        # one game short is that game, not lag.
+        ({IND: 6, TOR: 7}, {IND: 6, TOR: 7}, ()),
+        # TOR has no declared game, so its shortfall is last night's lag.
+        ({IND: 7, TOR: 6}, {IND: 7}, ("provider_window_unverified",)),
+        # One declared game explains one missing game, never two.
+        ({IND: 5, TOR: 7}, {TOR: 7}, ("provider_window_unverified",)),
+    ],
+    ids=["declared shortfall", "undeclared shortfall", "shortfall beyond the declared games"],
+)
+def test_tracking_behind_the_box_score_defers_the_team_without_failing_the_run(
+    tmp_path: Path, monkeypatch, tracking_gp, accepted, deferred
+):
     _patch_opponent_shot_endpoints(
         monkeypatch,
-        tracking_gp={LAC: 6, OKC: 7},
+        tracking_gp=tracking_gp,
         box_score=lambda team_id: pd.DataFrame([{"TEAM_ID": team_id, "GP": 7, "MIN": 1691.0}]),
     )
     collector, transport, outbox = _collector(
         tmp_path,
-        discovery=_opponent_shot_discovery(LAC, OKC),
+        discovery=_opponent_shot_discovery(IND, TOR),
         provider=_StandaloneNBAProvider(),
         release_checksum="a" * 64,
     )
@@ -3670,11 +3687,18 @@ def test_tracking_behind_the_box_score_defers_the_team_without_failing_the_run(t
 
     assert result.exit_code == 0
     assert result.disposition is RunDisposition.COMPLETE
-    assert result.failures == ("provider_window_unverified",)
-    assert result.spooled == 3
-    assert result.uploaded == 3
-    terminal = [call[4] for call in transport.calls if call[1].endswith("/api/collector/status")][-1]
-    assert (terminal["state"], terminal["reason"]) == ("complete", "provider_window_unverified")
+    assert result.failures == deferred
+    uploaded = [
+        json.loads(gzip.decompress(call[3]))
+        for call in transport.calls
+        if "/api/collector/observations" in call[1]
+    ]
+    assert {
+        (record["team_id"], record["games_played"], record["tracking_games_played"])
+        for document in uploaded
+        for record in document["payload"]["records"]
+    } == {(team_id, 7, games) for team_id, games in accepted.items()}
+    assert len(uploaded) == 3 * len(accepted)
     outbox.close()
 
 
