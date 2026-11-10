@@ -26,6 +26,7 @@ from app.domain.team_matchup_taxonomy import (
     publication_metric_identity,
 )
 from app.domain.utc import parse_utc_iso
+from app.services.shot_type_coverage import untracked_exclusions_hold
 
 
 class PublicationValidationError(ValueError):
@@ -111,9 +112,14 @@ def validate_publication_rows(
             raise PublicationValidationError("publication_game_set_mismatch")
         if {row.team_id for row in rows} != set(expected_game_ids_by_team) or any(
             len(row.game_ids) != len(set(row.game_ids))
-            or (window == "l15" and len(row.game_ids) != 15)
-            or set(row.game_ids) != set(expected_game_ids_by_team[row.team_id])
+            or (window == "l15" and len(expected_game_ids_by_team[row.team_id]) != 15)
             for row in rows
+        ):
+            raise PublicationValidationError("publication_game_set_mismatch")
+        governed = {team_id: frozenset(game_ids) for team_id, game_ids in expected_game_ids_by_team.items()}
+        published = {row.team_id: frozenset(row.game_ids) for row in rows}
+        if published != governed and not (
+            base == "shot_types" and untracked_exclusions_hold(governed, published)
         ):
             raise PublicationValidationError("publication_game_set_mismatch")
     return expected_keys or ()

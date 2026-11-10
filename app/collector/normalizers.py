@@ -967,6 +967,14 @@ def normalize_opponent_grouped_shot_response(
         require_games_played=True,
         require_minutes=True,
     )
+    # Composition tells a declared untracked game from lag by tracking's own
+    # games, which the box score's ``GP`` replaced in the window binding.
+    tracked = {row["TRACKING_GP"] for row in _records(response) if "TRACKING_GP" in row}
+    if len(tracked) > 1:
+        raise ProviderContractError("provider_schema_changed")
+    for tracking_games in tracked:
+        for record in observation.payload["records"]:
+            record["tracking_games_played"] = int(_number(tracking_games, integer=True))
     return observation
 
 
