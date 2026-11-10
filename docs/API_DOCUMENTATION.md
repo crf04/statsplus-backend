@@ -3778,7 +3778,9 @@ Each side also carries `stats` (crf04/statsplus#252): the subject's box-score
 averages over the side's games in which he has a stored game-log row for the
 team, matched on NBA `game_id`. The logs are read through the season's
 publication snapshot (the reads `GET /api/games/game_logs` uses), once per
-request for every subject of the response. The game set is unchanged.
+request for every subject of the response, scoped to the response's `season`,
+so a season after the Published Season (2026-27 while 2025-26 is published)
+has its stats too (crf04/statsplus#484). The game set is unchanged.
 
 - `played`: side games with a game-log row for him. A DNP has none, so it is
   left out of `stats` while the rotation `minutes` beside it still counts it as 0.

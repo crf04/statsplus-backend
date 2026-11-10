@@ -26,6 +26,7 @@ from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.domain.team_window import TeamWindow, team_window
 from app.errors import InvalidInputError, ResourceNotFoundError
 from app.services.athlete_resolver import catalog_athlete_matches, normalize_athlete_name
+from app.services.research_season import season_scoped
 from app.services.rotation_derivation import clock_text
 
 CS_PER_MINUTE = 6000
@@ -731,11 +732,16 @@ class RotationService:
     def _logs_by_player(
         self, season: str, team: str, player_ids: Iterable[int]
     ) -> dict[int, dict[str, dict[str, Fraction]]]:
-        """Each player's game-log rows for ``team``, one batched read under one publication snapshot."""
+        """Each player's game-log rows for ``team``, one batched read under one publication snapshot.
+
+        Read scoped to ``season``: an unscoped read of a season after the
+        Published Season serves no logs (crf04/statsplus#484).
+        """
 
         ids = sorted(player_ids)
-        snapshot = self.game_logs.capture_publication_snapshot(season)
-        frames = self.game_logs.get_players_logs_by_id(ids, season, publication_snapshot=snapshot)
+        games = season_scoped(self.game_logs, season)
+        snapshot = games.capture_publication_snapshot(season)
+        frames = games.get_players_logs_by_id(ids, season, publication_snapshot=snapshot)
         return {player_id: _log_rows_by_game(frames.get(player_id), team) for player_id in ids}
 
     def _team_lines(
