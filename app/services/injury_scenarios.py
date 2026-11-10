@@ -541,7 +541,13 @@ class InjuryScenarioService:
                 injured_logs[s].other_team_rows(team) is not None
                 or mates[s].other_team_rows(team) is not None
             )
-            without, played = self.games.games_without_and_with_player(rows, injured_logs[s].absent_frame())
+            rostered = (
+                injured_logs[s].frame is None
+                and request.catalog_teams(s).get(injured_id) == NBA_TEAM_TRICODE_TO_ID[team]
+            )
+            without, played = self.games.games_without_and_with_player(
+                rows, injured_logs[s].absent_frame(), team if rostered else None
+            )
             window.append(_WindowSeason(s, rows, without, played, sliceable=not changed))
         if not window:
             return None

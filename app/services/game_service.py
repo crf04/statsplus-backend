@@ -23,6 +23,7 @@ from nba_api.stats.static import teams
 from sqlalchemy.engine import Engine
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.play_type_matchup import complete_play_type_shares, play_type_matchup
 from app.domain.team_matchup_taxonomy import LEDGER_DEFENSE_SHEET_METRICS
 from app.domain.team_window import team_window
@@ -410,14 +411,27 @@ class GameService:
                 publication_snapshot=publication_snapshot,
                 connection=connection,
             )
-            without, _ = self._absence_split(player_logs, player_gamelogs)
+            rostered_team = self._catalog_team(player_name, season) if player_gamelogs.empty else None
+            without, _ = self._absence_split(player_logs, player_gamelogs, rostered_team)
             exclude_game_ids |= set(player_logs["GAME_ID"]) - without
 
         return exclude_game_ids
 
+    def _catalog_team(self, player_name, season):
+        """The tricode of the team the Athlete Catalog lists ``player_name`` on for ``season``, if any."""
+        if self.athlete_catalog is None:
+            return None
+        player_id = int(self.get_player_id(player_name, season))
+        rows = self.athlete_catalog.get_catalog(season, active_only=False)
+        team_id = next((row.get("team_id") for row in rows if int(row["player_id"]) == player_id), None)
+        return NBA_TEAM_ID_TO_TRICODE.get(team_id)
+
     @staticmethod
-    def _absence_split(player_logs, absent_player_logs):
-        """Ids of ``player_logs``' games inside the absent player's team window: those he has no row in, then those he has."""
+    def _absence_split(player_logs, absent_player_logs, rostered_team=None):
+        """Ids of ``player_logs``' games inside the absent player's team window: those he has no row in, then those he has.
+
+        ``rostered_team`` is the team roster evidence places him on when he has no row.
+        """
         appearances = list(
             zip(
                 pd.to_datetime(absent_player_logs["GAME_DATE"]).dt.date,
@@ -425,7 +439,10 @@ class GameService:
                 strict=True,
             )
         )
-        windows = {team: team_window(appearances, team) for team in set(player_logs["TEAM_ABBREVIATION"])}
+        windows = {
+            team: team_window(appearances, team, rostered=team == rostered_team)
+            for team in set(player_logs["TEAM_ABBREVIATION"])
+        }
         appeared = set(
             zip(absent_player_logs["GAME_ID"], absent_player_logs["TEAM_ABBREVIATION"], strict=True)
         )
@@ -500,7 +517,7 @@ class GameService:
         )
         return {int(row.player_id) for row in rows}
 
-    def games_without_and_with_player(self, player_logs, absent_player_logs):
+    def games_without_and_with_player(self, player_logs, absent_player_logs, rostered_team=None):
         """The ``players_off`` absence rule, for logs already read by id.
 
         Same rule as ``get_games_to_exclude``: a game of team T counts as
@@ -508,9 +525,10 @@ class GameService:
         (crf04/statsplus#449) and he has no game-log row for T that day, and as
         "with" him when it falls inside the window and he has one.  Returns the
         ids of ``player_logs``' games on each side; a game outside the window is
-        on neither.
+        on neither.  ``rostered_team`` is the team the Athlete Catalog lists him
+        on, which opens his window there when he has no row.
         """
-        without, played = self._absence_split(player_logs, absent_player_logs)
+        without, played = self._absence_split(player_logs, absent_player_logs, rostered_team)
         return {str(game_id) for game_id in without}, {str(game_id) for game_id in played}
 
     def filter_players_on_off(
