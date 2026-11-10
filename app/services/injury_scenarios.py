@@ -38,6 +38,13 @@ Each kind of evidence is compared with its own "with him" figure: the
 full-game split with the teammate's average in games the injured player
 played, the on/off split with the teammate's per-36 while the injured player
 is on the floor (``on[]``).  The "plays" branch reports those baselines only.
+
+Seasons
+-------
+Every sample is also reported per season (``seasons``), and a flag is computed
+on one season only (crf04/statsplus#485): the Slate season when the teammate
+has ``MIN_GAMES_WITHOUT`` games on each side in it, otherwise last season.
+The pooled figures stay for one release.
 """
 
 from __future__ import annotations

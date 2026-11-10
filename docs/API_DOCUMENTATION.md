@@ -1024,7 +1024,7 @@ caller of the NBA injury report; Matchup reads what it stored and never fetches.
 ### Get Injury Scenarios
 
 ```http
-GET /api/injury_scenarios?date=YYYY-MM-DD[&game_id=ID][&player=ID_OR_NAME]
+GET /api/injury_scenarios?date=YYYY-MM-DD[&game_id=ID][&player=ID_OR_NAME][&teammate=ID_OR_NAME]
 ```
 
 Authenticated (crf04/statsplus#220, #425). One scenario for each player the
@@ -1033,6 +1033,14 @@ or Out on that date; Probable and Available get none. Parameters and refusals
 are those of Get Injuries, plus the optional `game_id` and `player` (a player
 id or full name, case-insensitive) filters. Nothing is stored: every request
 rebuilds from the stored injury snapshot.
+
+An absence whose report `reason` starts `G League` (a G League or two-way
+assignment) opens no scenario unless `player` names him; the response's
+`g_league_skipped` counts those left out (crf04/statsplus#485). `teammate` (a
+player id or full name, case-insensitive) keeps only that teammate's rows,
+`replacement_starters` and `minutes_jumps` entries in every scenario; a value
+that matches no player on a selected scenario's team roster (either season of
+the window) is `400 invalid_input` with `details.parameters: ["teammate"]`.
 
 With `player`, a missing or expired on/off split of that scenario (on and off,
 this season and, when it joins the window, last season) is fetched from
@@ -1049,7 +1057,9 @@ request reads the cache only and makes no upstream call. Without Redis, where th
 shared, a named request does not reach PBPStats either: its rows carry `on_off_unavailable`.
 
 Each scenario has `injured` (player, player_id, team, game_id, status,
-report_time), `limits` (`stale_report`, or `player_unresolved` when the
+`reason`, report_time, and `seasons`: `[{season, missed, played}]`, the
+Slate season then last season, counting his team's games he missed and played
+by the game-log absence rule; `[]` when unresolved), `limits` (`stale_report`, or `player_unresolved` when the
 report's name matched no Athlete Catalog player, in which case there are no
 branches) and `branches`: `plays` then `sits` for Questionable or Doubtful,
 `sits` only for Out. A branch's `rows` hold one row per rotation teammate
@@ -1065,10 +1075,44 @@ that are never flagged.
   [on/off](#get-onoff-splits) with the injured player in `off[]`.
 - `line`: `value`, `source` and `beat`/`of` counted in the `without` games
   against today's posted line, or `null`.
-- `shift`: `full_game` and `on_off_per36`, each against its own baseline, with
-  the `season_span` each was computed over. `baseline.on_floor_season_span` and
+- `shift`: `full_game` and `on_off_per36` in the `flag_season`, each against
+  its own baseline, with the `season_span` each was computed over (the flag
+  season, or `null` for `on_off` when it supplied no off-floor minutes). `baseline.on_floor_season_span` and
   `off_floor.season_span` name only the seasons that supplied on/off minutes.
-- `flagged`: both shifts at least +10%, or both at most -10%.
+- `flagged`: both shifts at least +10%, or both at most -10%, in the
+  `flag_season`.
+- `flag_season` (sits, scored rows; crf04/statsplus#485): the one season the
+  flag, `shift` and `limits` are computed on. It is the Slate season when the
+  teammate has at least 3 games on each side in it (without him and with him),
+  otherwise last season; with no last season in the window it stays the Slate
+  season.
+- `seasons` (crf04/statsplus#485): one entry per season of the window, the
+  Slate season first, so no figure in it spans two seasons. In `plays`, each
+  is `{season, baseline: {avg, games, per36, minutes}}` (`USG`:
+  `{usage, minutes}`). In `sits`, a scored entry also has
+  `without: {avg, games}`, `off_floor: {per36, minutes}`, `line: {beat, of}`
+  (`null` without today's line), `shift` (`{full_game, on_off_per36}` or
+  `null` when not computed), `flagged` and that season's `limits`; a context
+  entry has `without` (MIN, FGA), `off_floor` (`null` for MIN) and `limits`.
+  Example (Austin Reaves PTS, LeBron James sits):
+
+  ```json
+  "flag_season": "2026-27",
+  "seasons": [
+    {"season": "2026-27", "baseline": {"avg": 20.0, "games": 5, "per36": 19.8, "minutes": 400},
+     "without": {"avg": 25.0, "games": 3}, "off_floor": {"per36": 25.2, "minutes": 200},
+     "line": {"beat": 2, "of": 3}, "shift": {"full_game": 0.25, "on_off_per36": 0.2727},
+     "flagged": true, "limits": []},
+    {"season": "2025-26", "baseline": {"avg": 20.0, "games": 2, "per36": 19.8, "minutes": 300},
+     "without": {"avg": 26.0, "games": 2}, "off_floor": {"per36": 24.75, "minutes": 80},
+     "line": {"beat": 2, "of": 2}, "shift": null, "flagged": false,
+     "limits": ["insufficient", "insufficient_baseline"]}
+  ]
+  ```
+
+  The pooled `baseline`, `without`, `off_floor` and `line` (and their
+  `season_span` fields) still sum the window's seasons; they stay for one
+  release and then go.
 - `on_off_sources` and `on_off_games_missing` (crf04/statsplus#410): the
   sorted, distinct `source` values (`pbpstats`, `statsplus`) of the on/off
   splits the row's numbers summed (the on-floor split, plus the off-floor one
@@ -1080,8 +1124,10 @@ that are never flagged.
   `excluded_games`, the teammate's games for this team in the seasons read
   that are on neither side because the two were not teammates then (before
   the injured player joined, or before either player's last team change).
-- `limits`: `insufficient` (under 3 games without or under 150 off-floor
-  minutes; never flagged), `no_line`, `stale_report`, `no_baseline`, and the
+- `limits` (of the `flag_season` on scored `sits` rows; of the pooled on/off on
+  context rows): `insufficient` (under 3 games without or under 150 off-floor
+  minutes; never flagged), `insufficient_baseline` (under 3 games with him or
+  under 150 on-floor minutes; never flagged), `no_line`, `stale_report`, `no_baseline`, and the
   on/off limits `on_off_not_warmed` (no cached split; a request without
   `player` never calls PBPStats, the scheduled warm fills the cache, and
   naming the injured player fetches it), `on_off_unavailable` (no cache, or
@@ -1089,8 +1135,8 @@ that are never flagged.
   kept when the fetch failed), `on_off_unsliceable` (a
   player changed teams in that season, so its whole-season totals cannot match
   the window) and `on_off_seasons_differ` (the on and off states cover
-  different seasons). Any on/off limit other than `on_off_stale` blocks the
-  flag, and so does any unsliceable season in the window; the full-game numbers are still returned.
+  different seasons). Any on/off limit other than `on_off_stale` in the flag
+  season blocks the flag; the full-game numbers are still returned.
 
 The window is the current season plus last season, each read scoped to its
 season (`season_scoped`), so a current season after the Published Season counts
@@ -1098,29 +1144,37 @@ its games as a selected season does. It starts after the later of
 the two players' last appearance for a different team, and last season also
 needs a game for this team by the injured player. Without a team change the
 `without` games are those `GET /api/games/game_logs?players_off[]=` returns.
-Teammates come from the game-log team roster, minus players the Athlete
-Catalog places on another team (a player it lacks, or an unreadable catalog,
-falls back to the game logs); totals are summed across the
-window's seasons before per-36 is derived.
+Teammates are the players with a game for the team in the Slate season, minus
+players the Athlete Catalog has since placed on another team; before the
+team's first game of the Slate season the catalog decides among last season's
+roster (an unreadable or empty catalog leaves that roster as the game logs
+have it). Teammates listed Out on the same report get no rows
+(crf04/statsplus#485). Pooled totals are summed across the window's seasons
+before per-36 is derived.
 
 Rotation context (crf04/statsplus#239, from the stored [rotations](#get-rotation);
 context only, it never changes which rows are flagged). Every row of a
 teammate carries `rotation`, in both branches: the split of
 [Rotation without a player](#rotation-without-a-player) for that teammate with
 the injured player absent, over the same window, plus `seasons` (the span of
-seasons that supplied games) and `missing_games` (his game-log `without` games
-that have no stored rotation). Seasons with no stored rotations contribute
+seasons that supplied games), `missing_games` (his game-log `without` games
+that have no stored rotation) and `by_season` (crf04/statsplus#485): the same
+split for each season that supplied games, Slate season first, each with its
+`season` and `missing_games`. Each side carries `minutes_per_game_played`
+beside `minutes`. Seasons with no stored rotations contribute
 nothing; `rotation` is `null` when no stored game in the window gives the
 teammate a line. A scenario also has:
 
-- `rotation_starts`: `{starts, games}`, the injured player's own starts over the
-  stored games he played (after his own last team change), so "started in his
-  place" is only claimed for a regular starter; `{0, 0}` with no stored games.
+- `rotation_starts`: `{starts, games, by_season}`, the injured player's own
+  starts over the stored games he played (after his own last team change), so
+  "started in his place" is only claimed for a regular starter; `{0, 0}` with
+  no stored games. `by_season` is `[{season, starts, games}]`, Slate season
+  first.
 - `replacement_starters`: teammates in the window whose start rate is higher
   without him than with him (a side with no games counts as rate 0) and who
   started at least one without game, by `starts_without` high to low, then name.
   Each has `name`, `starts_without`, `games_without`, `starts_with`,
-  `games_with`. A teammate whose split is insufficient is never listed.
+  `games_with`, and `by_season` with those counts per season. A teammate whose split is insufficient is never listed.
 - `minutes_jumps`: teammates in the window who are not in the 15+ MPG set, whose
   split is sufficient (3 or more without games) and whose `minutes_change` is
   6.0 or more, by `minutes_change` high to low. Each has `name` and `rotation`;
@@ -3758,7 +3812,8 @@ invalid_input` with `details.parameter: "without"`; an ambiguous one adds
 
 Each side has `games`, `played`, `starts`, `minutes` (per game, DNPs as 0,
 rounded half-up to 0.1 from exact centiseconds; `null` for a side with no
-games) and `closed`. `minutes_change` is without minus with per-game minutes
+games), `minutes_per_game_played` (the same minutes over `played` games only;
+`null` when he played none, crf04/statsplus#485) and `closed`. `minutes_change` is without minus with per-game minutes
 from exact values, rounded once (`null` when a side has no games). A split with
 fewer than 3 without games is returned with `insufficient: true`.
 
