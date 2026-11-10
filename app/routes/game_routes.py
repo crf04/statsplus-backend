@@ -42,12 +42,12 @@ from ..errors import (
     sanitize_public_value,
 )
 from ..models.game_logs import GameLogFilterError, GameLogQuery
-from ..services.database_first_activation import SeasonUnavailable
+from ..services.database_first_activation import ReadSeason, SeasonUnavailable
 from ..services.game_log_preview import GameLogPreviewService, parse_line, parse_line_type
 from ..services.matchup_slate_preview import MatchupSlatePreviewService
 from ..services.nba_stats_adapter import validate_canonical_season
 from ..services.posted_lines import without_prices
-from ..services.research_season import season_scoped
+from ..services.research_season import season_is_pinned, season_scoped
 from ..services.serving_season import next_season
 from ..services.slate_board import BOARD_SOURCES
 from ..utils.auth import get_current_user, is_waitlisted, require_auth, require_auth_optional_allow_waitlisted
@@ -611,6 +611,9 @@ def _admitted(viewer: dict[str, Any] | None) -> bool:
         return False
 
 
+_PLAYER_GAME_LOGS = "player_game_logs"
+
+
 def _slate_today() -> date:
     return slate_date_for_instant(datetime.now(UTC))
 
@@ -620,13 +623,19 @@ def _page_season() -> str | None:
 
     The season after the Published Season once today falls in it, as the
     signed-in Workspace defaults to (crf04/statsplus#348); ``None`` before
-    then, or when no publication reader can select it.
+    then, under an ``NBA_CURRENT_SEASON`` pin, or when no publication reader
+    can select it.
     """
 
     reader = getattr(game_service, "publication_reader", None)
-    if getattr(reader, "captures_published_season", False) is not True:
+    if getattr(reader, "captures_published_season", False) is not True or season_is_pinned(
+        game_service.settings
+    ):
         return None
-    upcoming = next_season(_default_season())
+    published = reader.last_published_season()
+    if published is None:
+        return None
+    upcoming = next_season(published)
     return upcoming if upcoming <= current_nba_season(_slate_today()) else None
 
 
@@ -649,8 +658,47 @@ def _link_logs(player_name: str, query: GameLogQuery, *, named: bool) -> dict[st
     return _filtered_logs(player_name, query, selected=named)
 
 
+def _offered(season: str) -> bool:
+    """Whether a selection of ``season`` serves game logs, from their labels alone."""
+
+    reader = game_service.publication_reader.for_season(season)
+    try:
+        reader.snapshot(
+            (_PLAYER_GAME_LOGS,),
+            season=ReadSeason(season, requested=season),
+            projection_only_keys=frozenset({_PLAYER_GAME_LOGS}),
+        )
+    except SeasonUnavailable:
+        return False
+    return True
+
+
+def _preview_query_from(args: Any) -> tuple[str, GameLogQuery]:
+    """Parse a preview's link to the season ``_link_logs`` would read for it.
+
+    The season is resolved, and a named one that is not offered refused,
+    before the facts cache, so a card is keyed by the season it draws and no
+    cached card stands in for a season no longer offered.
+    """
+
+    player_name, query = _game_log_query_from(args)
+    named = args.get("season_filter") is not None
+    season = query.season_filter if named else _page_season()
+    reader = getattr(game_service, "publication_reader", None)
+    if season is None or getattr(reader, "captures_published_season", False) is not True:
+        return player_name, query
+    if _offered(season):
+        return player_name, query.model_copy(update={"season_filter": season})
+    if named:
+        raise SelectedSeasonUnavailableError(
+            selected_season=season, published_season=reader.last_published_season()
+        )
+    return player_name, query
+
+
 def _preview_logs(player_name: str, query: GameLogQuery) -> dict[str, Any]:
-    return _link_logs(player_name, query, named=request.args.get("season_filter") is not None)
+    selected = request.args.get("season_filter") is not None or query.season_filter != _default_season()
+    return _filtered_logs(player_name, query, selected=selected)
 
 
 @game_bp.route("/game_logs/preview.png", methods=["GET"])
@@ -661,7 +709,7 @@ def get_game_log_preview():
     previews = current_app.extensions.setdefault(
         "game_log_previews",
         GameLogPreviewService(
-            parse=_game_log_query_from, logs=_preview_logs, redis_client=get_dependencies().redis_client
+            parse=_preview_query_from, logs=_preview_logs, redis_client=get_dependencies().redis_client
         ),
     )
     image = previews.render(request.args, line_type, link_line)

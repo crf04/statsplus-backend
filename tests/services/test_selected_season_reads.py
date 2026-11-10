@@ -723,6 +723,48 @@ def test_a_preview_of_the_published_season_still_draws_its_games(served, client,
     assert _preview_values(client, dependencies, f"&season_filter={OLD}") == [30.0]
 
 
+def test_a_preview_naming_no_season_redraws_once_2026_27_serves(served, client, dependencies):
+    dependencies.redis_client = FakeRedis()
+    path = "/api/games/game_logs/preview.png?player_name=Player+0&line_date=2026-10-26"
+    client.get(path)
+
+    served.hold_opening_week()
+    client.get(path)
+
+    values = [
+        json.loads(value)["values"]
+        for key, value in dependencies.redis_client.values.items()
+        if key.startswith("game_log_preview:v")
+    ]
+    assert sorted(values) == [[12.0], [30.0]]
+
+
+def test_a_cached_preview_of_a_season_no_longer_offered_is_refused(served, client, dependencies):
+    served.hold_opening_week()
+    dependencies.redis_client = FakeRedis()
+    path = "/api/games/game_logs/preview.png?player_name=Player+0&season_filter=2026-27&line_date=2026-10-26"
+    assert client.get(path).status_code == 200
+
+    accept_ledger(served.engine, THIN_GAMES, "pbp")
+
+    response = client.get(path)
+    assert response.status_code == 503
+    assert response.get_json()["error"]["code"] == "season_unavailable"
+
+
+@pytest.mark.parametrize("pin", [OLD, NEW])
+def test_a_pinned_deployment_reads_a_link_naming_no_season_as_before(served, client, pin):
+    served.hold_opening_week()
+    settings = served.games.settings
+    served.games.settings = settings.model_copy(
+        update={"nba": settings.nba.model_copy(update={"current_season": pin})}
+    )
+    body = client.get("/api/games/game_logs?player_name=Player+0").get_json()
+
+    assert "season_context" not in body
+    assert [row["PTS"] for row in body["game_logs"]] == ([30] if pin == OLD else [])
+
+
 def test_a_preview_of_an_unoffered_season_is_refused_and_not_cached(served, client, dependencies):
     dependencies.redis_client = FakeRedis()
 
