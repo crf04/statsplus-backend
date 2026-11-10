@@ -1171,7 +1171,7 @@ def rotation_world(world, tmp_path):
 
 
 def _split(without, played, change, *, insufficient=False, seasons="2026-27", missing=0):
-    keys = ("games", "played", "starts", "minutes", "closed")
+    keys = ("games", "played", "starts", "minutes", "minutes_per_game_played", "closed")
     return {
         "without": dict(zip(keys, without, strict=True)),
         "with": dict(zip(keys, played, strict=True)),
@@ -1187,7 +1187,7 @@ def test_teammate_rows_carry_the_rotation_split_in_both_branches(client, authent
 
     # Reaves: 3 without games at 34.0, 5 with games at 30.0.  His 2025-26
     # without games h3 and h4 have no stored rotation, so they are missing.
-    expected = _split((3, 3, 3, 34.0, 2), (5, 5, 5, 30.0, 1), 4.0, missing=2)
+    expected = _split((3, 3, 3, 34.0, 34.0, 2), (5, 5, 5, 30.0, 30.0, 1), 4.0, missing=2)
     assert _row(scenario, "sits", REAVES, "PTS")["rotation"] == expected
     assert _row(scenario, "plays", REAVES, "MIN")["rotation"] == expected
 
@@ -1197,13 +1197,14 @@ def test_a_dnp_teammate_counts_zero_minutes_and_a_missing_line_excludes_the_game
 ):
     scenario = _scenario(_scenarios(client, authenticate), LEBRON)
 
-    # Hayes: g5 is a DNP-CD, so 4 played of 5 and (4 * 20) / 5 = 16.0 minutes.
+    # Hayes: g5 is a DNP-CD, so 4 played of 5: (4 * 20) / 5 = 16.0 minutes a
+    # game, 20.0 a game played.
     assert _row(scenario, "sits", HAYES, "PTS")["rotation"] == _split(
-        (3, 3, 2, 24.0, 0), (5, 4, 0, 16.0, 0), 8.0
+        (3, 3, 2, 24.0, 24.0, 0), (5, 4, 0, 16.0, 20.0, 0), 8.0
     )
     # Hachimura has no g8 line: only g6 and g7 are his without games.
     assert _row(scenario, "sits", HACHIMURA, "PTS")["rotation"] == _split(
-        (2, 2, 2, 29.0, 0), (5, 5, 1, 25.0, 0), 4.0, insufficient=True, missing=0
+        (2, 2, 2, 29.0, 29.0, 0), (5, 5, 1, 25.0, 25.0, 0), 4.0, insufficient=True, missing=0
     )
 
 
@@ -1262,8 +1263,8 @@ def test_minutes_jumps_list_only_sub_rotation_teammates_at_six_minutes_or_more(
     # Bench +8.0, Exact Six exactly +6.0 (listed), Just Below +5.9 (not),
     # Thin Sample +9.0 on only 2 without games (insufficient, not listed).
     assert scenario["minutes_jumps"] == [
-        {"name": "Bench Reserve", "rotation": _split((3, 3, 2, 18.0, 0), (5, 5, 0, 10.0, 0), 8.0)},
-        {"name": "Exact Six", "rotation": _split((3, 3, 0, 16.0, 0), (5, 5, 0, 10.0, 0), 6.0)},
+        {"name": "Bench Reserve", "rotation": _split((3, 3, 2, 18.0, 18.0, 0), (5, 5, 0, 10.0, 10.0, 0), 8.0)},
+        {"name": "Exact Six", "rotation": _split((3, 3, 0, 16.0, 16.0, 0), (5, 5, 0, 10.0, 10.0, 0), 6.0)},
     ]
     # They carry no scored rows and are never flagged.
     rows = [r for b in scenario["branches"] for r in b["rows"]]
@@ -1314,7 +1315,7 @@ def test_a_teammate_who_left_and_returned_counts_rotation_games_only_after_the_r
     scenario = _scenario(_scenarios(client, authenticate), LEBRON)
 
     assert _row(scenario, "sits", RETURNER, "MIN")["rotation"] == _split(
-        (3, 3, 3, 20.0, 0), (1, 1, 0, 20.0, 0), 0.0
+        (3, 3, 3, 20.0, 20.0, 0), (1, 1, 0, 20.0, 20.0, 0), 0.0
     )
 
 
@@ -1378,7 +1379,7 @@ def test_rotation_splits_combine_both_seasons_with_a_span(client, authenticate, 
     # h3-h6 (4 x 36.0, 2 starts) = 7 games, 246 / 7 = 35.1 minutes.  With: g1-g5
     # (5 x 30.0, 1 closed) + h1-h2 (2 x 30.0) = 7 games, 30.0 minutes.
     assert _row(scenario, "sits", REAVES, "PTS")["rotation"] == _split(
-        (7, 7, 5, 35.1, 2), (7, 7, 7, 30.0, 1), 5.1, seasons="2025-26 to 2026-27", missing=0
+        (7, 7, 5, 35.1, 35.1, 2), (7, 7, 7, 30.0, 30.0, 1), 5.1, seasons="2025-26 to 2026-27", missing=0
     )
 
 
@@ -1387,7 +1388,7 @@ def test_a_teammate_found_only_in_last_seasons_roster_gets_a_rotation(client, au
 
     # Prior Only has game logs and rotations in 2025-26 only.
     assert _row(scenario, "sits", PRIOR_ONLY, "MIN")["rotation"] == _split(
-        (4, 4, 3, 24.0, 0), (2, 2, 0, 20.0, 0), 4.0, seasons="2025-26", missing=0
+        (4, 4, 3, 24.0, 24.0, 0), (2, 2, 0, 20.0, 20.0, 0), 4.0, seasons="2025-26", missing=0
     )
     assert {
         "name": "Prior Only",
@@ -1418,7 +1419,7 @@ def test_a_stored_game_without_the_teammates_line_is_not_a_missing_game(client, 
     # g8 is a game-log without game for him and is stored, but its box score
     # has no line for him: it is not his game, and it is not missing either.
     assert _row(scenario, "sits", OMITTED, "MIN")["rotation"] == _split(
-        (2, 2, 0, 20.0, 0), (5, 5, 0, 20.0, 0), 0.0, insufficient=True, missing=0
+        (2, 2, 0, 20.0, 20.0, 0), (5, 5, 0, 20.0, 20.0, 0), 0.0, insufficient=True, missing=0
     )
 
 
