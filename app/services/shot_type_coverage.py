@@ -10,13 +10,11 @@ the composer gathers from observations and the governed ledger.
 
 from __future__ import annotations
 
-from collections.abc import Hashable, Iterable, Mapping
+from collections import Counter
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TypeVar
 
 from app.collector.untracked_games import UNTRACKED_GAMES, UntrackedGame, untracked_games
-
-K = TypeVar("K", bound=Hashable)
 
 
 @dataclass(frozen=True)
@@ -24,13 +22,13 @@ class DeclaredGameBox:
     """One declared game's governed ledger facts."""
 
     game: UntrackedGame
-    #: Ledger ``team_minutes``: the team's player minutes, overtime included.
+    #: Ledger ``team_minutes``: game minutes, 48 in regulation and 53 after one overtime.
     team_minutes: Mapping[int, float]
     #: Players with minutes in the game.
     players: frozenset[int]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, order=True)
 class Shortfall:
     participant: int
     expected_gp: int
@@ -49,6 +47,18 @@ class ShotTypeCoverageBlocked(ValueError):
 class CoveredTeam:
     game_ids: frozenset[str]
     minutes: float
+
+
+@dataclass(frozen=True)
+class PlayerTracking:
+    """One player shot-type observation's box-score and tracking games."""
+
+    team_box_gp: Mapping[int, int]
+    box_gp: Mapping[int, int]
+    box_fga: Mapping[int, int]
+    overall_gp: Mapping[int, int]
+    #: Each category record's player, box-score games and tracking games.
+    category_gp: tuple[tuple[int, int | None, int | None], ...]
 
 
 def untracked_exclusions_hold(
@@ -76,23 +86,38 @@ def declared_in_window(season: str, governed: Mapping[int, frozenset[str]]) -> t
 
 
 def _absent_games(
-    box_gp: Mapping[K, int],
-    tracking_gp: Mapping[K, int],
-    participants: Mapping[str, frozenset[K]],
+    readings: Sequence[tuple[Mapping[int, int], Mapping[int, int]]],
+    participants: Mapping[str, frozenset[int]],
 ) -> frozenset[str]:
-    """Decide each declared game absent or present, and require every shortfall be explained."""
+    """Declared games every participant is short for in every reading.
 
-    short = {key: games - tracking_gp.get(key, 0) for key, games in box_gp.items()}
-    absent = frozenset(
+    A reading pairs box-score games with one tracking source's games, so all
+    of a composition's readings share one absent set.
+    """
+
+    return frozenset(
         game_id
         for game_id, members in participants.items()
-        if members and all(short.get(member, 0) >= 1 for member in members)
+        if members
+        and readings
+        and all(
+            box.get(member, 0) - tracking.get(member, 0) >= 1
+            for box, tracking in readings
+            for member in members
+        )
     )
-    unexplained = tuple(
-        Shortfall(key, box_gp[key] - missing, tracking_gp.get(key, 0))
-        for key in sorted(box_gp)
-        if short[key] != (missing := sum(key in participants[game_id] for game_id in absent))
-    )
+
+
+def _unexplained(
+    box_gp: Mapping[int, int], tracking_gp: Mapping[int, int], appearances: Mapping[int, int]
+) -> Iterable[Shortfall]:
+    for key, games in box_gp.items():
+        if games - tracking_gp.get(key, 0) != appearances.get(key, 0):
+            yield Shortfall(key, games - appearances.get(key, 0), tracking_gp.get(key, 0))
+
+
+def _require_explained(shortfalls: Iterable[Shortfall], absent: frozenset[str]) -> frozenset[str]:
+    unexplained = tuple(sorted(set(shortfalls)))
     if unexplained:
         raise ShotTypeCoverageBlocked(
             "provider_window_lagging", unexplained=unexplained, declared_absent=absent
@@ -103,31 +128,38 @@ def _absent_games(
 def cover_teams(
     governed: Mapping[int, frozenset[str]],
     *,
-    tracking_gp: Mapping[int, int],
+    tracking_gp: Sequence[Mapping[int, int]],
     minutes: Mapping[int, float],
     declared: Iterable[DeclaredGameBox],
 ) -> dict[int, CoveredTeam]:
     """Each team's tracked games and the box minutes those games played.
 
-    ``minutes`` is the box score's window minutes, in game minutes (about 48
-    per game).  An absent game's ledger minutes are a team's five players'
-    minutes, so a fifth of them leaves totals and minutes on the same games.
+    ``tracking_gp`` holds each shot type's tracking games by team.  Every
+    shot type must be short by exactly the absent declared games.
+    ``minutes`` is the box score's window minutes, in game minutes like the
+    ledger's ``team_minutes``, so subtracting an absent game's leaves totals
+    and minutes on the same games.
     """
 
     boxes = {box.game.game_id: box for box in declared}
+    box_gp = {team_id: len(game_ids) for team_id, game_ids in governed.items()}
     absent = _absent_games(
-        {team_id: len(game_ids) for team_id, game_ids in governed.items()},
-        tracking_gp,
+        [(box_gp, reading) for reading in tracking_gp],
         {
             game_id: frozenset(team_id for team_id in box.game.team_ids if game_id in governed[team_id])
             for game_id, box in boxes.items()
         },
     )
+    appearances = {team_id: len(game_ids & absent) for team_id, game_ids in governed.items()}
+    _require_explained(
+        (shortfall for reading in tracking_gp for shortfall in _unexplained(box_gp, reading, appearances)),
+        absent,
+    )
     return {
         team_id: CoveredTeam(
             game_ids=game_ids - absent,
             minutes=minutes[team_id]
-            - sum(boxes[game_id].team_minutes[team_id] / 5 for game_id in game_ids & absent),
+            - sum(boxes[game_id].team_minutes[team_id] for game_id in game_ids & absent),
         )
         for team_id, game_ids in governed.items()
     }
@@ -135,40 +167,55 @@ def cover_teams(
 
 def verify_player_coverage(
     governed: Mapping[int, frozenset[str]],
+    observations: Sequence[PlayerTracking],
     *,
-    team_box_gp: Mapping[int, int],
-    box_gp: Mapping[int, int],
-    box_fga: Mapping[int, int],
-    overall_gp: Mapping[int, int],
-    category_gp: Iterable[tuple[int, int | None, int | None]],
     declared: Iterable[DeclaredGameBox],
 ) -> frozenset[str]:
     """Return the declared games absent from player tracking, or block.
 
-    The box score must cover every governed game.  Every shooter's tracking
-    Overall games, and every category record's games (beside its own box
-    games), must equal the box score's games less the absent declared games
-    the player appeared in.  A shooter who played only in absent games has no
-    tracking record at all.
+    Every observation's box score must cover every governed game.  A declared
+    game is absent only when every shooter who appeared in it is short in
+    every observation's Overall, so all categories share one absent set.
+    Every shooter's Overall games, and every category record's games beside
+    its own box games, must then equal the box score's games less the absent
+    games the player appeared in.  A shooter who played only in absent games
+    has no tracking record at all.
     """
 
-    if any(team_box_gp.get(team_id) != len(game_ids) for team_id, game_ids in governed.items()):
+    if any(
+        observation.team_box_gp.get(team_id) != len(game_ids)
+        for observation in observations
+        for team_id, game_ids in governed.items()
+    ):
         raise ShotTypeCoverageBlocked("provider_window_lagging", unexplained=(), declared_absent=frozenset())
-    shooters = {
-        player_id: box_gp.get(player_id, 0) for player_id, attempts in box_fga.items() if attempts > 0
-    }
-    participants = {box.game.game_id: box.players & shooters.keys() for box in declared}
-    absent = _absent_games(shooters, overall_gp, participants)
-    appearances = {
-        player_id: sum(player_id in participants[game_id] for game_id in absent) for player_id in shooters
-    }
-    unexplained = tuple(
-        Shortfall(player_id, (games_box or 0) - appearances.get(player_id, 0), games or 0)
-        for player_id, games_box, games in category_gp
-        if games_box is None or games != games_box - appearances.get(player_id, 0)
-    )
-    if unexplained:
-        raise ShotTypeCoverageBlocked(
-            "provider_window_lagging", unexplained=unexplained, declared_absent=absent
+    readings = [
+        (
+            {
+                player_id: observation.box_gp.get(player_id, 0)
+                for player_id, attempts in observation.box_fga.items()
+                if attempts > 0
+            },
+            observation.overall_gp,
         )
-    return absent
+        for observation in observations
+    ]
+    shooters = frozenset().union(*(shooter_gp.keys() for shooter_gp, _ in readings))
+    participants = {box.game.game_id: box.players & shooters for box in declared}
+    absent = _absent_games(readings, participants)
+    appearances = Counter(player_id for game_id in absent for player_id in participants[game_id])
+    return _require_explained(
+        [
+            *(
+                shortfall
+                for shooter_gp, overall in readings
+                for shortfall in _unexplained(shooter_gp, overall, appearances)
+            ),
+            *(
+                Shortfall(player_id, (games_box or 0) - appearances[player_id], games or 0)
+                for observation in observations
+                for player_id, games_box, games in observation.category_gp
+                if games_box is None or games != games_box - appearances[player_id]
+            ),
+        ],
+        absent,
+    )

@@ -119,6 +119,7 @@ from app.services.rebound_types_identity import rebound_identity_failures
 from app.services.serving_season import NOT_READY_REASON, readiness_rule
 from app.services.shot_type_coverage import (
     DeclaredGameBox,
+    PlayerTracking,
     Shortfall,
     ShotTypeCoverageBlocked,
     cover_teams,
@@ -1205,7 +1206,7 @@ def _compose_nba_observation_payload(
     observations = sorted(latest.values(), key=lambda row: row.observation_id)
     values: dict[int, dict[str, float]] = {team_id: {} for team_id in expected_teams}
     minutes_by_team: dict[int, float] = {}
-    tracking_by_team: dict[int, set[int]] = {team_id: set() for team_id in expected_teams}
+    tracking_by_category: dict[str, dict[int, int]] = {}
     sources: list[dict[str, str]] = []
     stat_keys = {
         "play_types": PLAY_TYPE_STATS,
@@ -1319,7 +1320,9 @@ def _compose_nba_observation_payload(
                 prior_minutes = minutes_by_team.setdefault(team_id, minutes)
                 if prior_minutes != minutes:
                     raise ValueError("publication minutes mismatch")
+            category = str(record.get("slice_key", record.get("category", ""))).strip()
             if base == "shot_types":
+                category = SHOT_TYPE_DISPLAY_TO_STORED.get(category, category)
                 # An observation from before tracking's games travelled has
                 # only the box score's.
                 tracking_games = record.get("tracking_games_played", games_played)
@@ -1329,10 +1332,7 @@ def _compose_nba_observation_payload(
                     or not float(tracking_games).is_integer()
                 ):
                     raise ValueError("publication games played mismatch")
-                tracking_by_team[team_id].add(int(tracking_games))
-            category = str(record.get("slice_key", record.get("category", ""))).strip()
-            if base == "shot_types":
-                category = SHOT_TYPE_DISPLAY_TO_STORED.get(category, category)
+                tracking_by_category.setdefault(category, {})[team_id] = int(tracking_games)
             for stat_key in stat_keys:
                 if stat_key not in record:
                     continue
@@ -1361,21 +1361,16 @@ def _compose_nba_observation_payload(
         raise ValueError("publication observation league incomplete")
     game_ids_by_team = expected_game_ids_by_team
     if base == "shot_types":
-        governed_games = {team_id: len(game_ids) for team_id, game_ids in expected_game_ids_by_team.items()}
         short_teams = {
             team_id
-            for team_id, tracked in tracking_by_team.items()
-            if any(games < governed_games[team_id] for games in tracked)
+            for tracking in tracking_by_category.values()
+            for team_id, games in tracking.items()
+            if games < len(expected_game_ids_by_team[team_id])
         }
         try:
-            # Categories collected while tracking caught up disagree.
-            if any(len(tracked) != 1 for tracked in tracking_by_team.values()):
-                raise ShotTypeCoverageBlocked(
-                    "provider_window_lagging", unexplained=(), declared_absent=frozenset()
-                )
             covered = cover_teams(
                 expected_game_ids_by_team,
-                tracking_gp={team_id: min(tracked) for team_id, tracked in tracking_by_team.items()},
+                tracking_gp=[tracking_by_category[category] for category in sorted(tracking_by_category)],
                 minutes=minutes_by_team,
                 declared=_declared_game_boxes(
                     session,
@@ -1464,15 +1459,10 @@ def _is_player_season_scope(scope: Mapping[str, Any]) -> bool:
     )
 
 
-def _assert_player_shot_types_cover_governed_games(
-    scope: Mapping[str, Any],
-    document: Mapping[str, Any],
-    *,
-    cutoff: datetime,
-    expected_game_ids_by_team: Mapping[int, frozenset[str]] | None,
-    declared: Sequence[DeclaredGameBox] = (),
-) -> None:
-    """Refuse player tracking that does not yet cover every governed game.
+def _player_shot_type_tracking(
+    scope: Mapping[str, Any], document: Mapping[str, Any], *, cutoff: datetime
+) -> PlayerTracking:
+    """Read the games by which player tracking proves it covers the governed games.
 
     NBA player tracking can trail the box score by game-days while still
     answering, and its only tell is a smaller games played.  The observation
@@ -1485,12 +1475,10 @@ def _assert_player_shot_types_cover_governed_games(
     types has an Overall record and no category record, and is legitimately
     absent from the Diet (crf04/statsplus#386).
 
-    Games declared untracked are subtracted from the players who appeared in
-    them when tracking has none of the game (``shot_type_coverage``).
+    ``shot_type_coverage`` reconciles every category's games at once, net of
+    the declared untracked games that are absent from tracking.
     """
 
-    if not expected_game_ids_by_team:
-        raise ValueError("publication governance is incomplete")
     endpoint_window = scope.get("endpoint_window")
     team_games = document.get("team_games_played")
     box_attempts = document.get("box_field_goal_attempts")
@@ -1509,33 +1497,31 @@ def _assert_player_shot_types_cover_governed_games(
     if not all(isinstance(record, Mapping) for record in records):
         raise ValueError("publication observation row malformed")
     try:
-        verify_player_coverage(
-            expected_game_ids_by_team,
+        return PlayerTracking(
             team_box_gp={int(team_id): games for team_id, games in team_games.items()},
             box_gp={int(player_id): games for player_id, games in box_games.items()},
             box_fga={int(player_id): attempts for player_id, attempts in box_attempts.items()},
             overall_gp={int(player_id): games for player_id, games in tracking_games.items()},
-            category_gp=[
+            category_gp=tuple(
                 (int(record["player_id"]), record.get("box_games_played"), record.get("games_played"))
                 for record in records
-            ],
-            declared=declared,
+            ),
         )
-    except ShotTypeCoverageBlocked:
-        raise
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError("publication observation value invalid") from error
 
 
-def _short_player_team_ids(session: Session, *, season: str, document: Mapping[str, Any]) -> set[int]:
+def _short_player_team_ids(
+    session: Session, *, season: str, observations: Sequence[PlayerTracking]
+) -> set[int]:
     """The ledger teams of every shooter whose tracking trails the box score."""
 
-    box_games = document.get("box_games_played") or {}
-    tracking_games = document.get("tracking_games_played") or {}
     short = {
-        int(player_id)
-        for player_id, attempts in (document.get("box_field_goal_attempts") or {}).items()
-        if attempts > 0 and (tracking_games.get(player_id) or 0) < (box_games.get(player_id) or 0)
+        player_id
+        for observation in observations
+        for player_id, attempts in observation.box_fga.items()
+        if attempts > 0
+        and (observation.overall_gp.get(player_id) or 0) < (observation.box_gp.get(player_id) or 0)
     }
     if not short:
         return set()
@@ -1644,7 +1630,9 @@ def _compose_player_diet_observation_payload(
     observed_categories: set[str] = set()
     facts: dict[tuple[int, str], dict[str, Any]] = {}
     sources: list[dict[str, str]] = []
-    declared: tuple[DeclaredGameBox, ...] | None = None
+    tracking: list[PlayerTracking] = []
+    if not expected_game_ids_by_team:
+        raise ValueError("publication governance is incomplete")
     for observation in sorted(latest.values(), key=lambda row: row.observation_id):
         if (
             observation.manifest_id != manifest_id
@@ -1667,37 +1655,9 @@ def _compose_player_diet_observation_payload(
         records = document.get("records")
         if not isinstance(records, list):
             raise ValueError("publication observation rows missing")
-        if declared is None:
-            declared = (
-                _declared_game_boxes(
-                    session,
-                    stream_key=stream_key,
-                    season=season,
-                    cutoff=cutoff,
-                    governed=expected_game_ids_by_team,
-                )
-                if expected_game_ids_by_team
-                else ()
-            )
-        try:
-            _assert_player_shot_types_cover_governed_games(
-                _safe_json_mapping(observation.scope),
-                document,
-                cutoff=cutoff,
-                expected_game_ids_by_team=expected_game_ids_by_team,
-                declared=declared,
-            )
-        except ShotTypeCoverageBlocked as blocked:
-            _log_shot_type_coverage_blocked(
-                stream_key=stream_key,
-                season=season,
-                cutoff=cutoff,
-                governed=expected_game_ids_by_team or {},
-                short_teams=_short_player_team_ids(session, season=season, document=document),
-                unexplained=blocked.unexplained,
-                declared_absent=blocked.declared_absent,
-            )
-            raise _ProviderWindowUnavailable(blocked.reason) from blocked
+        tracking.append(
+            _player_shot_type_tracking(_safe_json_mapping(observation.scope), document, cutoff=cutoff)
+        )
         sources.append(
             {
                 "observation_id": observation.observation_id,
@@ -1746,6 +1706,31 @@ def _compose_player_diet_observation_payload(
                 "provider": "nba_stats",
                 "shooting": shooting,
             }
+    try:
+        verify_player_coverage(
+            expected_game_ids_by_team,
+            tracking,
+            declared=_declared_game_boxes(
+                session,
+                stream_key=stream_key,
+                season=season,
+                cutoff=cutoff,
+                governed=expected_game_ids_by_team,
+            ),
+        )
+    except ShotTypeCoverageBlocked as blocked:
+        _log_shot_type_coverage_blocked(
+            stream_key=stream_key,
+            season=season,
+            cutoff=cutoff,
+            governed=expected_game_ids_by_team,
+            short_teams=_short_player_team_ids(session, season=season, observations=tracking),
+            unexplained=blocked.unexplained,
+            declared_absent=blocked.declared_absent,
+        )
+        raise _ProviderWindowUnavailable(blocked.reason) from blocked
+    except TypeError as error:
+        raise ValueError("publication observation value invalid") from error
     if not facts:
         raise ValueError("publication observation rows missing")
     if observed_categories != expected_slices:

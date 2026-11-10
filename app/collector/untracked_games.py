@@ -5,6 +5,11 @@ streams refuse to publish until it catches up.  A game tracking never
 reaches would hold them back forever, and no aggregate can tell "never" from
 "not yet", so such a game is declared here, with the evidence, in a reviewed
 change.  Only the shot-type streams read this list.
+
+Never remove an entry.  Past publications that omitted the game are
+validated against it, and a publication row does not record what it
+omitted.  A restored game is counted as present, so keeping its entry costs
+nothing.
 """
 
 from __future__ import annotations
