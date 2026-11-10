@@ -1364,15 +1364,30 @@ def rotation_world(world, tmp_path):
     return world
 
 
-def _split(without, played, change, *, insufficient=False, seasons="2026-27", missing=0):
+def _sides(without, played, change, insufficient):
     keys = ("games", "played", "starts", "minutes", "minutes_per_game_played", "closed")
     return {
         "without": dict(zip(keys, without, strict=True)),
         "with": dict(zip(keys, played, strict=True)),
         "minutes_change": change,
         "insufficient": insufficient,
+    }
+
+
+def _season(season, without, played, change, *, insufficient=False, missing=0):
+    return {"season": season, **_sides(without, played, change, insufficient), "missing_games": missing}
+
+
+def _split(without, played, change, *, insufficient=False, seasons="2026-27", missing=0, by_season=None):
+    """A pooled rotation split; ``by_season`` defaults to the one season it covers, with no missing games."""
+
+    return {
+        **_sides(without, played, change, insufficient),
         "seasons": seasons,
         "missing_games": missing,
+        "by_season": [_season(seasons, without, played, change, insufficient=insufficient)]
+        if by_season is None
+        else by_season,
     }
 
 
@@ -1406,14 +1421,28 @@ def test_a_teammate_with_no_stored_rotation_has_a_null_rotation(client, authenti
     tatum = _scenario(_scenarios(client, authenticate), TATUM)
 
     assert _row(tatum, "sits", BROWN, "PTS")["rotation"] is None
-    assert tatum["rotation_starts"] == {"starts": 0, "games": 0}
+    assert tatum["rotation_starts"] == {
+        "starts": 0,
+        "games": 0,
+        "by_season": [
+            {"season": "2026-27", "starts": 0, "games": 0},
+            {"season": "2025-26", "starts": 0, "games": 0},
+        ],
+    }
     assert tatum["replacement_starters"] == [] and tatum["minutes_jumps"] == []
 
 
 def test_rotation_starts_counts_the_injured_players_own_with_games(client, authenticate, rotation_world):
     scenario = _scenario(_scenarios(client, authenticate), LEBRON)
 
-    assert scenario["rotation_starts"] == {"starts": 4, "games": 5}
+    assert scenario["rotation_starts"] == {
+        "starts": 4,
+        "games": 5,
+        "by_season": [
+            {"season": "2026-27", "starts": 4, "games": 5},
+            {"season": "2025-26", "starts": 0, "games": 0},
+        ],
+    }
 
 
 def test_replacement_starters_need_a_sufficient_higher_start_rate_ordered_by_starts(
@@ -1430,6 +1459,15 @@ def test_replacement_starters_need_a_sufficient_higher_start_rate_ordered_by_sta
             "games_without": 3,
             "starts_with": 2,
             "games_with": 5,
+            "by_season": [
+                {
+                    "season": "2026-27",
+                    "starts_without": 3,
+                    "games_without": 3,
+                    "starts_with": 2,
+                    "games_with": 5,
+                }
+            ],
         },
         {
             "name": "Bench Reserve",
@@ -1437,6 +1475,15 @@ def test_replacement_starters_need_a_sufficient_higher_start_rate_ordered_by_sta
             "games_without": 3,
             "starts_with": 0,
             "games_with": 5,
+            "by_season": [
+                {
+                    "season": "2026-27",
+                    "starts_without": 2,
+                    "games_without": 3,
+                    "starts_with": 0,
+                    "games_with": 5,
+                }
+            ],
         },
         {
             "name": "Jaxson Hayes",
@@ -1444,6 +1491,15 @@ def test_replacement_starters_need_a_sufficient_higher_start_rate_ordered_by_sta
             "games_without": 3,
             "starts_with": 0,
             "games_with": 5,
+            "by_season": [
+                {
+                    "season": "2026-27",
+                    "starts_without": 2,
+                    "games_without": 3,
+                    "starts_with": 0,
+                    "games_with": 5,
+                }
+            ],
         },
     ]
 
@@ -1569,14 +1625,22 @@ def two_seasons(rotation_world):
     return rotation_world
 
 
-def test_rotation_splits_combine_both_seasons_with_a_span(client, authenticate, two_seasons):
+def test_rotation_splits_pool_both_seasons_and_keep_each_one(client, authenticate, two_seasons):
     scenario = _scenario(_scenarios(client, authenticate), LEBRON)
 
     # Reaves without: 2026-27 g6-g8 (3 x 34.0, 3 starts, 2 closed) + 2025-26
     # h3-h6 (4 x 36.0, 2 starts) = 7 games, 246 / 7 = 35.1 minutes.  With: g1-g5
     # (5 x 30.0, 1 closed) + h1-h2 (2 x 30.0) = 7 games, 30.0 minutes.
     assert _row(scenario, "sits", REAVES, "PTS")["rotation"] == _split(
-        (7, 7, 5, 35.1, 35.1, 2), (7, 7, 7, 30.0, 30.0, 1), 5.1, seasons="2025-26 to 2026-27", missing=0
+        (7, 7, 5, 35.1, 35.1, 2),
+        (7, 7, 7, 30.0, 30.0, 1),
+        5.1,
+        seasons="2025-26 to 2026-27",
+        missing=0,
+        by_season=[
+            _season("2026-27", (3, 3, 3, 34.0, 34.0, 2), (5, 5, 5, 30.0, 30.0, 1), 4.0),
+            _season("2025-26", (4, 4, 2, 36.0, 36.0, 0), (2, 2, 2, 30.0, 30.0, 0), 6.0),
+        ],
     )
 
 
@@ -1593,13 +1657,14 @@ def test_replacement_starters_compare_start_rates_not_counts(client, authenticat
 
     # Rate Guard starts 2 of 3 without him (0.67) but 3 of 5 with him (0.60):
     # more with him in count terms (3 > 2), yet a higher rate without.
-    assert {
+    (rate,) = [entry for entry in scenario["replacement_starters"] if entry["name"] == "Rate Guard"]
+    assert {k: v for k, v in rate.items() if k != "by_season"} == {
         "name": "Rate Guard",
         "starts_without": 2,
         "games_without": 3,
         "starts_with": 3,
         "games_with": 5,
-    } in scenario["replacement_starters"]
+    }
 
 
 def test_a_stored_game_without_the_teammates_line_is_not_a_missing_game(client, authenticate, two_seasons):
@@ -1622,7 +1687,14 @@ def test_the_injured_players_starts_count_only_after_his_own_team_change(
 
     scenario = _scenario(_scenarios(client, authenticate), LEBRON)
 
-    assert scenario["rotation_starts"] == {"starts": 4, "games": 5}
+    assert scenario["rotation_starts"] == {
+        "starts": 4,
+        "games": 5,
+        "by_season": [
+            {"season": "2026-27", "starts": 4, "games": 5},
+            {"season": "2025-26", "starts": 0, "games": 0},
+        ],
+    }
 
 
 # -- a named player's missing splits are fetched (crf04/statsplus#267) -------

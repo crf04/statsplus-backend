@@ -557,8 +557,8 @@ class InjuryScenarioService:
         seasons: Sequence[str],
         injured_logs: Mapping[str, _Logs],
         rotation_reads: _RotationReads,
-    ) -> dict[str, int]:
-        """His starts over his own with games, after his own last team change."""
+    ) -> dict[str, Any]:
+        """His starts over his own with games, after his own last team change, in all and per season."""
 
         others = [
             rows
@@ -566,15 +566,19 @@ class InjuryScenarioService:
             if rows is not None
         ]
         after = _as_date(max((rows["GAME_DATE"].max() for rows in others), default=None))
-        starts = games = 0
-        for s in seasons:
+        by_season = []
+        for s in reversed(seasons):
             lines, _, played = rotation_reads.season(s)
-            for game_id in played:
-                line = lines[game_id][rotation_reads.injured_id]
-                if after is None or line["game_date"] > after:
-                    games += 1
-                    starts += bool(line["started"])
-        return {"starts": starts, "games": games}
+            mine = [lines[game_id][rotation_reads.injured_id] for game_id in played]
+            counted = [line for line in mine if after is None or line["game_date"] > after]
+            by_season.append(
+                {"season": s, "starts": sum(bool(line["started"]) for line in counted), "games": len(counted)}
+            )
+        return {
+            "starts": sum(entry["starts"] for entry in by_season),
+            "games": sum(entry["games"] for entry in by_season),
+            "by_season": by_season,
+        }
 
     def _teammate(
         self,
@@ -640,15 +644,21 @@ class InjuryScenarioService:
         after: Any,
         rotation_reads: _RotationReads,
     ) -> dict[str, Any] | None:
-        """His stored rotation split with the injured player absent, over the pair window."""
+        """His stored rotation split with the injured player absent, over the pair window.
+
+        ``by_season`` holds the split of each season that supplied games, the
+        Slate season (the newest) first.
+        """
 
         without_lines: list[Mapping[str, Any]] = []
         with_lines: list[Mapping[str, Any]] = []
         contributing: list[str] = []
+        by_season: list[dict[str, Any]] = []
         missing = 0
         for w in window:
             lines, without_ids, with_ids = rotation_reads.season(w.season)
-            missing += sum(1 for game_id in w.without if game_id not in lines)
+            season_missing = sum(1 for game_id in w.without if game_id not in lines)
+            missing += season_missing
             mine = (
                 [lines[g][teammate_id] for g in ids if teammate_id in lines[g]]
                 for ids in (without_ids, with_ids)
@@ -658,6 +668,14 @@ class InjuryScenarioService:
             )
             if season_without or season_with:
                 contributing.append(w.season)
+                by_season.insert(
+                    0,
+                    {
+                        "season": w.season,
+                        **rotation_split(season_without, season_with),
+                        "missing_games": season_missing,
+                    },
+                )
             without_lines += season_without
             with_lines += season_with
         if not without_lines and not with_lines:
@@ -666,6 +684,7 @@ class InjuryScenarioService:
             **rotation_split(without_lines, with_lines),
             "seasons": _season_span(contributing),
             "missing_games": missing,
+            "by_season": by_season,
         }
 
     # -- reads ---------------------------------------------------------------
@@ -760,6 +779,16 @@ def _replacement_starters(teammates: Sequence[_Teammate]) -> list[dict[str, Any]
                 "games_without": without["games"],
                 "starts_with": played["starts"],
                 "games_with": played["games"],
+                "by_season": [
+                    {
+                        "season": entry["season"],
+                        "starts_without": entry["without"]["starts"],
+                        "games_without": entry["without"]["games"],
+                        "starts_with": entry["with"]["starts"],
+                        "games_with": entry["with"]["games"],
+                    }
+                    for entry in split["by_season"]
+                ],
             }
         )
     found.sort(key=lambda entry: (-entry["starts_without"], entry["name"]))
