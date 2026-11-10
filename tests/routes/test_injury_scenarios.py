@@ -1045,6 +1045,23 @@ def test_a_game_before_the_injured_player_joined_is_on_neither_side(client, auth
     assert pts["pair_window"] == {"from": "2026-10-25", "excluded_games": 6}
 
 
+def test_games_before_the_injured_players_debut_count_without_him_when_the_catalog_places_him_on_the_team(
+    client, authenticate, world
+):
+    # Ingram's shape (crf04/statsplus-backend#759): with BOS last season, on
+    # LAL since and out all season, so every LAL game this season is without him.
+    for row in world.logs.rows[(LEBRON, PRIOR)]:
+        row["TEAM_ABBREVIATION"] = "BOS"
+    del world.logs.rows[(LEBRON, CURRENT)]
+
+    pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
+
+    assert pts["without"] == {"avg": 21.88, "games": 8, "season_span": "2026-27"}
+    assert pts["baseline"]["games"] == 0
+    # Only last season's h1-h4, before his team change, are left out.
+    assert pts["pair_window"] == {"from": "2026-10-21", "excluded_games": 4}
+
+
 def _mates(client, authenticate):
     scenario = _scenario(_scenarios(client, authenticate), LEBRON)
     return {r["player_id"] for r in scenario["branches"][1]["rows"]}

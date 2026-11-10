@@ -678,6 +678,70 @@ def test_players_off_counts_games_an_inactive_teammate_missed_as_without(service
     assert result["GAME_ID"].tolist() == ["m3", "m4", "m5"]
 
 
+def test_players_off_counts_games_before_a_named_players_season_debut_as_without(service, monkeypatch):
+    # Hart's missed opener (crf04/statsplus#450): his first game this season is
+    # for NYK, so the window opens at NYK's first game.
+    brunson = _logs(*((f"n{n}", f"2026-10-{20 + 2 * n}", "NYK") for n in range(1, 5)))
+    hart = brunson[brunson["GAME_ID"].isin(["n3", "n4"])]
+    _stub_game_logs(service, monkeypatch, {"Josh Hart": hart})
+
+    result = run(service.filter_players_on_off(brunson, [], ["Josh Hart"], "2026-27"))
+
+    assert result["GAME_ID"].tolist() == ["n1", "n2"]
+
+
+def _rostered_service(game_engine, monkeypatch, team_id):
+    """A GameService whose 2026-27 catalog lists Brandon Ingram on ``team_id``."""
+    from app.services import game_service as game_service_module
+
+    monkeypatch.setattr(game_service_module, "get_redis_client", lambda *args, **kwargs: None)
+    catalog = _StubAthleteCatalog(
+        "2026-27",
+        [
+            {
+                "player_id": 1627742,
+                "display_name": "Brandon Ingram",
+                "team_id": team_id,
+                "is_active_for_season": True,
+            }
+        ],
+    )
+    return game_service_module.GameService(
+        game_engine,
+        team_filter_rankings=_StubRankings(["GSW", "LAL", "BOS"]),
+        athlete_catalog=catalog,
+    )
+
+
+_NO_GAMES = pd.DataFrame(columns=["GAME_ID", "GAME_DATE", "TEAM_ABBREVIATION", "MIN"])
+_LAC_GAMES = _logs(*((f"c{n}", f"2026-11-{n:02d}", "LAC") for n in range(1, 10)))
+
+
+def test_players_off_counts_every_team_game_without_a_player_the_catalog_places_on_the_team(
+    game_engine, monkeypatch
+):
+    # Ingram, out all season for LAC (crf04/statsplus-backend#759): no game,
+    # but the Athlete Catalog lists him on LAC, so all 9 LAC games are without.
+    service = _rostered_service(game_engine, monkeypatch, 1610612746)
+    _stub_game_logs(service, monkeypatch, {"Brandon Ingram": _NO_GAMES})
+
+    result = run(service.filter_players_on_off(_LAC_GAMES, [], ["Brandon Ingram"], "2026-27"))
+
+    assert result["GAME_ID"].tolist() == [f"c{n}" for n in range(1, 10)]
+
+
+@pytest.mark.parametrize("team_id", [1610612738, None])
+def test_players_off_counts_no_game_without_a_player_with_no_game_the_catalog_does_not_place_on_the_team(
+    game_engine, monkeypatch, team_id
+):
+    service = _rostered_service(game_engine, monkeypatch, team_id)
+    _stub_game_logs(service, monkeypatch, {"Brandon Ingram": _NO_GAMES})
+
+    result = run(service.filter_players_on_off(_LAC_GAMES, [], ["Brandon Ingram"], "2026-27"))
+
+    assert result["GAME_ID"].tolist() == []
+
+
 # --- team ranking ----------------------------------------------------------
 
 
