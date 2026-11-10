@@ -3625,7 +3625,7 @@ The backend computes every average and recent-versus-season comparison.
 | `player_team` | No | Tricode; only with `player_name`, keeps only the namesake on that current catalog team |
 | `team` | One selector | Tricode; the team view |
 | `game_id` | One selector | The 10-digit NBA game id the Slate returns (for example `0022501171`); the game view. Rejects `last_n` and `season` |
-| `last_n` | No | Whole number 1-20, default 5. Counts the player's games on his current team's box scores |
+| `last_n` | No | Whole number 1-20, default 5. Counts his current team's games inside his team window |
 | `season` | No | `YYYY-YY`. Default: the current season, or the latest season with rotation data when the current one has none |
 | `without` | No | Repeatable (crf04/statsplus#239). A player name; with `player_name` or `team`, switches to the [without split](#rotation-without-a-player). Rejected with `game_id` and with `last_n` |
 
@@ -3639,11 +3639,17 @@ rotation data in the season (after any `player_team`) is also
 as in the Unscheduled Matchup; namesakes without rotation data never make a
 name ambiguous.
 
-*Recent* is the player's last `last_n` stored regular-season games for his
-current team (the team of his latest stored game) whose box score lists him.
-A game he sat out (DNP or box-score inactive) is a 0-minute game; a team game he
-is not listed for, such as one before a trade, is not counted. *Season*
-is all of the player's own stored games in the season (every team he played for).
+A player's *team window* for a team runs from his first stored game for it in
+the season until his first later game for another team, open-ended if he never
+moves (crf04/statsplus#449). *Recent* is the last `last_n` stored
+regular-season games of his current team (the team of his latest stored game)
+inside his window there; *Season* is every stored game of each team he played
+for inside his window for it (crf04/statsplus#483). A team game in the window
+counts whether or not its box score lists him: a DNP or box-score inactive line
+is a 0-minute game, and a game with no line for him (2026-27 LiveData box
+scores list only active players) is a *missed* game, also 0 minutes. A game
+before his first game for the team, such as one before a trade, is outside his
+window and left out.
 In the team view each player's `recent` is the same rule applied to that team,
 while `games` lists the team's own last `last_n` games. *Played* is minutes above 0, *started* is the box-score starter
 flag, and *closed* is on court at the end of the fourth period. Minutes are
@@ -3663,17 +3669,20 @@ Player view:
              "minutes_by_period": {"Q1": 7.0, "Q2": 5.9, "Q3": 7.2, "Q4": 7.8, "OT": 0.0}},
   "games": [
     {"game_date": "2026-04-12", "matchup": "DET @ CHA", "started": true, "minutes": 33.1, "closed": true,
-     "minutes_by_period": {"Q1": 9.4, "Q2": 5.0, "Q3": 9.6, "Q4": 9.1, "OT": 0.0},
+     "on_box_score": true, "minutes_by_period": {"Q1": 9.4, "Q2": 5.0, "Q3": 9.6, "Q4": 9.1, "OT": 0.0},
      "stints": [{"in": {"period": 1, "clock": "12:00"}, "out": {"period": 1, "clock": "2:36"}, "minutes": 9.4}]}
   ]
 }
 ```
 
-`games` lists the `recent` games newest first, DNPs included (`minutes: 0.0`,
-`stints: []`, `started: false`). `matchup` is `TEAM @ HOME` for an away game and
-`TEAM vs. AWAY` for a home game. `minutes`, `stints` and `minutes_by_period` in
-the summaries are per-game averages over all the games counted (DNPs as 0);
-`played`, `starts` and `closed` are counts. A stint that continues across a
+`games` lists the `recent` games newest first, DNPs and missed games included
+(`minutes: 0.0`, `stints: []`, `started: false`). Each game's `on_box_score` is
+`false` for a missed game (no box-score line for him) and `true` otherwise.
+`matchup` is `TEAM @ HOME` for an away game and `TEAM vs. AWAY` for a home
+game. In the summaries `games` is the team games counted, `played` the games he
+played, and `starts` and `closed` are counts; `minutes`, `stints` and
+`minutes_by_period` are averages over the games he played (`null` when he
+played none). A stint that continues across a
 period break is one stint (`out` in a later period than `in`); a change made at
 the start of a period ends the earlier stint at the end of the previous period.
 
@@ -3693,11 +3702,14 @@ Team view:
 ```
 
 `players` is everyone on the team's box score (active, DNP or inactive) in at
-least one of the team's last `last_n` games, so players who left earlier drop
-out, sorted by
-`abs(minutes_change)` descending and then by name. `minutes_change` is
-`recent.minutes - season_summary.minutes` computed from the unrounded averages,
-then rounded to one decimal. `starters` are sorted by name.
+least one of the team's last `last_n` games, plus each player the season's
+Athlete Catalog lists on the team who has a stored game for it and missed all of
+them inside his window (`recent.played: 0`). Players who left earlier drop out.
+They are sorted by `abs(minutes_change)` descending, then by name, with a `null`
+`minutes_change` last. `minutes_change` is `recent.minutes -
+season_summary.minutes` (both per game played) computed from the unrounded
+averages, then rounded to one decimal; `null` when either side has no game
+played. `starters` are sorted by name.
 
 Game view (crf04/statsplus#233): every box-score player of one stored game, both
 teams, with the stints the player view returns.

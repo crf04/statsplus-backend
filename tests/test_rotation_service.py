@@ -207,7 +207,7 @@ def _detroit_world(tmp_path):
     return service_for(repository, catalog), repository
 
 
-def test_player_view_counts_a_missed_game_as_zero_minutes_and_compares_with_the_season(tmp_path):
+def test_player_view_averages_minutes_over_games_played_and_compares_with_the_season(tmp_path):
     service, _ = _detroit_world(tmp_path)
 
     document = service.get_player_rotation(
@@ -217,25 +217,25 @@ def test_player_view_counts_a_missed_game_as_zero_minutes_and_compares_with_the_
     assert document["season"] == "2025-26"
     assert document["last_n"] == 3
     assert document["player"] == {"name": "Ausar Thompson", "team": "DET"}
-    # Recent: 04-12, 04-10, 04-08 (a 0-minute game).  Minutes (33+30+0)/3 = 21.0.
+    # Recent: 04-12, 04-10, 04-08 (a 0-minute game).  Minutes (33+30)/2 played = 31.5.
     assert document["recent"] == {
         "games": 3,
         "played": 2,
         "starts": 2,
-        "minutes": 21.0,
-        "stints": 2.7,
+        "minutes": 31.5,
+        "stints": 4.0,
         "closed": 1,
-        "minutes_by_period": {"Q1": 5.7, "Q2": 4.3, "Q3": 5.7, "Q4": 5.3, "OT": 0.0},
+        "minutes_by_period": {"Q1": 8.5, "Q2": 6.5, "Q3": 8.5, "Q4": 8.0, "OT": 0.0},
     }
-    # Season: his own four box-score lines, (33+30+0+18)/4 = 20.25, rounded half up.
+    # Season: DET's five games from his first (01-05), 04-05 missed; (33+30+18)/3 played = 27.0.
     assert document["season_summary"] == {
-        "games": 4,
+        "games": 5,
         "played": 3,
         "starts": 3,
-        "minutes": 20.3,
-        "stints": 2.3,
+        "minutes": 27.0,
+        "stints": 3.0,
         "closed": 2,
-        "minutes_by_period": {"Q1": 5.5, "Q2": 4.3, "Q3": 5.5, "Q4": 5.0, "OT": 0.0},
+        "minutes_by_period": {"Q1": 7.3, "Q2": 5.7, "Q3": 7.3, "Q4": 6.7, "OT": 0.0},
     }
 
 
@@ -252,6 +252,7 @@ def test_player_view_lists_recent_games_newest_first_with_stints_and_matchups(tm
         "started": True,
         "minutes": 33.0,
         "closed": True,
+        "on_box_score": True,
         "minutes_by_period": {"Q1": 9.0, "Q2": 6.0, "Q3": 9.0, "Q4": 9.0, "OT": 0.0},
         "stints": [
             {"in": {"period": 1, "clock": "12:00"}, "out": {"period": 1, "clock": "3:00"}, "minutes": 9.0},
@@ -271,31 +272,30 @@ def test_player_view_lists_recent_games_newest_first_with_stints_and_matchups(tm
         "started": False,
         "minutes": 0.0,
         "closed": False,
+        "on_box_score": True,
         "minutes_by_period": {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0, "OT": 0.0},
         "stints": [],
     }
 
 
-def test_a_team_game_without_the_player_on_its_box_score_is_not_his_game(tmp_path):
+def test_a_team_game_inside_his_window_without_his_line_is_a_missed_game(tmp_path):
     service, _ = _detroit_world(tmp_path)
 
     document = service.get_player_rotation(
         player_name="Ausar Thompson", player_team=None, last_n=4, season=None
     )
 
-    # DET's 04-05 game has no Ausar line, so it is skipped rather than counted
-    # as 0 minutes; his inactive/DNP 04-08 line still is a 0-minute game.
-    assert [g["game_date"] for g in document["games"]] == [
-        "2026-04-12",
-        "2026-04-10",
-        "2026-04-08",
-        "2026-01-05",
+    # DET's 04-05 game has no Ausar line: a missed game, beside his 0-minute 04-08 line.
+    assert [(g["game_date"], g["minutes"], g["on_box_score"]) for g in document["games"]] == [
+        ("2026-04-12", 33.0, True),
+        ("2026-04-10", 30.0, True),
+        ("2026-04-08", 0.0, True),
+        ("2026-04-05", 0.0, False),
     ]
-    assert [g["minutes"] for g in document["games"]] == [33.0, 30.0, 0.0, 18.0]
     assert document["recent"]["games"] == 4
-    assert document["recent"]["starts"] == 3
-    assert document["recent"]["played"] == 3
-    assert document["recent"]["minutes"] == 20.3
+    assert document["recent"]["starts"] == 2
+    assert document["recent"]["played"] == 2
+    assert document["recent"]["minutes"] == 31.5
 
 
 def test_last_n_defaults_are_the_callers_and_a_long_window_stops_at_stored_games(tmp_path):
@@ -330,16 +330,16 @@ def test_team_view_ranks_players_by_how_far_their_minutes_moved(tmp_path):
     ]
     assert document["players"] == [
         {
+            "name": "Ausar Thompson",
+            "recent": {"games": 3, "played": 2, "starts": 2, "minutes": 31.5, "closed": 1},
+            "season_summary": {"games": 5, "played": 3, "starts": 3, "minutes": 27.0, "closed": 2},
+            "minutes_change": 4.5,
+        },
+        {
             "name": "Isaiah Stewart",
             "recent": {"games": 3, "played": 3, "starts": 0, "minutes": 15.0, "closed": 0},
             "season_summary": {"games": 5, "played": 5, "starts": 0, "minutes": 12.0, "closed": 0},
             "minutes_change": 3.0,
-        },
-        {
-            "name": "Ausar Thompson",
-            "recent": {"games": 3, "played": 2, "starts": 2, "minutes": 21.0, "closed": 1},
-            "season_summary": {"games": 4, "played": 3, "starts": 3, "minutes": 20.3, "closed": 2},
-            "minutes_change": 0.8,
         },
         {
             "name": "Cade Cunningham",
@@ -568,3 +568,152 @@ def test_team_view_drops_players_who_left_before_the_recent_games(tmp_path):
 
     assert [p["name"] for p in document["players"]] == ["Stayer", "Inactive Ian"]
     assert sorted(p["name"] for p in wider["players"]) == ["Departed", "Inactive Ian", "Stayer"]
+
+
+# -- team games he missed (crf04/statsplus#483) ------------------------------
+#
+# 2026-27 LiveData box scores list only active players, so a game he missed
+# has no line.  PHI's games, newest first; Bona's minutes, ``-`` for no line.
+#
+#   11-08 -   11-06 -   11-04 24   11-02 20   10-31 28   10-29 0 (2025-26-style
+#   inactive line)   10-27 -   10-25 - (both before his first PHI game)
+
+BONA, MAXEY, GONE = 1641737, 1630178, 1630999
+CURRENT = "2026-27"
+
+
+def _phi_world(tmp_path, catalog=None):
+    repository = migrated_repository(tmp_path)
+    dates = ("11-08", "11-06", "11-04", "11-02", "10-31", "10-29", "10-27", "10-25")
+    bona = {"11-04": 24, "11-02": 20, "10-31": 28, "10-29": 0}
+    gone = {"10-25": 15, "10-27": 14, "10-29": 16}
+    store(
+        repository,
+        *(
+            game(
+                f"00226001{n:02d}",
+                f"2026-{day}",
+                "PHI",
+                "BOS",
+                [
+                    line(MAXEY, "Tyrese Maxey", "PHI", minutes=36, started=True),
+                    *([line(BONA, "Adem Bona", "PHI", minutes=bona[day])] if day in bona else []),
+                    *([line(GONE, "Gone Gary", "PHI", minutes=gone[day])] if day in gone else []),
+                ],
+            )
+            for n, day in enumerate(dates)
+        ),
+        game(
+            "0022600200",
+            "2026-11-01",
+            "NYK",
+            "MIA",
+            [line(GONE, "Gone Gary", "NYK", minutes=22, started=True)],
+        ),
+        season=CURRENT,
+    )
+    catalog = catalog or Catalog(
+        (BONA, "Adem Bona", "PHI"),
+        (MAXEY, "Tyrese Maxey", "PHI"),
+        (GONE, "Gone Gary", "NYK"),
+    )
+    return service_for(repository, catalog, default_season=CURRENT)
+
+
+def test_recent_counts_the_team_games_he_missed_and_averages_minutes_over_games_played(tmp_path):
+    service = _phi_world(tmp_path)
+
+    document = service.get_player_rotation(player_name="Adem Bona", player_team=None, last_n=5, season=None)
+
+    assert [(g["game_date"], g["minutes"], g["on_box_score"]) for g in document["games"]] == [
+        ("2026-11-08", 0.0, False),
+        ("2026-11-06", 0.0, False),
+        ("2026-11-04", 24.0, True),
+        ("2026-11-02", 20.0, True),
+        ("2026-10-31", 28.0, True),
+    ]
+    assert document["games"][0] == {
+        "game_date": "2026-11-08",
+        "matchup": "PHI vs. BOS",
+        "started": False,
+        "minutes": 0.0,
+        "closed": False,
+        "on_box_score": False,
+        "minutes_by_period": {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0, "OT": 0.0},
+        "stints": [],
+    }
+    # (24 + 20 + 28) / 3 played, not / 5.
+    assert document["recent"] == {
+        "games": 5,
+        "played": 3,
+        "starts": 0,
+        "minutes": 24.0,
+        "stints": 0.0,
+        "closed": 0,
+        "minutes_by_period": {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0, "OT": 0.0},
+    }
+
+
+def test_season_counts_team_games_inside_his_window_and_an_inactive_line_once(tmp_path):
+    service = _phi_world(tmp_path)
+
+    document = service.get_player_rotation(player_name="Adem Bona", player_team=None, last_n=5, season=None)
+
+    # 10-29 (his 0-minute line) through 11-08: six team games, three played.
+    # 10-27 and 10-25 are before his first PHI game, outside his window.
+    assert (document["season_summary"]["games"], document["season_summary"]["played"]) == (6, 3)
+    assert document["season_summary"]["minutes"] == 24.0
+
+
+def test_games_after_a_move_to_another_team_are_not_counted_for_the_old_team(tmp_path):
+    service = _phi_world(tmp_path)
+
+    document = service.get_player_rotation(player_name="Gone Gary", player_team=None, last_n=5, season=None)
+
+    # His PHI window closes at his first NYK game (11-01); PHI's later games are not his.
+    assert document["player"] == {"name": "Gone Gary", "team": "NYK"}
+    assert (document["recent"]["games"], document["recent"]["played"]) == (1, 1)
+    assert (document["season_summary"]["games"], document["season_summary"]["played"]) == (5, 4)
+    assert document["season_summary"]["minutes"] == 16.8
+
+
+def test_team_view_counts_missed_games_and_keeps_a_player_who_missed_them_all(tmp_path):
+    service = _phi_world(tmp_path)
+
+    document = service.get_team_rotation(team="PHI", last_n=2, season=None)
+
+    by_name = {player["name"]: player for player in document["players"]}
+    assert sorted(by_name) == ["Adem Bona", "Tyrese Maxey"]
+    assert by_name["Adem Bona"]["recent"] == {
+        "games": 2,
+        "played": 0,
+        "starts": 0,
+        "minutes": None,
+        "closed": 0,
+    }
+    assert by_name["Adem Bona"]["minutes_change"] is None
+    wider = {p["name"]: p for p in service.get_team_rotation(team="PHI", last_n=5, season=None)["players"]}
+    assert wider["Adem Bona"]["recent"] == {
+        "games": 5,
+        "played": 3,
+        "starts": 0,
+        "minutes": 24.0,
+        "closed": 0,
+    }
+    assert wider["Adem Bona"]["season_summary"] == {
+        "games": 6,
+        "played": 3,
+        "starts": 0,
+        "minutes": 24.0,
+        "closed": 0,
+    }
+    assert wider["Adem Bona"]["minutes_change"] == 0.0
+
+
+def test_team_view_leaves_out_a_player_the_catalog_no_longer_lists_on_the_team(tmp_path):
+    released = Catalog((BONA, "Adem Bona", None), (MAXEY, "Tyrese Maxey", "PHI"))
+    service = _phi_world(tmp_path, catalog=released)
+
+    document = service.get_team_rotation(team="PHI", last_n=2, season=None)
+
+    assert [player["name"] for player in document["players"]] == ["Tyrese Maxey"]

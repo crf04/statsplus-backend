@@ -5,12 +5,13 @@ recently, from the stored LiveData rotations.  Every average, count and
 recent-versus-season comparison is computed here; the MCP only trims and
 relabels.
 
-*Recent* is the player's last ``last_n`` stored regular-season games for his
-current team whose box score lists him, so a game he sat out (DNP or inactive)
-counts as 0 minutes but a team game he is not listed for does not count.  *Season*
-is all of the player's own stored games in the season, on any team.  Averages
-are exact fractions of the stored centiseconds, rounded half-up to one decimal
-only for display.
+*Recent* is his current team's last ``last_n`` stored regular-season games
+inside his team window (crf04/statsplus#449, #483), and *Season* is every team
+game inside his window for each team he played for.  A game he has no box-score
+line in (2026-27 box scores list only active players) is a missed game, not
+skipped.  Minutes average over the games he played.  Averages are exact
+fractions of the stored centiseconds, rounded half-up to one decimal only for
+display.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from decimal import ROUND_HALF_UP, Decimal
 from fractions import Fraction
+from functools import cache
 from typing import Any
 
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
@@ -111,6 +113,91 @@ def _summary(lines: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "closed": counts["closed"],
         "minutes_by_period": _period_minutes(lines),
     }
+
+
+def _missed(game: Mapping[str, Any], team: str) -> dict[str, Any]:
+    """A team game he has no box-score line in, as a 0-minute entry."""
+
+    return {
+        "game_id": game["game_id"],
+        "game_date": game["game_date"],
+        "home_tricode": game["home_tricode"],
+        "away_tricode": game["away_tricode"],
+        "team_tricode": team,
+        "started": False,
+        "minutes_cs": 0,
+        "closed": False,
+        "stint_count": 0,
+        "on_box_score": False,
+        **{column: 0 for column in _PERIOD_COLUMNS.values()},
+    }
+
+
+def _team_entries(
+    own_rows: Sequence[Mapping[str, Any]], team: str, team_games: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """His lines for ``team`` plus each team game inside his window he has no line in, newest first."""
+
+    window = team_window(((row["game_date"], row["team_tricode"]) for row in own_rows), team)
+    listed = {row["game_id"] for row in own_rows}
+    entries = [{**row, "on_box_score": True} for row in own_rows if row["team_tricode"] == team]
+    entries += [
+        _missed(game, team)
+        for game in team_games
+        if game["game_id"] not in listed and window is not None and window.contains(game["game_date"])
+    ]
+    return sorted(entries, key=lambda entry: (entry["game_date"], entry["game_id"]), reverse=True)
+
+
+def _played_average(entries: Sequence[Mapping[str, Any]], column: str) -> Fraction | None:
+    played = [entry for entry in entries if entry["minutes_cs"] > 0]
+    return Fraction(sum(entry[column] for entry in played), len(played)) if played else None
+
+
+def _window_counts(entries: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Team games, games played and starts and closes over ``entries``; minutes per game played."""
+
+    minutes = _played_average(entries, "minutes_cs")
+    return {
+        "games": len(entries),
+        "played": sum(1 for entry in entries if entry["minutes_cs"] > 0),
+        "starts": sum(1 for entry in entries if entry["started"]),
+        "minutes": None if minutes is None else _round1(minutes / CS_PER_MINUTE),
+        "closed": sum(1 for entry in entries if entry["closed"]),
+    }
+
+
+def _window_summary(entries: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """:func:`_window_counts` plus stints and period minutes per game played."""
+
+    stints = _played_average(entries, "stint_count")
+    periods = {key: _played_average(entries, column) for key, column in _PERIOD_COLUMNS.items()}
+    counts = _window_counts(entries)
+    return {
+        "games": counts["games"],
+        "played": counts["played"],
+        "starts": counts["starts"],
+        "minutes": counts["minutes"],
+        "stints": None if stints is None else _round1(stints),
+        "closed": counts["closed"],
+        "minutes_by_period": (
+            {key: _round1(value / CS_PER_MINUTE) for key, value in periods.items()}
+            if counts["played"]
+            else None
+        ),
+    }
+
+
+def _window_minutes_change(
+    recent: Sequence[Mapping[str, Any]], season: Sequence[Mapping[str, Any]]
+) -> float | None:
+    """Recent minus season minutes per game played, from exact values; ``None`` without a played game."""
+
+    recent_minutes = _played_average(recent, "minutes_cs")
+    season_minutes = _played_average(season, "minutes_cs")
+    if recent_minutes is None or season_minutes is None:
+        return None
+    return _round1((recent_minutes - season_minutes) / CS_PER_MINUTE)
 
 
 # -- rotation split (crf04/statsplus#239) ------------------------------------
@@ -387,14 +474,17 @@ class RotationService:
         team = own_rows[0]["team_tricode"]
         if without:
             return self._player_without(season, athlete, own_rows, team, without, game_logs)
-        recent = self._recent(own_rows, team, last_n)
-        stints = self.repository.stints(athlete.player_id, [row["game_id"] for row in recent])
+        team_games = cache(lambda tricode: self.repository.team_games(season, tricode))
+        recent = _team_entries(own_rows, team, team_games(team))[:last_n]
+        stints = self.repository.stints(
+            athlete.player_id, [row["game_id"] for row in recent if row["on_box_score"]]
+        )
         return {
             "season": season,
             "last_n": last_n,
             "player": {"name": athlete.display_name, "team": team},
-            "recent": _summary(recent),
-            "season_summary": _summary(own_rows),
+            "recent": _window_summary(recent),
+            "season_summary": _window_summary(_season_entries(own_rows, team_games)),
             "games": [
                 {
                     "game_date": game["game_date"].isoformat(),
@@ -402,6 +492,7 @@ class RotationService:
                     "started": game["started"],
                     "minutes": _minutes(game["minutes_cs"]),
                     "closed": game["closed"],
+                    "on_box_score": game["on_box_score"],
                     "minutes_by_period": _period_minutes([game]),
                     "stints": [_stint(stint) for stint in stints.get(game["game_id"], ())],
                 }
@@ -422,7 +513,8 @@ class RotationService:
         season = self._season(season)
         if without:
             return self._team_without(season, team, without, game_logs)
-        recent_games = self.repository.team_games(season, team)[:last_n]
+        team_games = cache(lambda tricode: self.repository.team_games(season, tricode))
+        recent_games = team_games(team)[:last_n]
         if not recent_games:
             raise ResourceNotFoundError(
                 "The requested team has no rotation data for the season.",
@@ -430,9 +522,12 @@ class RotationService:
             )
         team_rows = self.repository.player_games(season, team=team)
         recent_ids = {game["game_id"] for game in recent_games}
-        # Only players on the team's box score in one of its recent games:
-        # players who left the team before them drop out.
-        player_ids = sorted({row["player_id"] for row in team_rows if row["game_id"] in recent_ids})
+        # Players on the team's box score in one of its recent games, and
+        # players the catalog lists on the team who missed them all; players
+        # who left the team before them drop out.
+        listed = {row["player_id"] for row in team_rows if row["game_id"] in recent_ids}
+        rostered = self._catalog_team_ids(season, team)
+        player_ids = sorted({row["player_id"] for row in team_rows if row["player_id"] in listed | rostered})
         rows_by_player = self._rows_by_player(self.repository.player_games(season, player_ids=player_ids))
         starters = {game["game_id"]: [] for game in recent_games}
         for row in team_rows:
@@ -441,19 +536,26 @@ class RotationService:
         players = []
         for player_id in player_ids:
             own_rows = rows_by_player[player_id]
-            recent = self._recent(own_rows, team, last_n)
+            entries = _team_entries(own_rows, team, team_games(team))
+            if player_id not in listed and not any(entry["game_id"] in recent_ids for entry in entries):
+                continue
+            recent = entries[:last_n]
+            season_entries = _season_entries(own_rows, team_games)
             players.append(
                 {
                     "name": own_rows[0]["player_name"],
-                    "recent": _counts(recent),
-                    "season_summary": _counts(own_rows),
-                    "minutes_change": _round1(
-                        (_average_cs(recent, "minutes_cs") - _average_cs(own_rows, "minutes_cs"))
-                        / CS_PER_MINUTE
-                    ),
+                    "recent": _window_counts(recent),
+                    "season_summary": _window_counts(season_entries),
+                    "minutes_change": _window_minutes_change(recent, season_entries),
                 }
             )
-        players.sort(key=lambda player: (-abs(player["minutes_change"]), player["name"]))
+        players.sort(
+            key=lambda player: (
+                player["minutes_change"] is None,
+                -abs(player["minutes_change"] or 0.0),
+                player["name"],
+            )
+        )
         return {
             "season": season,
             "last_n": last_n,
@@ -725,16 +827,27 @@ class RotationService:
             grouped.setdefault(row["player_id"], []).append(dict(row))
         return grouped
 
-    @staticmethod
-    def _recent(own_rows: Sequence[Mapping[str, Any]], team: str, last_n: int) -> list[dict[str, Any]]:
-        """His last ``last_n`` games for ``team`` whose box score lists him.
+    def _catalog_team_ids(self, season: str, team: str) -> set[int]:
+        """Ids the season's Athlete Catalog lists on ``team``."""
 
-        Team games he is not on the box score for are not his games and never
-        count as 0 minutes; a DNP or an inactive listing does.  ``own_rows``
-        are newest first.
-        """
+        if self.athlete_catalog is None:
+            return set()
+        team_id = NBA_TEAM_TRICODE_TO_ID[team]
+        return {
+            athlete["player_id"]
+            for athlete in self.athlete_catalog.get_catalog(season, active_only=False)
+            if athlete.get("team_id") == team_id
+        }
 
-        return [dict(row) for row in own_rows if row["team_tricode"] == team][:last_n]
+
+def _season_entries(
+    own_rows: Sequence[Mapping[str, Any]], team_games: Callable[[str], Sequence[Mapping[str, Any]]]
+) -> list[dict[str, Any]]:
+    """His team games for every team he played for in the season, newest first."""
+
+    teams = {row["team_tricode"] for row in own_rows}
+    entries = [entry for team in teams for entry in _team_entries(own_rows, team, team_games(team))]
+    return sorted(entries, key=lambda entry: (entry["game_date"], entry["game_id"]), reverse=True)
 
 
 __all__ = ["MIN_WITHOUT_GAMES", "RotationService", "absent_windows", "classify_games", "rotation_split"]
