@@ -116,7 +116,7 @@ class AthleteCatalog:
         ]
 
 
-def _entry(player, status, url=REPORT, report_time="2026-11-10T17:00:00-05:00"):
+def _entry(player, status, url=REPORT, report_time="2026-11-10T17:00:00-05:00", reason="Soreness"):
     name, team = NAMES[player]
     slug = name.lower().replace(" ", "")
     return InjuryEntryEvidence(
@@ -126,7 +126,7 @@ def _entry(player, status, url=REPORT, report_time="2026-11-10T17:00:00-05:00"):
         source_team_tricode=team,
         canonical_status=status,
         raw_status=status,
-        reason="Soreness",
+        reason=reason,
         source_url=url,
         game_date="2026-11-10",
         matchup="LAL@BOS",
@@ -571,6 +571,7 @@ def test_questionable_has_both_branches_and_out_only_sits_and_probable_none(clie
         "team": "LAL",
         "game_id": GAME,
         "status": "Questionable",
+        "reason": "Soreness",
         "report_time": "2026-11-10T17:00:00-05:00",
     }
     plays = _row(_scenario(body, LEBRON), "plays", REAVES, "PTS")
@@ -1009,11 +1010,36 @@ def test_filters_by_game_and_player_and_validates_parameters(client, authenticat
     ] == ["LeBron James"]
     assert _scenarios(client, authenticate, "date=2026-11-10&game_id=0022600999") == {
         "date": "2026-11-10",
+        "g_league_skipped": 0,
         "scenarios": [],
     }
     headers = authenticate()
     assert client.get("/api/injury_scenarios", headers=headers).status_code == 400
     assert client.get("/api/injury_scenarios?date=2026-11-10&x=1", headers=headers).status_code == 400
+
+
+def test_a_g_league_assignment_opens_no_scenario_unless_named(client, authenticate, world):
+    """crf04/statsplus#485: a two-way player sent down is not an injury."""
+
+    world.now += timedelta(minutes=30)
+    world.provider.entries.append(_entry(VANDERBILT, "Out", reason="G League - Two-Way"))
+    world.provider.entries.append(_entry(HACHIMURA, "Out", reason="G League - On Assignment"))
+    world.provider.clock = lambda: world.now
+    world.refresh.run()
+
+    body = _scenarios(client, authenticate)
+    assert body["g_league_skipped"] == 2
+    assert [s["injured"]["player"] for s in body["scenarios"]] == [
+        "Jayson Tatum",
+        "Jaxson Hayes",
+        "LeBron James",
+    ]
+
+    named = _scenarios(client, authenticate, "date=2026-11-10&player=Jarred Vanderbilt")
+    assert named["g_league_skipped"] == 0
+    assert [(s["injured"]["player"], s["injured"]["reason"]) for s in named["scenarios"]] == [
+        ("Jarred Vanderbilt", "G League - Two-Way")
+    ]
 
 
 def test_an_injured_player_who_changed_teams_resets_the_pair(client, authenticate, world):

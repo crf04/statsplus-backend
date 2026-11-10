@@ -58,6 +58,9 @@ from app.services.rotation_service import absent_windows, classify_games, rotati
 SCENARIO_STATUSES = ("Out", "Doubtful", "Questionable")
 #: Statuses with both a "plays" and a "sits" branch.
 UNCERTAIN_STATUSES = frozenset({"Doubtful", "Questionable"})
+#: A report reason with this prefix is a G League or two-way assignment, not an
+#: injury: it opens no scenario unless the request names the player.
+G_LEAGUE_REASON = "G League"
 
 MIN_GAMES_WITHOUT = 3
 MIN_OFF_FLOOR_MINUTES = 150
@@ -355,12 +358,17 @@ class InjuryScenarioService:
         season = schedule_season(self.settings, self.event_catalog, slate_date)
         wanted = str(player).strip().casefold() if player else None
         selected = []
+        g_league_skipped = 0
         for row in listing["injuries"]:
             if row["status"] not in SCENARIO_STATUSES:
                 continue
             if game_id and row["game_id"] != game_id:
                 continue
-            if wanted and wanted not in (str(row["player_id"]), row["player"].casefold()):
+            if wanted:
+                if wanted not in (str(row["player_id"]), row["player"].casefold()):
+                    continue
+            elif row["reason"].startswith(G_LEAGUE_REASON):
+                g_league_skipped += 1
                 continue
             selected.append(row)
         listed_out: dict[str, set[int]] = {}
@@ -371,6 +379,7 @@ class InjuryScenarioService:
         self._prefetch(selected, season, reads)
         return {
             "date": listing["date"],
+            "g_league_skipped": g_league_skipped,
             "scenarios": [
                 self._scenario(row, season, reads, listed_out.get(row["team"], set())) for row in selected
             ],
@@ -442,6 +451,7 @@ class InjuryScenarioService:
                 "team": row["team"],
                 "game_id": row["game_id"],
                 "status": row["status"],
+                "reason": row["reason"],
                 "report_time": row["report_time"],
             },
             "branches": [],
