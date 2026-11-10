@@ -36,6 +36,7 @@ from app.collector.outbox import OutboxBusy, OutboxError, OutboxFull, OutboxRepo
 from app.collector.provider import (
     ResidentialScopeExecutor,
     ScopeWork,
+    _defer_lagging_tracking,
     _StandaloneNBAProvider,
 )
 from app.collector.runner import (
@@ -3979,6 +3980,33 @@ def test_a_tracking_shortfall_never_masks_malformed_zone_evidence(
 
     assert (result.exit_code, result.failures, result.uploaded) == (20, (failure,), 0)
     outbox.close()
+
+
+@pytest.mark.parametrize(
+    ("tracking_gp", "untracked_games", "deferred"),
+    [
+        (6, 0, True),
+        # Tracking ahead of the box score is not lag (shot zones declare nothing).
+        (8, 0, False),
+        (6, 1, False),
+        (5, 1, True),
+        (8, 1, False),
+    ],
+)
+def test_only_tracking_behind_the_box_score_beyond_the_declared_games_defers(
+    tracking_gp, untracked_games, deferred
+):
+    # The window binding refuses tracking ahead of the box score before this
+    # runs, so only the helper itself can show it is not deferred.
+    observation = SimpleNamespace(complete=True)
+    raw = [{"TEAM_ID": LAC, "GP": 7, "TRACKING_GP": tracking_gp}]
+
+    try:
+        returned = _defer_lagging_tracking(raw, observation, untracked_games=untracked_games)
+    except ProviderContractError as error:
+        assert (deferred, str(error)) == (True, "provider_window_unverified")
+    else:
+        assert (deferred, returned) == (False, observation)
 
 
 def test_cached_instruction_is_used_before_expiry_during_railway_outage(tmp_path: Path):

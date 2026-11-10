@@ -132,7 +132,7 @@ def _defer_lagging_tracking(
     """
 
     if observation.complete and any(
-        row["TRACKING_GP"] not in {row["GP"], row["GP"] - untracked_games}
+        row["TRACKING_GP"] < row["GP"] and row["TRACKING_GP"] != row["GP"] - untracked_games
         for row in _records(raw)
         if "TRACKING_GP" in row
     ):
