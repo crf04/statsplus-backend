@@ -1132,10 +1132,12 @@ def test_a_split_says_which_of_the_teams_games_it_covers_and_when_the_state_last
 
     together = service.get("BOS", "2025-26", on=[1])
     never = service.get("BOS", "2025-26", on=[1, 6])
+    without = service.get("BOS", "2025-26", off=[1])
 
     coverage = ("team_games", "games_included", "games_through", "split_games", "last_split_game_date")
     assert [together[key] for key in coverage] == [4, 3, "2025-11-08", 2, "2025-10-24"]
     assert [never[key] for key in coverage] == [4, 3, "2025-11-08", 0, None]
+    assert [without[key] for key in coverage] == [4, 3, "2025-11-08", 1, "2025-11-08"]
     assert together["games_missing"] == [
         {"game_id": "0022500004", "game_date": "2025-10-28", "matchup": "DEN @ BOS"}
     ]
