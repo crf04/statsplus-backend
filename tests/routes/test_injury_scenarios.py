@@ -493,7 +493,7 @@ def world(tmp_path, dependencies):
         CURRENT,
         off=[LEBRON],
         players=[
-            (REAVES, 100, 31.0, 70, 40, 15, 12, 80),
+            (REAVES, 200, 31.0, 140, 80, 30, 24, 160),
             (HACHIMURA, 200, 20.0, 80, 30, 10, 10, 60),
             (VANDERBILT, 100, 15.0, 30, 25, 6, 0, 25),
             (HAYES, 150, 18.0, 66, 30, 5, 0, 55),
@@ -573,6 +573,11 @@ def test_questionable_has_both_branches_and_out_only_sits_and_probable_none(clie
         "status": "Questionable",
         "reason": "Soreness",
         "report_time": "2026-11-10T17:00:00-05:00",
+        # g6-g8 and h3-h4 are team games he sat (Reaves and others played them).
+        "seasons": [
+            {"season": "2026-27", "missed": 3, "played": 5},
+            {"season": "2025-26", "missed": 2, "played": 2},
+        ],
     }
     plays = _row(_scenario(body, LEBRON), "plays", REAVES, "PTS")
     assert plays["baseline"] == {
@@ -589,23 +594,24 @@ def test_questionable_has_both_branches_and_out_only_sits_and_probable_none(clie
 def test_agreeing_evidence_at_ten_percent_is_flagged_and_disagreement_is_not(client, authenticate, world):
     scenario = _scenario(_scenarios(client, authenticate), LEBRON)
 
+    # The flag is computed on 2026-27 alone: 3 games without him and 5 with.
     pts = _row(scenario, "sits", REAVES, "PTS")
-    assert pts["without"] == {"avg": 25.4, "games": 5, "season_span": "2025-26 to 2026-27"}
-    assert pts["off_floor"] == {"per36": 25.0, "minutes": 180, "season_span": "2025-26 to 2026-27"}
-    assert _shifts(pts) == {"full_game": 0.27, "on_off_per36": 0.2626}
+    assert pts["flag_season"] == "2026-27"
+    assert _shifts(pts) == {"full_game": 0.25, "on_off_per36": 0.2727}  # 25.0 vs 20.0; 25.2 vs 19.8
+    assert pts["shift"]["season_span"] == {"full_game": "2026-27", "on_off": "2026-27"}
     assert pts["flagged"] is True
     assert pts["limits"] == []
 
-    ast = _row(scenario, "sits", REAVES, "AST")  # both down: 5 -> 4, 7.2 -> 6.0
-    assert _shifts(ast) == {"full_game": -0.2, "on_off_per36": -0.1667}
+    ast = _row(scenario, "sits", REAVES, "AST")  # both down: 5 -> 4, 7.2 -> 5.4
+    assert _shifts(ast) == {"full_game": -0.2, "on_off_per36": -0.25}
     assert ast["flagged"] is True
 
-    reb = _row(scenario, "sits", REAVES, "REB")  # 4 -> 3 in games, 7.2 -> 8.0 per 36
-    assert _shifts(reb) == {"full_game": -0.25, "on_off_per36": 0.1111}
+    reb = _row(scenario, "sits", REAVES, "REB")  # 4 -> 3 in games, 7.2 -> 14.4 per 36
+    assert _shifts(reb) == {"full_game": -0.25, "on_off_per36": 1.0}
     assert reb["flagged"] is False
 
-    three = _row(scenario, "sits", REAVES, "3PM")  # exactly +10% in games: 2.0 -> 2.2
-    assert _shifts(three) == {"full_game": 0.1, "on_off_per36": 0.1111}
+    three = _row(scenario, "sits", REAVES, "3PM")  # 2.0 -> 2.33 in games, 3.6 -> 4.32 per 36
+    assert _shifts(three) == {"full_game": 0.1667, "on_off_per36": 0.2}
     assert three["flagged"] is True
 
     assert {r["market"]: r["kind"] for r in scenario["branches"][1]["rows"] if r["player_id"] == REAVES} == {
@@ -620,6 +626,121 @@ def test_agreeing_evidence_at_ten_percent_is_flagged_and_disagreement_is_not(cli
     }
 
 
+def test_every_sample_is_reported_per_season_with_the_slate_season_first(client, authenticate, world):
+    """crf04/statsplus#485: no figure in ``seasons`` spans two seasons; the pooled fields stay."""
+
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    pts = _row(scenario, "sits", REAVES, "PTS")
+    assert pts["without"] == {"avg": 25.4, "games": 5, "season_span": "2025-26 to 2026-27"}
+    assert pts["off_floor"] == {"per36": 25.07, "minutes": 280, "season_span": "2025-26 to 2026-27"}
+    assert pts["seasons"] == [
+        {
+            "season": "2026-27",
+            "baseline": {"avg": 20.0, "games": 5, "per36": 19.8, "minutes": 400},
+            "without": {"avg": 25.0, "games": 3},
+            "off_floor": {"per36": 25.2, "minutes": 200},
+            "line": {"beat": 2, "of": 3},  # 26 and 25 beat 24.5; 24 does not
+            "shift": {"full_game": 0.25, "on_off_per36": 0.2727},
+            "flagged": True,
+            "limits": [],
+        },
+        {
+            "season": "2025-26",
+            "baseline": {"avg": 20.0, "games": 2, "per36": 19.8, "minutes": 300},
+            "without": {"avg": 26.0, "games": 2},
+            "off_floor": {"per36": 24.75, "minutes": 80},
+            "line": {"beat": 2, "of": 2},
+            "shift": None,
+            "flagged": False,
+            "limits": ["insufficient", "insufficient_baseline"],
+        },
+    ]
+    assert _row(scenario, "plays", REAVES, "PTS")["seasons"] == [
+        {"season": "2026-27", "baseline": {"avg": 20.0, "games": 5, "per36": 19.8, "minutes": 400}},
+        {"season": "2025-26", "baseline": {"avg": 20.0, "games": 2, "per36": 19.8, "minutes": 300}},
+    ]
+    usage = _row(scenario, "sits", REAVES, "USG")
+    assert [(e["season"], e["baseline"]["usage"], e["off_floor"]["usage"]) for e in usage["seasons"]] == [
+        ("2026-27", 26.0, 31.0),
+        ("2025-26", 25.0, 30.0),
+    ]
+    minutes = _row(scenario, "sits", REAVES, "MIN")
+    assert [(e["season"], e["baseline"]["avg"], e["without"]) for e in minutes["seasons"]] == [
+        ("2026-27", 30.0, {"avg": 34.0, "games": 3}),
+        ("2025-26", 30.0, {"avg": 34.0, "games": 2}),
+    ]
+
+
+def test_a_player_who_has_missed_nothing_this_season_says_so(client, authenticate, world):
+    world.logs.add(LEBRON, CURRENT, "LAL", _flat(G[5:], 34, 25, 7, 8, 2, 20))
+
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    assert scenario["injured"]["seasons"] == [
+        {"season": "2026-27", "missed": 0, "played": 8},
+        {"season": "2025-26", "missed": 2, "played": 2},
+    ]
+    # Reaves has last season to fall back on; Vanderbilt, with no 2025-26 window, has only this one.
+    assert _row(scenario, "sits", REAVES, "PTS")["flag_season"] == "2025-26"
+    assert _row(scenario, "sits", VANDERBILT, "PTS")["flag_season"] == "2026-27"
+
+
+def test_a_thin_slate_season_flags_on_last_season_instead(client, authenticate, world):
+    """Under 3 games on either side this season, the flag is computed on last season, named."""
+
+    logs = world.logs
+    logs.add(LEBRON, CURRENT, "LAL", _flat(G[5:7], 34, 25, 7, 8, 2, 20))  # he missed only g8
+    prior = _dates(PRIOR, 6, "2025-10-22")
+    logs.rows[(LEBRON, PRIOR)] = []
+    logs.add(LEBRON, PRIOR, "LAL", _flat(prior[:3], 34, 25, 7, 8, 2, 20))
+    logs.rows[(REAVES, PRIOR)] = []
+    logs.add(
+        REAVES, PRIOR, "LAL", _flat(prior[:3], 30, 20, 4, 5, 2, 15) + _flat(prior[3:], 34, 26, 3, 4, 2, 18)
+    )
+    world.wowy.tweak(LAL, PRIOR, off=[LEBRON], player=REAVES, minutes=200, points=140)
+    world.redis.data.clear()
+    world.warm()
+
+    pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
+
+    assert pts["flag_season"] == "2025-26"
+    assert _shifts(pts) == {"full_game": 0.3, "on_off_per36": 0.2727}  # 26 vs 20; 25.2 vs 19.8
+    assert pts["shift"]["season_span"] == {"full_game": "2025-26", "on_off": "2025-26"}
+    assert pts["flagged"] is True and pts["limits"] == []
+    assert [(e["season"], e["without"]["games"], e["limits"]) for e in pts["seasons"]] == [
+        ("2026-27", 1, ["insufficient"]),
+        ("2025-26", 3, []),
+    ]
+
+
+def test_a_baseline_under_150_on_floor_minutes_or_3_games_is_never_flagged(client, authenticate, world):
+    """crf04/statsplus#485: Garza was flagged at -50% on 8 on-floor minutes."""
+
+    world.wowy.tweak(LAL, CURRENT, on=[LEBRON], player=REAVES, minutes=149, points=82)
+    world.redis.data.clear()
+    world.warm()
+
+    pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
+
+    assert pts["seasons"][0]["baseline"]["minutes"] == 149
+    assert pts["limits"] == ["insufficient_baseline"]
+    assert pts["flagged"] is False and "shift" not in pts
+
+    world.wowy.tweak(LAL, CURRENT, on=[LEBRON], player=REAVES, minutes=400, points=220)
+    world.redis.data.clear()
+    world.warm()
+    rows = world.logs.rows[(LEBRON, CURRENT)]
+    world.logs.rows[(LEBRON, CURRENT)] = rows[:2]  # with him in g1-g2 only; g3-g8 without
+    del world.logs.rows[(LEBRON, PRIOR)]  # last season is out of the window: 2026-27 is all there is
+
+    pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
+
+    assert (pts["flag_season"], pts["seasons"][0]["baseline"]["games"]) == ("2026-27", 2)
+    assert [e["season"] for e in pts["seasons"]] == ["2026-27"]
+    assert pts["limits"] == ["insufficient_baseline"] and pts["flagged"] is False
+
+
 def test_context_markets_are_never_flagged_and_carry_the_supporting_numbers(client, authenticate, world):
     scenario = _scenario(_scenarios(client, authenticate), LEBRON)
 
@@ -627,7 +748,7 @@ def test_context_markets_are_never_flagged_and_carry_the_supporting_numbers(clie
     assert minutes["without"]["avg"] == 34.0 and minutes["baseline"]["avg"] == 30.0
     assert minutes["flagged"] is False and "line" not in minutes
     usage = _row(scenario, "sits", REAVES, "USG")
-    assert usage["baseline"]["usage"] == 25.57 and usage["off_floor"]["usage"] == 30.56
+    assert usage["baseline"]["usage"] == 25.57 and usage["off_floor"]["usage"] == 30.71
     assert usage["flagged"] is False
 
 
@@ -736,17 +857,23 @@ def test_an_expired_split_is_served_stale_with_a_limit(client, authenticate, wor
     scenario = _scenario(_scenarios(client, authenticate), LEBRON)
 
     pts = _row(scenario, "sits", REAVES, "PTS")
-    assert pts["off_floor"]["minutes"] == 180
+    assert pts["off_floor"]["minutes"] == 280
     assert "on_off_stale" in pts["limits"] and pts["flagged"] is True
 
 
-def test_a_missing_prior_season_state_cannot_compare_unlike_seasons(client, authenticate, world):
+def test_a_missing_prior_season_state_limits_that_season_only(client, authenticate, world):
     del world.redis.data[build_request("LAL", PRIOR, on=[LEBRON]).cache_key]
 
     pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
 
-    assert pts["limits"] == ["on_off_not_warmed", "on_off_seasons_differ"]
-    assert pts["flagged"] is False and "shift" not in pts
+    # The 2026-27 flag stands on its own; last season names what it lacks.
+    assert (pts["flag_season"], pts["limits"], pts["flagged"]) == ("2026-27", [], True)
+    assert pts["seasons"][1]["limits"] == [
+        "insufficient",
+        "insufficient_baseline",
+        "on_off_not_warmed",
+        "on_off_seasons_differ",
+    ]
 
 
 def test_a_mid_season_team_change_leaves_that_season_full_game_only(client, authenticate, world):
@@ -777,26 +904,33 @@ def test_pra_on_off_sums_points_rebounds_and_assists(client, authenticate, world
 
     pra = _row(scenario, "sits", REAVES, "PRA")
     assert pra["baseline"]["per36"] == 34.2  # (385 + 140 + 140) * 36 / 700
-    assert pra["off_floor"]["per36"] == 39.0  # (125 + 40 + 30) * 36 / 180
-    assert _shifts(pra) == {"full_game": 0.1172, "on_off_per36": 0.1404}
+    assert pra["off_floor"]["per36"] == 41.14  # (195 + 80 + 45) * 36 / 280
+    # 2026-27: 32 vs 29 in games; (140 + 80 + 30) * 36 / 200 = 45.0 vs 34.2 per 36.
+    assert _shifts(pra) == {"full_game": 0.1034, "on_off_per36": 0.3158}
     assert pra["flagged"] is True
 
 
-def test_a_shift_just_under_ten_percent_is_not_flagged(client, authenticate, world):
-    # Games: 3PM 2.0 -> 2.2, exactly +10%.  On/off: 449 on and 127 off 3PM
-    # over 700 / 180 minutes is +9.9975%, which rounds to 0.1 but is not 10%.
-    wowy = world.wowy
-    wowy.tweak(LAL, CURRENT, on=[LEBRON], player=REAVES, fg3m=249)
-    wowy.tweak(LAL, PRIOR, on=[LEBRON], player=REAVES, fg3m=200)
-    wowy.tweak(LAL, CURRENT, off=[LEBRON], player=REAVES, fg3m=70)
-    wowy.tweak(LAL, PRIOR, off=[LEBRON], player=REAVES, fg3m=57)
+def test_a_shift_of_exactly_ten_percent_flags_and_just_under_does_not(client, authenticate, world):
+    # Games: PTS 20.0 -> 22.0 in 2026-27, exactly +10%.  On/off: 220 points over
+    # 400 minutes on (19.8 per 36) against 121 over 200 off (21.78) is +10%, and
+    # against 170 over 281 (21.78 less a little) is +9.9968%, which rounds to 0.1.
+    for row in world.logs.rows[(REAVES, CURRENT)][5:]:
+        row["PTS"] = 22
+    world.wowy.tweak(LAL, CURRENT, off=[LEBRON], player=REAVES, minutes=200, points=121)
     world.redis.data.clear()
     world.warm()
 
-    three = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "3PM")
+    pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
+    assert _shifts(pts) == {"full_game": 0.1, "on_off_per36": 0.1}
+    assert pts["flagged"] is True
 
-    assert _shifts(three) == {"full_game": 0.1, "on_off_per36": 0.1}
-    assert three["flagged"] is False
+    world.wowy.tweak(LAL, CURRENT, off=[LEBRON], player=REAVES, minutes=281, points=170)
+    world.redis.data.clear()
+    world.warm()
+
+    pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
+    assert _shifts(pts) == {"full_game": 0.1, "on_off_per36": 0.1}
+    assert pts["flagged"] is False
 
 
 def test_without_games_equal_the_game_log_players_off_filter(client, authenticate, world):
@@ -1052,7 +1186,7 @@ def test_an_injured_player_who_changed_teams_resets_the_pair(client, authenticat
     assert pts["without"] == {"avg": 25.0, "games": 3, "season_span": "2026-27"}
     assert pts["baseline"]["games"] == 5 and pts["baseline"]["season_span"] == "2026-27"
     assert pts["off_floor"]["season_span"] == "2026-27"
-    assert pts["off_floor"]["minutes"] == 100
+    assert pts["off_floor"]["minutes"] == 200
 
 
 def test_a_game_before_the_injured_player_joined_is_on_neither_side(client, authenticate, world):
@@ -1134,19 +1268,15 @@ def test_a_teammate_listed_out_on_the_same_report_has_no_row(client, authenticat
     }
 
 
-def test_an_unsliceable_prior_season_blocks_the_flag(client, authenticate, world):
+def test_an_unsliceable_prior_season_limits_that_season_only(client, authenticate, world):
     world.logs.rows[(REAVES, PRIOR)][0]["TEAM_ABBREVIATION"] = "BOS"  # joined mid-season
-    # This season alone would clear 150 minutes and agree with the games (+13.6%).
-    world.wowy.tweak(LAL, CURRENT, off=[LEBRON], player=REAVES, minutes=160, points=100)
-    world.redis.data.clear()
-    world.warm()
 
     pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
 
     assert pts["without"]["season_span"] == "2025-26 to 2026-27"
-    assert pts["off_floor"] == {"per36": 22.5, "minutes": 160, "season_span": "2026-27"}
-    assert pts["limits"] == ["on_off_unsliceable"]
-    assert pts["flagged"] is False
+    assert pts["off_floor"] == {"per36": 25.2, "minutes": 200, "season_span": "2026-27"}
+    assert (pts["flag_season"], pts["limits"], pts["flagged"]) == ("2026-27", [], True)
+    assert pts["seasons"][1]["limits"] == ["insufficient", "insufficient_baseline", "on_off_unsliceable"]
 
 
 def test_on_off_spans_name_the_seasons_that_supplied_minutes(client, authenticate, world):
@@ -1163,10 +1293,7 @@ def test_on_off_spans_name_the_seasons_that_supplied_minutes(client, authenticat
     assert pts["baseline"]["on_floor_season_span"] == "2026-27"
     assert pts["baseline"]["minutes"] == 400
     assert pts["off_floor"]["season_span"] == "2026-27"
-    assert pts["shift"]["season_span"] == {
-        "full_game": "2025-26 to 2026-27",
-        "on_off": "2026-27",
-    }
+    assert pts["shift"]["season_span"] == {"full_game": "2026-27", "on_off": "2026-27"}
 
 
 # -- rotation context (crf04/statsplus#239) ---------------------------------
@@ -1518,8 +1645,8 @@ def test_a_named_player_with_nothing_cached_gets_figures_and_flags_from_one_fetc
     pts = _row(_named(world), "sits", REAVES, "PTS")
 
     assert sorted(world.wowy.asked) == LAL_SPLITS  # on and off, this season and last, once each
-    assert pts["off_floor"] == {"per36": 25.0, "minutes": 180, "season_span": "2025-26 to 2026-27"}
-    assert _shifts(pts) == {"full_game": 0.27, "on_off_per36": 0.2626}
+    assert pts["off_floor"] == {"per36": 25.07, "minutes": 280, "season_span": "2025-26 to 2026-27"}
+    assert _shifts(pts) == {"full_game": 0.25, "on_off_per36": 0.2727}
     assert pts["flagged"] is True
     assert pts["limits"] == []
 
@@ -1558,7 +1685,7 @@ def test_an_upstream_failure_with_no_copy_still_returns_the_scenario_as_unavaila
     pts = _row(_named(world), "sits", REAVES, "PTS")
 
     assert pts["without"] == {"avg": 25.4, "games": 5, "season_span": "2025-26 to 2026-27"}
-    assert pts["limits"] == ["insufficient", "on_off_unavailable", "on_off_seasons_differ"]
+    assert pts["limits"] == ["on_off_unavailable", "on_off_seasons_differ"]
     assert pts["flagged"] is False
 
 
@@ -1570,7 +1697,7 @@ def test_an_upstream_failure_serves_the_expired_copy_as_stale(world):
     pts = _row(_named(world), "sits", REAVES, "PTS")
 
     assert sorted(world.wowy.asked) == LAL_SPLITS  # every expired split was tried
-    assert pts["off_floor"]["minutes"] == 180
+    assert pts["off_floor"]["minutes"] == 280
     assert pts["limits"] == ["on_off_stale"]
     assert pts["flagged"] is True
 
@@ -1637,7 +1764,9 @@ def test_provider_time_counts_toward_the_deadline_and_later_splits_are_not_fetch
     # Calls start at 0 s and 5 s; the third has 2 s left, times out, and the fourth never starts.
     assert len(world.wowy.asked) == 3
     assert redis.now_ms == 12000
-    assert pts["limits"] == ["insufficient", "on_off_unavailable"]  # the first two splits arrived
+    # The 2026-27 splits arrived first, so its flag stands; last season's did not.
+    assert (pts["limits"], pts["flagged"]) == ([], True)
+    assert pts["seasons"][1]["limits"] == ["insufficient", "insufficient_baseline", "on_off_unavailable"]
 
 
 def test_without_redis_or_with_its_breaker_open_a_named_request_does_not_reach_upstream(world):
