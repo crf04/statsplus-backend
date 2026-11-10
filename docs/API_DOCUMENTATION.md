@@ -3228,7 +3228,11 @@ changes no average.
   `best_over` or `best_under`. `lines`, `provider_lines`, `as_of` and `closing`
   are unchanged. Any offered `season_filter` reads for them as for a signed-in
   caller, including the season after the Published Season while
-  [`/seasons`](#get-seasons) offers it.
+  [`/seasons`](#get-seasons) offers it. With no `season_filter` they read the
+  page season (crf04/statsplus#477): the season after the Published Season
+  once today's ET date falls in it, as the signed-in Log Workspace defaults to,
+  with its `season_context`; while that season serves no game logs, the
+  Published Season as before.
 * `matchup` reads from the player's side: `LAL vs GSW` at home, `LAL @ GSW` away.
 * `lines` has one entry per market the stored player pool holds for that game
   (`PTS`, `REB`, `AST`, `PRA`, `3PM`, ...), one value each: the majority line
@@ -3414,6 +3418,10 @@ same code, plus:
 - `line_date`: the posted-line day, as for game logs. The web app sends the
   current ET date so each day's links get a new image URL.
 
+The card reads the link's games as a caller without an account reads
+[Get Game Logs](#get-game-logs) (crf04/statsplus#477): any offered
+`season_filter`, and with none the page season.
+
 The card leads with every game the link's filters match. It shows the player,
 the stat and line as `PTS - 22.5`, the filters in the words of the link's title
 (`2025-26 season, without Trae Young`, or `Every logged game`), and the
@@ -3440,6 +3448,7 @@ alone, the bars are neutral and the headline is the game count (`31 games`).
 | Provider, database or query-timeout failure, including resolving the default season | 200 | Brand fallback PNG | `public, max-age=60` |
 | Bad filter, `line_type` or `line` | 400 | `invalid_input` | `no-store` |
 | Unknown player | 404 | `resource_not_found` | `no-store` |
+| `season_filter` not offered | 503 | `season_unavailable` | `no-store` |
 | Per-IP limit | 429 | `rate_limited`, `Retry-After` | `no-store` |
 
 Every PNG is 1200×630 `image/png`. The card's facts (not the PNG) are cached in

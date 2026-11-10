@@ -6,8 +6,9 @@ exactly as before.  A selected season reads through ``season_scoped``; one
 that is not offered is ``503 season_unavailable``, never another season's
 answer.  An anonymous profile or team-stats caller never reads an
 Unpublished Season: one after the Published Season is refused before anything
-is read or cached, as a game-log preview is.  The Slate and slate edges serve
-every offered season to anyone, so the home page reads the Matchup's season.
+is read or cached.  Game-log links (their previews included), the Slate and
+slate edges serve every offered season to anyone, so a shared link and the
+home page read the season their sender saw.
 """
 
 from collections.abc import Iterator

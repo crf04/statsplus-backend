@@ -83,8 +83,9 @@ def _stable(body: bytes) -> str:
         ("unscheduled", f"/api/matchups/unscheduled?player_id={PLAYER_ID}&opponent=BOS"),
     ],
 )
-def test_an_omitted_season_answers_exactly_as_before(world, client, name, path):
-    response = client.get(path)
+def test_an_omitted_season_answers_exactly_as_before(world, client, authenticate, name, path):
+    # A game-log link read without an account opens on the page season (statsplus#477).
+    response = client.get(path, headers=authenticate() if name == "game_logs" else None)
 
     assert response.status_code == 200
     golden = GOLDEN / f"{name}.json"
