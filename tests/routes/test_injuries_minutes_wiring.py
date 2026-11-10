@@ -123,6 +123,6 @@ def test_the_route_returns_the_report_dates_season_before_its_cutover_and_the_se
         )
         for r in body["injuries"]
     ] == [
-        ("Veteran", (33.0, 2, NEW), (29.0, 2, LAST)),
         ("Prior Only", (None, 0, None), (20.0, 2, LAST)),
+        ("Veteran", (33.0, 2, NEW), (29.0, 2, LAST)),
     ]

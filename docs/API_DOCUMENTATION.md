@@ -957,10 +957,9 @@ malformed date or an unknown team is `400 invalid_input`. While
 `INJURY_REPORT_ENABLED` is off the route answers `503 provider_unavailable`.
 
 A date with no stored report (no games, or none collected) is
-`"injuries": []`. Entries are ordered by `average_minutes`, then
-`prior_average_minutes`, each high to low with `null` last
-(crf04/statsplus#488); ties by team, then status severity (Out, Doubtful,
-Questionable, Probable, Available), then player name.
+`"injuries": []`. Entries are ordered by team, then status severity (Out,
+Doubtful, Questionable, Probable, Available), then player name; the minutes
+fields do not change that order.
 
 ```json
 {

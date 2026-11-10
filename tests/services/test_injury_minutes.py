@@ -124,24 +124,27 @@ def test_an_unreadable_prior_season_leaves_the_current_minutes(cut_over):
     assert found.prior == {}
 
 
-def _listing(world, minutes, *, ids=None):
+PLAYERS = [
+    ("No Id", None, "LAL", "Out"),
+    ("Prior Only", PRIOR_ONLY, "LAL", "Out"),
+    ("No Games", NO_GAMES, "LAL", "Out"),
+    ("Rookie", ROOKIE, "LAL", "Out"),
+    ("Traded", TRADED, "LAL", "Out"),
+    ("Veteran", VETERAN, "LAL", "Out"),
+]
+
+
+def _listing(world, minutes, *, ids=None, players=PLAYERS):
     entries = [
         {
             "source_player_name": name,
             "canonical_player_id": player_id,
-            "tricode": "LAL",
-            "canonical_status": "Out",
+            "tricode": tricode,
+            "canonical_status": status,
             "reason": "",
             "report_time": None,
         }
-        for name, player_id in [
-            ("No Id", None),
-            ("Prior Only", PRIOR_ONLY),
-            ("No Games", NO_GAMES),
-            ("Rookie", ROOKIE),
-            ("Traded", TRADED),
-            ("Veteran", VETERAN),
-        ]
+        for name, player_id, tricode, status in players
         for player_id in [ids(player_id) if ids and player_id is not None else player_id]
     ]
     snapshot = SimpleNamespace(normalized_entries=entries, retrieved_at=REPORT_AFTERNOON)
@@ -173,7 +176,7 @@ def _minutes_columns(body):
 NONE = (None, 0, None)
 
 
-def test_every_injury_row_carries_both_seasons_sorted_by_current_then_prior_minutes(world):
+def test_every_injury_row_carries_both_seasons(world):
     body = _listing(world, _service(world)).list_injuries(REPORT_DATE, None)
 
     assert (body["minutes_season"], body["minutes_published_season"]) == (NEW, LAST)
@@ -185,13 +188,27 @@ def test_every_injury_row_carries_both_seasons_sorted_by_current_then_prior_minu
         "No Games": (NONE, NONE),
         "No Id": (NONE, NONE),
     }
-    assert [row["player"] for row in body["injuries"]] == [
-        "Veteran",
-        "Traded",
-        "Rookie",
-        "Prior Only",
-        "No Games",
-        "No Id",
+
+
+def test_minutes_leave_the_order_by_team_then_status_then_player(world):
+    players = [
+        ("Veteran", VETERAN, "LAL", "Questionable"),
+        ("Traded", TRADED, "BOS", "Out"),
+        ("Rookie", ROOKIE, "LAL", "Out"),
+        ("Prior Only", PRIOR_ONLY, "BOS", "Doubtful"),
+        ("No Games", NO_GAMES, "LAL", "Out"),
+        ("No Id", None, "BOS", "Out"),
+    ]
+
+    body = _listing(world, _service(world), players=players).list_injuries(REPORT_DATE, None)
+
+    assert [(row["team"], row["status"], row["player"]) for row in body["injuries"]] == [
+        ("BOS", "Out", "No Id"),
+        ("BOS", "Out", "Traded"),
+        ("BOS", "Doubtful", "Prior Only"),
+        ("LAL", "Out", "No Games"),
+        ("LAL", "Out", "Rookie"),
+        ("LAL", "Questionable", "Veteran"),
     ]
 
 

@@ -78,23 +78,6 @@ def _season_fields(prefix: str, found: Any | None) -> dict[str, Any]:
     }
 
 
-def _by_minutes(row: Mapping[str, Any]) -> tuple:
-    """Current minutes, then prior, high to low with none last; then team, severity, name."""
-
-    current, prior = row["average_minutes"], row["prior_average_minutes"]
-    return (
-        current is None,
-        -(current or 0),
-        prior is None,
-        -(prior or 0),
-        row["team"],
-        INJURY_STATUS_ORDER.index(row["status"])
-        if row["status"] in INJURY_STATUS_ORDER
-        else len(INJURY_STATUS_ORDER),
-        row["player"],
-    )
-
-
 class StoredInjuryListing:
     """List or count the stored injury report of the games on one date."""
 
@@ -161,7 +144,7 @@ class StoredInjuryListing:
             retrieved_at = assume_utc(snapshot.retrieved_at)
             started = parse_utc_iso(str(event["scheduled_at"])) <= now or is_final_event(event)
             stale = not started and (now - retrieved_at) > timedelta(seconds=INJURY_LIST_STALE_SECONDS)
-            injuries.extend(
+            rows = [
                 {
                     "player": str(entry["source_player_name"]),
                     "player_id": entry.get("canonical_player_id"),
@@ -176,8 +159,17 @@ class StoredInjuryListing:
                 }
                 for entry in snapshot.normalized_entries
                 if tricode is None or entry.get("tricode") == tricode
+            ]
+            rows.sort(
+                key=lambda row: (
+                    row["team"],
+                    INJURY_STATUS_ORDER.index(row["status"])
+                    if row["status"] in INJURY_STATUS_ORDER
+                    else len(INJURY_STATUS_ORDER),
+                    row["player"],
+                )
             )
-        injuries.sort(key=_by_minutes)
+            injuries.extend(rows)
         return {
             "date": slate_date.isoformat(),
             "team": tricode,
