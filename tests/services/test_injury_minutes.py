@@ -1,8 +1,9 @@
-"""Minutes on each injury row come from the season rule of crf04/statsplus#230.
+"""Minutes on each injury row: the report date's season and the one before (crf04/statsplus#488).
 
 Game logs are real Publications in a migrated SQLite database, read through the
-real reader and game-log repository; 2025-26 is published first and 2026-27
-activates after it, so the prior season is always read from retained history.
+real reader and game-log repository.  ``world`` is production on 2026-11-10:
+2025-26 is the Published Season and 2026-27's game logs are a held candidate.
+``cut_over`` is the same games after the Season Cutover.
 """
 
 from __future__ import annotations
@@ -18,10 +19,13 @@ from app.models.player_game_log import PublicationPlayerGameLog
 from app.services.injury_listing import StoredInjuryListing
 from app.services.injury_minutes import InjuryMinutesService
 from tests import test_target_backtest as bt
-from tests.routes.test_injuries import AFTERNOON, Events
+from tests.routes.test_injuries import Events, _event
 from tests.services.test_backtest_seasons import LAST, NEW, World
 
-ALWAYS_FIVE, FOUR_PLUS_PRIOR, PRIOR_ONLY, NO_GAMES, TRADED = 101, 102, 103, 104, 105
+VETERAN, PRIOR_ONLY, NO_GAMES, TRADED, ROOKIE = 101, 103, 104, 105, 106
+REPORT_DATE = "2026-11-10"
+REPORT_AFTERNOON = datetime(2026, 11, 10, 20, 0, tzinfo=UTC)
+GAMES = [_event("0022600150", (bt.LAL, "LAL"), (bt.BOS, "BOS"), "2026-11-11T00:30:00+00:00")]
 
 
 def _games(player_id, season, minutes, *, team=(bt.LAL, "LAL"), first=0):
@@ -42,28 +46,37 @@ def _games(player_id, season, minutes, *, team=(bt.LAL, "LAL"), first=0):
     return rows
 
 
-def _publish(world, season, rows):
-    world.compose("player_game_logs", season, {"rows": rows})
+def _build(tmp_path, *, hold):
+    built = World(create_engine(f"sqlite:///{tmp_path / 'minutes.sqlite3'}"))
+    built.compose(
+        "player_game_logs",
+        LAST,
+        {"rows": _games(VETERAN, LAST, [28, 30]) + _games(PRIOR_ONLY, LAST, [15, 25])},
+    )
+    built.compose(
+        "player_game_logs",
+        NEW,
+        {
+            "rows": _games(VETERAN, NEW, [32, 34])
+            + _games(ROOKIE, NEW, [10])
+            + _games(TRADED, NEW, [30, 30, 30], team=(bt.LAL, "LAL"))
+            + _games(TRADED, NEW, [20, 20], team=(bt.BOS, "BOS"), first=3)
+        },
+        hold=hold,
+    )
+    return built
 
 
 @pytest.fixture
 def world(tmp_path):
-    built = World(create_engine(f"sqlite:///{tmp_path / 'minutes.sqlite3'}"))
-    _publish(
-        built,
-        LAST,
-        _games(FOUR_PLUS_PRIOR, LAST, [10, 20, 30])
-        + _games(PRIOR_ONLY, LAST, [15, 25])
-        + _games(ALWAYS_FIVE, LAST, [5]),
-    )
-    _publish(
-        built,
-        NEW,
-        _games(ALWAYS_FIVE, NEW, [30, 32, 34, 36, 38])
-        + _games(FOUR_PLUS_PRIOR, NEW, [20, 20, 20, 20])
-        + _games(TRADED, NEW, [30, 30, 30], team=(bt.LAL, "LAL"))
-        + _games(TRADED, NEW, [20, 20], team=(bt.BOS, "BOS"), first=3),
-    )
+    built = _build(tmp_path, hold=True)
+    yield built
+    built.engine.dispose()
+
+
+@pytest.fixture
+def cut_over(tmp_path):
+    built = _build(tmp_path, hold=False)
     yield built
     built.engine.dispose()
 
@@ -74,25 +87,41 @@ def _service(world):
     )
 
 
-def test_each_branch_of_the_season_rule(world):
-    found = _service(world).minutes([ALWAYS_FIVE, FOUR_PLUS_PRIOR, PRIOR_ONLY, NO_GAMES, TRADED]).by_player
+def _triples(found):
+    return {player_id: (m.average_minutes, m.games_played, m.season) for player_id, m in found.items()}
 
-    assert {player_id: (m.average_minutes, m.games_played, m.season) for player_id, m in found.items()} == {
-        ALWAYS_FIVE: (34.0, 5, NEW),
-        FOUR_PLUS_PRIOR: (20.0, 3, LAST),
-        PRIOR_ONLY: (20.0, 2, LAST),
+
+def test_the_report_dates_season_is_read_before_its_cutover_beside_the_season_before(world):
+    found = _service(world).minutes([VETERAN, PRIOR_ONLY, NO_GAMES, TRADED, ROOKIE], NEW)
+
+    assert (found.season, found.published_season) == (NEW, LAST)
+    assert _triples(found.current) == {
+        VETERAN: (33.0, 2, NEW),
         TRADED: (26.0, 5, NEW),
+        ROOKIE: (10.0, 1, NEW),
     }
+    assert _triples(found.prior) == {VETERAN: (29.0, 2, LAST), PRIOR_ONLY: (20.0, 2, LAST)}
 
 
-def test_an_unreadable_prior_season_gives_no_minutes_to_the_rows_that_need_it(world):
-    world.revoke("player_game_logs", LAST)
+def test_after_the_cutover_the_two_seasons_are_still_the_report_dates_and_the_one_before(cut_over):
+    found = _service(cut_over).minutes([VETERAN, PRIOR_ONLY, NO_GAMES, TRADED, ROOKIE], NEW)
 
-    found = _service(world).minutes([ALWAYS_FIVE, FOUR_PLUS_PRIOR, PRIOR_ONLY]).by_player
-
-    assert {player_id: (m.average_minutes, m.games_played, m.season) for player_id, m in found.items()} == {
-        ALWAYS_FIVE: (34.0, 5, NEW)
+    assert (found.season, found.published_season) == (NEW, NEW)
+    assert _triples(found.current) == {
+        VETERAN: (33.0, 2, NEW),
+        TRADED: (26.0, 5, NEW),
+        ROOKIE: (10.0, 1, NEW),
     }
+    assert _triples(found.prior) == {VETERAN: (29.0, 2, LAST), PRIOR_ONLY: (20.0, 2, LAST)}
+
+
+def test_an_unreadable_prior_season_leaves_the_current_minutes(cut_over):
+    cut_over.revoke("player_game_logs", LAST)
+
+    found = _service(cut_over).minutes([VETERAN, PRIOR_ONLY], NEW)
+
+    assert _triples(found.current) == {VETERAN: (33.0, 2, NEW)}
+    assert found.prior == {}
 
 
 def _listing(world, minutes, *, ids=None):
@@ -106,81 +135,88 @@ def _listing(world, minutes, *, ids=None):
             "report_time": None,
         }
         for name, player_id in [
-            ("Always Five", ALWAYS_FIVE),
-            ("Four Plus Prior", FOUR_PLUS_PRIOR),
+            ("No Id", None),
             ("Prior Only", PRIOR_ONLY),
             ("No Games", NO_GAMES),
+            ("Rookie", ROOKIE),
             ("Traded", TRADED),
-            ("No Id", None),
+            ("Veteran", VETERAN),
         ]
         for player_id in [ids(player_id) if ids and player_id is not None else player_id]
     ]
-    snapshot = SimpleNamespace(
-        normalized_entries=entries,
-        retrieved_at=datetime(2026, 1, 15, 20, 0, tzinfo=UTC),
-    )
+    snapshot = SimpleNamespace(normalized_entries=entries, retrieved_at=REPORT_AFTERNOON)
 
     class Snapshots:
         def get_many(self, scopes):
             return {scopes[0]: snapshot}
 
     return StoredInjuryListing(
-        event_catalog=Events(),
+        event_catalog=Events(GAMES),
         snapshot_repository=Snapshots(),
         settings=world.settings,
         enabled=True,
-        clock=lambda: AFTERNOON,
+        clock=lambda: REPORT_AFTERNOON,
         minutes=minutes,
     )
 
 
 def _minutes_columns(body):
     return {
-        row["player"]: (row["average_minutes"], row["games_played"], row["minutes_season"])
+        row["player"]: (
+            (row["average_minutes"], row["games_played"], row["minutes_season"]),
+            (row["prior_average_minutes"], row["prior_games_played"], row["prior_minutes_season"]),
+        )
         for row in body["injuries"]
     }
 
 
-def test_every_injury_row_carries_its_minutes_and_keeps_its_order(world):
-    body = _listing(world, _service(world)).list_injuries("2026-01-15", None)
+NONE = (None, 0, None)
 
+
+def test_every_injury_row_carries_both_seasons_sorted_by_current_then_prior_minutes(world):
+    body = _listing(world, _service(world)).list_injuries(REPORT_DATE, None)
+
+    assert (body["minutes_season"], body["minutes_published_season"]) == (NEW, LAST)
     assert _minutes_columns(body) == {
-        "Always Five": (34.0, 5, NEW),
-        "Four Plus Prior": (20.0, 3, LAST),
-        "Prior Only": (20.0, 2, LAST),
-        "No Games": (None, 0, None),
-        "Traded": (26.0, 5, NEW),
-        "No Id": (None, 0, None),
+        "Veteran": ((33.0, 2, NEW), (29.0, 2, LAST)),
+        "Traded": ((26.0, 5, NEW), NONE),
+        "Rookie": ((10.0, 1, NEW), NONE),
+        "Prior Only": (NONE, (20.0, 2, LAST)),
+        "No Games": (NONE, NONE),
+        "No Id": (NONE, NONE),
     }
     assert [row["player"] for row in body["injuries"]] == [
-        "Always Five",
-        "Four Plus Prior",
+        "Veteran",
+        "Traded",
+        "Rookie",
+        "Prior Only",
         "No Games",
         "No Id",
-        "Prior Only",
-        "Traded",
     ]
 
 
-def test_an_unreadable_prior_season_does_not_fail_the_list(world):
-    world.revoke("player_game_logs", LAST)
+def test_after_the_cutover_no_row_names_one_season_twice(cut_over):
+    body = _listing(cut_over, _service(cut_over)).list_injuries(REPORT_DATE, None)
 
-    body = _listing(world, _service(world)).list_injuries("2026-01-15", None)
-
-    assert _minutes_columns(body) == {
-        "Always Five": (34.0, 5, NEW),
-        "Four Plus Prior": (None, 0, None),
-        "Prior Only": (None, 0, None),
-        "No Games": (None, 0, None),
-        "Traded": (26.0, 5, NEW),
-        "No Id": (None, 0, None),
-    }
+    assert (body["minutes_season"], body["minutes_published_season"]) == (NEW, NEW)
+    assert _minutes_columns(body)["Veteran"] == ((33.0, 2, NEW), (29.0, 2, LAST))
+    assert {row["minutes_season"] for row in body["injuries"]} == {NEW, None}
+    assert {row["prior_minutes_season"] for row in body["injuries"]} == {LAST, None}
 
 
-def test_the_list_reads_each_season_once_however_many_players_it_has(world):
+def test_an_unreadable_prior_season_does_not_fail_the_list(cut_over):
+    cut_over.revoke("player_game_logs", LAST)
+
+    body = _listing(cut_over, _service(cut_over)).list_injuries(REPORT_DATE, None)
+
+    assert _minutes_columns(body)["Veteran"] == ((33.0, 2, NEW), NONE)
+    assert _minutes_columns(body)["Prior Only"] == (NONE, NONE)
+
+
+def test_the_list_reads_each_season_once_however_many_players_it_has(cut_over):
     reads = []
 
-    @event.listens_for(world.engine, "before_cursor_execute")
+    @event.listens_for(cut_over.engine, "before_cursor_execute")
     def _count(connection, cursor, statement, *_rest):
         if (
             statement.lstrip().upper().startswith("SELECT")
@@ -188,29 +224,23 @@ def test_the_list_reads_each_season_once_however_many_players_it_has(world):
         ):
             reads.append(statement)
 
-    _listing(world, _service(world)).list_injuries("2026-01-15", None)
+    _listing(cut_over, _service(cut_over)).list_injuries(REPORT_DATE, None)
 
     assert len(reads) == 2
 
 
-def test_published_season_is_reported_at_the_top_level(world):
-    body = _listing(world, _service(world)).list_injuries("2026-01-15", None)
+def test_seasons_are_null_with_no_minutes_service(world):
+    body = _listing(world, None).list_injuries(REPORT_DATE, None)
 
-    assert body["minutes_published_season"] == NEW
-
-
-def test_published_season_is_null_with_no_minutes_service(world):
-    body = _listing(world, None).list_injuries("2026-01-15", None)
-
-    assert body["minutes_published_season"] is None
-    assert _minutes_columns(body)["Always Five"] == (None, 0, None)
+    assert (body["minutes_season"], body["minutes_published_season"]) == (None, None)
+    assert _minutes_columns(body)["Veteran"] == (NONE, NONE)
 
 
 def test_a_player_id_stored_as_a_string_still_matches(world):
-    body = _listing(world, _service(world), ids=str).list_injuries("2026-01-15", None)
+    body = _listing(world, _service(world), ids=str).list_injuries(REPORT_DATE, None)
 
-    assert _minutes_columns(body)["Always Five"] == (34.0, 5, NEW)
-    assert _minutes_columns(body)["Traded"] == (26.0, 5, NEW)
+    assert _minutes_columns(body)["Veteran"] == ((33.0, 2, NEW), (29.0, 2, LAST))
+    assert _minutes_columns(body)["Traded"] == ((26.0, 5, NEW), NONE)
 
 
 def _corrupt(world, season_publication_season, player_id):
@@ -232,41 +262,35 @@ def _corrupt(world, season_publication_season, player_id):
         )
 
 
-def test_corrupt_current_rows_give_that_player_no_minutes_and_spare_the_others(world):
-    _corrupt(world, NEW, ALWAYS_FIVE)
+def test_corrupt_current_rows_give_that_player_no_current_minutes_and_spare_the_others(cut_over):
+    _corrupt(cut_over, NEW, VETERAN)
 
-    found = _service(world).minutes([ALWAYS_FIVE, TRADED, PRIOR_ONLY])
+    found = _service(cut_over).minutes([VETERAN, TRADED], NEW)
 
-    assert found.published_season == NEW
-    assert {
-        player_id: (m.average_minutes, m.games_played, m.season) for player_id, m in found.by_player.items()
-    } == {TRADED: (26.0, 5, NEW), PRIOR_ONLY: (20.0, 2, LAST)}
+    assert _triples(found.current) == {TRADED: (26.0, 5, NEW)}
+    assert _triples(found.prior) == {VETERAN: (29.0, 2, LAST)}
 
 
-def test_corrupt_prior_rows_give_that_player_no_minutes(world):
-    _corrupt(world, LAST, PRIOR_ONLY)
+def test_corrupt_prior_rows_give_that_player_no_prior_minutes(cut_over):
+    _corrupt(cut_over, LAST, PRIOR_ONLY)
 
-    found = _service(world).minutes([PRIOR_ONLY, FOUR_PLUS_PRIOR])
+    found = _service(cut_over).minutes([PRIOR_ONLY, VETERAN], NEW)
 
-    assert {
-        player_id: (m.average_minutes, m.games_played, m.season) for player_id, m in found.by_player.items()
-    } == {FOUR_PLUS_PRIOR: (20.0, 3, LAST)}
+    assert _triples(found.prior) == {VETERAN: (29.0, 2, LAST)}
 
 
-def test_postseason_games_do_not_count_toward_the_published_threshold(world, monkeypatch):
-    """The legacy table may hold Playoffs rows; four regular plus one is not five."""
+def test_postseason_games_do_not_count(world, monkeypatch):
+    """The legacy table may hold Playoffs rows; they are not regular-season minutes."""
 
     real = world.logs.list_players_rows
 
     def with_a_playoff_game(season, player_ids, **kwargs):
         rows = real(season, player_ids, **kwargs)
-        if season == NEW and FOUR_PLUS_PRIOR in rows:
-            extra = replace(rows[FOUR_PLUS_PRIOR][0], season_type="Playoffs", game_id="0042600001")
-            rows = {**rows, FOUR_PLUS_PRIOR: rows[FOUR_PLUS_PRIOR] + (extra,)}
+        if season == NEW and ROOKIE in rows:
+            extra = replace(rows[ROOKIE][0], season_type="Playoffs", game_id="0042600001", minutes=40)
+            rows = {**rows, ROOKIE: rows[ROOKIE] + (extra,)}
         return rows
 
     monkeypatch.setattr(world.logs, "list_players_rows", with_a_playoff_game)
 
-    found = _service(world).minutes([FOUR_PLUS_PRIOR]).by_player[FOUR_PLUS_PRIOR]
-
-    assert (found.average_minutes, found.games_played, found.season) == (20.0, 3, LAST)
+    assert _triples(_service(world).minutes([ROOKIE], NEW).current) == {ROOKIE: (10.0, 1, NEW)}
