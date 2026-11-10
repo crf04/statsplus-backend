@@ -2592,6 +2592,14 @@ def test_usage_rollover_resets_locked_row_and_preserves_429_limits(control_db):
         operations.record_usage("rollover", envelopes=1, max_envelopes=1)
 
 
+def test_a_season_day_of_envelopes_fits_one_usage_window(control_db):
+    operations = CollectionOperationsService(control_db, clock=lambda: datetime(2026, 11, 10, tzinfo=UTC))
+    for _ in range(1_500):
+        row = operations.record_usage("railway-cron", envelopes=1, bytes_received=2_000)
+
+    assert row.envelope_count == 1_500
+
+
 def test_diagnostics_reports_bounded_stream_freshness_collector_release_and_usage(control_db):
     now = datetime(2026, 8, 12, 12, tzinfo=UTC)
     publications = PublicationService(control_db, clock=lambda: now)
@@ -2730,7 +2738,7 @@ def test_diagnostics_reports_bounded_stream_freshness_collector_release_and_usag
     assert usage["concurrency_retry_after_seconds"] == 30
     assert usage["limits"] == {
         "poll_count": 100,
-        "envelope_count": 1000,
+        "envelope_count": 5000,
         "byte_count": 50 * 1024 * 1024,
         "concurrency_count": 1,
     }
