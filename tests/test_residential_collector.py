@@ -4225,6 +4225,29 @@ def test_busy_upload_near_its_deadline_is_retried_within_the_run(tmp_path: Path)
     outbox.close()
 
 
+def test_rate_limited_upload_stops_the_drain_and_keeps_the_rest_pending(tmp_path: Path):
+    collector, transport, outbox, sleeps = _busy_collector(
+        tmp_path, collect_before=NOW + timedelta(seconds=15), busy_uploads=1_000
+    )
+    for index in range(2):
+        outbox.enqueue(
+            kind="observation",
+            client_observation_id=f"queued-{index}",
+            checksum=_wire_checksum(f"queued-{index}"),
+            cutoff=NOW,
+            payload=_wire(f"queued-{index}", f"queued-{index}"),
+            metadata={"manifest_id": "m-busy", "observation_type": "grouped_shot_types"},
+        )
+
+    result = collector.run()
+
+    assert result.disposition is RunDisposition.RETRY
+    assert result.uploaded == 0
+    assert outbox.count() == 3
+    assert len(transport.upload_times) == 2
+    outbox.close()
+
+
 def test_busy_upload_is_not_retried_when_the_wait_would_pass_its_deadline(tmp_path: Path):
     collector, transport, outbox, sleeps = _busy_collector(
         tmp_path, collect_before=NOW + timedelta(seconds=15), busy_uploads=2
