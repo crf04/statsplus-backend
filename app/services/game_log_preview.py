@@ -93,7 +93,7 @@ from app.services.preview_card import (
 logger = logging.getLogger(__name__)
 
 #: Bumped whenever the facts or the rules that derive them change.
-PREVIEW_SCHEMA = 2
+PREVIEW_SCHEMA = 3
 FACTS_TTL_SECONDS = 3600
 #: Uncached renders per minute, across every caller and worker.
 RENDER_BUDGET_PER_MINUTE = 120
@@ -519,8 +519,8 @@ class GameLogPreviewService:
     """Draw one game-log link's preview, reading its game logs through ``logs``.
 
     ``parse`` and ``logs`` are the game-log route's own parser
-    (``_preview_query_from``) and read (``_filtered_logs``), so filters, the
-    default season and the 400/404/503 refusals are the page's.  Without Redis
+    (``_game_log_query_from``) and an anonymous reader's read (``_link_logs``),
+    so filters, the season and the 400/404/503 refusals are the page's.  Without Redis
     nothing is cached and each process keeps its own, smaller render budget.
     """
 

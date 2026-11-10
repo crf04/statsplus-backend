@@ -20,7 +20,7 @@ timeouts keep the documented 503 ``provider_unavailable`` contract.
 import logging
 import re
 import threading
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any
 
 import requests
@@ -29,8 +29,10 @@ from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.datastructures import MultiDict
 
+from ..config.settings import current_nba_season
 from ..dependencies import get_dependencies
 from ..domain.nba_teams import NBA_TEAM_TRICODES
+from ..domain.slate_time import slate_date_for_instant
 from ..errors import (
     InvalidInputError,
     ProviderUnavailableError,
@@ -45,7 +47,8 @@ from ..services.game_log_preview import GameLogPreviewService, parse_line, parse
 from ..services.matchup_slate_preview import MatchupSlatePreviewService
 from ..services.nba_stats_adapter import validate_canonical_season
 from ..services.posted_lines import without_prices
-from ..services.research_season import refuse_after_published, season_scoped
+from ..services.research_season import season_scoped
+from ..services.serving_season import next_season
 from ..services.slate_board import BOARD_SOURCES
 from ..utils.auth import get_current_user, is_waitlisted, require_auth, require_auth_optional_allow_waitlisted
 from ._selected_season import season_argument, season_refusals, selected
@@ -540,8 +543,8 @@ def _filtered_logs(player_name: str, query: GameLogQuery, *, selected: bool = Fa
 
     A ``selected`` season is a Selected Season (crf04/statsplus#330): it may
     read an Unpublished Season and adds ``season_context``; one that is not
-    offered is refused, never answered from another season.  Anonymous
-    previews and the ladder never select, so public pages stay on published data.
+    offered is refused, never answered from another season.  The ladder
+    never selects; a link read without an account selects (``_link_logs``).
     """
     service = game_service
     if selected:
@@ -584,7 +587,9 @@ def get_game_logs():
     selected_season = request.args.get("season_filter") is not None
     if not admitted:
         g.research_action = False
-    logs = _filtered_logs(player_name, query, selected=selected_season)
+        logs = _link_logs(player_name, query, named=selected_season)
+    else:
+        logs = _filtered_logs(player_name, query, selected=selected_season)
     if not admitted and logs.get("posted_line") is not None:
         logs = {**logs, "posted_line": without_prices(logs["posted_line"])}
     return jsonify(logs)
@@ -606,18 +611,46 @@ def _admitted(viewer: dict[str, Any] | None) -> bool:
         return False
 
 
-def _preview_query_from(args: Any) -> tuple[str, GameLogQuery]:
-    """Parse a preview's link, refusing a season after the Published Season.
+def _slate_today() -> date:
+    return slate_date_for_instant(datetime.now(UTC))
 
-    A preview never selects, so it never reads an Unpublished Season: it is
-    refused as game logs refuse an unoffered one, never drawn as an empty
-    sample, and before the facts cache so no card stands in for it.
+
+def _page_season() -> str | None:
+    """The season a link naming none opens on for a reader who cannot choose one.
+
+    The season after the Published Season once today falls in it, as the
+    signed-in Workspace defaults to (crf04/statsplus#348); ``None`` before
+    then, or when no publication reader can select it.
     """
 
-    player_name, query = _game_log_query_from(args)
-    if args.get("season_filter") is not None:
-        refuse_after_published(getattr(game_service, "publication_reader", None), query.season_filter)
-    return player_name, query
+    reader = getattr(game_service, "publication_reader", None)
+    if getattr(reader, "captures_published_season", False) is not True:
+        return None
+    upcoming = next_season(_default_season())
+    return upcoming if upcoming <= current_nba_season(_slate_today()) else None
+
+
+def _link_logs(player_name: str, query: GameLogQuery, *, named: bool) -> dict[str, Any]:
+    """A link's game logs as a reader without an account sees them (crf04/statsplus#477).
+
+    Any offered season it names reads as selected; with none it reads the
+    page season, falling back to the Published Season while that season has
+    no game logs to serve.
+    """
+
+    season = None if named else _page_season()
+    if season is not None:
+        try:
+            return _filtered_logs(
+                player_name, query.model_copy(update={"season_filter": season}), selected=True
+            )
+        except SelectedSeasonUnavailableError:
+            pass
+    return _filtered_logs(player_name, query, selected=named)
+
+
+def _preview_logs(player_name: str, query: GameLogQuery) -> dict[str, Any]:
+    return _link_logs(player_name, query, named=request.args.get("season_filter") is not None)
 
 
 @game_bp.route("/game_logs/preview.png", methods=["GET"])
@@ -628,7 +661,7 @@ def get_game_log_preview():
     previews = current_app.extensions.setdefault(
         "game_log_previews",
         GameLogPreviewService(
-            parse=_preview_query_from, logs=_filtered_logs, redis_client=get_dependencies().redis_client
+            parse=_game_log_query_from, logs=_preview_logs, redis_client=get_dependencies().redis_client
         ),
     )
     image = previews.render(request.args, line_type, link_line)

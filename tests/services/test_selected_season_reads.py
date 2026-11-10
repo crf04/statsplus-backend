@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pytest
 from sqlalchemy import select, text
@@ -648,19 +648,82 @@ def test_the_route_rejects_a_malformed_season(served, client):
     assert response.get_json()["error"]["code"] == "invalid_input"
 
 
-def test_the_route_without_a_season_adds_no_context(served, client):
+def test_an_admitted_caller_without_a_season_reads_the_published_one_without_context(
+    served, client, authenticate
+):
     served.hold_opening_week()
 
+    body = client.get("/api/games/game_logs?player_name=Player+0", headers=authenticate()).get_json()
+
+    assert [row["PTS"] for row in body["game_logs"]] == [30]
+    assert "season_context" not in body
+
+
+@pytest.mark.parametrize("waitlisted", [False, True], ids=["anonymous", "waitlisted"])
+def test_a_link_naming_no_season_opens_a_reader_without_an_account_on_the_page_season(
+    served, client, authenticate, make_db_user, waitlisted
+):
+    served.hold_opening_week()
+    headers = authenticate(db_user=make_db_user(access_status="waitlisted")) if waitlisted else None
+
+    body = client.get("/api/games/game_logs?player_name=Player+0", headers=headers).get_json()
+
+    assert [row["PTS"] for row in body["game_logs"]] == [12]
+    assert body["season_context"] == {"selected_season": NEW, "published_season": OLD}
+
+
+def test_a_link_naming_no_season_reads_the_published_one_while_the_page_season_serves_no_game_logs(
+    served, client
+):
     body = client.get("/api/games/game_logs?player_name=Player+0").get_json()
 
     assert [row["PTS"] for row in body["game_logs"]] == [30]
     assert "season_context" not in body
 
 
-@pytest.mark.parametrize("offered", [False, True], ids=["unoffered", "offered"])
-def test_an_anonymous_preview_of_2026_27_is_refused_like_the_game_logs(served, client, dependencies, offered):
-    if offered:
-        served.hold_opening_week()
+def test_a_link_naming_no_season_reads_the_published_one_before_the_next_season_begins(
+    served, client, monkeypatch
+):
+    served.hold_opening_week()
+    monkeypatch.setattr("app.routes.game_routes._slate_today", lambda: date(2026, 9, 30))
+
+    body = client.get("/api/games/game_logs?player_name=Player+0").get_json()
+
+    assert [row["PTS"] for row in body["game_logs"]] == [30]
+
+
+def _preview_values(client, dependencies, query):
+    dependencies.redis_client = FakeRedis()
+    response = client.get(f"/api/games/game_logs/preview.png?player_name=Player+0{query}")
+    assert (response.status_code, response.mimetype) == (200, "image/png")
+    [facts] = [
+        json.loads(value)
+        for key, value in dependencies.redis_client.values.items()
+        if key.startswith("game_log_preview:v")
+    ]
+    return facts["values"]
+
+
+@pytest.mark.parametrize("query", ["&season_filter=2026-27", ""], ids=["named", "omitted"])
+def test_a_preview_draws_the_offered_2026_27(served, client, dependencies, query):
+    served.hold_opening_week()
+
+    assert _preview_values(client, dependencies, query) == [12.0]
+
+
+def test_a_preview_naming_no_season_draws_the_published_one_while_2026_27_serves_no_game_logs(
+    served, client, dependencies
+):
+    assert _preview_values(client, dependencies, "") == [30.0]
+
+
+def test_a_preview_of_the_published_season_still_draws_its_games(served, client, dependencies):
+    served.hold_opening_week()
+
+    assert _preview_values(client, dependencies, f"&season_filter={OLD}") == [30.0]
+
+
+def test_a_preview_of_an_unoffered_season_is_refused_and_not_cached(served, client, dependencies):
     dependencies.redis_client = FakeRedis()
 
     response = client.get("/api/games/game_logs/preview.png?player_name=Player+0&season_filter=2026-27")
@@ -672,22 +735,7 @@ def test_an_anonymous_preview_of_2026_27_is_refused_like_the_game_logs(served, c
         {"selected_season": NEW, "published_season": OLD},
     )
     assert "max-age" not in response.headers.get("Cache-Control", "")
-    assert dependencies.redis_client.values == {}
-
-
-def test_an_anonymous_preview_of_the_published_season_still_draws_its_games(served, client, dependencies):
-    served.hold_opening_week()
-    dependencies.redis_client = FakeRedis()
-
-    response = client.get(f"/api/games/game_logs/preview.png?player_name=Player+0&season_filter={OLD}")
-
-    assert (response.status_code, response.mimetype) == (200, "image/png")
-    [facts] = [
-        json.loads(value)
-        for key, value in dependencies.redis_client.values.items()
-        if key.startswith("game_log_preview:v")
-    ]
-    assert facts["games"] == 1
+    assert not [key for key in dependencies.redis_client.values if key.startswith("game_log_preview:v")]
 
 
 def test_team_games_are_the_fewest_and_most_games_any_team_has(world):
