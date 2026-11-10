@@ -1752,6 +1752,11 @@ class SegmentSplits:
             ),
             written_at=AFTERNOON,
             games_missing=tuple(self.missing[season]),
+            team_games=10,
+            games_included=10 - len(self.missing[season]),
+            games_through="2026-11-08",
+            split_games=9 if rows else 0,
+            last_split_game_date="2026-11-08" if rows else None,
         )
 
 

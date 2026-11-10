@@ -990,6 +990,11 @@ def test_a_covered_season_is_served_from_segments_without_pbp_stats_or_redis(cov
         "stale",
         "players",
         "games_missing",
+        "team_games",
+        "games_included",
+        "games_through",
+        "split_games",
+        "last_split_game_date",
     ]
     assert set(body["players"][0]) == {
         "player_id",

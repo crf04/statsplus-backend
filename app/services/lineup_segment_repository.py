@@ -64,6 +64,15 @@ class SegmentSplit:
     #: first: ``{game_id, game_date, matchup}`` with the Eastern date and
     #: ``"AWAY @ HOME"``.
     games_missing: tuple[Mapping[str, Any], ...]
+    #: The team-season's completed regular-season games in the Event Catalog,
+    #: and how many of them have stored segments.
+    team_games: int
+    games_included: int
+    #: The Eastern date of the newest included game; ``None`` when none is.
+    games_through: str | None
+    #: The games with a row in the split, and the Eastern date of the newest.
+    split_games: int
+    last_split_game_date: str | None
 
 
 def mask_of(slots: Iterable[int]) -> int:
@@ -263,7 +272,7 @@ class LineupSegmentRepository:
                     )
                 )
             }
-            unstored = connection.execute(
+            events = connection.execute(
                 select(
                     _EVENTS.c.nba_game_id,
                     _EVENTS.c.scheduled_at,
@@ -274,6 +283,7 @@ class LineupSegmentRepository:
                     _EVENTS.c.postponed_status,
                     _EVENTS.c.postponement_evidence,
                     _EVENTS.c.classification,
+                    _GAMES.c.game_id.label("stored_game_id"),
                 )
                 .select_from(
                     _EVENTS.outerjoin(
@@ -284,17 +294,22 @@ class LineupSegmentRepository:
                 .where(
                     _EVENTS.c.season == season,
                     or_(_EVENTS.c.home_team_id == team_id, _EVENTS.c.away_team_id == team_id),
-                    _GAMES.c.game_id.is_(None),
                 )
             ).mappings()
+            completed = [event for event in events if _completed_regular_season(event)]
+            dates = {event["nba_game_id"]: _eastern_date(event["scheduled_at"]) for event in completed}
             games_missing = sorted(
-                (_missing_game(event) for event in unstored if _completed_regular_season(event)),
+                (_missing_game(event) for event in completed if event["stored_game_id"] is None),
                 key=lambda game: (game["game_date"], game["game_id"]),
             )
+            included = [
+                dates[event["nba_game_id"]] for event in completed if event["stored_game_id"] is not None
+            ]
             rows: tuple[Mapping[str, Any], ...] = ()
             written = None
+            split_game_ids: set[str] = set()
             if all(player_id in roster for player_id in on):
-                rows, written = self._sums(
+                rows, written, split_game_ids = self._sums(
                     connection,
                     season,
                     team_id,
@@ -306,6 +321,13 @@ class LineupSegmentRepository:
             rows=rows,
             written_at=_utc(written) if written is not None else None,
             games_missing=tuple(games_missing),
+            team_games=len(completed),
+            games_included=len(included),
+            games_through=max(included, default=None),
+            split_games=len(split_game_ids),
+            last_split_game_date=max(
+                (dates[game_id] for game_id in split_game_ids if game_id in dates), default=None
+            ),
         )
 
     @staticmethod
@@ -316,10 +338,17 @@ class LineupSegmentRepository:
         on_mask: int,
         off_mask: int,
         names: Mapping[int, str],
-    ) -> tuple[tuple[Mapping[str, Any], ...], datetime | None]:
-        """Each player's sums, and when the newest game with a row in the split was written."""
+    ) -> tuple[tuple[Mapping[str, Any], ...], datetime | None, set[str]]:
+        """Each player's sums, when the newest game with a row in the split was
+        written, and the games with a row in it."""
 
         mask = _PLAYERS.c.lineup_mask
+        in_split = [_PLAYERS.c.team_id == team_id, _PLAYERS.c.season == season]
+        if on_mask:
+            on = literal(on_mask, BigInteger())
+            in_split.append(mask.op("&")(on) == on)
+        if off_mask:
+            in_split.append(mask.op("&")(literal(off_mask, BigInteger())) == 0)
         query = (
             select(
                 _PLAYERS.c.player_id,
@@ -327,19 +356,15 @@ class LineupSegmentRepository:
                 *(func.sum(_PLAYERS.c[key]).label(key) for key in (*COUNTS, *_TEAM_TOTALS)),
                 func.max(_PLAYERS.c.written_at).label("written_at"),
             )
-            .where(_PLAYERS.c.team_id == team_id, _PLAYERS.c.season == season)
+            .where(*in_split)
             .group_by(_PLAYERS.c.player_id)
         )
-        if on_mask:
-            on = literal(on_mask, BigInteger())
-            query = query.where(mask.op("&")(on) == on)
-        if off_mask:
-            query = query.where(mask.op("&")(literal(off_mask, BigInteger())) == 0)
         rows = [dict(row) for row in connection.execute(query).mappings()]
         written = [row.pop("written_at") for row in rows]
         return (
             tuple({**row, "name": names.get(row["player_id"], "")} for row in rows),
             max(written, default=None),
+            set(connection.execute(select(_PLAYERS.c.game_id).where(*in_split).distinct()).scalars()),
         )
 
 
@@ -360,9 +385,13 @@ def _missing_game(event: Mapping[str, Any]) -> dict[str, Any]:
 
     return {
         "game_id": event["nba_game_id"],
-        "game_date": _utc(event["scheduled_at"]).astimezone(EASTERN).date().isoformat(),
+        "game_date": _eastern_date(event["scheduled_at"]),
         "matchup": f"{event['away_team_tricode']} @ {event['home_team_tricode']}",
     }
+
+
+def _eastern_date(scheduled_at: datetime) -> str:
+    return _utc(scheduled_at).astimezone(EASTERN).date().isoformat()
 
 
 def _utc(value: datetime) -> datetime:
