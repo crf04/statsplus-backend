@@ -1067,6 +1067,47 @@ def test_a_player_missing_from_or_unreadable_in_the_catalog_falls_back_to_game_l
     assert REAVES in _mates(client, authenticate)
 
 
+def test_a_teammate_with_no_game_for_the_team_this_season_has_no_row(client, authenticate, world):
+    """crf04/statsplus#485: last season's Lakers who have not played for them this season are gone."""
+
+    world.logs.add(PRIOR_ONLY, PRIOR, "LAL", _flat(H, 30, 12, 5, 2, 1, 9))
+
+    assert _mates(client, authenticate) == {REAVES, HACHIMURA, VANDERBILT, HAYES}
+
+
+def test_before_the_teams_first_game_the_catalog_decides(client, authenticate, world):
+    for player, season in list(world.logs.rows):
+        if season == CURRENT and NAMES[player][1] == "LAL":
+            del world.logs.rows[(player, season)]
+    world.logs.add(PRIOR_ONLY, PRIOR, "LAL", _flat(H, 30, 12, 5, 2, 1, 9))
+    del world.catalog.team_ids[PRIOR_ONLY]  # not on a roster this season
+
+    # Hayes finished last season with Boston, so the pair reset drops him too.
+    assert _mates(client, authenticate) == {REAVES}
+
+    world.catalog.unreadable = True
+    assert _mates(client, authenticate) == {REAVES, PRIOR_ONLY}
+
+
+def test_a_teammate_listed_out_on_the_same_report_has_no_row(client, authenticate, world):
+    world.now += timedelta(minutes=30)
+    world.provider.entries.append(_entry(REAVES, "Out"))
+    world.provider.clock = lambda: world.now
+    world.refresh.run()
+
+    body = _scenarios(client, authenticate)
+
+    for injured in (LEBRON, HAYES):
+        rows = [r for b in _scenario(body, injured)["branches"] for r in b["rows"]]
+        assert REAVES not in {r["player_id"] for r in rows}
+    assert {r["player_id"] for r in _scenario(body, REAVES)["branches"][0]["rows"]} == {
+        LEBRON,
+        HACHIMURA,
+        VANDERBILT,
+        HAYES,
+    }
+
+
 def test_an_unsliceable_prior_season_blocks_the_flag(client, authenticate, world):
     world.logs.rows[(REAVES, PRIOR)][0]["TEAM_ABBREVIATION"] = "BOS"  # joined mid-season
     # This season alone would clear 150 minutes and agree with the games (+13.6%).
@@ -1263,7 +1304,10 @@ def test_minutes_jumps_list_only_sub_rotation_teammates_at_six_minutes_or_more(
     # Bench +8.0, Exact Six exactly +6.0 (listed), Just Below +5.9 (not),
     # Thin Sample +9.0 on only 2 without games (insufficient, not listed).
     assert scenario["minutes_jumps"] == [
-        {"name": "Bench Reserve", "rotation": _split((3, 3, 2, 18.0, 18.0, 0), (5, 5, 0, 10.0, 10.0, 0), 8.0)},
+        {
+            "name": "Bench Reserve",
+            "rotation": _split((3, 3, 2, 18.0, 18.0, 0), (5, 5, 0, 10.0, 10.0, 0), 8.0),
+        },
         {"name": "Exact Six", "rotation": _split((3, 3, 0, 16.0, 16.0, 0), (5, 5, 0, 10.0, 10.0, 0), 6.0)},
     ]
     # They carry no scored rows and are never flagged.
@@ -1383,20 +1427,12 @@ def test_rotation_splits_combine_both_seasons_with_a_span(client, authenticate, 
     )
 
 
-def test_a_teammate_found_only_in_last_seasons_roster_gets_a_rotation(client, authenticate, two_seasons):
+def test_a_teammate_found_only_in_last_seasons_roster_is_left_out(client, authenticate, two_seasons):
     scenario = _scenario(_scenarios(client, authenticate), LEBRON)
 
-    # Prior Only has game logs and rotations in 2025-26 only.
-    assert _row(scenario, "sits", PRIOR_ONLY, "MIN")["rotation"] == _split(
-        (4, 4, 3, 24.0, 24.0, 0), (2, 2, 0, 20.0, 20.0, 0), 4.0, seasons="2025-26", missing=0
-    )
-    assert {
-        "name": "Prior Only",
-        "starts_without": 3,
-        "games_without": 4,
-        "starts_with": 0,
-        "games_with": 2,
-    } in scenario["replacement_starters"]
+    # Prior Only has game logs and rotations in 2025-26 only (crf04/statsplus#485).
+    assert PRIOR_ONLY not in {r["player_id"] for b in scenario["branches"] for r in b["rows"]}
+    assert "Prior Only" not in {entry["name"] for entry in scenario["replacement_starters"]}
 
 
 def test_replacement_starters_compare_start_rates_not_counts(client, authenticate, two_seasons):

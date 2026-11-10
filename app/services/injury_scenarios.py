@@ -363,39 +363,59 @@ class InjuryScenarioService:
             if wanted and wanted not in (str(row["player_id"]), row["player"].casefold()):
                 continue
             selected.append(row)
+        listed_out: dict[str, set[int]] = {}
+        for row in listing["injuries"]:
+            if row["status"] == "Out" and row["player_id"] is not None:
+                listed_out.setdefault(row["team"], set()).add(int(row["player_id"]))
         reads = _RequestReads(self, fetch_on_off=bool(wanted), user_id=user_id)
         self._prefetch(selected, season, reads)
         return {
             "date": listing["date"],
-            "scenarios": [self._scenario(row, season, reads) for row in selected],
+            "scenarios": [
+                self._scenario(row, season, reads, listed_out.get(row["team"], set())) for row in selected
+            ],
         }
 
     def _prefetch(self, rows: Sequence[Mapping[str, Any]], season: str, reads: _RequestReads) -> None:
-        """Read every log the request needs: one batch per season, whatever the scenarios."""
+        """Read every log the request needs: one batch per season, whatever the scenarios.
+
+        Both seasons' whole team rosters, so each season's team games are known.
+        """
 
         seasons = [previous_nba_season(season), season]
         wanted: set[int] = set()
         for row in rows:
             if row["player_id"] is None:
                 continue
-            injured_id = int(row["player_id"])
-            wanted.add(injured_id)
-            wanted |= self._roster(injured_id, row["team"], seasons, season, reads)
+            wanted.add(int(row["player_id"]))
+            for s in seasons:
+                wanted |= reads.roster(NBA_TEAM_TRICODE_TO_ID[row["team"]], s)
         for s in seasons:
             reads.load_logs(wanted, s)
 
     def _roster(
-        self, injured_id: int, team: str, seasons: Sequence[str], season: str, reads: _RequestReads
+        self, injured_id: int, team: str, season: str, reads: _RequestReads, listed_out: set[int]
     ) -> set[int]:
-        """The teammates a scenario considers: the team's rosters, less those the catalog places elsewhere."""
+        """The teammates a scenario considers (crf04/statsplus#485).
+
+        Once the team has played in the Slate season, those with a game for it
+        in that season, less any the Athlete Catalog has since placed on
+        another team.  Before its first game the catalog decides among last
+        season's roster (an unreadable or empty catalog leaves the roster as
+        the game logs have it).  Teammates listed Out on the same report are
+        left out.
+        """
 
         team_id = NBA_TEAM_TRICODE_TO_ID[team]
-        roster: set[int] = set()
-        for s in seasons:
-            roster |= reads.roster(team_id, s)
-        roster.discard(injured_id)
         current_team = reads.catalog_teams(season)
-        return {pid for pid in roster if current_team.get(pid) in (None, team_id)}
+        roster = reads.roster(team_id, season)
+        if roster:
+            roster = {pid for pid in roster if current_team.get(pid) in (None, team_id)}
+        else:
+            roster = reads.roster(team_id, previous_nba_season(season))
+            if current_team:
+                roster = {pid for pid in roster if current_team.get(pid) == team_id}
+        return roster - {injured_id} - listed_out
 
     def prior_season_eligible(self, row: Mapping[str, Any], prior_season: str) -> bool:
         """Whether the listed player's last season can join his window.
@@ -411,7 +431,9 @@ class InjuryScenarioService:
 
     # -- one injured player ----------------------------------------------------
 
-    def _scenario(self, row: Mapping[str, Any], season: str, reads: _RequestReads) -> dict[str, Any]:
+    def _scenario(
+        self, row: Mapping[str, Any], season: str, reads: _RequestReads, listed_out: set[int]
+    ) -> dict[str, Any]:
         limits = ["stale_report"] if row["stale"] else []
         scenario: dict[str, Any] = {
             "injured": {
@@ -433,7 +455,9 @@ class InjuryScenarioService:
             return scenario
         branches = ["plays", "sits"] if row["status"] in UNCERTAIN_STATUSES else ["sits"]
         injured_id = int(row["player_id"])
-        evidence, rotation_starts = self._teammates(injured_id, row["team"], season, row["game_id"], reads)
+        evidence, rotation_starts = self._teammates(
+            injured_id, row["team"], season, row["game_id"], reads, listed_out
+        )
         for branch in branches:
             scenario["branches"].append(
                 {
@@ -452,7 +476,13 @@ class InjuryScenarioService:
         return scenario
 
     def _teammates(
-        self, injured_id: int, team: str, season: str, game_id: str, request: _RequestReads
+        self,
+        injured_id: int,
+        team: str,
+        season: str,
+        game_id: str,
+        request: _RequestReads,
+        listed_out: set[int],
     ) -> tuple[list[_Teammate], dict[str, int]]:
         """Every teammate in the pair window (rotation or not) and the injured player's starts."""
 
@@ -460,7 +490,7 @@ class InjuryScenarioService:
         injured_logs = {s: _Logs(request.logs(injured_id, s)) for s in seasons}
         reads = _OnOffReads(self.on_off, team, injured_id, request)
         rotation_reads = _RotationReads(self.rotations, team, injured_id, request)
-        roster = self._roster(injured_id, team, seasons, season, request)
+        roster = self._roster(injured_id, team, season, request, listed_out)
         pool_lines = self._pool_lines(season, game_id)
         teammates = []
         for teammate_id in sorted(roster):
