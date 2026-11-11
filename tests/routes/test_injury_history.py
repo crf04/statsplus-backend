@@ -17,9 +17,11 @@ from tests.support.slate_catalog import NoNeighbourEvents
 
 JACKSON, GOODWIN, OTHER_LAC = 1628402, 1630692, 1627000
 WILLIAMS_OKC, WILLIAMS_PHX = 1631114, 1641000
+#: In the 2025-26 Athlete Catalog only.
+OLD_CLIPPER = 1620000
 SEASON = "2026-27"
-#: 3pm Eastern on 2026-11-10.
-NOW = datetime(2026, 11, 10, 20, 0, tzinfo=UTC)
+#: 8pm Eastern on 2026-11-10, already 2026-11-11 in UTC.
+NOW = datetime(2026, 11, 11, 1, 0, tzinfo=UTC)
 
 
 def _event(game_id, away, home, tip, season=SEASON):
@@ -63,6 +65,8 @@ class Events(NoNeighbourEvents):
 
 class AthleteCatalog:
     def get_catalog(self, season, *, active_only=False):
+        if season == "2025-26":
+            return [{"player_id": OLD_CLIPPER, "display_name": "Old Clipper", "team_abbreviation": "LAC"}]
         return [
             {"player_id": JACKSON, "display_name": "Isaiah Jackson", "team_abbreviation": "LAC"},
             {"player_id": GOODWIN, "display_name": "Jordan Goodwin", "team_abbreviation": "PHX"},
@@ -216,6 +220,27 @@ def stored(repository):
             "BOS@LAC",
             "2026-11-08T17:30:00-05:00",
         ),
+        # A teammate's row and an unmatched name, both later: neither is his.
+        _row(
+            OTHER_LAC,
+            "Other Clipper",
+            "LAC",
+            "Available",
+            "",
+            "2026-11-08",
+            "LAC@DEN",
+            "2026-11-08T18:30:00-05:00",
+        ),
+        _row(
+            None,
+            "Isaiah Jackson",
+            "LAC",
+            "Probable",
+            "Illness",
+            "2026-11-08",
+            "LAC@DEN",
+            "2026-11-08T18:30:00-05:00",
+        ),
     )
     _store(
         repository,
@@ -308,7 +333,7 @@ def test_a_player_on_no_report_in_the_range_lists_nothing_but_counts_his_teams_r
     client, authenticate, stored
 ):
     body = _get(
-        client, authenticate, "player=Other%20Clipper&from_date=2026-11-07&to_date=2026-11-09"
+        client, authenticate, "player=Other%20Clipper&from_date=2026-11-09&to_date=2026-11-10"
     ).get_json()
 
     assert body["statuses"] == []
@@ -370,12 +395,13 @@ def test_a_bad_history_request_is_a_400_naming_the_parameter(client, authenticat
 
 
 def test_a_past_season_range_without_to_date_ends_with_that_season(client, authenticate, repository):
+    # He is in that season's Athlete Catalog only.
     _store(
         repository,
         "0022500900",
         _row(
-            JACKSON,
-            "Isaiah Jackson",
+            OLD_CLIPPER,
+            "Old Clipper",
             "LAC",
             "Out",
             "Left knee soreness",
@@ -386,10 +412,21 @@ def test_a_past_season_range_without_to_date_ends_with_that_season(client, authe
         season="2025-26",
     )
 
-    body = _get(client, authenticate, "player=Isaiah%20Jackson&from_date=2026-02-01").get_json()
+    body = _get(client, authenticate, "player=Old%20Clipper&from_date=2026-02-01").get_json()
 
+    assert body["player"] == {"player_id": OLD_CLIPPER, "name": "Old Clipper", "team": "LAC"}
     assert (body["season"], body["to_date"]) == ("2025-26", "2026-09-30")
     assert [(row["game_date"], row["game_id"], row["status"]) for row in body["statuses"]] == [
         ("2026-02-28", "0022500900", "Out")
     ]
     assert body["report_coverage"] == [{"team": "LAC", "team_games": 1, "games_with_report": 1}]
+
+
+def test_a_from_date_after_the_eastern_today_needs_a_to_date(client, authenticate, stored):
+    response = _get(client, authenticate, f"player={JACKSON}&from_date=2026-11-11")
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["details"]["parameters"] == ["from_date"]
+    explicit = _get(client, authenticate, f"player={JACKSON}&from_date=2026-11-11&to_date=2026-11-12")
+    assert explicit.status_code == 200
+    assert explicit.get_json()["statuses"] == []

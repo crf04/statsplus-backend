@@ -1030,7 +1030,9 @@ so a reader can see why he missed a past game. `player` is a canonical player
 id or a full name matched against the season's Athlete Catalog (case,
 punctuation and diacritics ignored, no fuzzy match). `from_date` is required;
 `to_date` defaults to today's US Eastern date, or the last day of
-`from_date`'s season (September 30) when that is earlier. Both are US Eastern
+`from_date`'s season (September 30) when that is earlier; with no `to_date`, a
+`from_date` after today is `400 invalid_input` with
+`details.parameters: ["from_date"]`. Both are US Eastern
 game dates and must fall in one season (October 1 to September 30): a range
 that ends before it starts or crosses seasons, which includes any range longer
 than a season, is `400 invalid_input` with `details.parameters: ["to_date"]`.

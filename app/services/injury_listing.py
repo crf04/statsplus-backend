@@ -222,8 +222,12 @@ class StoredInjuryListing:
         first = self._parse_range_date(from_date, "from_date")
         if to_date is None:
             today = slate_date_for_instant(assume_utc(self._clock()))
-            season_end = date(int(current_nba_season(first)[:4]) + 1, 9, 30)
-            last = max(first, min(today, season_end))
+            last = min(today, date(int(current_nba_season(first)[:4]) + 1, 9, 30))
+            if last < first:
+                raise InvalidInputError(
+                    "The injuries from_date is after today; pass a to_date.",
+                    public_details={"parameter": "from_date", "parameters": ["from_date"]},
+                )
         else:
             last = self._parse_range_date(to_date, "to_date")
             if last < first or current_nba_season(last) != current_nba_season(first):
