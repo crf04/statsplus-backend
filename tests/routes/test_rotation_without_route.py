@@ -829,6 +829,8 @@ def test_with_is_rejected_with_game_id_last_n_and_a_blank_name(client, detroit, 
     [
         "team=DET&with=Cade%20Cunningham&without=cade%20cunningham",
         "player_name=Ausar%20Thompson&with=Jalen%20Duren&with=Cade%20Cunningham&without=CADE%20CUNNINGHAM",
+        "team=DET&with=C%C3%A1d%C3%A9%20Cunningham&without=Cade%20Cunningham",
+        "team=DET&with=Jalen%20Duren&with=Cade%20Cunningham&without=C%C3%A1de%20Cunningham",
     ],
 )
 def test_the_same_player_in_with_and_without_is_a_400_naming_both(client, detroit, query):
@@ -938,3 +940,35 @@ def test_games_after_the_with_player_moved_to_another_team_are_left_out(client, 
     split = _get(client, "team=DET&with=Moved%20On").get_json()["split"]
 
     assert (split["games_asked"], split["games_other"], split["games_mixed"]) == (1, 1, 0)
+
+
+@pytest.mark.parametrize("subject", ["team=DET", "player_name=Steady"])
+def test_one_player_resolved_from_two_names_in_with_and_without_is_a_400_naming_both(
+    client, tmp_path, dependencies, subject
+):
+    # The box score names him "Cade Cunningham"; the catalog, which resolves
+    # a name on no box score, names the same id "Cade Alias".
+    repository = migrated_repository(tmp_path)
+    store(
+        repository,
+        _g(
+            1,
+            "2026-01-01",
+            line(CADE, "Cade Cunningham", "DET", minutes=30),
+            line(AUSAR, "Steady", "DET", minutes=20),
+        ),
+        _g(
+            2,
+            "2026-01-03",
+            line(CADE, "Cade Cunningham", "DET", minutes=0),
+            line(AUSAR, "Steady", "DET", minutes=25),
+        ),
+    )
+    dependencies.rotation_service = service_for(
+        repository, Catalog((CADE, "Cade Alias", "DET"), (AUSAR, "Steady", "DET"))
+    )
+
+    response = _get(client, f"{subject}&with=Cade%20Cunningham&without=Cade%20Alias")
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["details"]["parameters"] == ["with", "without"]

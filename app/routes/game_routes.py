@@ -42,7 +42,6 @@ from ..errors import (
     sanitize_public_value,
 )
 from ..models.game_logs import GameLogFilterError, GameLogQuery
-from ..services.athlete_resolver import normalize_athlete_name
 from ..services.database_first_activation import ReadSeason, SeasonUnavailable
 from ..services.game_log_preview import GameLogPreviewService, parse_line, parse_line_type
 from ..services.matchup_slate_preview import MatchupSlatePreviewService
@@ -811,13 +810,6 @@ def get_rotation():
             raise _invalid_rotation("last_n", name)
         if any(not typed.strip() for typed in names):
             raise _invalid_rotation(name)
-    if {normalize_athlete_name(typed) for typed in with_} & {
-        normalize_athlete_name(typed) for typed in without
-    }:
-        raise InvalidInputError(
-            "The same player is named in with and without.",
-            public_details={"parameters": ["with", "without"]},
-        )
     game_logs = False
     if "game_logs" in request.args:
         if not (with_ or without) or request.args["game_logs"] not in ("true", "false"):

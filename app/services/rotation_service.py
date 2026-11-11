@@ -305,6 +305,15 @@ def _minutes_change(
     return _round1((_average_cs(without, "minutes_cs") - _average_cs(played, "minutes_cs")) / CS_PER_MINUTE)
 
 
+def named_in_with_and_without() -> InvalidInputError:
+    """The refusal of one player named in both ``with`` and ``without``."""
+
+    return InvalidInputError(
+        "The same player is named in with and without.",
+        public_details={"parameters": ["with", "without"]},
+    )
+
+
 def rotation_split(
     without_lines: Sequence[Mapping[str, Any]],
     with_lines: Sequence[Mapping[str, Any]],
@@ -680,6 +689,8 @@ class RotationService:
         absent, absent_windows = self._named(
             season, team, "without", without, lines_by_game, names, subject_id
         )
+        if present.keys() & absent.keys():
+            raise named_in_with_and_without()
         asked, other, mixed = split_games(lines_by_game, present_windows, absent_windows)
         return _Split(lines_by_game, names, present, absent, asked, other, mixed, legacy=not with_)
 
@@ -990,4 +1001,11 @@ def _season_entries(
     return sorted(entries, key=lambda entry: (entry["game_date"], entry["game_id"]), reverse=True)
 
 
-__all__ = ["MIN_WITHOUT_GAMES", "RotationService", "absent_windows", "rotation_split", "split_games"]
+__all__ = [
+    "MIN_WITHOUT_GAMES",
+    "RotationService",
+    "absent_windows",
+    "named_in_with_and_without",
+    "rotation_split",
+    "split_games",
+]
