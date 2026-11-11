@@ -3650,6 +3650,11 @@ is a 0-minute game, and a game with no line for him (2026-27 LiveData box
 scores list only active players) is a *missed* game, also 0 minutes. A game
 before his first game for the team, such as one before a trade, is outside his
 window and left out.
+The player and team views carry `team_games_counted: true`
+(crf04/statsplus#483): `recent.games` and `season_summary.games` count the
+team's games inside his team window and the averages are per game played. A
+response without the field comes from a backend whose `games` counted only the
+games whose box score lists him, averaged over those games.
 In the team view each player's `recent` is the same rule applied to that team,
 while `games` lists the team's own last `last_n` games. *Played* is minutes above 0, *started* is the box-score starter
 flag, and *closed* is on court at the end of the fourth period. Minutes are
@@ -3662,6 +3667,7 @@ Player view:
 {
   "season": "2025-26",
   "last_n": 5,
+  "team_games_counted": true,
   "player": {"name": "Ausar Thompson", "team": "DET"},
   "recent": {"games": 5, "played": 5, "starts": 5, "minutes": 31.2, "stints": 3.4, "closed": 4,
              "minutes_by_period": {"Q1": 8.1, "Q2": 6.0, "Q3": 8.4, "Q4": 8.7, "OT": 0.0}},
@@ -3690,7 +3696,7 @@ Team view:
 
 ```json
 {
-  "season": "2025-26", "last_n": 5, "team": "DET",
+  "season": "2025-26", "last_n": 5, "team_games_counted": true, "team": "DET",
   "games": [{"game_date": "2026-04-12", "matchup": "DET @ CHA", "starters": ["Cade Cunningham", "..."]}],
   "players": [
     {"name": "Ausar Thompson",

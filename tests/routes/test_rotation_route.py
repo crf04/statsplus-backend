@@ -108,6 +108,7 @@ def test_team_rotation_lists_starters_and_minute_changes(client, seeded):
     assert response.get_json() == {
         "season": "2025-26",
         "last_n": 1,
+        "team_games_counted": True,
         "team": "DET",
         "games": [{"game_date": "2026-01-04", "matchup": "DET @ BOS", "starters": ["Unit One", "Unit Two"]}],
         "players": [

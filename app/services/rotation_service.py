@@ -483,6 +483,7 @@ class RotationService:
         return {
             "season": season,
             "last_n": last_n,
+            "team_games_counted": True,
             "player": {"name": athlete.display_name, "team": team},
             "recent": _window_summary(recent),
             "season_summary": _window_summary(_season_entries(own_rows, team_games)),
@@ -560,6 +561,7 @@ class RotationService:
         return {
             "season": season,
             "last_n": last_n,
+            "team_games_counted": True,
             "team": team,
             "games": [
                 {

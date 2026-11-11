@@ -625,6 +625,7 @@ def test_recent_counts_the_team_games_he_missed_and_averages_minutes_over_games_
 
     document = service.get_player_rotation(player_name="Adem Bona", player_team=None, last_n=5, season=None)
 
+    assert document["team_games_counted"] is True
     assert [(g["game_date"], g["minutes"], g["on_box_score"]) for g in document["games"]] == [
         ("2026-11-08", 0.0, False),
         ("2026-11-06", 0.0, False),
@@ -682,6 +683,7 @@ def test_team_view_counts_missed_games_and_keeps_a_player_who_missed_them_all(tm
 
     document = service.get_team_rotation(team="PHI", last_n=2, season=None)
 
+    assert document["team_games_counted"] is True
     by_name = {player["name"]: player for player in document["players"]}
     assert sorted(by_name) == ["Adem Bona", "Tyrese Maxey"]
     assert by_name["Adem Bona"]["recent"] == {
