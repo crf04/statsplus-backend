@@ -1947,7 +1947,9 @@ def _sat_out_last_season(world):
     store(
         world.scenarios.rotations,
         *(
-            rotation_game(game_id, day, "LAL", "BOS", [rotation_line(REAVES, "Austin Reaves", "LAL", minutes=30)])
+            rotation_game(
+                game_id, day, "LAL", "BOS", [rotation_line(REAVES, "Austin Reaves", "LAL", minutes=30)]
+            )
             for game_id, day in H
         ),
         season=PRIOR,

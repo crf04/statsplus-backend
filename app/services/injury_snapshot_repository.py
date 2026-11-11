@@ -154,16 +154,19 @@ class InjurySnapshotRepository:
     def get_season_mentions(
         self, season: str, player_ids: Collection[int], *, connection: Connection | None = None
     ) -> dict[InjurySnapshotScope, StoredInjurySnapshot]:
-        """The season's reconciled snapshots that may list one of ``player_ids``, in one statement.
+        """The season's reconciled snapshots that list one of ``player_ids``, in one statement.
 
-        A superset: a snapshot qualifies when an id's digits appear anywhere in
-        its stored entries, so the caller still checks each entry's
-        ``canonical_player_id``.
+        Matched in SQL on the stored JSON's ``"canonical_player_id":<id>``
+        member, as ``_encode_objects`` writes it, so a longer id holding the
+        same digits does not qualify.  Each snapshot keeps all its entries.
         """
 
         if not player_ids:
             return {}
         table = InjurySnapshot.__table__
+        members = [
+            f'"canonical_player_id":{int(player_id)}{end}' for player_id in player_ids for end in (",", "}")
+        ]
         with read_connection(self.engine, connection) as connection:
             rows = (
                 connection.execute(
@@ -174,7 +177,12 @@ class InjurySnapshotRepository:
                         table.c.unresolved_team_entry_count,
                     ).where(
                         table.c.season == validate_canonical_season(season),
-                        or_(*(table.c.normalized_entries.contains(str(int(pid))) for pid in player_ids)),
+                        or_(
+                            *(
+                                table.c.normalized_entries.contains(member, autoescape=True)
+                                for member in members
+                            )
+                        ),
                     )
                 )
                 .mappings()

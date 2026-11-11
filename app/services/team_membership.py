@@ -81,7 +81,9 @@ class TeamMembership:
             for key, (lines, games) in judged.items()
             if any(_before_first(lines, team, days) for team, days in games.items())
         ]
-        evidence = self._optional(season, lambda: self._evidence(season, needed, player_id), {}) if needed else {}
+        evidence = (
+            self._optional(season, lambda: self._evidence(season, needed, player_id), {}) if needed else {}
+        )
         windows: dict[Hashable, dict[str, TeamWindow | None]] = {}
         for key, (lines, games) in judged.items():
             windows[key] = {}
