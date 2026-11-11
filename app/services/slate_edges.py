@@ -35,6 +35,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.config.settings import RuntimeSettings
+from app.domain.matchup_experience import ROTATION_SOURCE
 from app.domain.nba_events import season_for_game_id
 from app.errors import (
     AppError,
@@ -71,7 +72,7 @@ LEADER_MARKETS = ("PTS", "REB", "AST", "3PM", "PRA", "PR", "PA", "RA", "FGA", "F
 LEADERS_PER_GAME = 5
 #: Bumped whenever the selection rules or the response shape change, so a
 #: stored response of the old rules is never served.
-SLATE_EDGES_CACHE_SCHEMA = 9
+SLATE_EDGES_CACHE_SCHEMA = 10
 _REASON_BASE = "play_types"
 _REASON_SLICES = 2
 
@@ -510,8 +511,10 @@ class SlateEdgesService:
     @staticmethod
     def _is_spotlight_eligible(entry: Mapping[str, Any]) -> bool:
         scoring = entry["player"]["season_scoring"]
+        # A pick should be playable: a Rotation Player has no line.
         return (
-            entry["cell"]["blend"]
+            entry["player"]["player_source"] != ROTATION_SOURCE
+            and entry["cell"]["blend"]
             and not entry["cell"]["thin"]
             and entry["cell"]["value"] != 0
             and scoring is not None

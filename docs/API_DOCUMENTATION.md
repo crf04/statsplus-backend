@@ -1268,7 +1268,8 @@ DFS provider and writes nothing.
   such score is unscored. `thin` is that cell's thin flag.
 - `scores` lists every scored player of the game's Matchup as
   `{ canonical_id, value }` with no scoring floor, in the Matchup's own player
-  order.
+  order, Rotation Players (crf04/statsplus#459) included; so do `effects` and
+  `leaders`.
 - `effects` holds up to three of those players whose `season_scoring` is at
   least 8, ordered by `|value|` descending (ties: higher `season_scoring`, then
   lower `canonical_id`). A thin player is included, flagged `thin`.
@@ -1284,7 +1285,8 @@ DFS provider and writes nothing.
   FTA and FTM are left out because they fall back to the team rate for about
   half the teams early in a season.
 - `spotlight.best` is the largest positive season PTS Blend `value` across all
-  games among non-thin Blends (a single component never qualifies) whose
+  games among non-thin Blends (a single component never qualifies) of players
+  with a line (never a Matchup row whose `player_source` is `rotation`) whose
   `season_scoring` is at least 12; `spotlight.toughest` is the most negative by
   the same filter. Each is `null` when no player qualifies. `opponent` is the
   tricode of the side the player does not play for.
@@ -1565,6 +1567,9 @@ closing projections". A final game with governed archived projection evidence,
 or with any still-servable stored Player Pool, therefore keeps the
 evidence-appropriate existing experience, as does every scheduled or live game.
 `player_source` is `game_logs` in historical mode and `player_pool` otherwise.
+It names the source of the Participants: in current mode a player row's own
+`player_source` may also be `rotation` (a Rotation Player, below), which never
+changes the experience, the `participants` section or the targetable counts.
 
 `sections` always contains exactly `schedule`, `participants`,
 `season_defense`, `last_15_defense`, and `injuries`. Every section carries its
@@ -1919,13 +1924,72 @@ always present: the Over and Under price of the pick behind each `lines` entry,
   (historical mode, and the Unscheduled Matchup) carry `"line_prices": {}`.
 
 `player_source`, `stat_categories`, and `focal_game_line` are additive and
-always present. `player_source` is `player_pool` for a stored pool player and
-`game_logs` for a Historical Matchup participant. In current mode
-`stat_categories` equals `posted_markets` and the key set of `scores` is a
-superset of it (crf04/statsplus#457); in historical mode `stat_categories` is
-exactly the key set of `scores`, the governed Statistic Catalog crossed with the
-score-input contract rather than any DFS archive. `focal_game_line` is `null`
-in current mode.
+always present. `player_source` is `player_pool` for a stored pool player,
+`rotation` for a Rotation Player, and `game_logs` for a Historical Matchup
+participant. In current mode `stat_categories` equals `posted_markets` and the
+key set of `scores` is a superset of it (crf04/statsplus#457); in historical
+mode `stat_categories` is exactly the key set of `scores`, the governed
+Statistic Catalog crossed with the score-input contract rather than any DFS
+archive. `focal_game_line` is `null` in current mode.
+
+**Rotation Players** (crf04/statsplus#459). A current-mode Matchup also lists
+each player with no line in CourtAI's books who played recent minutes: a
+player who is not in the game's Player Pool, played 10 or more minutes for his
+team in at least one of its 5 most recent Regular Season games before the
+game's date in the game's own season, is placed on that team by the season's
+active Athlete Catalog, and is not listed `Out` on the game's stored injury
+report (a `Doubtful` or `Questionable` player stays, with his
+`injury_badge_ref`). Only the team's own logs count, so a team's first game of
+the season lists none, a player traded to a team is listed once he has played
+10 minutes for it, and a player traded or waived away is not listed for his
+old team. A Historical or Unscheduled Matchup lists none. Every pool row comes
+before every Rotation Player row; each group keeps the order above. A
+Rotation Player row has the pool row's shape with:
+
+| Field | Rotation Player row |
+|---|---|
+| `player_source` | `rotation` |
+| `stat_categories`, `posted_markets` | `[]` |
+| `provenance`, `lines`, `line_prices` | `{}` |
+| `book_lines` | his sportsbook quotes, as a pool row's |
+| `scores` | every scoreable category, as a pool row's |
+| `season_averages` | `{}` |
+| `last_five_games` | his last five games, each with `stats: {}` |
+| `season_scoring`, `last_10_minutes`, `diet_shares`, `diet_thin`, `injury_badge_ref` | as a pool row's |
+
+```json
+{
+  "canonical_id": 1641001,
+  "name": "Example Rotation Player",
+  "team_id": 1610612752,
+  "tricode": "NYK",
+  "player_source": "rotation",
+  "stat_categories": [],
+  "focal_game_line": null,
+  "posted_markets": [],
+  "provenance": {},
+  "lines": {},
+  "line_prices": {},
+  "season_scoring": 4.2,
+  "last_five_games": [
+    { "game_id": "0022600140", "game_date": "2026-11-08", "matchup": "NYK @ MIL",
+      "minutes": 18.5, "stats": {} }
+  ],
+  "season_averages": {},
+  "last_10_minutes": [6.1, 18.5],
+  "diet_shares": { "play_types": [], "shot_zones": [], "shot_types": [],
+                   "assist_locations": [], "rebound_types": [] },
+  "diet_thin": { "play_types": true, "shot_zones": true, "shot_types": true,
+                 "assist_locations": true, "rebound_types": true },
+  "scores": { "PTS": { "season": { "...": "every scoreable category, as a pool row" } } },
+  "injury_badge_ref": null,
+  "book_lines": {}
+}
+```
+
+A Rotation Player is never targetable: `targetable_player_count`, the Slate's
+counts, the Matchup Selection route (`404` for him), the DFS board, posted
+lines and Injury Scenarios lines keep to the pool.
 
 `last_five_games` and `season_averages` (crf04/statsplus#395) are additive and
 always present. Both read the rows behind `season_scoring`: the player's
