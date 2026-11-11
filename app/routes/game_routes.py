@@ -97,6 +97,8 @@ _ROTATION_MAX_LAST_N = 20
 _LAST_N = re.compile(r"[0-9]{1,2}\Z")
 _NBA_GAME_ID = re.compile(r"[0-9]{10}\Z")
 _BOARD_PARAMETERS = frozenset({"date", "season", "market", "game", "team", "sources"})
+#: One player's stored statuses over a date range (crf04/statsplus#494).
+_INJURY_HISTORY_PARAMETERS = frozenset({"player", "from_date", "to_date"})
 
 
 def _is_canonical_player_id(value: str) -> bool:
@@ -126,12 +128,30 @@ def get_slate_edges():
 @injuries_bp.route("", methods=["GET"], strict_slashes=False)
 @require_auth
 def get_injuries():
-    """List the stored official injury report for one ET date, or one team."""
-    unknown = sorted(set(request.args) - {"date", "team"})
+    """List the stored official injury report for one ET date, or one team; or one player's statuses over a range."""
+    unknown = sorted(set(request.args) - {"date", "team", *_INJURY_HISTORY_PARAMETERS})
     if unknown:
         raise InvalidInputError(
             "The injuries parameters are invalid.",
             public_details={"parameters": [sanitize_public_value(name) for name in unknown]},
+        )
+    if "player" in request.args:
+        conflicting = sorted({"date", "team"} & set(request.args))
+        if conflicting:
+            raise InvalidInputError(
+                "The injuries player cannot be combined with date or team.",
+                public_details={"parameters": conflicting},
+            )
+        return jsonify(
+            injuries_service.player_history(
+                request.args["player"], request.args.get("from_date"), request.args.get("to_date")
+            )
+        )
+    misplaced = sorted(_INJURY_HISTORY_PARAMETERS & set(request.args))
+    if misplaced:
+        raise InvalidInputError(
+            "The injuries from_date and to_date need a player.",
+            public_details={"parameters": misplaced},
         )
     return jsonify(injuries_service.list_injuries(request.args.get("date"), request.args.get("team")))
 

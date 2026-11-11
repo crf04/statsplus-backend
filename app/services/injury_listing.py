@@ -1,4 +1,4 @@
-"""Stored official injury report, listed by date and counted per Slate game.
+"""Stored official injury report, listed by date, by player, and counted per Slate game.
 
 Reads what the scheduled refresh already
 stored in ``injury_snapshots``; it never reaches the provider.  Unlike the
@@ -16,15 +16,17 @@ from typing import Any
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.config.settings import current_nba_season
 from app.domain.nba_events import is_all_star_kind, is_final_event, resolve_stored_event_classification
 from app.domain.nba_teams import NBA_TEAM_TRICODES, canonical_nba_team_abbreviation
+from app.domain.slate_time import slate_date_for_instant, slate_day_bounds_utc
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import InvalidInputError, ProviderUnavailableError, raise_if_query_timeout
 from app.providers.nba_injury_report import (
-    EASTERN,
     REPORT_STATUSES,
     report_time_from_name,
 )
+from app.services.athlete_resolver import CanonicalAthlete, catalog_athlete_matches
 from app.services.injury_snapshot_repository import InjurySnapshotScope
 from app.services.publication_snapshot_calls import call_with_read_scope
 from app.services.research_season import schedule_season
@@ -48,8 +50,34 @@ def _report_time(entry: Mapping[str, Any]) -> str | None:
     return None if moment is None else moment.isoformat()
 
 
-def _status(entry: Mapping[str, Any]) -> str:
+def report_status(entry: Mapping[str, Any]) -> str:
     return str(entry.get("canonical_status") or entry.get("raw_status") or "")
+
+
+def _report_moment(entry: Mapping[str, Any]) -> datetime:
+    try:
+        return assume_utc(datetime.fromisoformat(str(_report_time(entry))))
+    except ValueError:
+        return datetime.min.replace(tzinfo=UTC)
+
+
+def listed_entry(snapshot: Any, player_id: int, team: str, game_date: str) -> Mapping[str, Any] | None:
+    """His row for ``team`` on one game's stored report, or ``None`` when it does not list him.
+
+    A row the report printed for another day (the same teams' next game) does
+    not describe this game; a row stored before rows carried a date does.  Of
+    two rows for him, the later report time decides.  A row whose name matched
+    no catalog player (``canonical_player_id`` null) is never taken for him.
+    """
+
+    rows = [
+        entry
+        for entry in snapshot.normalized_entries
+        if _player_id(entry.get("canonical_player_id")) == player_id
+        and entry.get("tricode") == team
+        and str(entry.get("game_date") or game_date) == game_date
+    ]
+    return max(rows, key=_report_moment, default=None)
 
 
 def _player_id(value: Any) -> int | None:
@@ -90,9 +118,12 @@ class StoredInjuryListing:
         enabled: bool,
         clock: Callable[[], datetime] | None = None,
         minutes: Any | None = None,
+        athlete_catalog: Any | None = None,
     ) -> None:
         self.event_catalog = event_catalog
         self.snapshot_repository = snapshot_repository
+        #: Resolves the ``player`` of a status history.
+        self.athlete_catalog = athlete_catalog
         self.settings = settings
         self.enabled = enabled
         self._clock = clock or (lambda: datetime.now(UTC))
@@ -115,7 +146,7 @@ class StoredInjuryListing:
                 continue
             per_status = dict.fromkeys(INJURY_STATUS_ORDER, 0)
             for entry in snapshot.normalized_entries:
-                status = _status(entry)
+                status = report_status(entry)
                 if status in per_status:
                     per_status[status] += 1
             counts[game_id] = per_status
@@ -150,7 +181,7 @@ class StoredInjuryListing:
                     "player_id": entry.get("canonical_player_id"),
                     "team": str(entry["tricode"]),
                     "game_id": game_id,
-                    "status": _status(entry),
+                    "status": report_status(entry),
                     "reason": str(entry.get("reason") or ""),
                     "report_time": _report_time(entry),
                     "retrieved_at": retrieved_at.isoformat(),
@@ -177,6 +208,135 @@ class StoredInjuryListing:
             "minutes_published_season": None if minutes is None else minutes.published_season,
             "injuries": injuries,
         }
+
+    # -- /api/injuries?player= ----------------------------------------------
+
+    def player_history(self, player: str, from_date: str | None, to_date: str | None) -> dict[str, Any]:
+        """One player's stored statuses by game, oldest first, over one season's date range.
+
+        A game whose stored report does not list him is not in ``statuses``;
+        ``report_coverage`` says, per team he is listed for in the range or the
+        Athlete Catalog places him on, how many of its games had a report.
+        """
+
+        first = self._parse_range_date(from_date, "from_date")
+        if to_date is None:
+            today = slate_date_for_instant(assume_utc(self._clock()))
+            season_end = date(int(current_nba_season(first)[:4]) + 1, 9, 30)
+            last = max(first, min(today, season_end))
+        else:
+            last = self._parse_range_date(to_date, "to_date")
+            if last < first or current_nba_season(last) != current_nba_season(first):
+                raise InvalidInputError(
+                    "The injuries to_date must be on or after from_date and in the same season.",
+                    public_details={"parameter": "to_date", "parameters": ["to_date"]},
+                )
+        if not self.enabled:
+            raise ProviderUnavailableError("The injury report is not enabled.")
+        if self.event_catalog is None or self.snapshot_repository is None or self.athlete_catalog is None:
+            raise ProviderUnavailableError("The injury report is not available. Please try again later.")
+        season = schedule_season(self.settings, self.event_catalog, first)
+        athlete = self._athlete(player, season)
+        events = range_events(self.event_catalog, season, first, last)
+        by_game = {str(event["nba_game_id"]): event for event in events}
+        mentions = self._read(self.snapshot_repository.get_season_mentions, season, [athlete.player_id])
+        statuses = []
+        for scope, snapshot in mentions.items():
+            event = by_game.get(scope.game_id)
+            if event is None:
+                continue
+            game_date = _eastern_date(event)
+            for team in _event_tricodes(event):
+                entry = listed_entry(snapshot, athlete.player_id, team, game_date)
+                if entry is not None:
+                    statuses.append(
+                        {
+                            "game_date": game_date,
+                            "game_id": scope.game_id,
+                            "matchup": _matchup(event, team),
+                            "team": team,
+                            "status": report_status(entry),
+                            "reason": str(entry.get("reason") or ""),
+                            "report_time": _report_time(entry),
+                        }
+                    )
+        statuses.sort(key=lambda row: (row["game_date"], str(by_game[row["game_id"]]["scheduled_at"])))
+        catalog_team = canonical_nba_team_abbreviation(athlete.team_abbreviation)
+        teams = sorted({row["team"] for row in statuses} | ({catalog_team} & NBA_TEAM_TRICODES))
+        team_games = {
+            team: [
+                InjurySnapshotScope(season, game_id)
+                for game_id, event in by_game.items()
+                if team in _event_tricodes(event)
+            ]
+            for team in teams
+        }
+        reported = self._read(
+            self.snapshot_repository.stored_scopes,
+            [scope for scopes in team_games.values() for scope in scopes],
+        )
+        return {
+            "player": {
+                "player_id": athlete.player_id,
+                "name": athlete.display_name,
+                "team": athlete.team_abbreviation,
+            },
+            "season": season,
+            "from_date": first.isoformat(),
+            "to_date": last.isoformat(),
+            "report_coverage": [
+                {
+                    "team": team,
+                    "team_games": len(scopes),
+                    "games_with_report": sum(scope in reported for scope in scopes),
+                }
+                for team, scopes in team_games.items()
+            ],
+            "statuses": statuses,
+        }
+
+    def _athlete(self, player: str, season: str) -> CanonicalAthlete:
+        """The season's catalog athlete ``player`` names, by player id or full name."""
+
+        wanted = str(player).strip()
+        catalog = self.athlete_catalog.get_catalog(season, active_only=False)
+        if wanted.isdigit():
+            matches = [CanonicalAthlete.from_row(row) for row in catalog if str(row["player_id"]) == wanted]
+        else:
+            matches = list(catalog_athlete_matches(catalog, wanted))
+        if not matches:
+            raise InvalidInputError(
+                "The injuries player is not in the season's Athlete Catalog.",
+                public_details={"parameter": "player", "parameters": ["player"]},
+            )
+        if len(matches) > 1:
+            raise InvalidInputError(
+                "The injuries player matches more than one player; name him by player_id.",
+                public_details={
+                    "parameter": "player",
+                    "parameters": ["player"],
+                    "candidates": [
+                        {
+                            "player_id": athlete.player_id,
+                            "name": athlete.display_name,
+                            "team": athlete.team_abbreviation,
+                        }
+                        for athlete in sorted(matches, key=lambda athlete: athlete.player_id)
+                    ],
+                },
+            )
+        return matches[0]
+
+    @staticmethod
+    def _read(method: Callable[..., Any], *args: Any) -> Any:
+        try:
+            return method(*args)
+        except (SQLAlchemyError, TypeError, ValueError) as error:
+            raise_if_query_timeout(error)
+            raise ProviderUnavailableError(
+                "The injury report is not available. Please try again later.",
+                detail=error,
+            ) from error
 
     # -- shared ------------------------------------------------------------
 
@@ -234,6 +394,19 @@ class StoredInjuryListing:
         return parsed
 
     @staticmethod
+    def _parse_range_date(value: str | None, parameter: str) -> date:
+        try:
+            parsed = datetime.strptime(str(value), "%Y-%m-%d").date()
+        except ValueError:
+            parsed = None
+        if parsed is None or parsed.isoformat() != value:
+            raise InvalidInputError(
+                f"The injuries {parameter} must use YYYY-MM-DD.",
+                public_details={"parameter": parameter, "parameters": [parameter]},
+            )
+        return parsed
+
+    @staticmethod
     def _parse_team(value: str | None) -> str | None:
         if value is None:
             return None
@@ -260,12 +433,24 @@ def slate_events(
     if event_catalog is None:
         return []
     season = season or schedule_season(settings, event_catalog, slate_date)
-    local_start = datetime.combine(slate_date, datetime.min.time(), EASTERN)
+    return range_events(event_catalog, season, slate_date, slate_date, connection=connection)
+
+
+def range_events(
+    event_catalog: Any,
+    season: str,
+    first: date,
+    last: date,
+    *,
+    connection: Connection | None = None,
+) -> list[Mapping[str, Any]]:
+    """The season's stored non-All-Star events from ET date ``first`` through ``last``, in tip order."""
+
     events = call_with_read_scope(
         event_catalog.get_events_between,
         season,
-        local_start.astimezone(UTC),
-        (local_start + timedelta(days=1)).astimezone(UTC),
+        slate_day_bounds_utc(first)[0],
+        slate_day_bounds_utc(last)[1],
         connection=connection,
     )
     kept = [
@@ -282,9 +467,30 @@ def slate_events(
     return kept
 
 
+def _eastern_date(event: Mapping[str, Any]) -> str:
+    return slate_date_for_instant(parse_utc_iso(str(event["scheduled_at"]))).isoformat()
+
+
+def _event_tricodes(event: Mapping[str, Any]) -> tuple[str, str]:
+    return (
+        canonical_nba_team_abbreviation(event["away_team"]["tricode"]),
+        canonical_nba_team_abbreviation(event["home_team"]["tricode"]),
+    )
+
+
+def _matchup(event: Mapping[str, Any], team: str) -> str:
+    """``LAC @ DEN`` for an away game, ``LAC vs. DEN`` for a home game, as the rotation prints it."""
+
+    away, home = _event_tricodes(event)
+    return f"{team} vs. {away}" if team == home else f"{team} @ {home}"
+
+
 __all__ = [
     "INJURY_LIST_STALE_SECONDS",
     "INJURY_STATUS_ORDER",
     "StoredInjuryListing",
+    "listed_entry",
+    "range_events",
+    "report_status",
     "slate_events",
 ]
