@@ -836,7 +836,7 @@ def get_rotation():
             raise _invalid_rotation(name)
     game_logs = False
     if "game_logs" in request.args:
-        if not (with_ or without) or request.args["game_logs"] not in ("true", "false"):
+        if not (with_ or without or selector == "team") or request.args["game_logs"] not in ("true", "false"):
             raise _invalid_rotation("game_logs")
         game_logs = request.args["game_logs"] == "true"
     if selector == "game_id":

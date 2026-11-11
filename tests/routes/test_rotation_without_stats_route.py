@@ -394,12 +394,144 @@ def test_game_logs_reach_every_player_of_the_team_view_and_are_absent_by_default
 
 
 @pytest.mark.parametrize(
-    "query", ["team=DET&game_logs=true", "team=DET&without=Cade%20Cunningham&game_logs=yes"]
+    "query",
+    [
+        "player_name=Ausar%20Thompson&game_logs=true",
+        "game_id=0022500001&game_logs=true",
+        "game_id=0022500001&game_logs=false",
+        "team=DET&without=Cade%20Cunningham&game_logs=yes",
+        "team=DET&game_logs=yes",
+    ],
 )
-def test_game_logs_needs_without_and_a_boolean(client, detroit, query):
+def test_game_logs_needs_a_split_or_the_team_view_and_a_boolean(client, detroit, query):
     response = client.get(f"{ROTATION}?{query}")
     assert response.status_code == 400
     assert "game_logs" in response.get_json()["error"]["details"]["parameters"]
+
+
+def _team(client, query):
+    response = client.get(f"{ROTATION}?team=DET&{query}")
+    assert response.status_code == 200
+    return response.get_json()
+
+
+def _grid(body):
+    return {
+        player["name"]: [
+            (g["game_date"], g["matchup"], g["started"], g["minutes"], g["box"] and g["box"]["PTS"])
+            for g in player["game_logs"]
+        ]
+        for player in body["players"]
+    }
+
+
+def test_team_view_game_logs_cover_each_team_game_with_misses_as_empty_boxes(client, detroit):
+    """crf04/statsplus#504: every listed player's game in each of the team's last ``last_n`` games."""
+
+    body = _team(client, "game_logs=true&last_n=3")
+
+    assert [g["game_date"] for g in body["games"]] == ["2026-01-07", "2026-01-06", "2026-01-05"]
+    assert _grid(body) == {
+        "Ausar Thompson": [
+            ("2026-01-07", "DET vs. BOS", False, 26.0, 20.0),
+            ("2026-01-06", "DET vs. BOS", False, 28.0, None),  # minutes on the rotation, no game-log row
+            ("2026-01-05", "DET vs. BOS", False, 24.0, 14.0),
+        ],
+        "Cade Cunningham": [
+            ("2026-01-07", "DET vs. BOS", False, 0.0, None),  # a DNP line
+            ("2026-01-06", "DET vs. BOS", False, 0.0, None),
+            ("2026-01-05", "DET vs. BOS", False, 32.0, 20.0),
+        ],
+        "Cameo Player": [
+            ("2026-01-07", "DET vs. BOS", False, 0.0, None),  # missed: no line in any of them
+            ("2026-01-06", "DET vs. BOS", False, 0.0, None),
+            ("2026-01-05", "DET vs. BOS", False, 0.0, None),
+        ],
+        "Isaiah Stewart": [
+            ("2026-01-07", "DET vs. BOS", False, 0.0, None),  # missed: no line in g7
+            ("2026-01-06", "DET vs. BOS", False, 10.0, 0.0),
+            ("2026-01-05", "DET vs. BOS", False, 12.0, 4.0),
+        ],
+        "Jalen Duren": [
+            ("2026-01-07", "DET vs. BOS", False, 25.0, 9.0),
+            ("2026-01-06", "DET vs. BOS", False, 0.0, None),
+            ("2026-01-05", "DET vs. BOS", False, 22.0, 9.0),
+        ],
+    }
+    ausar = _entry(body, "Ausar Thompson")["game_logs"][0]["box"]
+    assert ausar == {
+        "minutes": 26.0,
+        "PTS": 20.0,
+        "REB": 5.0,
+        "AST": 8.0,
+        "3PM": 3.0,
+        "PRA": 33.0,
+        "FGA": 14.0,
+        **ZERO_BOX,
+    }
+    assert len(detroit.stored_logs.batches) == 1
+
+
+def test_team_view_game_logs_leave_out_team_games_before_his_window(client, detroit):
+    """Cameo's first DET game is g2, so g1 is outside his window: absent, not a miss."""
+
+    body = _team(client, "game_logs=true&last_n=7")
+
+    assert [g["game_date"] for g in _entry(body, "Cameo Player")["game_logs"]] == DATES[:0:-1]
+    assert [g["game_date"] for g in _entry(body, "Ausar Thompson")["game_logs"]] == DATES[::-1]
+
+
+def test_team_view_game_logs_carry_started_and_the_away_matchup(client, tmp_path, dependencies):
+    repository = migrated_repository(tmp_path)
+    store(
+        repository,
+        game(
+            "0022600001",
+            "2026-11-01",
+            "BOS",
+            "NYK",
+            [line(AUSAR, "Jalen Brunson", "NYK", minutes=34, started=True)],
+        ),
+        game("0022600002", "2026-11-03", "NYK", "BOS", [line(AUSAR, "Jalen Brunson", "NYK", minutes=12)]),
+    )
+    logs = StoredLogs()
+    logs.add(AUSAR, "NYK", "0022600001", "2026-11-01", minutes=34, pts=30, FG3A=9, FTA=7)
+    dependencies.rotation_service = service_for(
+        repository, Catalog((AUSAR, "Jalen Brunson", "NYK")), logs=logs
+    )
+
+    response = client.get(f"{ROTATION}?team=NYK&game_logs=true")
+
+    assert response.status_code == 200
+    [brunson] = response.get_json()["players"]
+    assert [
+        (
+            g["game_date"],
+            g["matchup"],
+            g["started"],
+            g["minutes"],
+            g["box"] and (g["box"]["FG3A"], g["box"]["FTA"]),
+        )
+        for g in brunson["game_logs"]
+    ] == [
+        ("2026-11-03", "NYK vs. BOS", False, 12.0, None),
+        ("2026-11-01", "NYK @ BOS", True, 34.0, (9.0, 7.0)),
+    ]
+
+
+def test_team_view_without_game_logs_true_is_unchanged(client, detroit):
+    plain = client.get(f"{ROTATION}?team=DET&last_n=3")
+    false = client.get(f"{ROTATION}?team=DET&last_n=3&game_logs=false")
+
+    assert plain.status_code == false.status_code == 200
+    assert false.data == plain.data
+    assert {key for player in plain.get_json()["players"] for key in player} == {
+        "name",
+        "recent",
+        "season_summary",
+        "minutes_change",
+    }
+    assert detroit.stored_logs.batches == []
 
 
 class PublishedSeasonReader:

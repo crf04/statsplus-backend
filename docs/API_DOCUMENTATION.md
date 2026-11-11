@@ -3960,7 +3960,7 @@ coverage once every completed game is stored or rejected.
 
 ```http
 GET /api/games/rotation?player_name=<name>[&player_team=<tricode>][&last_n=5][&season=YYYY-YY]
-GET /api/games/rotation?team=<tricode>[&last_n=5][&season=YYYY-YY]
+GET /api/games/rotation?team=<tricode>[&last_n=5][&season=YYYY-YY][&game_logs=true]
 GET /api/games/rotation?game_id=<NBA game id>
 GET /api/games/rotation?player_name=<name>&without=<name>[&without=<name>][&season=YYYY-YY]
 GET /api/games/rotation?team=<tricode>&without=<name>[&without=<name>][&season=YYYY-YY]
@@ -3983,6 +3983,7 @@ The backend computes every average and recent-versus-season comparison.
 | `season` | No | `YYYY-YY`. Default: the current season, or the latest season with rotation data when the current one has none |
 | `without` | No | Repeatable (crf04/statsplus#239). A player name; with `player_name` or `team`, switches to the [without split](#rotation-without-a-player). Rejected with `game_id` and with `last_n` |
 | `with` | No | Repeatable (crf04/statsplus#499). A player name; with `player_name` or `team`, switches to the [with split](#rotation-with-a-player), alone or beside `without`. Rejected with `game_id` and with `last_n` |
+| `game_logs` | No | `true` or `false`, default `false`. With `team` (crf04/statsplus#504) or a split ([`game_logs`](#rotation-without-a-player)) adds per-game box scores; rejected with `game_id` and on the plain player view |
 
 Exactly one of `player_name`, `team` and `game_id` is required, each parameter except `with` and `without` may appear
 once, and an unknown parameter is rejected. Every rejected request is
@@ -4086,6 +4087,40 @@ season_summary.minutes` (both per game played) computed from the unrounded
 averages, then rounded to one decimal; `null` when either side has no game
 played. `starters` are sorted by name.
 
+`game_logs=true` (crf04/statsplus#504) adds `game_logs` to every entry of
+`players`, so one call reads the whole team's minutes and box scores game by
+game. It lists his game in each of the team's last `last_n` games (the
+top-level `games`) inside his team window, newest first:
+
+```json
+"game_logs": [
+  {"game_date": "2026-04-12", "matchup": "DET @ CHA", "started": true, "minutes": 33.1,
+   "box": {"minutes": 33.0, "PTS": 18.0, "REB": 5.0, "AST": 4.0, "3PM": 2.0, "PRA": 27.0,
+           "FGA": 15.0, "FGM": 7.0, "FG3A": 6.0, "FTM": 2.0, "FTA": 2.0, "OREB": 1.0, "DREB": 4.0,
+           "STL": 1.0, "BLK": 0.0, "TOV": 2.0, "PF": 3.0, "PLUS_MINUS": 6.0}},
+  {"game_date": "2026-04-10", "matchup": "DET vs. ORL", "started": false, "minutes": 0.0, "box": null}
+]
+```
+
+- `game_date`, `matchup` and `started` are the player view's; `minutes` is the
+  rotation's, rounded to one decimal.
+- `box` is his stored game-log row for the team, unrounded, in the keys of the
+  split's `stats` (`minutes` is the game log's whole-minute figure, `3PM` its
+  `FG3M`, `PRA` the sum of PTS, REB and AST); a column missing from the row is
+  `null`.
+- A team game he missed (no box-score line), a DNP and an inactive line are
+  each an entry with `minutes: 0.0`, `started: false` and `box: null`, never a
+  gap. `box` is also `null` when the rotation shows minutes but no game-log row
+  is stored; `minutes` above 0 tells the two apart.
+- A team game outside his team window (before his first game for the team, or
+  after he moved) has no entry, so a player who joined or left inside the
+  window has fewer entries than `games`.
+- The game logs are read once per request for every listed player, through the
+  season's publication snapshot, as for the split's `stats`.
+
+Without `game_logs=true` the team view carries no `game_logs` and reads no
+game logs; `game_logs=false` is the same answer.
+
 Game view (crf04/statsplus#233): every box-score player of one stored game, both
 teams, with the stints the player view returns.
 
@@ -4182,7 +4217,7 @@ has its stats too (crf04/statsplus#484). The game set is unchanged.
   but no game-log row exists. They are excluded from the averages.
 - `stats` is `null` for a side where he has no game-log row in any game.
 
-`game_logs=true` (only with `without` or `with`; `true` or `false`, anything else is a
+`game_logs=true` (with `without` or `with`, or on the plain team view; `true` or `false`, anything else is a
 `400` naming `game_logs`) adds `game_logs` to each side, beside `stats`: the
 side's games, newest first, each with `game_date`, `started`, `minutes` (the
 rotation's, a DNP as 0) and `box`, the game-log row in the same keys as
