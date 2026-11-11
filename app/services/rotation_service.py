@@ -21,10 +21,15 @@ from fractions import Fraction
 from typing import Any
 
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
-from app.domain.team_window import TeamWindow, team_window
+from app.domain.team_window import TeamWindow
 from app.errors import InvalidInputError, ResourceNotFoundError
-from app.services.athlete_resolver import catalog_athlete_matches, normalize_athlete_name
+from app.services.athlete_resolver import (
+    catalog_athlete_matches,
+    match_catalog_athlete,
+    normalize_athlete_name,
+)
 from app.services.rotation_derivation import clock_text
+from app.services.team_membership import TeamMembership
 
 CS_PER_MINUTE = 6000
 #: A ``without`` split with fewer games than this is returned but marked insufficient.
@@ -119,17 +124,25 @@ def _summary(lines: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 # window (crf04/statsplus#449) in which each has no line or a 0-minute line; a
 # *with* game is one in which every named player's line shows more than 0.  A
 # game outside any named player's window, or where they disagree, is neither.
+# Membership evidence opens a window before a player's first game for the team
+# (crf04/statsplus#450).
 
 
 def absent_windows(
-    repository: Any, season: str, team: str, absent_ids: Iterable[int]
+    repository: Any,
+    season: str,
+    team: str,
+    absent_ids: Iterable[int],
+    membership: TeamMembership,
+    lines_by_game: Mapping[str, Mapping[int, Mapping[str, Any]]],
 ) -> dict[int, TeamWindow | None]:
     """Each absent player's team window for ``team``, from his stored lines for every team."""
 
     appearances: dict[int, list[tuple[Any, str]]] = {player_id: [] for player_id in absent_ids}
     for row in repository.player_games(season, player_ids=list(appearances)):
         appearances[row["player_id"]].append((row["game_date"], row["team_tricode"]))
-    return {player_id: team_window(rows, team) for player_id, rows in appearances.items()}
+    games = {game_id: next(iter(lines.values()))["game_date"] for game_id, lines in lines_by_game.items()}
+    return membership.windows(season, team, games, appearances)
 
 
 def classify_games(
@@ -322,12 +335,15 @@ class RotationService:
         athlete_catalog: Any | None,
         default_season: Callable[[], str],
         game_logs: Any,
+        injury_reports: Any | None = None,
     ) -> None:
         self.repository = repository
         self.athlete_catalog = athlete_catalog
         self._default_season = default_season
         #: The game service: its publication-snapshot reads give ``without`` its box-score stats.
         self.game_logs = game_logs
+        #: The stored injury reports, membership evidence for a ``without`` window.
+        self.membership = TeamMembership(injury_reports, game_logs.get_players_logs_by_id)
 
     # -- public reads ---------------------------------------------------
 
@@ -531,10 +547,8 @@ class RotationService:
         game_logs: bool = False,
     ) -> dict[str, Any]:
         lines_by_game, names = self._team_lines(season, team)
-        absent = self._resolve_absent(without, names, team, subject_id=athlete.player_id)
-        without_ids, with_ids = classify_games(
-            lines_by_game, absent_windows(self.repository, season, team, absent)
-        )
+        absent, windows = self._absent(season, team, without, lines_by_game, names, athlete.player_id)
+        without_ids, with_ids = classify_games(lines_by_game, windows)
         subject = athlete.player_id
         without_lines = [lines_by_game[g][subject] for g in without_ids if subject in lines_by_game[g]]
         with_lines = [lines_by_game[g][subject] for g in with_ids if subject in lines_by_game[g]]
@@ -573,10 +587,8 @@ class RotationService:
                 "The requested team has no rotation data for the season.",
                 public_details={"reason": "no_rotation_data"},
             )
-        absent = self._resolve_absent(without, names, team, subject_id=None)
-        without_ids, with_ids = classify_games(
-            lines_by_game, absent_windows(self.repository, season, team, absent)
-        )
+        absent, windows = self._absent(season, team, without, lines_by_game, names, None)
+        without_ids, with_ids = classify_games(lines_by_game, windows)
         sides: dict[int, tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]] = {}
         for game_id in without_ids:
             for player_id, line in lines_by_game[game_id].items():
@@ -647,6 +659,48 @@ class RotationService:
             lines_by_game.setdefault(row["game_id"], {})[row["player_id"]] = row
             names.setdefault(row["player_id"], row["player_name"])
         return lines_by_game, names
+
+    def _absent(
+        self,
+        season: str,
+        team: str,
+        requested: Sequence[str],
+        lines_by_game: Mapping[str, Mapping[int, Mapping[str, Any]]],
+        names: Mapping[int, str],
+        subject_id: int | None,
+    ) -> tuple[dict[int, str], dict[int, TeamWindow | None]]:
+        """Named ``without`` players and their team windows.
+
+        A name on none of the team's box scores resolves through the Athlete
+        Catalog, and counts only with membership evidence for a window: an
+        injured player who has not played (crf04/statsplus#450).
+        """
+
+        targets = {normalize_athlete_name(typed) for typed in requested}
+        listed = {normalize_athlete_name(name) for name in names.values()}
+        catalog = (
+            ()
+            if self.athlete_catalog is None
+            else self.athlete_catalog.get_catalog(season, active_only=False)
+        )
+        unlisted = {
+            athlete.player_id: athlete.display_name
+            for typed in requested
+            if normalize_athlete_name(typed) not in listed
+            and (athlete := match_catalog_athlete(catalog, typed)) is not None
+        }
+        candidates = [
+            player_id
+            for player_id, name in {**names, **unlisted}.items()
+            if normalize_athlete_name(name) in targets
+        ]
+        windows = absent_windows(self.repository, season, team, candidates, self.membership, lines_by_game)
+        resolvable = {
+            **names,
+            **{player_id: name for player_id, name in unlisted.items() if windows[player_id] is not None},
+        }
+        absent = self._resolve_absent(requested, resolvable, team, subject_id=subject_id)
+        return absent, {player_id: windows[player_id] for player_id in absent}
 
     @staticmethod
     def _resolve_absent(

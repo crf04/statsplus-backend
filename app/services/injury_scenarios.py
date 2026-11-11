@@ -50,9 +50,11 @@ import pandas as pd
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
+from app.domain.team_window import TeamWindow
 from app.services.posted_lines import posted_line
 from app.services.research_season import previous_nba_season, schedule_season, season_scoped
-from app.services.rotation_service import absent_windows, classify_games, rotation_split
+from app.services.rotation_service import classify_games, rotation_split
+from app.services.team_membership import TeamMembership, appearances
 
 #: Statuses that get a scenario; Probable and Available get none.
 SCENARIO_STATUSES = ("Out", "Doubtful", "Questionable")
@@ -301,11 +303,20 @@ class _RequestReads:
 class _RotationReads:
     """One injured player's stored rotation lines for his team, read once per season."""
 
-    def __init__(self, rotations: Any | None, team: str, injured_id: int, request: _RequestReads) -> None:
+    def __init__(
+        self,
+        rotations: Any | None,
+        team: str,
+        injured_id: int,
+        request: _RequestReads,
+        windows: Mapping[str, TeamWindow | None],
+    ) -> None:
         self.rotations = rotations
         self.team = team
         self.injured_id = injured_id
         self.request = request
+        #: His team window per season.
+        self.windows = windows
         self._memo: dict[str, tuple[dict[str, dict[int, dict[str, Any]]], list[str], list[str]]] = {}
 
     def season(self, season: str) -> tuple[dict[str, dict[int, dict[str, Any]]], list[str], list[str]]:
@@ -313,7 +324,7 @@ class _RotationReads:
 
         if season not in self._memo:
             lines = self.request.rotation_lines(self.rotations, self.team, season)
-            windows = absent_windows(self.rotations, season, self.team, [self.injured_id]) if lines else {}
+            windows = {self.injured_id: self.windows[season]} if lines else {}
             without, played = classify_games(lines, windows)
             self._memo[season] = (lines, without, played)
         return self._memo[season]
@@ -459,8 +470,9 @@ class InjuryScenarioService:
         seasons = [previous_nba_season(season), season]  # chronological
         injured_logs = {s: _Logs(request.logs(injured_id, s)) for s in seasons}
         reads = _OnOffReads(self.on_off, team, injured_id, request)
-        rotation_reads = _RotationReads(self.rotations, team, injured_id, request)
         roster = self._roster(injured_id, team, seasons, season, request)
+        windows = self._windows(injured_id, team, seasons, injured_logs, roster, request)
+        rotation_reads = _RotationReads(self.rotations, team, injured_id, request, windows)
         pool_lines = self._pool_lines(season, game_id)
         teammates = []
         for teammate_id in sorted(roster):
@@ -470,6 +482,7 @@ class InjuryScenarioService:
                 team,
                 seasons,
                 injured_logs,
+                windows,
                 reads,
                 rotation_reads,
                 pool_lines,
@@ -478,6 +491,41 @@ class InjuryScenarioService:
             if built is not None:
                 teammates.append(built)
         return teammates, self._rotation_starts(team, seasons, injured_logs, rotation_reads)
+
+    def _windows(
+        self,
+        injured_id: int,
+        team: str,
+        seasons: Sequence[str],
+        injured_logs: Mapping[str, _Logs],
+        roster: Iterable[int],
+        request: _RequestReads,
+    ) -> dict[str, TeamWindow | None]:
+        """His team window per season, judged on the team's stored rotation games and teammates' log games."""
+
+        membership = TeamMembership(
+            self.injuries.snapshot_repository,
+            lambda player_ids, s: {player_id: request.logs(player_id, s) for player_id in player_ids},
+        )
+        windows: dict[str, TeamWindow | None] = {}
+        for s in seasons:
+            lines = request.rotation_lines(self.rotations, team, s)
+            games = {
+                game_id: next(iter(by_player.values()))["game_date"] for game_id, by_player in lines.items()
+            }
+            for teammate_id in roster:
+                rows = _Logs(request.logs(teammate_id, s)).team_rows(team)
+                if rows is not None:
+                    games.update(
+                        zip(
+                            rows["GAME_ID"].astype(str),
+                            pd.to_datetime(rows["GAME_DATE"]).dt.date,
+                            strict=True,
+                        )
+                    )
+            found = membership.windows(s, team, games, {injured_id: appearances(injured_logs[s].frame)})
+            windows[s] = found[injured_id]
+        return windows
 
     @staticmethod
     def _rotation_starts(
@@ -511,6 +559,7 @@ class InjuryScenarioService:
         team: str,
         seasons: Sequence[str],
         injured_logs: Mapping[str, _Logs],
+        windows: Mapping[str, TeamWindow | None],
         reads: _OnOffReads,
         rotation_reads: _RotationReads,
         pool_lines: Mapping[int, Mapping[str, Mapping[str, float]]],
@@ -541,12 +590,8 @@ class InjuryScenarioService:
                 injured_logs[s].other_team_rows(team) is not None
                 or mates[s].other_team_rows(team) is not None
             )
-            rostered = (
-                injured_logs[s].frame is None
-                and request.catalog_teams(s).get(injured_id) == NBA_TEAM_TRICODE_TO_ID[team]
-            )
             without, played = self.games.games_without_and_with_player(
-                rows, injured_logs[s].absent_frame(), team if rostered else None
+                rows, injured_logs[s].absent_frame(), {team: windows[s]}
             )
             window.append(_WindowSeason(s, rows, without, played, sliceable=not changed))
         if not window:

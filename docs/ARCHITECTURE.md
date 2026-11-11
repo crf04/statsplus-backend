@@ -1319,10 +1319,14 @@ lineup-stint filters. For every named player, the same game-log source supplies
 season rows. `players_on[]` intersects `(game_id, team)` pairs across the
 primary player and every named teammate; `players_off[]` removes the union of
 same-team pairs where any named teammate has a row, and keeps only games inside
-each named teammate's team window, from the team's first game of the season
-when his first game of the season is for the team (or, with no game yet, when
-the Athlete Catalog lists him on it), otherwise from his first game for the
-team, until his first later game for another team (crf04/statsplus#449, #450). A
+each named teammate's team window, from his first game for the team in the
+season until his first later game for another team (crf04/statsplus#449). A
+team game before his first game for the team is in the window only with
+membership evidence for that game (crf04/statsplus#450): the stored official
+injury report (`injury_snapshots`) lists him for the team, or his last
+previous-season game was for the team and he has played for no other team
+before that game. `app/services/team_membership.py` reads that evidence for game
+logs, rotations and Injury Scenarios alike, and only when such games exist. A
 player appearing for the
 opponent in the same game is therefore never treated as the primary player's
 teammate. Every named player's rows come from an active durable publication;

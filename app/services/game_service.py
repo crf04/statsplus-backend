@@ -23,10 +23,8 @@ from nba_api.stats.static import teams
 from sqlalchemy.engine import Engine
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
-from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.play_type_matchup import complete_play_type_shares, play_type_matchup
 from app.domain.team_matchup_taxonomy import LEDGER_DEFENSE_SHEET_METRICS
-from app.domain.team_window import team_window
 from app.models.game_logs import GameLogQuery, GameLogResponse
 from app.services.database_first_activation import ReadSeason
 from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS
@@ -43,6 +41,7 @@ from app.services.team_matchup_query import (
     combined_league_column,
     publication_league_table,
 )
+from app.services.team_membership import TeamMembership, appearances
 from app.utils.cache_config import get_redis_client
 from app.utils.tables import normalize_table_name
 
@@ -190,6 +189,7 @@ class GameService:
         game_log_seasons=None,
         closing_lines=None,
         posted_lines=None,
+        injury_reports=None,
     ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
@@ -225,6 +225,11 @@ class GameService:
         # Today's posted lines for ``posted_line`` (#238); absent against the
         # read-only demo database, which leaves it null.
         self.posted_lines = posted_lines
+
+        # Stored official injury reports, membership evidence for a
+        # ``players_off`` team window (crf04/statsplus#450); absent against the
+        # read-only demo database, which reads none.
+        self.injury_reports = injury_reports
 
         # Initialize cache
         if redis_client is None:
@@ -411,38 +416,38 @@ class GameService:
                 publication_snapshot=publication_snapshot,
                 connection=connection,
             )
-            rostered_team = self._catalog_team(player_name, season) if player_gamelogs.empty else None
-            without, _ = self._absence_split(player_logs, player_gamelogs, rostered_team)
+            windows = {
+                team: self._team_window(season, team, player_logs, player_name, player_gamelogs)
+                for team in set(player_logs["TEAM_ABBREVIATION"])
+            }
+            without, _ = self._absence_split(player_logs, player_gamelogs, windows)
             exclude_game_ids |= set(player_logs["GAME_ID"]) - without
 
         return exclude_game_ids
 
-    def _catalog_team(self, player_name, season):
-        """The tricode of the team the Athlete Catalog lists ``player_name`` on for ``season``, if any."""
-        if self.athlete_catalog is None:
-            return None
-        player_id = int(self.get_player_id(player_name, season))
-        rows = self.athlete_catalog.get_catalog(season, active_only=False)
-        team_id = next((row.get("team_id") for row in rows if int(row["player_id"]) == player_id), None)
-        return NBA_TEAM_ID_TO_TRICODE.get(team_id)
+    def _team_window(self, season, team, player_logs, player_name, absent_player_logs):
+        """The absent player's team window for ``team``, judged on ``player_logs``' games for it.
+
+        Membership evidence (crf04/statsplus#450) is read only for those games
+        before his first game for ``team``.
+        """
+        rows = player_logs[player_logs["TEAM_ABBREVIATION"] == team]
+        games = dict(zip(rows["GAME_ID"].astype(str), pd.to_datetime(rows["GAME_DATE"]).dt.date, strict=True))
+        membership = TeamMembership(self.injury_reports, self.get_players_logs_by_id)
+        return membership.windows(
+            season,
+            team,
+            games,
+            {player_name: appearances(absent_player_logs)},
+            lambda name: int(self.get_player_id(name, season)),
+        )[player_name]
 
     @staticmethod
-    def _absence_split(player_logs, absent_player_logs, rostered_team=None):
+    def _absence_split(player_logs, absent_player_logs, windows):
         """Ids of ``player_logs``' games inside the absent player's team window: those he has no row in, then those he has.
 
-        ``rostered_team`` is the team roster evidence places him on when he has no row.
+        ``windows`` holds his window for each of ``player_logs``' teams.
         """
-        appearances = list(
-            zip(
-                pd.to_datetime(absent_player_logs["GAME_DATE"]).dt.date,
-                absent_player_logs["TEAM_ABBREVIATION"],
-                strict=True,
-            )
-        )
-        windows = {
-            team: team_window(appearances, team, rostered=team == rostered_team)
-            for team in set(player_logs["TEAM_ABBREVIATION"])
-        }
         appeared = set(
             zip(absent_player_logs["GAME_ID"], absent_player_logs["TEAM_ABBREVIATION"], strict=True)
         )
@@ -517,7 +522,7 @@ class GameService:
         )
         return {int(row.player_id) for row in rows}
 
-    def games_without_and_with_player(self, player_logs, absent_player_logs, rostered_team=None):
+    def games_without_and_with_player(self, player_logs, absent_player_logs, windows):
         """The ``players_off`` absence rule, for logs already read by id.
 
         Same rule as ``get_games_to_exclude``: a game of team T counts as
@@ -525,10 +530,10 @@ class GameService:
         (crf04/statsplus#449) and he has no game-log row for T that day, and as
         "with" him when it falls inside the window and he has one.  Returns the
         ids of ``player_logs``' games on each side; a game outside the window is
-        on neither.  ``rostered_team`` is the team the Athlete Catalog lists him
-        on, which opens his window there when he has no row.
+        on neither.  ``windows`` holds his window for each of ``player_logs``'
+        teams (``app.services.team_membership``).
         """
-        without, played = self._absence_split(player_logs, absent_player_logs, rostered_team)
+        without, played = self._absence_split(player_logs, absent_player_logs, windows)
         return {str(game_id) for game_id in without}, {str(game_id) for game_id in played}
 
     def filter_players_on_off(
