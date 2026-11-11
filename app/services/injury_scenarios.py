@@ -722,8 +722,8 @@ class InjuryScenarioService:
             rows = mates[s].team_rows(team)
             if rows is None:
                 continue
-            # Last season counts only with evidence he was on this team then.
-            if s != seasons[-1] and injured_logs[s].team_rows(team) is None:
+            # Last season counts only when his team window places him on this team then.
+            if s != seasons[-1] and windows[s] is None:
                 continue
             if last_other is not None:
                 rows = rows[rows["GAME_DATE"] > last_other]
