@@ -9,14 +9,14 @@ no Matchup: a row carries the Matchup player row's ``lines``, ``line_prices``
 and ``book_lines`` for one market, and a player ruled Out stays in with his
 status.  A started game's pool is its closing set, as every pool read serves it.
 With ``moves`` it also reads the market's line history for the date's games
-(``app.services.line_moves``) in four more statements on the same connection.
+(``app.services.line_moves``) in up to five more statements on the same connection.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from app.domain.nba_events import is_final_event, is_started_event
@@ -26,7 +26,7 @@ from app.errors import InvalidInputError, ProviderUnavailableError
 from app.providers.odds_api import BOOK_ALLOWLIST
 from app.providers.registry import dfs_provider_names
 from app.services.injury_listing import slate_events
-from app.services.line_moves import HISTORY_REACH, book_histories, moves_of, provider_histories, pulled_value
+from app.services.line_moves import book_histories, moves_of, provider_histories, pulled_value
 from app.services.player_pool import PlayerPool
 from app.services.projection_archive import _projection_closing_start_fence
 from app.services.projection_retention import RETENTION_WINDOW
@@ -39,9 +39,9 @@ from app.services.sportsbook_quotes import build_market_entry
 BOARD_INJURY_STATUSES = frozenset({"Out", "Doubtful", "Questionable", "Probable"})
 #: Every name ``sources`` accepts: the DFS and prediction-market providers and the served books.
 BOARD_SOURCES = frozenset(dfs_provider_names()) | BOOK_ALLOWLIST
-#: How far back a date's moves are served: its day and the history before it
-#: must still be inside the projection archive's retention window.
-MOVES_KEPT = RETENTION_WINDOW - HISTORY_REACH
+#: How far back a date's moves are served: its day and the evening before must
+#: still be inside the projection archive's retention window.
+MOVES_KEPT = RETENTION_WINDOW - timedelta(days=1)
 
 
 def _iso_z(value: Any) -> str:

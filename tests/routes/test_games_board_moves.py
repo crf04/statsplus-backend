@@ -58,7 +58,7 @@ from tests.routes.test_games_board import (
 )
 
 PRITCHARD = (1630202, "Payton Pritchard", BOS, LATER)
-#: Two days before the slate: older than the history the moves read.
+#: Two days before the slate: Dabble first posts LeBron's 24.5.
 EARLY = datetime(2026, 1, 13, 20, 0, tzinfo=UTC)
 #: 18:00 ET the day before: the slate's lines open.
 T0 = datetime(2026, 1, 14, 23, 0, tzinfo=UTC)
@@ -187,15 +187,7 @@ def seed_moves(engine, dependencies):
             ),
         ),
     ):
-        archive.ingest_snapshot(
-            replace(
-                _snapshot("prizepicks", markets, at),
-                status=SnapshotStatus.PARTIAL,
-                coverage=CoverageEvidence(fanout_complete=False),
-            ),
-            query=QUERY,
-            accepted_at=at,
-        )
+        archive.ingest_snapshot(_partial("prizepicks", markets, at), query=QUERY, accepted_at=at)
 
     store = SportsbookQuoteStore(engine)
     night = [
@@ -352,10 +344,10 @@ def test_a_cell_that_never_moved_says_so_even_when_reposted(moves_board, client)
     _status, body = _get(client, "date=2026-01-15&market=PTS&moves=true")
 
     rows = _rows(body)
-    # Dabble also posted LeBron's 24.5 two days before; history reaches one day before 00:00 ET.
+    # Dabble first posted LeBron's 24.5 two days before and never moved it.
     assert rows["LeBron James"]["moves"] == {
         "dabble": {
-            "open": _value(24.5, -115, -111, seen_at="2026-01-14T23:00:00Z"),
+            "open": _value(24.5, -115, -111, seen_at="2026-01-13T20:00:00Z"),
             "previous": None,
             "unchanged": True,
         }
@@ -382,6 +374,63 @@ def test_a_started_game_ends_its_history_at_the_tip(moves_board, client):
             "unchanged": False,
         }
     }
+
+
+def _partial(provider, markets, at):
+    return replace(
+        _snapshot(provider, markets, at),
+        status=SnapshotStatus.PARTIAL,
+        coverage=CoverageEvidence(fanout_complete=False),
+    )
+
+
+def test_a_generation_still_current_today_keeps_its_history(moves_board, client):
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(moves_board, catalog)
+    market = _market(catalog, "underdog", TATUM, "points", "28.5")
+    first = archive.ingest_complete_snapshot(
+        _snapshot("underdog", (market,), EARLY), query=QUERY, accepted_at=EARLY
+    )
+    # Unchanged since two days before: today's poll confirms that generation and writes no row.
+    assert (
+        archive.ingest_complete_snapshot(
+            _snapshot("underdog", (market,), T3), query=QUERY, accepted_at=T3
+        ).generation_id
+        == first.generation_id
+    )
+
+    _status, body = _get(client, "date=2026-01-15&market=PTS&moves=true")
+
+    tatum = _rows(body)["Jayson Tatum"]
+    assert tatum["lines"]["underdog"] == 28.5
+    assert tatum["moves"]["underdog"] == {
+        "open": _value(28.5, -110, None, seen_at="2026-01-13T20:00:00Z"),
+        "previous": None,
+        "unchanged": True,
+    }
+
+
+def test_a_line_carried_since_before_the_day_and_withdrawn_today_is_pulled(moves_board, client):
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(moves_board, catalog)
+    white = _market(catalog, "kalshi", WHITE, "points", "15.5")
+    for at, status in ((EARLY, MarketStatus.AVAILABLE), (T3, MarketStatus.SUSPENDED)):
+        archive.ingest_snapshot(
+            _partial("kalshi", (replace(white, status=status),), at), query=QUERY, accepted_at=at
+        )
+
+    _status, body = _get(client, "date=2026-01-15&market=PTS&moves=true")
+
+    assert body["pulled"]["kalshi"] == [
+        {
+            "game_id": LATER,
+            "player_id": WHITE[0],
+            "name": "Derrick White",
+            "team": "BOS",
+            **_value(15.5, None, None),
+            "last_seen_at": "2026-01-13T20:00:00Z",
+        }
+    ]
 
 
 PULLED = {

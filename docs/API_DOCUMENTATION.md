@@ -1381,8 +1381,8 @@ on one repeatable-read snapshot. It composes no Matchup and calls no provider.
   rows, each row's `lines`, `line_prices` and `book_lines.books`, the index's
   counts, and the top-level `sources` list.
 - `moves` is `true` or `false` (the default). `true` needs `market` and a date
-  whose 00:00 ET is at most two days ago (the archive keeps three days, and the
-  history reaches one day before the date); see [Line moves](#line-moves).
+  whose 00:00 ET is at most two days ago (the archive keeps three days, and
+  most lines open the evening before); see [Line moves](#line-moves).
 - An unknown market, a malformed value, a repeated parameter (other than
   `sources`) or any other parameter is `400 invalid_input` with
   `details.parameters` naming it. A date with no games is `200` with
@@ -1510,8 +1510,7 @@ is exactly the one above.
   `lines`, then each book in `book_lines.books` by name. `open` is the value in
   force at 00:00 ET, or the first value for a line first posted later that day;
   its `seen_at` is when that value was first seen without a change, which is
-  the evening before for most opening lines, and at most one day before
-  00:00 ET. `previous` is the value before
+  the evening before for most opening lines. `previous` is the value before
   the current one, with `changed_at` the time the current value replaced it,
   or `null` when the value never changed today. `unchanged` is `true` exactly
   when `previous` is `null`. A source re-posting the same line and prices is
@@ -1529,13 +1528,13 @@ is exactly the one above.
 - A started game's history ends at its tip, as its closing set does, so its
   moves describe the closing value.
 - Provider history is every promoted generation of the provider's snapshots
-  since one day before the date (`projection_observations`), replayed as the
-  Player Pool's latest lines are: a Complete generation replaces the provider's
-  offerings, and a Partial one withdraws each offering it observes and posts
-  the available ones, carrying the rest. A provider cell posted at two lines in
-  one generation is not a value. A line PrizePicks (Partial only) has carried
-  since before that day has no history. Book history is
-  `sportsbook_prop_quotes`, a row per change. The extra reads are four
+  since the first stored line for the date's games in the market
+  (`projection_observations`), replayed as the Player Pool's latest lines are:
+  a Complete generation replaces the provider's offerings, and a Partial one
+  withdraws each offering it observes and posts the available ones, carrying
+  the rest. A provider cell posted at two lines in one generation is not a
+  value. Book history is
+  `sportsbook_prop_quotes`, a row per change. The extra reads are at most five
   statements on the board's snapshot, bounded to the date's games and the
   market's statistics through the existing indexes.
 

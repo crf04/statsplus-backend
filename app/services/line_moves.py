@@ -22,10 +22,10 @@ from __future__ import annotations
 from bisect import bisect_left
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, select
 
 from app.domain.utc import assume_utc
 from app.models.projection_archive import (
@@ -42,10 +42,6 @@ from app.providers.dfs import SnapshotStatus
 Value = tuple[float, int | None, int | None]
 #: One source's cell: source, game, player.
 CellKey = tuple[str, str, int]
-#: How far before the date's 00:00 ET a provider's history is read: books and
-#: DFS apps open a slate's lines the evening before.  A line a Partial-only
-#: provider (PrizePicks) has carried since before then has no history.
-HISTORY_REACH = timedelta(days=1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,45 +226,51 @@ def provider_histories(
 ) -> dict[CellKey, CellHistory]:
     """Each provider cell's history in the market's statistics for ``game_ids``.
 
-    Two statements read the providers' promoted generations (with each one's
-    snapshot status and newest confirming poll), then one reads the cells'
-    rows through the governed identity index (game, player, statistic): every
-    line-bearing targetable row, and every row of a Partial generation, whose
-    untargetable rows withdraw an offering.  ``fences`` holds a started game's
-    tip.
+    Reads go through the governed identity index (game, player, statistic) and
+    span only the cells' own history: their line-bearing targetable rows; the
+    providers' promoted generations since the first of those rows, with each
+    one's snapshot status and newest confirming poll; and the untargetable rows
+    of those generations that are Partial, which withdraw an offering.
+    ``fences`` holds a started game's tip.
     """
 
     providers = sorted(set(providers))
     if not game_ids or not statistic_ids or not providers:
         return {}
+    observation = ProjectionObservation.__table__
+    columns = (
+        observation.c.provider,
+        observation.c.generation_id,
+        observation.c.market_reference,
+        observation.c.targetable,
+        observation.c.canonical_game_id,
+        observation.c.canonical_player_id,
+        observation.c.canonical_player_name,
+        observation.c.canonical_team_id,
+        observation.c.line_value,
+        observation.c.over_price,
+        observation.c.under_price,
+        observation.c.observed_at,
+    )
+    cells = (
+        observation.c.canonical_game_id.in_(sorted(game_ids)),
+        observation.c.canonical_statistic_id.in_(sorted(statistic_ids)),
+        observation.c.provider.in_(providers),
+    )
+    posting = and_(observation.c.targetable.is_(True), observation.c.line_value.is_not(None))
+    rows = connection.execute(select(*columns).where(*cells, posting)).all()
+    if not rows:
+        return {}
     generations = _generations(
-        connection, season=season, providers=providers, since=day_start - HISTORY_REACH
+        connection, season=season, providers=providers, since=min(assume_utc(row.observed_at) for row in rows)
     )
     partial = sorted(
         generation_id for generation_id, generation in generations.items() if not generation.complete
     )
-    observation = ProjectionObservation.__table__
-    posting = and_(observation.c.targetable.is_(True), observation.c.line_value.is_not(None))
-    rows = connection.execute(
-        select(
-            observation.c.provider,
-            observation.c.generation_id,
-            observation.c.market_reference,
-            observation.c.targetable,
-            observation.c.canonical_game_id,
-            observation.c.canonical_player_id,
-            observation.c.canonical_player_name,
-            observation.c.canonical_team_id,
-            observation.c.line_value,
-            observation.c.over_price,
-            observation.c.under_price,
-        ).where(
-            observation.c.canonical_game_id.in_(sorted(game_ids)),
-            observation.c.canonical_statistic_id.in_(sorted(statistic_ids)),
-            observation.c.provider.in_(providers),
-            or_(posting, observation.c.generation_id.in_(partial)) if partial else posting,
-        )
-    ).all()
+    if partial:
+        rows += connection.execute(
+            select(*columns).where(*cells, ~posting, observation.c.generation_id.in_(partial))
+        ).all()
     by_cell: dict[tuple[str, str, str, int], dict[str, list[Any]]] = {}
     for row in rows:
         generation = generations.get(str(row.generation_id))
