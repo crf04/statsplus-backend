@@ -524,11 +524,11 @@ class RotationService:
         team_rows = self.repository.player_games(season, team=team)
         recent_ids = {game["game_id"] for game in recent_games}
         # Players on the team's box score in one of its recent games, and
-        # players the catalog lists on the team who missed them all; players
-        # who left the team before them drop out.
+        # players who missed them all inside an open team window unless the
+        # catalog says they left; players whose window closed before them drop out.
         listed = {row["player_id"] for row in team_rows if row["game_id"] in recent_ids}
-        rostered = self._catalog_team_ids(season, team)
-        player_ids = sorted({row["player_id"] for row in team_rows if row["player_id"] in listed | rostered})
+        departed = self._catalog_departed_ids(season, team)
+        player_ids = sorted({row["player_id"] for row in team_rows} - (departed - listed))
         rows_by_player = self._rows_by_player(self.repository.player_games(season, player_ids=player_ids))
         starters = {game["game_id"]: [] for game in recent_games}
         for row in team_rows:
@@ -833,8 +833,11 @@ class RotationService:
             grouped.setdefault(row["player_id"], []).append(dict(row))
         return grouped
 
-    def _catalog_team_ids(self, season: str, team: str) -> set[int]:
-        """Ids the season's Athlete Catalog lists on ``team``."""
+    def _catalog_departed_ids(self, season: str, team: str) -> set[int]:
+        """Ids the season's Athlete Catalog says left ``team``: another team, or off every roster.
+
+        A missing row or a null team is unknown, not a departure.
+        """
 
         if self.athlete_catalog is None:
             return set()
@@ -842,7 +845,8 @@ class RotationService:
         return {
             athlete["player_id"]
             for athlete in self.athlete_catalog.get_catalog(season, active_only=False)
-            if athlete.get("team_id") == team_id
+            if athlete.get("team_id") not in (None, team_id)
+            or athlete.get("roster_status") in ("inactive", "historical")
         }
 
 

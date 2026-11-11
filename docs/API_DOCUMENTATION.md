@@ -3702,9 +3702,13 @@ Team view:
 ```
 
 `players` is everyone on the team's box score (active, DNP or inactive) in at
-least one of the team's last `last_n` games, plus each player the season's
-Athlete Catalog lists on the team who has a stored game for it and missed all of
-them inside his window (`recent.played: 0`). Players who left earlier drop out.
+least one of the team's last `last_n` games, plus each player with a stored game
+for the team who missed all of them inside his open team window (`recent.played:
+0`, his counts the player view's). Such a player is left out only when the
+season's Athlete Catalog says he left: its `team_id` names another team, or its
+`roster_status` is `inactive` or `historical` (off every NBA roster). A missing
+catalog row or a `null` `team_id` is unknown, and he stays. Players whose window
+closed before the team's last `last_n` games drop out.
 They are sorted by `abs(minutes_change)` descending, then by name, with a `null`
 `minutes_change` last. `minutes_change` is `recent.minutes -
 season_summary.minutes` (both per game played) computed from the unrounded

@@ -561,7 +561,7 @@ def test_team_view_drops_players_who_left_before_the_recent_games(tmp_path):
             ],
         ),
     )
-    service = service_for(repository, Catalog((1, "Stayer", "DET")))
+    service = service_for(repository, Catalog((1, "Stayer", "DET"), (2, "Departed", "BOS")))
 
     document = service.get_team_rotation(team="DET", last_n=1, season=None)
     wider = service.get_team_rotation(team="DET", last_n=2, season=None)
@@ -710,10 +710,69 @@ def test_team_view_counts_missed_games_and_keeps_a_player_who_missed_them_all(tm
     assert wider["Adem Bona"]["minutes_change"] == 0.0
 
 
-def test_team_view_leaves_out_a_player_the_catalog_no_longer_lists_on_the_team(tmp_path):
-    released = Catalog((BONA, "Adem Bona", None), (MAXEY, "Tyrese Maxey", "PHI"))
-    service = _phi_world(tmp_path, catalog=released)
+def _team_view_after_missing_both(service):
+    return [
+        player["name"] for player in service.get_team_rotation(team="PHI", last_n=2, season=None)["players"]
+    ]
 
-    document = service.get_team_rotation(team="PHI", last_n=2, season=None)
 
-    assert [player["name"] for player in document["players"]] == ["Tyrese Maxey"]
+@pytest.mark.parametrize(
+    "catalog",
+    [
+        pytest.param(Catalog((MAXEY, "Tyrese Maxey", "PHI")), id="no catalog row"),
+        pytest.param(Catalog((BONA, "Adem Bona", None), (MAXEY, "Tyrese Maxey", "PHI")), id="null team"),
+    ],
+)
+def test_team_view_keeps_a_player_who_missed_them_all_when_the_catalog_is_silent(tmp_path, catalog):
+    service = _phi_world(tmp_path, catalog=catalog)
+
+    team = {p["name"]: p for p in service.get_team_rotation(team="PHI", last_n=2, season=None)["players"]}
+    # The player view resolves him by catalog row; his counts do not depend on it.
+    named = service_for(service.repository, Catalog((BONA, "Adem Bona", "PHI")))
+    player = named.get_player_rotation(player_name="Adem Bona", player_team=None, last_n=2, season=None)
+
+    assert sorted(team) == ["Adem Bona", "Tyrese Maxey"]
+    assert team["Adem Bona"]["recent"] == {"games": 2, "played": 0, "starts": 0, "minutes": None, "closed": 0}
+    assert team["Adem Bona"]["season_summary"] == {
+        "games": 6,
+        "played": 3,
+        "starts": 0,
+        "minutes": 24.0,
+        "closed": 0,
+    }
+    for summary in ("recent", "season_summary"):
+        assert team["Adem Bona"][summary] == {
+            key: player[summary][key] for key in ("games", "played", "starts", "minutes", "closed")
+        }
+
+
+@pytest.mark.parametrize(
+    "bona",
+    [
+        pytest.param((BONA, "Adem Bona", "NYK"), id="another team"),
+        pytest.param((BONA, "Adem Bona", "PHI", "inactive"), id="off every roster"),
+        pytest.param((BONA, "Adem Bona", None, "inactive"), id="off every roster, no team"),
+    ],
+)
+def test_team_view_drops_a_player_who_missed_them_all_when_the_catalog_says_he_left(tmp_path, bona):
+    service = _phi_world(tmp_path, catalog=Catalog(bona, (MAXEY, "Tyrese Maxey", "PHI")))
+
+    player = service.get_player_rotation(player_name="Adem Bona", player_team=None, last_n=2, season=None)
+
+    # The team view drops him on that evidence; the player view still reads
+    # his PHI window, where no other team's game has closed it.
+    assert _team_view_after_missing_both(service) == ["Tyrese Maxey"]
+    assert (player["recent"]["games"], player["recent"]["played"]) == (2, 0)
+
+
+def test_team_view_keeps_a_player_on_the_recent_box_score_whatever_the_catalog_says(tmp_path):
+    service = _phi_world(
+        tmp_path,
+        catalog=Catalog(
+            (BONA, "Adem Bona", "NYK"), (MAXEY, "Tyrese Maxey", "PHI"), (GONE, "Gone Gary", "NYK")
+        ),
+    )
+
+    wider = [p["name"] for p in service.get_team_rotation(team="PHI", last_n=5, season=None)["players"]]
+
+    assert sorted(wider) == ["Adem Bona", "Tyrese Maxey"]
