@@ -3601,7 +3601,21 @@ first, `[]` when none:
 ```
 
 `game_date` is the Eastern date and `matchup` is `AWAY @ HOME`, both from the
-Event Catalog. `minutes` round half up from the segments' seconds, as
+Event Catalog. Five more fields say which games the split covers
+(crf04/statsplus-backend#761): `team_games`, the team-season's completed
+regular-season games in the Event Catalog; `games_included`, how many of them
+have stored segments (`team_games` minus the `games_missing`); `games_through`,
+the Eastern date of the newest included game; `split_games`, the games in which
+the asked lineup state occurred; and `last_split_game_date`, the Eastern date of
+the newest of those. Each date is `null` when there is no such game. `cached_at`
+is a write time, not a cache: a game rewritten later moves it without changing
+the split, so read currency from these fields instead.
+
+```json
+"team_games": 10, "games_included": 9, "games_through": "2026-11-08",
+"split_games": 7, "last_split_game_date": "2026-11-06",
+"games_missing": [{"game_id": "0022600142", "game_date": "2026-10-28", "matchup": "OKC @ DAL"}]
+``` `minutes` round half up from the segments' seconds, as
 PBPStats rounds. `usage` is StatsPlus usage: 100 · (FGA + 0.44·FTA + TOV) /
 (team on-floor FGA + player-less heaves + 0.44·FTA + TOV). Free throws count
 for the lineup on the floor at the foul; from 2026-27 a heave counts as its
