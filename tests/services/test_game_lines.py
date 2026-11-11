@@ -8,7 +8,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import create_engine, event, text
 
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.services.game_context import GameContextRepository
@@ -184,6 +184,11 @@ def test_after_tip_the_last_line_read_before_it_is_kept(tmp_path, state):
     engine = world(tmp_path)
     run(engine, scoreboard(), BEFORE_TIP)
     before = line(engine, NYK_GAME)
+    assert (before["status"], before["spread"], before["read_at"]) == (
+        "available",
+        -15.5,
+        "2026-11-10T22:00:00+00:00",
+    )
     payload = scoreboard()
     event = espn_event(payload, "NY")
     event["status"]["type"]["state"] = state
@@ -200,6 +205,11 @@ def test_a_line_that_disappears_before_tip_keeps_the_last_one_read(tmp_path):
     engine = world(tmp_path)
     run(engine, scoreboard(), BEFORE_TIP)
     before = line(engine, NYK_GAME)
+    assert (before["status"], before["spread"], before["read_at"]) == (
+        "available",
+        -15.5,
+        "2026-11-10T22:00:00+00:00",
+    )
     payload = scoreboard()
     espn_event(payload, "NY")["competitions"][0].pop("odds")
 
@@ -367,6 +377,11 @@ def test_a_finished_game_with_no_odds_keeps_its_last_line(tmp_path):
     engine = world(tmp_path)
     run(engine, scoreboard(), BEFORE_TIP)
     before = line(engine, NYK_GAME)
+    assert (before["status"], before["spread"], before["read_at"]) == (
+        "available",
+        -15.5,
+        "2026-11-10T22:00:00+00:00",
+    )
     payload = scoreboard()
     event = espn_event(payload, "NY")
     event["status"]["type"]["state"] = "post"
@@ -422,3 +437,39 @@ def test_an_event_dated_another_eastern_day_does_not_take_this_days_game(tmp_pat
     assert summary["unmatched"] == ["401909999 MIL@NYK"]
     stored = line(engine, NYK_GAME)
     assert (stored["spread"], stored["total"]) == (-15.5, 222.5)
+
+
+def collect_while_a_later_run_writes(engine, later_engine):
+    """Run a 22:00 collection; just before its first write, a 23:55 run with a moved NY line commits."""
+
+    moved = scoreboard()
+    espn_event(moved, "NY")["competitions"][0]["odds"][0].update(
+        details="NY -14", spread=-14.0, overUnder=224.0
+    )
+    fired = []
+
+    def later_run_first(_connection, _cursor, statement, *_args):
+        if not fired and statement.lstrip().upper().startswith("INSERT INTO GAME_LINES"):
+            fired.append(run(later_engine, moved, LATER))
+
+    event.listen(engine, "before_cursor_execute", later_run_first)
+    try:
+        summary = run(engine, scoreboard(), BEFORE_TIP)
+    finally:
+        event.remove(engine, "before_cursor_execute", later_run_first)
+    return fired[0], summary
+
+
+def test_a_run_that_read_earlier_loses_to_a_later_run_that_writes_while_it_is_open(tmp_path):
+    engine = world(tmp_path)
+    later_engine = create_engine(engine.url)
+
+    later, summary = collect_while_a_later_run_writes(engine, later_engine)
+
+    assert (later["inserted"], summary["inserted"], summary["stale"]) == (6, 0, 6)
+    stored = line(engine, NYK_GAME)
+    assert (stored["spread"], stored["total"], stored["read_at"]) == (
+        -14.0,
+        224.0,
+        "2026-11-10T23:55:00+00:00",
+    )

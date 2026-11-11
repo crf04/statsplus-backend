@@ -10,7 +10,17 @@ from sqlalchemy import create_engine, inspect, text
 
 from app.migrations import run_migrations
 from app.services.game_context import GameContextRepository
-from tests.services.test_game_lines import BEFORE_TIP, GAMES, LATER, NYK_GAME, line, run, scoreboard, team
+from tests.services.test_game_lines import (
+    BEFORE_TIP,
+    GAMES,
+    LATER,
+    NYK_GAME,
+    collect_while_a_later_run_writes,
+    line,
+    run,
+    scoreboard,
+    team,
+)
 from tests.support.game_context_world import schedule
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_migrations]
@@ -63,6 +73,22 @@ def test_an_earlier_read_finishing_later_keeps_the_newer_line_on_postgres(engine
     summary = run(engine, scoreboard(), BEFORE_TIP)
 
     assert (summary["inserted"], summary["updated"], summary["stale"]) == (0, 0, 6)
+    stored = line(engine, NYK_GAME)
+    assert (stored["spread"], stored["total"], stored["read_at"]) == (
+        -14.0,
+        224.0,
+        "2026-11-10T23:55:00+00:00",
+    )
+
+
+def test_a_run_that_read_earlier_loses_to_a_later_run_that_writes_while_it_is_open_on_postgres(engine):
+    later_engine = create_engine(engine.url)
+    try:
+        later, summary = collect_while_a_later_run_writes(engine, later_engine)
+    finally:
+        later_engine.dispose()
+
+    assert (later["inserted"], summary["inserted"], summary["stale"]) == (6, 0, 6)
     stored = line(engine, NYK_GAME)
     assert (stored["spread"], stored["total"], stored["read_at"]) == (
         -14.0,
