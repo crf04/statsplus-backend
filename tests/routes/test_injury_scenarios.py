@@ -1305,7 +1305,34 @@ def test_an_unknown_teammate_is_refused_even_when_no_scenario_is_selected(client
     assert response.get_json()["error"]["details"] == {"parameters": ["teammate"]}
 
     # A teammate on a team the report lists is valid; there is just no scenario to show him in.
-    assert _scenarios(client, authenticate, "date=2026-11-10&game_id=0022600999&teammate=Austin Reaves") == {
+    for name in ("Austin Reaves", "Jaylen Brown"):
+        assert _scenarios(client, authenticate, f"date=2026-11-10&game_id=0022600999&teammate={name}") == {
+            "date": "2026-11-10",
+            "g_league_skipped": 0,
+            "scenarios": [],
+        }
+
+
+def test_a_teammate_is_valid_when_his_teams_only_listed_player_matched_no_catalog_player(
+    client, authenticate, tmp_path, dependencies
+):
+    unresolved = InjuryEntryEvidence(
+        entry_id="nba_official:2026-11-10:LAL@BOS:mysteryreserve",
+        source_player_id="LAL:mysteryreserve",
+        source_player_name="Mystery Reserve",
+        source_team_tricode="LAL",
+        canonical_status="Probable",
+        raw_status="Probable",
+        reason="Soreness",
+        source_url=REPORT,
+        game_date="2026-11-10",
+        matchup="LAL@BOS",
+        report_time="2026-11-10T17:00:00-05:00",
+    )
+    w = World(tmp_path, dependencies, [unresolved])
+    w.logs.add(REAVES, CURRENT, "LAL", _flat(G[:5], 30, 20, 4, 5, 2, 15))
+
+    assert _scenarios(client, authenticate, "date=2026-11-10&teammate=Austin Reaves") == {
         "date": "2026-11-10",
         "g_league_skipped": 0,
         "scenarios": [],

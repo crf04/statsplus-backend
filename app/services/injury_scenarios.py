@@ -395,7 +395,7 @@ class InjuryScenarioService:
         teammate_ids = None
         if teammate:
             # With no scenario selected, the name is still checked, against every team on the report.
-            on_report = selected or [row for row in listing["injuries"] if row["player_id"] is not None]
+            on_report = selected or listing["injuries"]
             teammate_ids = self._teammate_ids(teammate, on_report, season, reads)
         return {
             "date": listing["date"],
