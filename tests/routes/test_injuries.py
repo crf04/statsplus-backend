@@ -200,6 +200,7 @@ def test_scheduled_refresh_stores_the_report_that_injuries_then_lists(client, au
     assert response.get_json() == {
         "date": "2026-01-15",
         "team": None,
+        "minutes_season": None,
         "minutes_published_season": None,
         "injuries": [
             {
@@ -215,6 +216,9 @@ def test_scheduled_refresh_stores_the_report_that_injuries_then_lists(client, au
                 "average_minutes": None,
                 "games_played": 0,
                 "minutes_season": None,
+                "prior_average_minutes": None,
+                "prior_games_played": 0,
+                "prior_minutes_season": None,
             },
             {
                 "player": "Mystery Reserve",
@@ -229,6 +233,9 @@ def test_scheduled_refresh_stores_the_report_that_injuries_then_lists(client, au
                 "average_minutes": None,
                 "games_played": 0,
                 "minutes_season": None,
+                "prior_average_minutes": None,
+                "prior_games_played": 0,
+                "prior_minutes_season": None,
             },
             {
                 "player": "LeBron James",
@@ -243,6 +250,9 @@ def test_scheduled_refresh_stores_the_report_that_injuries_then_lists(client, au
                 "average_minutes": None,
                 "games_played": 0,
                 "minutes_season": None,
+                "prior_average_minutes": None,
+                "prior_games_played": 0,
+                "prior_minutes_season": None,
             },
             {
                 "player": "Jalen Brunson",
@@ -257,6 +267,9 @@ def test_scheduled_refresh_stores_the_report_that_injuries_then_lists(client, au
                 "average_minutes": None,
                 "games_played": 0,
                 "minutes_season": None,
+                "prior_average_minutes": None,
+                "prior_games_played": 0,
+                "prior_minutes_season": None,
             },
         ],
     }
@@ -279,6 +292,7 @@ def test_a_day_with_no_report_lists_nothing(client, authenticate, world):
     assert body == {
         "date": "2026-01-20",
         "team": None,
+        "minutes_season": None,
         "minutes_published_season": None,
         "injuries": [],
     }
