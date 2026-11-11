@@ -79,12 +79,22 @@ def test_a_date_with_no_game_answers_no_game(client, seeded):
     assert response.get_json()["lineup"]["status"] == "no_game"
 
 
-@pytest.mark.parametrize("split", ["without=Unit%20One", "with=Unit%20One"])
-def test_the_split_team_views_carry_the_lineup_too(client, seeded, split):
+@pytest.mark.parametrize(
+    "split, key, named",
+    [
+        ("without=Unit%20One", "without", ("absent", ["Unit One"])),
+        ("with=Unit%20One", "split", ("with", ["Unit One"])),
+    ],
+)
+def test_the_split_team_views_carry_the_lineup_beside_their_split(client, seeded, split, key, named):
     response = client.get(f"{ROTATION}?team=OKC&{split}")
 
     assert response.status_code == 200
-    assert response.get_json()["lineup"]["status"] == "posted"
+    body = response.get_json()
+    field, names = named
+    assert body[key][field] == names
+    assert "games" not in body
+    assert body["lineup"]["status"] == "posted"
 
 
 @pytest.mark.parametrize(

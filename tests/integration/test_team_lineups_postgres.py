@@ -87,3 +87,50 @@ def test_a_locked_table_fails_the_step_within_its_database_timeout_on_postgres(e
     assert finished_while_locked, "the step waited on the lock past its timeout"
     assert (outcome["result"]["state"], outcome["result"]["error"]) == ("failed", "OperationalError")
     assert 4.5 < outcome["elapsed"] < 9
+
+
+def test_lineups_are_stored_while_the_game_lines_table_is_locked_on_postgres(engine, monkeypatch, capsys):
+    import functools
+    import json
+    import threading
+    import time
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from app.config.settings import OddsApiSettings
+    from app.providers import nba_daily_lineups
+    from app.services import game_lines
+    from scripts import collect_odds
+
+    scoreboard = json.loads(Path("tests/fixtures/espn/scoreboard_2026-11-10.json").read_text())
+    monkeypatch.setattr(
+        game_lines, "collect", functools.partial(game_lines.collect, fetch=lambda _day: scoreboard)
+    )
+    monkeypatch.setattr(nba_daily_lineups, "fetch_daily_lineups", lambda _day: RECORDED)
+    monkeypatch.setattr(collect_odds, "SIDE_STEP_SECONDS", 2.0)
+    settings = SimpleNamespace(odds_api=OddsApiSettings(), log_level="INFO")
+    monkeypatch.setattr(collect_odds, "load_settings", lambda **_kw: settings)
+    monkeypatch.setattr(collect_odds, "build_dependencies", lambda _s: SimpleNamespace(engine=engine))
+    outcome = {}
+
+    def cron_run():
+        started = time.monotonic()
+        outcome["code"] = collect_odds.main(["--database-url", "postgresql://odds.example/statsplus"])
+        outcome["elapsed"] = time.monotonic() - started
+
+    with engine.connect() as holder:
+        holder.execute(text("LOCK TABLE game_lines IN ACCESS EXCLUSIVE MODE"))
+        run = threading.Thread(target=cron_run)
+        run.start()
+        run.join(timeout=15)
+        finished_while_locked = not run.is_alive()
+        holder.rollback()
+    run.join()
+
+    assert finished_while_locked, "the game-lines step held the run past its bound"
+    assert outcome["code"] == 0 and outcome["elapsed"] < 10
+    out = [line for line in capsys.readouterr().out.splitlines() if not line.startswith('{"level"')]
+    assert out[1] == "game_lines failed: TimeoutError: still running after 2.0 s"
+    assert out[2].startswith("lineups: ") and '"state": "stored"' in out[2]
+    with engine.connect() as connection:
+        assert connection.execute(select(TeamLineup.__table__)).first() is not None

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -107,3 +109,52 @@ def test_one_side_step_raising_still_runs_the_other_in_order(monkeypatch, capsys
         if failing == "lineups"
         else 'lineups: {"state": "stored", "teams": 0}',
     ]
+
+
+@pytest.mark.parametrize("blocked", ["game_lines", "lineups"])
+def test_a_step_that_never_returns_is_abandoned_and_the_other_still_runs(monkeypatch, capsys, blocked):
+    calls = []
+
+    def step(name, result):
+        def run(_engine):
+            calls.append(name)
+            if name == blocked:
+                threading.Event().wait(5)
+            return result
+
+        return run
+
+    monkeypatch.setattr(collect_odds, "SIDE_STEP_SECONDS", 0.3)
+    monkeypatch.setattr(game_lines, "collect", step("game_lines", {"inserted": 0}))
+    monkeypatch.setattr(
+        team_lineups, "collect_team_lineups", step("lineups", {"state": "stored", "teams": 0})
+    )
+    started = time.monotonic()
+
+    assert run_script(monkeypatch, None) == 0
+
+    assert time.monotonic() - started < 2
+    assert calls == ["game_lines", "lineups"]
+    timed_out = f"{blocked} failed: TimeoutError: still running after 0.3 s"
+    assert printed(capsys)[1:] == [
+        timed_out if blocked == "game_lines" else 'game_lines: {"inserted": 0}',
+        timed_out if blocked == "lineups" else 'lineups: {"state": "stored", "teams": 0}',
+    ]
+
+
+def test_an_odds_beat_that_raises_still_runs_both_steps_and_keeps_its_exception(monkeypatch, capsys):
+    calls = []
+
+    def broken(_dependencies, _settings):
+        raise LookupError("odds beat broke")
+
+    monkeypatch.setattr(collect_odds.odds_collection, "build_odds_collection", broken)
+    monkeypatch.setattr(game_lines, "collect", lambda _engine: calls.append("game_lines") or {"inserted": 0})
+    monkeypatch.setattr(
+        team_lineups, "collect_team_lineups", lambda _engine: calls.append("lineups") or {"state": "stored"}
+    )
+
+    with pytest.raises(LookupError, match="odds beat broke"):
+        run_script(monkeypatch, None)
+
+    assert calls == ["game_lines", "lineups"]

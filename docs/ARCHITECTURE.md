@@ -4974,8 +4974,11 @@ beat (every 5 min, its own Railway cron service: scripts/collect_odds.py)
   → roster-scoped AthleteResolver (provider "oddsapi", ids "name:<folded>")
   → one transaction: odds_api_polls + sportsbook_prop_quotes (history, only on
     change, plus every closing snapshot) + sportsbook_prop_latest
-  → then, whatever the beat's outcome and each in its own guard: ESPN game
-    lines (crf04/statsplus#493), then NBA.com daily lineups (crf04/statsplus#492)
+  → then, whatever the beat's outcome (an exception included), each in its own
+    guard and each abandoned after SIDE_STEP_SECONDS (30 s) on a daemon thread:
+    ESPN game lines (crf04/statsplus#493), then NBA.com daily lineups
+    (crf04/statsplus#492). One failing or hanging never skips the other or
+    changes the exit code; together they add at most about a minute to a run.
 Matchup read (only when ODDS_API_ENABLED): MatchupService._book_lines →
   SportsbookQuoteReader (savepoint)
 Board read (only when ODDS_API_ENABLED): SlateBoardService →
@@ -5773,8 +5776,8 @@ Postgres the transaction sets a five-second `lock_timeout` and
 odds beat. It never raises; an unpublished day, a failed request, a malformed document or a
 database error is reported in its result and changes no row.
 `scripts/collect_odds.py` runs it after every odds beat and after the game
-lines step, each in its own guard (the `*/5 * * * *` odds cron, whatever
-`ODDS_API_ENABLED` says), so a lineup confirmed about 30
+lines step, each in its own guard and each bounded at 30 s (the `*/5 * * * *`
+odds cron, whatever `ODDS_API_ENABLED` says), so a lineup confirmed about 30
 minutes before tip is stored within about five minutes. Staging runs no
 collectors, so staging stores no lineups.
 

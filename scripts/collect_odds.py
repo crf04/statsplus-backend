@@ -10,10 +10,10 @@ Sentry is initialized as in the web app so the guard's alerts are delivered.
 
 After the odds beat, whatever its outcome, each run takes two side steps in
 this order, each in its own guard so one failing never skips the other or
-changes the exit code: it reads ESPN's scoreboard once and stores the day's
-game lines (crf04/statsplus#493), then stores NBA.com's daily lineups
-(crf04/statsplus#492; one request abandoned after ten seconds, five-second
-database timeouts).
+changes the exit code, and each abandoned after ``SIDE_STEP_SECONDS``: it
+reads ESPN's scoreboard once and stores the day's game lines
+(crf04/statsplus#493), then stores NBA.com's daily lineups
+(crf04/statsplus#492).
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 if __package__ in {None, ""}:
@@ -33,6 +34,9 @@ from app.services import game_lines, odds_collection, team_lineups
 from app.utils.db import is_demo_database_url
 from app.utils.json_logging import configure_json_logging
 from app.utils.sentry_setup import init_sentry
+
+#: Wall-clock bound on each side step after the odds beat, whatever it waits on.
+SIDE_STEP_SECONDS = 30.0
 
 
 def _flush_sentry() -> None:
@@ -87,23 +91,40 @@ def _odds_beat(dependencies, settings) -> int:
 def collect_game_lines(dependencies) -> None:
     """Store today's ESPN game lines; a failure is printed and leaves the odds beat's exit code alone."""
 
-    try:
-        summary = game_lines.collect(dependencies.engine)
-    except Exception as error:
-        print(f"game_lines failed: {type(error).__name__}: {error}")
-        return
-    print(f"game_lines: {json.dumps(summary, sort_keys=True)}")
+    _side_step("game_lines", lambda: game_lines.collect(dependencies.engine))
 
 
 def collect_lineups(dependencies) -> None:
     """Store today's NBA.com lineups; a failure is printed and leaves the odds beat's exit code alone."""
 
-    try:
-        summary = team_lineups.collect_team_lineups(dependencies.engine)
-    except Exception as error:
-        print(f"lineups failed: {type(error).__name__}: {error}")
-        return
-    print(f"lineups: {json.dumps(summary, sort_keys=True)}")
+    _side_step("lineups", lambda: team_lineups.collect_team_lineups(dependencies.engine))
+
+
+def _side_step(name: str, run) -> None:
+    """Run one side step for at most ``SIDE_STEP_SECONDS`` and print its summary or why it failed.
+
+    The step runs on a daemon thread, abandoned rather than joined when it
+    overruns, so a step blocked on a download or a database lock never holds
+    up the next step or the end of the run.
+    """
+
+    outcome: dict = {}
+
+    def target() -> None:
+        try:
+            outcome["summary"] = run()
+        except Exception as error:
+            outcome["error"] = error
+
+    worker = threading.Thread(target=target, name=name, daemon=True)
+    worker.start()
+    worker.join(SIDE_STEP_SECONDS)
+    if worker.is_alive():
+        print(f"{name} failed: TimeoutError: still running after {SIDE_STEP_SECONDS} s")
+    elif "error" in outcome:
+        print(f"{name} failed: {type(outcome['error']).__name__}: {outcome['error']}")
+    else:
+        print(f"{name}: {json.dumps(outcome['summary'], sort_keys=True)}")
 
 
 if __name__ == "__main__":
