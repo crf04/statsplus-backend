@@ -27,6 +27,7 @@ from tests.routes.test_games_board import (
     _get,
     seed_board,
 )
+from tests.routes.test_games_board_moves import PULLED, TATUM_MOVES, _rows, seed_moves
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_migrations]
 
@@ -230,3 +231,22 @@ def test_a_failed_injury_read_leaves_the_rest_of_the_board(board, client):
     assert status == 200
     assert _tatum(body) == (27.5, {"draftkings": 27.5, "fanduel": 28.5}, None)
     assert {row["injury_status"] for game in body["games"] for row in game["players"]} == {None}
+
+
+def test_line_moves_on_postgres(dependencies, client):
+    url = os.getenv("TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("TEST_DATABASE_URL is not set; skipping Postgres integration tests")
+    engine = create_engine(url, pool_size=4)
+    with engine.begin() as connection:
+        connection.execute(text("DROP SCHEMA public CASCADE"))
+        connection.execute(text("CREATE SCHEMA public"))
+    run_migrations(engine)
+    seed_moves(engine, dependencies)
+
+    status, body = _get(client, "date=2026-01-15&market=PTS&moves=true")
+
+    engine.dispose()
+    assert status == 200
+    assert _rows(body)["Jayson Tatum"]["moves"] == TATUM_MOVES
+    assert body["pulled"] == PULLED

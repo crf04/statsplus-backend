@@ -1357,7 +1357,7 @@ DFS provider and writes nothing.
 ### Get Board
 
 ```http
-GET /api/games/board?date=YYYY-MM-DD[&season=YYYY-YY][&market=CODE][&game=<nba_game_id>][&team=ABBR][&sources=a,b,...]
+GET /api/games/board?date=YYYY-MM-DD[&season=YYYY-YY][&market=CODE][&game=<nba_game_id>][&team=ABBR][&sources=a,b,...][&moves=true]
 Authorization: Bearer <firebase-id-token>
 ```
 
@@ -1380,6 +1380,8 @@ on one repeatable-read snapshot. It composes no Matchup and calls no provider.
   `fanduel`, `betmgm`, `williamhill_us`, `betrivers`, `fanatics`). It narrows the
   rows, each row's `lines`, `line_prices` and `book_lines.books`, the index's
   counts, and the top-level `sources` list.
+- `moves` is `true` or `false` (the default). `true` needs `market` and a date
+  whose 00:00 ET is at most two days ago; see [Line moves](#line-moves).
 - An unknown market, a malformed value, a repeated parameter (other than
   `sources`) or any other parameter is `400 invalid_input` with
   `details.parameters` naming it. A date with no games is `200` with
@@ -1465,6 +1467,71 @@ filters) and `"omitted": {"book_only_unnamed": 1}`, and gives each game its
   `freshness.pool.providers` vocabulary: `fresh`, `stale-served`, `missing`,
   and `closing` when every game read has started), then each book quoting a
   game read, `fresh` with its newest update. Times are UTC with a `Z` suffix.
+
+#### Line moves
+
+With `moves=true` (crf04/statsplus#491), each row adds `moves` and the board
+adds `pulled`. Every other field is unchanged, and without `moves` the response
+is exactly the one above.
+
+```json
+"moves": {
+  "dabble": {
+    "open": {"line": 27.5, "over": -122, "under": -104, "seen_at": "2026-01-14T23:00:00Z"},
+    "previous": {"line": 28.5, "over": -115, "under": -105, "changed_at": "2026-01-15T23:55:00Z"},
+    "unchanged": false
+  },
+  "fanduel": {
+    "open": {"line": 28.5, "over": -105, "under": -115, "seen_at": "2026-01-15T03:00:00Z"},
+    "previous": null,
+    "unchanged": true
+  }
+}
+```
+
+```json
+"pulled": {
+  "dabble": [
+    {"game_id": "0022500602", "player_id": 1628973, "name": "Jalen Brunson", "team": "NYK",
+     "line": 26.5, "over": -120, "under": -106, "last_seen_at": "2026-01-15T15:05:00Z"}
+  ],
+  "draftkings": [
+    {"game_id": "0022500602", "player_id": 1630573, "name": "Sam Hauser", "team": "BOS",
+     "line": 9.5, "over": -115, "under": -105, "last_seen_at": null}
+  ]
+}
+```
+
+- "Today" is the date's US Eastern day, from 00:00 ET. A value is a line with
+  its Over and Under prices (`null` for a side with no per-pick price, as in
+  `line_prices`; a Dabble line that is not near-even has both `null`).
+- `moves` has one key per source with a cell in the row: each provider in
+  `lines`, then each book in `book_lines.books` by name. `open` is the value in
+  force at 00:00 ET, or the first value for a line first posted later that day;
+  its `seen_at` is when that value was first seen without a change, which is
+  the evening before for most opening lines. `previous` is the value before
+  the current one, with `changed_at` the time the current value replaced it,
+  or `null` when the value never changed today. `unchanged` is `true` exactly
+  when `previous` is `null`. A source re-posting the same line and prices is
+  not a move; a change to either price is. A line that moved and moved back is
+  `unchanged: false` with the intermediate value as `previous`. A source's key
+  is `null` when its cell has no stored history.
+- `pulled` lists, per source, each player and market the source posted today
+  and no longer posts, in game, team, name and player ID order, with its last
+  value. `last_seen_at` is a provider's last poll that still showed the line.
+  For a book it is `null`: a book's history stores each change, not each poll,
+  and a pull writes nothing. A source with nothing pulled is absent. `game`,
+  `team` and `sources` narrow it as they narrow rows, and a player the catalog
+  cannot name or place on a team is not listed.
+- A started game's history ends at its tip, as its closing set does, so its
+  moves describe the closing value.
+- Provider history is every promoted generation of the provider's snapshots
+  (`projection_observations`, kept three days); a Complete generation without
+  the cell is a moment it was not posted, and a provider cell posted at two
+  lines in one generation is not a value. Book history is
+  `sportsbook_prop_quotes`, a row per change. The extra reads are four
+  statements on the board's snapshot, bounded to the date's games and the
+  market's statistics through the existing indexes.
 
 The board is not a research action and records no usage event.
 
