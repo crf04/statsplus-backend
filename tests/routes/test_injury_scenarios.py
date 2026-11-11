@@ -23,7 +23,7 @@ from app.config.settings import (
     RuntimeSettings,
 )
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
-from app.errors import ProviderUnavailableError
+from app.errors import InvalidInputError, ProviderUnavailableError
 from app.migrations import run_migrations
 from app.providers.nba_injury_report import InjuryEntryEvidence, InjuryProviderSnapshot
 from app.services.database_first_activation import ReadSeason
@@ -38,6 +38,8 @@ from app.services.matchup_injuries import MatchupInjuryService
 from app.services.on_off import OnOffService, build_request, injury_warm_requests
 from app.services.pbp_stats_adapter import WowyPlayerRow
 from app.services.player_pool import PlayerPool, PoolPlayer
+from app.services.research_season import previous_nba_season
+from app.services.rotation_service import RotationService
 from tests.support.injury_reports import store_reports
 from tests.support.rotation_world import game as rotation_game
 from tests.support.rotation_world import line as rotation_line
@@ -1924,6 +1926,158 @@ def test_one_report_read_per_season_serves_every_injured_player(client, authenti
 
 def _unreadable(*args, **kwargs):
     raise SQLAlchemyError("unreadable")
+
+
+def _sat_out_last_season(world):
+    """LeBron has no 2025-26 game; every stored LAL 2025-26 report and rotation (h1-h4) has Reaves without him."""
+
+    del world.logs.rows[(LEBRON, PRIOR)]
+    repository = world.listing.snapshot_repository
+    store_reports(repository, PRIOR, dict(H), (LEBRON, "LAL"))
+    world.games.injury_reports = repository
+    read = world.logs.get_player_logs
+
+    def with_columns(player_id, season, **kwargs):
+        # The stored source's empty frame keeps its columns.
+        return read(player_id, season, **kwargs).reindex(
+            columns=["GAME_ID", "GAME_DATE", "TEAM_ABBREVIATION", "MIN"]
+        )
+
+    world.logs.get_player_logs = with_columns
+    store(
+        world.scenarios.rotations,
+        *(
+            rotation_game(game_id, day, "LAL", "BOS", [rotation_line(REAVES, "Austin Reaves", "LAL", minutes=30)])
+            for game_id, day in H
+        ),
+        season=PRIOR,
+    )
+
+
+def test_an_injured_player_with_no_game_in_either_season_gets_each_seasons_reports_in_every_sample(
+    client, authenticate, world, tmp_path
+):
+    # Every LAL report in both seasons lists him; he played in neither.
+    _store_rotations(world, tmp_path, {REAVES: _rotation_lines()[REAVES]})
+    _out_all_season(world, (LEBRON, "LAL"))
+    _sat_out_last_season(world)
+
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+    pts = _row(scenario, "sits", REAVES, "PTS")
+
+    assert scenario["injured"]["seasons"] == [
+        {"season": CURRENT, "missed": 8, "played": 0},
+        {"season": PRIOR, "missed": 4, "played": 0},
+    ]
+    assert [(s["season"], s["without"]["games"]) for s in pts["seasons"]] == [(CURRENT, 8), (PRIOR, 4)]
+    assert [(s["season"], s["without"]["games"]) for s in pts["rotation"]["by_season"]] == [
+        (CURRENT, 8),
+        (PRIOR, 4),
+    ]
+
+
+def _game_logs_answer(world):
+    reaves = world.games.get_player_logs_by_id(REAVES, PRIOR)
+    return sorted(world.games.filter_players_on_off(reaves, [], ["LeBron James"], PRIOR)["GAME_ID"])
+
+
+def _rotation_answer(world):
+    rotations = RotationService(
+        world.scenarios.rotations,
+        world.catalog,
+        lambda: PRIOR,
+        world.games,
+        injury_reports=world.listing.snapshot_repository,
+    )
+    try:
+        body = rotations.get_player_rotation(
+            player_name="Austin Reaves", player_team=None, last_n=5, season=PRIOR, without=["LeBron James"]
+        )
+    except InvalidInputError as error:
+        return error.public_details["parameter"]
+    return body["without"]["without"]["games"]
+
+
+def _scenarios_answer(world, client, authenticate):
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+    pts = _row(scenario, "sits", REAVES, "PTS")
+    return (
+        scenario["injured"]["seasons"][1],
+        [(s["season"], s["without"]["games"]) for s in pts["seasons"]],
+        [(s["season"], s["without"]["games"]) for s in pts["rotation"]["by_season"]],
+    )
+
+
+def _fail_after_first_read(read):
+    """``read``, failing from its second call: the caller's own name resolution reads it first."""
+
+    calls = []
+
+    def failing(*args, **kwargs):
+        calls.append(args)
+        if len(calls) > 1:
+            raise SQLAlchemyError("unreadable")
+        return read(*args, **kwargs)
+
+    return failing
+
+
+_PRIOR_GAME_IDS = [game_id for game_id, _ in H]
+_SCENARIO_WITH_EVIDENCE = (
+    {"season": PRIOR, "missed": 4, "played": 0},
+    [(CURRENT, 3), (PRIOR, 4)],
+    [(CURRENT, 3), (PRIOR, 4)],
+)
+_SCENARIO_ON_MASTER = ({"season": PRIOR, "missed": 0, "played": 0}, [(CURRENT, 3)], [(CURRENT, 3)])
+
+
+@pytest.mark.parametrize(
+    ("surface", "unreadable", "expected"),
+    [
+        ("game logs", None, _PRIOR_GAME_IDS),
+        ("game logs", "reports", []),
+        ("game logs", "last season's logs", []),
+        ("game logs", "athlete catalog", []),
+        ("rotations", None, 4),
+        ("rotations", "reports", "without"),
+        ("rotations", "last season's logs", "without"),
+        ("rotations", "athlete catalog", "without"),
+        ("injury scenarios", None, _SCENARIO_WITH_EVIDENCE),
+        ("injury scenarios", "reports", _SCENARIO_ON_MASTER),
+        ("injury scenarios", "last season's logs", _SCENARIO_ON_MASTER),
+    ],
+)
+def test_any_unreadable_membership_read_gives_the_window_without_evidence(
+    client, authenticate, world, tmp_path, monkeypatch, surface, unreadable, expected
+):
+    # LeBron sat all of 2025-26 on LAL's reports.  With any of the reads the
+    # membership evidence needs unreadable, each surface answers as it does
+    # without evidence: no 2025-26 window, so a game-log filter with no
+    # games, a 400 naming ``without`` and a scenario with no 2025-26 sample.
+    _store_rotations(world, tmp_path, _rotation_lines())
+    _sat_out_last_season(world)
+    if unreadable == "reports":
+        monkeypatch.setattr(world.listing.snapshot_repository, "get_season_mentions", _unreadable)
+    elif unreadable == "last season's logs":
+        read = world.logs.get_players_logs
+
+        def two_seasons_back_unreadable(player_ids, season, **kwargs):
+            if season == previous_nba_season(PRIOR):
+                raise SQLAlchemyError("unreadable")
+            return read(player_ids, season, **kwargs)
+
+        monkeypatch.setattr(world.logs, "get_players_logs", two_seasons_back_unreadable)
+    elif unreadable == "athlete catalog":
+        monkeypatch.setattr(world.catalog, "get_catalog", _fail_after_first_read(world.catalog.get_catalog))
+
+    if surface == "game logs":
+        answer = _game_logs_answer(world)
+    elif surface == "rotations":
+        answer = _rotation_answer(world)
+    else:
+        answer = _scenarios_answer(world, client, authenticate)
+
+    assert answer == expected
 
 
 # -- two seasons of stored rotations ------------------------------------------

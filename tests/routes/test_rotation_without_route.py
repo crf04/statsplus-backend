@@ -574,19 +574,19 @@ def test_unreadable_membership_evidence_opens_the_window_at_the_first_game(
     assert (without["games_without"], without["games_with"]) == split
 
 
-def test_an_unreadable_catalog_leaves_names_on_the_box_scores_resolved(client, detroit, monkeypatch):
-    monkeypatch.setattr(detroit.rotation_service.athlete_catalog, "get_catalog", _unreadable)
+def test_names_on_the_box_scores_resolve_without_reading_the_catalog(client, detroit, monkeypatch):
+    catalog = detroit.rotation_service.athlete_catalog
+    read, reads = catalog.get_catalog, []
 
-    resolved = _get(client, "team=DET&without=Cade%20Cunningham")
-    unknown = _get(client, "team=DET&without=Brandon%20Ingram")
+    def counted(season, **kwargs):
+        reads.append(season)
+        return read(season, **kwargs)
 
-    assert resolved.status_code == 200
-    assert (
-        resolved.get_json()["without"]["games_without"],
-        resolved.get_json()["without"]["games_with"],
-    ) == (5, 2)
-    assert unknown.status_code == 400
-    assert unknown.get_json()["error"]["details"]["parameter"] == "without"
+    monkeypatch.setattr(catalog, "get_catalog", counted)
+
+    without = _get(client, "team=DET&without=Cade%20Cunningham").get_json()["without"]
+
+    assert (without["games_without"], without["games_with"], len(reads)) == (5, 2, 0)
 
 
 def test_an_offseason_mover_counts_for_the_new_team_on_its_reports_and_not_the_old_one(
