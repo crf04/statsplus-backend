@@ -230,6 +230,33 @@ def test_an_unreadable_prior_season_does_not_fail_the_list(cut_over):
     assert _minutes_columns(body)["Prior Only"] == (NONE, NONE)
 
 
+def test_a_player_with_no_current_games_listed_alone_keeps_empty_current_minutes(world):
+    listing = _listing(world, _service(world), players=[("Prior Only", PRIOR_ONLY, "LAL", "Out")])
+
+    body = listing.list_injuries(REPORT_DATE, None)
+
+    assert _minutes_columns(body) == {"Prior Only": (NONE, (20.0, 2, LAST))}
+
+
+def test_opening_night_before_any_game_log_keeps_last_seasons_minutes(tmp_path):
+    opening = World(create_engine(f"sqlite:///{tmp_path / 'opening.sqlite3'}"))
+    opening.compose("player_game_logs", LAST, {"rows": _games(VETERAN, LAST, [28, 30])})
+
+    body = _listing(opening, _service(opening)).list_injuries(REPORT_DATE, None)
+    opening.engine.dispose()
+
+    assert body["minutes_season"] == NEW
+    assert _minutes_columns(body)["Veteran"] == (NONE, (29.0, 2, LAST))
+
+
+def test_a_refused_current_season_does_not_fail_the_list(world):
+    world.checks.refused["player_game_logs"] = "candidate_not_readable"
+
+    body = _listing(world, _service(world)).list_injuries(REPORT_DATE, None)
+
+    assert _minutes_columns(body)["Veteran"] == (NONE, (29.0, 2, LAST))
+
+
 def test_the_list_reads_each_season_once_however_many_players_it_has(cut_over):
     reads = []
 
