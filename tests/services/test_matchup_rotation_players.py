@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import create_engine, text
 
 from app.config.settings import NBASeasonSettings, RuntimeSettings
@@ -537,8 +538,11 @@ def test_a_playoffs_log_on_the_legacy_table_never_admits_a_rotation_player(tmp_p
     assert QUESTIONABLE in [row["canonical_id"] for row in payload["players"]]
 
 
-def test_a_rotation_players_books_are_judged_stale_and_he_gets_no_line_label(tmp_path):
-    """No line, so no label is invented; his book quotes are judged like anyone's (crf04/statsplus#495, #496)."""
+@pytest.mark.parametrize("on_engine", [True, False])
+def test_a_rotation_players_books_are_judged_stale_and_he_gets_no_line_label(tmp_path, on_engine):
+    """No line, so no label is invented; his book quotes are judged like anyone's (crf04/statsplus#495, #496).
+
+    With an engine, as in production, the books are read on the request's connection."""
 
     served = _sqlite_world(tmp_path)
     SportsbookQuoteStore(served.engine).record_poll(
@@ -556,6 +560,8 @@ def test_a_rotation_players_books_are_judged_stale_and_he_gets_no_line_label(tmp
         ],
     )
     service = served.service()
+    if on_engine:
+        service._engine = served.engine
     service.sportsbook_reader = SportsbookQuoteReader(served.engine)
 
     rotation = next(
