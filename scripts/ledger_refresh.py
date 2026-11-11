@@ -18,8 +18,8 @@ from app.migrations import run_migrations
 from app.services.ledger_runtime import (
     ActiveManifestLedgerGovernanceReader,
     LedgerRuntime,
+    NoActiveCollectionManifest,
 )
-from app.services.team_matchup_publications import PublicationGovernanceUnavailable
 from app.utils.db import get_engine
 
 #: Each morning's collection manifest opens between the 10:15 and 12:15 UTC runs. Before
@@ -68,7 +68,7 @@ def main(argv=None) -> int:
             max_games=args.max_games,
             historical_repair=args.historical_repair,
         )
-    except PublicationGovernanceUnavailable as error:
+    except NoActiveCollectionManifest as error:
         if _now().time() >= MANIFEST_EXPECTED_BY:
             raise
         print(
