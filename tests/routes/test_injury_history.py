@@ -430,3 +430,10 @@ def test_a_from_date_after_the_eastern_today_needs_a_to_date(client, authenticat
     explicit = _get(client, authenticate, f"player={JACKSON}&from_date=2026-11-11&to_date=2026-11-12")
     assert explicit.status_code == 200
     assert explicit.get_json()["statuses"] == []
+
+
+def test_a_from_date_of_the_eastern_today_lists_todays_report(client, authenticate, stored):
+    body = _get(client, authenticate, f"player={JACKSON}&from_date=2026-11-10").get_json()
+
+    assert (body["from_date"], body["to_date"]) == ("2026-11-10", "2026-11-10")
+    assert [(row["game_date"], row["status"]) for row in body["statuses"]] == [("2026-11-10", "Available")]
