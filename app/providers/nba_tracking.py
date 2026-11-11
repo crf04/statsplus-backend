@@ -125,12 +125,16 @@ class NBATrackingProvider:
         )
         return parse_day_passing(payload)
 
-    def fetch_game_box_score(self, game_id: str, *, timeout: float) -> dict[int, dict[str, int]]:
+    def fetch_game_box_score(
+        self, game_id: str, *, timeout: float, finish_within: float
+    ) -> dict[int, dict[str, int]]:
         """``{player_id: {stat: count}}`` from NBA's official box score of one game.
 
         One request, never retried: the ledger's next run is the retry.  Requests
         start at least ``pace_seconds`` apart, like the tracking refresh's
-        throttle between games, but a slow request never holds up the next.
+        throttle between games, but a slow request never holds up the next.  A
+        request whose pacing wait plus ``timeout`` could outlast
+        ``finish_within`` seconds is not made.
         """
 
         from nba_api.stats.library.http import NBAStatsHTTP
@@ -138,6 +142,8 @@ class NBATrackingProvider:
         with self._pace_lock:
             now = self._monotonic()
             start = now if self._next_box_score is None else max(now, self._next_box_score)
+            if start - now + timeout > finish_within:
+                raise ProviderResponseError("boxscoretraditionalv3 could not answer in the time left")
             self._next_box_score = start + self.pace_seconds
         if start > now:
             self._sleep(start - now)
@@ -199,22 +205,42 @@ def parse_box_score_player_track(payload: Any) -> dict[int, dict[str, int | None
 
 
 def parse_box_score_traditional(payload: Any) -> dict[int, dict[str, int]]:
-    """Per-player counting stats from a ``boxscoretraditionalv3`` document."""
+    """Per-player counting stats from a ``boxscoretraditionalv3`` document.
+
+    The document is checked whole, every count of both teams' players whether
+    or not the ledger publishes it: a row whose makes exceed its attempts,
+    whose points disagree with its makes or whose rebounds disagree with their
+    offensive and defensive split makes the document no reference.
+    """
 
     box = payload.get("boxScoreTraditional") if isinstance(payload, dict) else None
     if not isinstance(box, dict):
         raise ProviderResponseError("boxscoretraditionalv3 has no boxScoreTraditional document")
     players: dict[int, dict[str, int]] = {}
     for side in ("homeTeam", "awayTeam"):
-        for player in (box.get(side) or {}).get("players") or []:
-            stats = player.get("statistics") or {}
-            counts = {stat: _count(stats.get(field)) for stat, field in BOX_SCORE_STATS.items()}
-            if None in counts.values() or not isinstance(player.get("personId"), int):
+        team = box.get(side)
+        rows = team.get("players") if isinstance(team, dict) else None
+        if not isinstance(rows, list) or not rows:
+            raise ProviderResponseError("boxscoretraditionalv3 lists no players for a team yet")
+        for player in rows:
+            stats = player.get("statistics") if isinstance(player, dict) else None
+            if not isinstance(stats, dict) or not isinstance(player.get("personId"), int):
                 raise ProviderResponseError("boxscoretraditionalv3 has a malformed player row")
+            counts = {stat: _count(stats.get(field)) for stat, field in BOX_SCORE_STATS.items()}
+            if None in counts.values() or not _consistent_box_score_counts(counts):
+                raise ProviderResponseError("boxscoretraditionalv3 has an inconsistent player row")
             players[player["personId"]] = counts
-    if not players:
-        raise ProviderResponseError("boxscoretraditionalv3 lists no players yet")
     return players
+
+
+def _consistent_box_score_counts(counts: dict[str, int]) -> bool:
+    return (
+        0 <= counts["FGM"] - counts["FG3M"] <= counts["FGA"] - counts["FG3A"]
+        and counts["FG3M"] <= counts["FG3A"]
+        and counts["FTM"] <= counts["FTA"]
+        and counts["PTS"] == 2 * counts["FGM"] + counts["FG3M"] + counts["FTM"]
+        and counts["REB"] == counts["OREB"] + counts["DREB"]
+    )
 
 
 def _minutes_played(value: Any) -> int:

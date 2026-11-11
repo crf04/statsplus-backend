@@ -41,6 +41,7 @@ from app.services.canonical_game_ledger import (
 )
 from app.services.ledger_box_score import (
     BOX_SCORE_BUDGET_SECONDS,
+    BOX_SCORE_DEADLINE_MARGIN_SECONDS,
     BOX_SCORE_RECONCILED_SEASON,
     BOX_SCORE_TIMEOUT_SECONDS,
     carries_box_score_corrections,
@@ -76,7 +77,9 @@ class LedgerLiveDataProvider(Protocol):
 class LedgerBoxScoreProvider(Protocol):
     """NBA's official box score on ``stats.nba.com``: ``{player_id: {stat: count}}``."""
 
-    def fetch_game_box_score(self, game_id: str, *, timeout: float) -> Mapping[int, Mapping[str, int]]: ...
+    def fetch_game_box_score(
+        self, game_id: str, *, timeout: float, finish_within: float
+    ) -> Mapping[int, Mapping[str, int]]: ...
 
 
 class LedgerAthleteCatalogReader(Protocol):
@@ -421,20 +424,21 @@ class LedgerBackfillService:
 
             Whatever the request does, it never costs the game its acceptance:
             a check starts only while the run's budget lasts and when its
-            timeout ends before the manifest's deadline, and any failure reads
-            as no box score.
+            pacing wait and timeout end a margin before the manifest's
+            deadline, and any failure reads as no box score.
             """
 
             nonlocal box_score_seconds_left
             started = _aware(self.clock())
             with box_score_lock:
-                if box_score_seconds_left <= 0 or started + timedelta(
-                    seconds=self.box_score_timeout_seconds
-                ) >= _aware(collect_before):
+                if box_score_seconds_left <= 0:
                     return None
             try:
                 return self.box_score_provider.fetch_game_box_score(
-                    game_id, timeout=self.box_score_timeout_seconds
+                    game_id,
+                    timeout=self.box_score_timeout_seconds,
+                    finish_within=(_aware(collect_before) - started).total_seconds()
+                    - BOX_SCORE_DEADLINE_MARGIN_SECONDS,
                 )
             except Exception:
                 return None

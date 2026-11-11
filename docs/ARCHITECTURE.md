@@ -2032,11 +2032,14 @@ The fields a correction writes are the ledger's, so a replacement that adds or
 drops them raises no `schema_drift` alert. When the box-score check gives no
 whole reference, nothing is applied or resolved and the game is listed in
 `unreconciled_game_ids`: when the request fails or times out, when the run has
-spent its 120 s box-score budget or the timeout would end past the manifest's
-`collect_before`, or when the document does not make a whole game of the
-evidence (a malformed or inconsistent row, a player of the game it leaves out,
-a player it credits who is not in the game, or counts that miss the final
-score). A first acceptance then stores the provider's game, as without the
+spent its 120 s box-score budget or the request's pacing wait plus its timeout
+would end less than 5 s before the manifest's `collect_before`, or when the
+document is not a whole reference. The document is checked whole before
+anything is applied or resolved, every count of both teams' players whether or
+not it is applied: a missing team, a negative or non-integer count, makes above
+attempts, points that disagree with the makes, or REB other than OREB plus DREB
+rejects it, and so does a player of the game it leaves out, a player it credits
+who is not in the game, or counts that miss the final score. A first acceptance then stores the provider's game, as without the
 check. A recheck of a stored game that carries corrections leaves it as it is,
 so a published count never flips back to the provider's because one check
 failed; the game is rechecked inside the daily and weekly windows like any

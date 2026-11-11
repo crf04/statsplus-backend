@@ -86,7 +86,7 @@ class _BoxScores:
         self.seconds = seconds
         self.ledger = ledger
 
-    def fetch_game_box_score(self, game_id, *, timeout=None):
+    def fetch_game_box_score(self, game_id, *, timeout=None, finish_within=None):
         if self.ledger is not None:
             self.ledger.now += timedelta(seconds=self.seconds)
         if isinstance(self.document, Exception):
@@ -890,8 +890,8 @@ def test_the_provider_fetches_one_paced_box_score_per_game_with_the_standard_hea
     monkeypatch.setattr(NBAStatsHTTP, "send_api_request", _send_recording(calls, now))
     provider = NBATrackingProvider(pace_seconds=0.6, sleep=sleeps.append, monotonic=lambda: now[0])
 
-    first = provider.fetch_game_box_score(GAME_ID, timeout=10)
-    second = provider.fetch_game_box_score("0022600028", timeout=10)
+    first = provider.fetch_game_box_score(GAME_ID, timeout=10, finish_within=60)
+    second = provider.fetch_game_box_score("0022600028", timeout=10, finish_within=60)
 
     assert (first[PETERSON]["AST"], second[BAILEY]["REB"]) == (5, 6)
     assert calls == [
@@ -914,7 +914,7 @@ def test_a_box_score_request_is_made_once_and_never_retried(monkeypatch):
     provider = NBATrackingProvider(pace_seconds=0.6, sleep=lambda _seconds: None)
 
     with pytest.raises(requests.Timeout):
-        provider.fetch_game_box_score(GAME_ID, timeout=10)
+        provider.fetch_game_box_score(GAME_ID, timeout=10, finish_within=60)
     assert attempts == [10]
 
 
@@ -934,11 +934,13 @@ def test_a_slow_box_score_request_does_not_hold_up_the_next_games_request(monkey
 
     monkeypatch.setattr(NBAStatsHTTP, "send_api_request", _send_recording([], gates=gates))
     provider = NBATrackingProvider(pace_seconds=0.6, sleep=lambda _seconds: None)
-    first = threading.Thread(target=provider.fetch_game_box_score, args=(GAME_ID,), kwargs={"timeout": 10})
+    first = threading.Thread(
+        target=provider.fetch_game_box_score, args=(GAME_ID,), kwargs={"timeout": 10, "finish_within": 60}
+    )
     first.start()
     assert first_started.wait(2)
 
-    provider.fetch_game_box_score("0022600028", timeout=10)
+    provider.fetch_game_box_score("0022600028", timeout=10, finish_within=60)
     first.join()
 
     assert failures == []

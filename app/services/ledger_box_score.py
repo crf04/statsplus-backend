@@ -31,6 +31,9 @@ BOX_SCORE_RECONCILED_SEASON = "2026-27"
 #: One request per game, never retried.  ``boxscoretraditionalv3`` answered in
 #: 0.13-0.20 s on 2026-11-10, so 10 s is ~50x a healthy answer.
 BOX_SCORE_TIMEOUT_SECONDS = 10.0
+#: A check must end, pacing wait and timeout included, this long before the
+#: manifest's ``collect_before`` so the game it checks is still accepted in time.
+BOX_SCORE_DEADLINE_MARGIN_SECONDS = 5.0
 #: Seconds one run may spend on box-score checks before it accepts the rest of
 #: its games unchecked.  A healthy run of ~25 rechecks spends ~5 s; with
 #: stats.nba.com down, 120 s caps the cost at 12 timeouts plus the one in
@@ -172,6 +175,7 @@ def _official_wire(official: Mapping[str, int], row: Mapping[str, Any]) -> dict[
 
 __all__ = [
     "BOX_SCORE_BUDGET_SECONDS",
+    "BOX_SCORE_DEADLINE_MARGIN_SECONDS",
     "BOX_SCORE_RECONCILED_SEASON",
     "BOX_SCORE_TIMEOUT_SECONDS",
     "UNAPPLIED_STATS",
