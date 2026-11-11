@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
 
 from app.domain.utc import assume_utc
 from app.models.projection_archive import (
@@ -136,7 +136,13 @@ class _Generation:
     confirmed_at: datetime
 
 
-def _resolved(rows: Iterable[Any]) -> Value | None:
+def _lines(rows: Iterable[Any]) -> list[Any]:
+    """The rows that post a line: the pool's candidates."""
+
+    return [row for row in rows if row.targetable and row.line_value is not None]
+
+
+def _resolved(rows: Sequence[Any]) -> Value | None:
     """A generation's one value for a cell, as the Player Pool resolves it; ``None`` at two lines."""
 
     lines = {float(row.line_value) for row in rows}
@@ -151,15 +157,65 @@ def _resolved(rows: Iterable[Any]) -> Value | None:
     return (next(iter(lines)), over, under)
 
 
-def _posted_by(generations: Sequence[_Generation], end: int, present: Mapping[str, Any]) -> bool:
-    """Whether a cell was posted after ``generations[:end]``: in the newest Complete one or a Partial since."""
+@dataclass(frozen=True, slots=True)
+class _Sequence:
+    """A scope's generations one game reads, in order, and where each Complete one falls."""
 
-    for index in range(end - 1, -1, -1):
-        if generations[index].generation_id in present:
-            return True
-        if generations[index].complete:
-            return False
-    return False
+    generations: list[_Generation]
+    index: dict[str, int]
+    #: For each position, the first Complete generation at or after it (``len`` when none).
+    next_complete: list[int]
+    #: How many generations came before the day began.
+    before_day: int
+
+    @classmethod
+    def of(cls, generations: list[_Generation], day_start: datetime) -> _Sequence:
+        next_complete = [len(generations)] * (len(generations) + 1)
+        for position in range(len(generations) - 1, -1, -1):
+            next_complete[position] = (
+                position if generations[position].complete else next_complete[position + 1]
+            )
+        return cls(
+            generations,
+            {generation.generation_id: position for position, generation in enumerate(generations)},
+            next_complete,
+            bisect_left([generation.order[0] for generation in generations], day_start),
+        )
+
+    def replay(
+        self, events: Sequence[int], rows: Mapping[str, list[Any]], end: int
+    ) -> tuple[bool, int | None]:
+        """Replay a cell's market references through ``generations[:end]`` as Latest applies them.
+
+        A Complete generation replaces the provider's offerings; a Partial one
+        withdraws each reference it observes and posts the targetable ones,
+        carrying the rest.  Returns whether the cell was posted afterwards and
+        the position of the last generation it was posted in.
+        """
+
+        live: set[str] = set()
+        last = None
+        applied = -1
+        for position in [*(event for event in events if event < end), end]:
+            if live:
+                cleared = self.next_complete[applied + 1]
+                if cleared < position:
+                    live = set()
+                    last = cleared - 1
+                else:
+                    last = position - 1
+            if position == end:
+                break
+            generation_rows = rows[self.generations[position].generation_id]
+            posted = {row.market_reference for row in _lines(generation_rows)}
+            if self.generations[position].complete:
+                live = posted
+            else:
+                live = (live - {row.market_reference for row in generation_rows}) | posted
+            if live:
+                last = position
+            applied = position
+        return bool(live), last
 
 
 def provider_histories(
@@ -174,20 +230,29 @@ def provider_histories(
 ) -> dict[CellKey, CellHistory]:
     """Each provider cell's history in the market's statistics for ``game_ids``.
 
-    One statement reads the cells' targetable lines through the governed
-    identity index (game, player, statistic); a second reads the providers'
-    promoted generations since the first of those rows, with each one's
-    snapshot status and polls.  ``fences`` holds a started game's tip.
+    Two statements read the providers' promoted generations (with each one's
+    snapshot status and newest confirming poll), then one reads the cells'
+    rows through the governed identity index (game, player, statistic): every
+    line-bearing targetable row, and every row of a Partial generation, whose
+    untargetable rows withdraw an offering.  ``fences`` holds a started game's
+    tip.
     """
 
     providers = sorted(set(providers))
     if not game_ids or not statistic_ids or not providers:
         return {}
+    generations = _generations(connection, season=season, providers=providers)
+    partial = sorted(
+        generation_id for generation_id, generation in generations.items() if not generation.complete
+    )
     observation = ProjectionObservation.__table__
+    posting = and_(observation.c.targetable.is_(True), observation.c.line_value.is_not(None))
     rows = connection.execute(
         select(
             observation.c.provider,
             observation.c.generation_id,
+            observation.c.market_reference,
+            observation.c.targetable,
             observation.c.canonical_game_id,
             observation.c.canonical_player_id,
             observation.c.canonical_player_name,
@@ -195,23 +260,13 @@ def provider_histories(
             observation.c.line_value,
             observation.c.over_price,
             observation.c.under_price,
-            observation.c.observed_at,
         ).where(
             observation.c.canonical_game_id.in_(sorted(game_ids)),
             observation.c.canonical_statistic_id.in_(sorted(statistic_ids)),
             observation.c.provider.in_(providers),
-            observation.c.targetable.is_(True),
-            observation.c.line_value.is_not(None),
+            or_(posting, observation.c.generation_id.in_(partial)) if partial else posting,
         )
     ).all()
-    if not rows:
-        return {}
-    generations = _generations(
-        connection,
-        season=season,
-        providers=providers,
-        since=min(assume_utc(row.observed_at) for row in rows),
-    )
     by_cell: dict[tuple[str, str, str, int], dict[str, list[Any]]] = {}
     for row in rows:
         generation = generations.get(str(row.generation_id))
@@ -219,44 +274,37 @@ def provider_histories(
             continue
         key = (*generation.scope, str(row.canonical_game_id), int(row.canonical_player_id))
         by_cell.setdefault(key, {}).setdefault(generation.generation_id, []).append(row)
-    sequences: dict[tuple[str, str], list[_Generation]] = {}
+    scopes: dict[tuple[str, str], list[_Generation]] = {}
     for generation in sorted(generations.values(), key=lambda generation: generation.order):
-        sequences.setdefault(generation.scope, []).append(generation)
-    # Each scope's generations a game's history reads (polled by its tip, if it started), and
-    # how many of them came before the day began.
-    eligible: dict[tuple[str, str, str], tuple[list[_Generation], int]] = {}
+        scopes.setdefault(generation.scope, []).append(generation)
+    # Each scope's generations a game reads: those polled by its tip, if it started.
+    sequences: dict[tuple[str, str, str], _Sequence] = {}
     histories: dict[CellKey, CellHistory] = {}
     for (provider, query_key, game_id, player_id), cell_rows in by_cell.items():
-        fence = fences.get(game_id)
-        if (provider, query_key, game_id) not in eligible:
-            sequence = [g for g in sequences[(provider, query_key)] if fence is None or g.polled_at <= fence]
-            eligible[(provider, query_key, game_id)] = (
-                sequence,
-                bisect_left([g.order[0] for g in sequence], day_start),
+        if (provider, query_key, game_id) not in sequences:
+            fence = fences.get(game_id)
+            sequences[(provider, query_key, game_id)] = _Sequence.of(
+                [g for g in scopes[(provider, query_key)] if fence is None or g.polled_at <= fence], day_start
             )
-        sequence, before_day = eligible[(provider, query_key, game_id)]
-        present = sorted(
-            (
-                generation
-                for generation in map(generations.__getitem__, cell_rows)
-                if fence is None or generation.polled_at <= fence
-            ),
-            key=lambda generation: generation.order,
+        sequence = sequences[(provider, query_key, game_id)]
+        events = sorted(
+            sequence.index[generation_id] for generation_id in cell_rows if generation_id in sequence.index
         )
-        if not present:
+        posted_now, last = sequence.replay(events, cell_rows, len(sequence.generations))
+        if last is None:
             continue
         sightings = tuple(
-            Sighting(generation.order[0], value)
-            for generation in present
-            for value in (_resolved(cell_rows[generation.generation_id]),)
+            Sighting(sequence.generations[event].order[0], value)
+            for event in events
+            for value in (_resolved(_lines(cell_rows[sequence.generations[event].generation_id])),)
             if value is not None
         )
-        newest = cell_rows[present[-1].generation_id][-1]
+        newest = cell_rows[sequence.generations[events[-1]].generation_id][-1]
         history = CellHistory(
             sightings=sightings,
-            posted_at_start=_posted_by(sequence, before_day, cell_rows),
-            posted_now=_posted_by(sequence, len(sequence), cell_rows),
-            last_seen_at=present[-1].confirmed_at,
+            posted_at_start=sequence.replay(events, cell_rows, sequence.before_day)[0],
+            posted_now=posted_now,
+            last_seen_at=sequence.generations[last].confirmed_at,
             name=newest.canonical_player_name,
             team_id=newest.canonical_team_id,
         )
@@ -267,12 +315,13 @@ def provider_histories(
     return histories
 
 
-def _generations(
-    connection: Any, *, season: str, providers: Sequence[str], since: datetime
-) -> dict[str, _Generation]:
+def _generations(connection: Any, *, season: str, providers: Sequence[str]) -> dict[str, _Generation]:
+    """The providers' promoted generations kept for the season: three days, since retention prunes older ones."""
+
     generation = ProjectionMaterializationGeneration.__table__
     snapshot = ProjectionProviderSnapshot.__table__
     poll = ProviderPoll.__table__
+    scope = (generation.c.provider.in_(providers), generation.c.season == season)
     rows = connection.execute(
         select(
             generation.c.generation_id,
@@ -288,23 +337,17 @@ def _generations(
                 poll, generation.c.source_poll_id == poll.c.poll_id
             )
         )
-        .where(
-            generation.c.provider.in_(providers),
-            generation.c.season == season,
-            generation.c.outcome == "advanced",
-            generation.c.retrieved_at >= since,
-        )
+        .where(*scope, generation.c.outcome == "advanced")
     ).all()
-    confirmations: dict[str, datetime] = {}
-    if rows:
+    confirmations = {
+        str(row.generation_id): assume_utc(row.confirmed_at)
         for row in connection.execute(
-            select(poll.c.generation_id, poll.c.retrieved_at).where(
-                poll.c.generation_id.in_([str(row.generation_id) for row in rows]),
-                poll.c.retrieved_at.is_not(None),
-            )
-        ):
-            at = assume_utc(row.retrieved_at)
-            confirmations[str(row.generation_id)] = max(confirmations.get(str(row.generation_id), at), at)
+            select(poll.c.generation_id, func.max(poll.c.retrieved_at).label("confirmed_at"))
+            .where(poll.c.provider.in_(providers), poll.c.season == season, poll.c.generation_id.is_not(None))
+            .group_by(poll.c.generation_id)
+        )
+        if row.confirmed_at is not None
+    }
     return {
         str(row.generation_id): _Generation(
             generation_id=str(row.generation_id),

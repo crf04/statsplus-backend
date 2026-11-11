@@ -11,7 +11,15 @@ from sqlalchemy import create_engine, insert
 
 from app.migrations import run_migrations
 from app.models.athlete_catalog import AthleteCatalog
-from app.providers.dfs import PriceKind, PriceScope, Selection, SelectionDirection
+from app.providers.dfs import (
+    CoverageEvidence,
+    MarketStatus,
+    PriceKind,
+    PriceScope,
+    Selection,
+    SelectionDirection,
+    SnapshotStatus,
+)
 from app.providers.registry import dfs_provider_names
 from app.services.athlete_catalog_service import AthleteCatalogReader
 from app.services.event_catalog_service import EventCatalogService
@@ -59,6 +67,8 @@ T1 = datetime(2026, 1, 15, 15, 0, tzinfo=UTC)
 #: An unchanged poll: it confirms T1's lines and writes no observation.
 T1B = datetime(2026, 1, 15, 15, 5, tzinfo=UTC)
 T2 = datetime(2026, 1, 15, 18, 0, tzinfo=UTC)
+#: PrizePicks' first Partial snapshot, inside its live window at NOW.
+T2B = datetime(2026, 1, 15, 23, 50, tzinfo=UTC)
 #: After GSW @ LAL tipped: its closing set ignores this poll.
 T3 = datetime(2026, 1, 15, 23, 55, tzinfo=UTC)
 #: The books' night poll, 22:00 ET the day before.
@@ -154,6 +164,19 @@ def seed_moves(engine, dependencies):
         created_at=STARTED_TIP,
     )
     archive.ingest_complete_snapshot(_dabble(catalog, T3, evening), query=QUERY, accepted_at=T3)
+    # PrizePicks writes Partial snapshots: an omitted line is carried, a suspended one withdrawn.
+    tatum = _market(catalog, "prizepicks", TATUM, "points", "28.5")
+    white = _market(catalog, "prizepicks", WHITE, "points", "15.5")
+    for at, markets in ((T2B, (tatum, white)), (T3, (replace(white, status=MarketStatus.SUSPENDED),))):
+        archive.ingest_snapshot(
+            replace(
+                _snapshot("prizepicks", markets, at),
+                status=SnapshotStatus.PARTIAL,
+                coverage=CoverageEvidence(fanout_complete=False),
+            ),
+            query=QUERY,
+            accepted_at=at,
+        )
 
     store = SportsbookQuoteStore(engine)
     night = [
@@ -212,7 +235,7 @@ def seed_moves(engine, dependencies):
                 ProjectionArchiveReadScope(provider=provider, query=QUERY)
                 for provider in dfs_provider_names()
             ),
-            required_providers=("dabble",),
+            required_providers=("dabble", "prizepicks"),
             clock=lambda: NOW,
             event_reader=schedule,
         ),
@@ -243,6 +266,11 @@ def _value(line, over, under, **at):
 
 
 TATUM_MOVES = {
+    "prizepicks": {
+        "open": _value(28.5, None, None, seen_at="2026-01-15T23:50:00Z"),
+        "previous": None,
+        "unchanged": True,
+    },
     "dabble": {
         "open": _value(27.5, -122, -104, seen_at="2026-01-14T23:00:00Z"),
         "previous": _value(28.5, -115, -105, changed_at="2026-01-15T23:55:00Z"),
@@ -266,7 +294,7 @@ def test_a_line_that_moved_and_moved_back_shows_its_open_and_previous_value(move
 
     assert status == 200
     tatum = _rows(body)["Jayson Tatum"]
-    assert tatum["lines"] == {"dabble": 27.5}
+    assert tatum["lines"] == {"dabble": 27.5, "prizepicks": 28.5}
     assert tatum["moves"] == TATUM_MOVES
 
 
@@ -274,7 +302,10 @@ def test_a_price_only_change_is_a_move(moves_board, client):
     _status, body = _get(client, "date=2026-01-15&market=PTS&moves=true")
 
     white = _rows(body)["Derrick White"]
-    assert white["line_prices"] == {"dabble": {"over": -125, "under": 105}}
+    assert (white["lines"], white["line_prices"]) == (
+        {"dabble": 15.5},
+        {"dabble": {"over": -125, "under": 105}},
+    )
     assert white["moves"] == {
         "dabble": {
             "open": _value(15.5, -110, -110, seen_at="2026-01-14T23:00:00Z"),
@@ -344,6 +375,16 @@ PULLED = {
             "last_seen_at": "2026-01-15T15:05:00Z",
         }
     ],
+    "prizepicks": [
+        {
+            "game_id": LATER,
+            "player_id": WHITE[0],
+            "name": "Derrick White",
+            "team": "BOS",
+            **_value(15.5, None, None),
+            "last_seen_at": "2026-01-15T23:50:00Z",
+        }
+    ],
     "draftkings": [
         {
             "game_id": LATER,
@@ -362,6 +403,7 @@ def test_each_source_lists_the_lines_it_pulled_today(moves_board, client):
 
     assert status == 200
     # Dabble's pull of Hauser came the evening before the slate's date, so it is not today's.
+    # PrizePicks withdrew White in a Partial snapshot; Tatum, omitted from it, is still posted.
     assert body["pulled"] == PULLED
     assert "Jalen Brunson" not in _rows(body)
 
