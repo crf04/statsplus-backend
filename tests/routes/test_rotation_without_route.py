@@ -203,6 +203,7 @@ def test_team_without_lists_starters_and_minute_changes(client, detroit):
 
     assert response.status_code == 200
     body = response.get_json()
+    assert "team_games_counted" not in body
     assert body["season"] == "2025-26" and body["team"] == "DET"
     without = body["without"]
     assert {k: without[k] for k in ("absent", "games_without", "games_with", "insufficient")} == {
