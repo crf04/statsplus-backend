@@ -17,6 +17,7 @@ g6    2026-01-11  32 S    0       18     12      Cade plays, Duren out
 """
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.services.injury_snapshot_repository import InjurySnapshotRepository
 from tests.support.injury_reports import store_reports
@@ -420,7 +421,13 @@ def _minnesota(repository, *lines_by_game):
     )
 
 
-INGRAM = 43
+INGRAM, BROWN = 43, 44
+
+
+def _min_days(*numbers):
+    """``{game_id: game day}`` of the ``_minnesota`` games numbered ``numbers``."""
+
+    return {f"00226000{n:02d}": f"2026-10-{10 + 2 * n}" for n in numbers}
 
 
 def test_a_missed_opener_counts_as_without_when_he_ended_last_season_on_the_team(
@@ -452,7 +459,7 @@ def test_a_player_with_no_line_is_without_in_every_game_whose_report_lists_him(
     ayo = lambda m: line(DOSUNMU, "Ayo Dosunmu", "MIN", minutes=m)  # noqa: E731
     _minnesota(repository, [ayo(30)], [ayo(28)], [ayo(26)], [ayo(24)])
     reports = InjurySnapshotRepository(repository.engine)
-    store_reports(reports, "2026-27", [f"00226000{n:02d}" for n in (1, 2, 3, 4)], (INGRAM, "MIN"))
+    store_reports(reports, "2026-27", _min_days(1, 2, 3, 4), (INGRAM, "MIN"))
     dependencies.rotation_service = service_for(
         repository,
         Catalog((DOSUNMU, "Ayo Dosunmu", "MIN"), (INGRAM, "Brandon Ingram", "MIN")),
@@ -473,7 +480,7 @@ def test_a_player_with_no_line_and_no_evidence_for_the_team_is_a_400(client, tmp
     _minnesota(repository, [line(DOSUNMU, "Ayo Dosunmu", "MIN", minutes=30)])
     reports = InjurySnapshotRepository(repository.engine)
     if listed:
-        store_reports(reports, "2026-27", ["0022600001"], *listed)
+        store_reports(reports, "2026-27", _min_days(1), *listed)
     dependencies.rotation_service = service_for(
         repository,
         Catalog((DOSUNMU, "Ayo Dosunmu", "MIN"), (INGRAM, "Brandon Ingram", "MIN")),
@@ -504,3 +511,93 @@ def test_games_after_the_absent_player_moved_to_another_team_are_left_out(client
     without = _get(client, "team=DET&without=Moved%20On").get_json()["without"]
 
     assert (without["games_without"], without["games_with"]) == (1, 1)
+
+
+def _unreadable(*args, **kwargs):
+    raise SQLAlchemyError("unreadable")
+
+
+class _UnreadablePastLogs(StoredLogs):
+    def get_players_logs_by_id(self, player_ids, season, *, publication_snapshot=None):
+        if season != "2026-27":
+            _unreadable()
+        return super().get_players_logs_by_id(player_ids, season, publication_snapshot=publication_snapshot)
+
+
+@pytest.mark.parametrize(
+    ("unreadable", "split"),
+    [(None, (1, 1)), ("reports", (0, 1)), ("last-season-logs", (0, 1))],
+    ids=["readable", "reports", "last-season-logs"],
+)
+def test_unreadable_membership_evidence_opens_the_window_at_the_first_game(
+    client, tmp_path, dependencies, monkeypatch, unreadable, split
+):
+    # Edwards debuts in game 2; game 1's report lists him for MIN.
+    repository = migrated_repository(tmp_path)
+    ayo = lambda m: line(DOSUNMU, "Ayo Dosunmu", "MIN", minutes=m)  # noqa: E731
+    _minnesota(repository, [ayo(30)], [ayo(20), line(EDWARDS, "Anthony Edwards", "MIN", minutes=36)])
+    reports = InjurySnapshotRepository(repository.engine)
+    store_reports(reports, "2026-27", _min_days(1), (EDWARDS, "MIN"))
+    if unreadable == "reports":
+        monkeypatch.setattr(reports, "get_season_mentions", _unreadable)
+    dependencies.rotation_service = service_for(
+        repository,
+        Catalog((DOSUNMU, "Ayo Dosunmu", "MIN")),
+        default_season="2026-27",
+        logs=_UnreadablePastLogs() if unreadable == "last-season-logs" else StoredLogs(),
+        injury_reports=reports,
+    )
+
+    response = _get(client, "team=MIN&without=Anthony%20Edwards")
+
+    assert response.status_code == 200
+    without = response.get_json()["without"]
+    assert (without["games_without"], without["games_with"]) == split
+
+
+def test_an_unreadable_catalog_leaves_names_on_the_box_scores_resolved(client, detroit, monkeypatch):
+    monkeypatch.setattr(detroit.rotation_service.athlete_catalog, "get_catalog", _unreadable)
+
+    resolved = _get(client, "team=DET&without=Cade%20Cunningham")
+    unknown = _get(client, "team=DET&without=Brandon%20Ingram")
+
+    assert resolved.status_code == 200
+    assert (
+        resolved.get_json()["without"]["games_without"],
+        resolved.get_json()["without"]["games_with"],
+    ) == (5, 2)
+    assert unknown.status_code == 400
+    assert unknown.get_json()["error"]["details"]["parameter"] == "without"
+
+
+def test_an_offseason_mover_counts_for_the_new_team_on_its_reports_and_not_the_old_one(
+    client, tmp_path, dependencies
+):
+    # Ingram ended 2025-26 on MIN, is on BOS's reports from opening night and
+    # has not played: MIN's games are not without him, BOS's are.
+    repository = migrated_repository(tmp_path)
+    ayo = lambda m: line(DOSUNMU, "Ayo Dosunmu", "MIN", minutes=m)  # noqa: E731
+    brown = lambda m: line(BROWN, "Jaylen Brown", "BOS", minutes=m)  # noqa: E731
+    _minnesota(repository, [ayo(30), brown(34)], [ayo(28), brown(36)])
+    reports = InjurySnapshotRepository(repository.engine)
+    store_reports(reports, "2026-27", _min_days(1, 2), (INGRAM, "BOS"))
+    logs = StoredLogs()
+    logs.add(INGRAM, "MIN", "0022501230", "2026-04-12", season="2025-26", minutes=36)
+    dependencies.rotation_service = service_for(
+        repository,
+        Catalog(
+            (DOSUNMU, "Ayo Dosunmu", "MIN"), (BROWN, "Jaylen Brown", "BOS"), (INGRAM, "Brandon Ingram", "BOS")
+        ),
+        default_season="2026-27",
+        logs=logs,
+        injury_reports=reports,
+    )
+
+    old = _get(client, "team=MIN&without=Brandon%20Ingram")
+    old_player = _get(client, "player_name=Ayo%20Dosunmu&without=Brandon%20Ingram")
+    new = _get(client, "team=BOS&without=Brandon%20Ingram").get_json()["without"]
+    new_player = _get(client, "player_name=Jaylen%20Brown&without=Brandon%20Ingram").get_json()["without"]
+
+    assert (old.status_code, old_player.status_code) == (400, 400)
+    assert (new["absent"], new["games_without"], new["games_with"]) == (["Brandon Ingram"], 2, 0)
+    assert (new_player["without"]["games"], new_player["without"]["minutes"]) == (2, 35.0)

@@ -1,24 +1,28 @@
 """Membership evidence for named ``without`` players' team windows (crf04/statsplus#450).
 
 A team game before a player's first game for the team counts as without him
-only when the stored official injury report for that game lists him for the
-team, or he ended the previous season on the team and has played for no other
-team before that game (``app.domain.team_window``).  The evidence is read only
-for players who have such games: those games' stored reports in one statement,
-and the players' previous-season game logs in one batch.
+only on the evidence ``app.domain.team_window`` ranks: the season's stored
+official injury reports, then his team at the end of the previous season.  The
+evidence is read only for players who have such games, once per request
+whatever their number: the reports that may list them in one statement, and
+their previous-season game logs in one batch.  It is optional: when either read
+fails, every window opens at his first game for the team, as without it.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Hashable, Mapping, Sequence
+import logging
+from collections.abc import Callable, Collection, Hashable, Mapping, Sequence
 from datetime import date
 from typing import Any
 
 import pandas as pd
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.domain.team_window import Membership, TeamWindow, team_window
-from app.services.injury_snapshot_repository import InjurySnapshotScope
 from app.services.research_season import previous_nba_season
+
+logger = logging.getLogger(__name__)
 
 
 def appearances(frame: pd.DataFrame | None) -> list[tuple[date, str]]:
@@ -43,51 +47,70 @@ class TeamMembership:
     def windows(
         self,
         season: str,
-        team: str,
-        games: Mapping[str, date],
-        lines: Mapping[Hashable, Sequence[tuple[date, str]]],
+        judged: Mapping[Hashable, tuple[Sequence[tuple[date, str]], Mapping[str, Collection[date]]]],
         player_id: Callable[[Any], int] = int,
-    ) -> dict[Hashable, TeamWindow | None]:
-        """Each player's window for ``team`` from his season's ``(game date, team)`` lines.
+    ) -> dict[Hashable, dict[str, TeamWindow | None]]:
+        """Each player's window for each team, as ``{key: {team: window}}``.
 
-        ``games`` are the team's games (id to date) the windows will judge.
-        ``lines`` are keyed by player id, or by a key ``player_id`` resolves to
-        one when his evidence is read.
+        ``judged[key]`` is his season's ``(game date, team)`` lines and, per
+        team, the days of its games the windows will judge.  Keys are player
+        ids, or keys ``player_id`` resolves to one when his evidence is read.
+        A window that would hold none of those days before his first game for
+        the team, and has no game of his, is ``None``.
         """
 
-        before: dict[Hashable, set[str]] = {}
-        for key, rows in lines.items():
-            first = min((day for day, played_for in rows if played_for == team), default=None)
-            ids = {game_id for game_id, day in games.items() if first is None or day < first}
-            if ids:
-                before[key] = ids
-        evidence: dict[Hashable, Membership] = {}
-        if before:
-            pending = set().union(*before.values())
-            listed = self._listed(season, team, {game_id: games[game_id] for game_id in pending})
-            ids = {key: player_id(key) for key in before}
-            previous = self.logs(sorted(set(ids.values())), previous_nba_season(season))
-            evidence = {
-                key: Membership(listed.get(resolved, frozenset()), _last_team(previous.get(resolved)) == team)
-                for key, resolved in ids.items()
-            }
-        return {key: team_window(rows, team, evidence.get(key, Membership())) for key, rows in lines.items()}
+        needed = {
+            key: player_id(key)
+            for key, (lines, games) in judged.items()
+            if any(_before_first(lines, team, days) for team, days in games.items())
+        }
+        evidence = self._evidence(season, needed) if needed else {}
+        windows: dict[Hashable, dict[str, TeamWindow | None]] = {}
+        for key, (lines, games) in judged.items():
+            windows[key] = {}
+            for team, days in games.items():
+                window = team_window(lines, team, evidence.get(key, Membership()))
+                if window is not None and window.opens is None and not any(map(window.contains, days)):
+                    window = None
+                windows[key][team] = window
+        return windows
 
-    def _listed(self, season: str, team: str, games: Mapping[str, date]) -> dict[int, frozenset[date]]:
-        """Each player's days among ``games`` whose stored report lists him for ``team``."""
+    def _evidence(self, season: str, ids: Mapping[Hashable, int]) -> dict[Hashable, Membership]:
+        wanted = sorted(set(ids.values()))
+        try:
+            listed = self._listed(season, wanted)
+            previous = self.logs(wanted, previous_nba_season(season))
+        except (SQLAlchemyError, ValueError) as error:
+            logger.warning("team membership evidence unreadable season=%s: %s", season, error)
+            return {}
+        return {
+            key: Membership(listed.get(resolved, frozenset()), _last_team(previous.get(resolved)))
+            for key, resolved in ids.items()
+        }
+
+    def _listed(self, season: str, player_ids: Collection[int]) -> dict[int, frozenset[tuple[date, str]]]:
+        """Each player's ``(game day, team)`` listings on the season's stored reports."""
 
         if self.injury_reports is None:
             return {}
-        stored = self.injury_reports.get_many(
-            tuple(InjurySnapshotScope(season, game_id) for game_id in games)
-        )
-        days: dict[int, set[date]] = {}
-        for scope, snapshot in stored.items():
+        wanted = set(player_ids)
+        found: dict[int, set[tuple[date, str]]] = {}
+        for snapshot in self.injury_reports.get_season_mentions(season, wanted).values():
             for entry in snapshot.normalized_entries:
-                player_id = entry.get("canonical_player_id")
-                if player_id is not None and entry.get("tricode") == team:
-                    days.setdefault(int(player_id), set()).add(games[scope.game_id])
-        return {player_id: frozenset(found) for player_id, found in days.items()}
+                player = entry.get("canonical_player_id")
+                if player is None or int(player) not in wanted or not entry.get("game_date"):
+                    continue
+                found.setdefault(int(player), set()).add(
+                    (date.fromisoformat(entry["game_date"]), entry["tricode"])
+                )
+        return {player: frozenset(days) for player, days in found.items()}
+
+
+def _before_first(lines: Sequence[tuple[date, str]], team: str, days: Collection[date]) -> bool:
+    """Whether any of ``days`` comes before his first game for ``team`` (or he has none)."""
+
+    first = min((day for day, played_for in lines if played_for == team), default=None)
+    return any(first is None or day < first for day in days)
 
 
 def _last_team(frame: pd.DataFrame | None) -> str | None:

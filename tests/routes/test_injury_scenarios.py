@@ -14,6 +14,7 @@ from typing import ClassVar
 import pandas as pd
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.config.settings import (
     CacheSettings,
@@ -1055,7 +1056,7 @@ def _out_all_season(world, *listed):
         row["TEAM_ABBREVIATION"] = "BOS"
     del world.logs.rows[(LEBRON, CURRENT)]
     if listed:
-        store_reports(world.listing.snapshot_repository, CURRENT, [game_id for game_id, _ in G], *listed)
+        store_reports(world.listing.snapshot_repository, CURRENT, dict(G), *listed)
 
 
 def test_every_game_whose_report_lists_an_injured_player_with_no_game_is_without_him(
@@ -1374,6 +1375,65 @@ def test_an_injured_player_with_no_game_gets_a_rotation_split_from_his_reports(
     assert _row(scenario, "sits", REAVES, "PTS")["rotation"] == _split(
         (8, 8, 8, 31.5, 3), (0, 0, 0, None, 0), None
     )
+
+
+def test_an_offseason_movers_old_team_games_are_not_without_him(client, authenticate, world, tmp_path):
+    # LeBron ended 2025-26 on LAL, is on BOS's reports on every LAL game day
+    # this season and has not played: only last season's h3-h4 are without him.
+    del world.logs.rows[(LEBRON, CURRENT)]
+    store_reports(
+        world.listing.snapshot_repository,
+        CURRENT,
+        {f"b{game_id}": day for game_id, day in G},
+        (LEBRON, "BOS"),
+    )
+    lines = _rotation_lines()
+    del lines[LEBRON]
+    _store_rotations(world, tmp_path, lines)
+
+    pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
+
+    assert pts["without"] == {"avg": 26.0, "games": 2, "season_span": "2025-26"}
+    assert (pts["baseline"]["games"], pts["rotation"]) == (2, None)
+    assert pts["pair_window"] == {"from": "2025-10-22", "excluded_games": 8}
+
+
+def test_unreadable_stored_reports_leave_an_injured_players_window_at_his_first_game(
+    client, authenticate, world, tmp_path, monkeypatch
+):
+    # Readable, these reports give him 8 games without him and a rotation split.
+    _out_all_season(world, (LEBRON, "LAL"))
+    lines = _rotation_lines()
+    del lines[LEBRON]
+    _store_rotations(world, tmp_path, lines)
+    monkeypatch.setattr(world.listing.snapshot_repository, "get_season_mentions", _unreadable)
+
+    pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
+
+    # As with no evidence: he has no LAL game, so no window and no split.
+    assert (pts["without"]["games"], pts["baseline"]["games"], pts["rotation"]) == (0, 0, None)
+
+
+def test_one_report_read_per_season_serves_every_injured_player(client, authenticate, world, monkeypatch):
+    # LeBron and Hayes both have no 2026-27 game, so both need its reports.
+    _out_all_season(world, (LEBRON, "LAL"))
+    del world.logs.rows[(HAYES, CURRENT)]
+    repository = world.listing.snapshot_repository
+    read, reads = repository.get_season_mentions, []
+
+    def counted(season, player_ids, **kwargs):
+        reads.append((season, sorted(player_ids)))
+        return read(season, player_ids, **kwargs)
+
+    monkeypatch.setattr(repository, "get_season_mentions", counted)
+
+    _scenarios(client, authenticate)
+
+    assert reads == [(PRIOR, [LEBRON]), (CURRENT, [LEBRON, HAYES])]
+
+
+def _unreadable(*args, **kwargs):
+    raise SQLAlchemyError("unreadable")
 
 
 # -- two seasons of stored rotations ------------------------------------------

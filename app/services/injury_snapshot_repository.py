@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import and_, delete, exists, insert, select, tuple_, update
+from sqlalchemy import and_, delete, exists, insert, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection, Engine
@@ -150,6 +150,46 @@ class InjurySnapshotRepository:
                 unresolved_team_entry_count=int(row["unresolved_team_entry_count"]),
             )
         return result
+
+    def get_season_mentions(
+        self, season: str, player_ids: Collection[int], *, connection: Connection | None = None
+    ) -> dict[InjurySnapshotScope, StoredInjurySnapshot]:
+        """The season's reconciled snapshots that may list one of ``player_ids``, in one statement.
+
+        A superset: a snapshot qualifies when an id's digits appear anywhere in
+        its stored entries, so the caller still checks each entry's
+        ``canonical_player_id``.
+        """
+
+        if not player_ids:
+            return {}
+        table = InjurySnapshot.__table__
+        with read_connection(self.engine, connection) as connection:
+            rows = (
+                connection.execute(
+                    select(
+                        table.c.game_id,
+                        table.c.normalized_entries,
+                        table.c.retrieved_at,
+                        table.c.unresolved_team_entry_count,
+                    ).where(
+                        table.c.season == validate_canonical_season(season),
+                        or_(*(table.c.normalized_entries.contains(str(int(pid))) for pid in player_ids)),
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return {
+            InjurySnapshotScope(season, row["game_id"]): StoredInjurySnapshot(
+                normalized_entries=tuple(
+                    self._decode_objects(row["normalized_entries"], "normalized injuries")
+                ),
+                retrieved_at=assume_utc(row["retrieved_at"]),
+                unresolved_team_entry_count=int(row["unresolved_team_entry_count"]),
+            )
+            for row in rows
+        }
 
     def stored_scopes(self, scopes: Sequence[InjurySnapshotScope]) -> set[InjurySnapshotScope]:
         """The given scopes that already hold a snapshot, without loading it."""

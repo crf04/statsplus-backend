@@ -407,40 +407,32 @@ class GameService:
     ):
         """Ids of ``player_logs``' games that are not "without" every named player."""
         season = season or self.default_season()
-        exclude_game_ids = set()
-        for player_name in players_off_names:
-            player_gamelogs, _ = call_with_read_scope(
+        absent = {
+            player_name: call_with_read_scope(
                 self._get_game_logs,
                 player_name,
                 season,
                 publication_snapshot=publication_snapshot,
                 connection=connection,
-            )
-            windows = {
-                team: self._team_window(season, team, player_logs, player_name, player_gamelogs)
-                for team in set(player_logs["TEAM_ABBREVIATION"])
-            }
-            without, _ = self._absence_split(player_logs, player_gamelogs, windows)
+            )[0]
+            for player_name in players_off_names
+        }
+        games = {
+            team: set(pd.to_datetime(rows["GAME_DATE"]).dt.date)
+            for team, rows in player_logs.groupby("TEAM_ABBREVIATION")
+        }
+        membership = TeamMembership(self.injury_reports, self.get_players_logs_by_id)
+        windows = membership.windows(
+            season,
+            {player_name: (appearances(logs), games) for player_name, logs in absent.items()},
+            lambda name: int(self.get_player_id(name, season)),
+        )
+        exclude_game_ids = set()
+        for player_name, player_gamelogs in absent.items():
+            without, _ = self._absence_split(player_logs, player_gamelogs, windows[player_name])
             exclude_game_ids |= set(player_logs["GAME_ID"]) - without
 
         return exclude_game_ids
-
-    def _team_window(self, season, team, player_logs, player_name, absent_player_logs):
-        """The absent player's team window for ``team``, judged on ``player_logs``' games for it.
-
-        Membership evidence (crf04/statsplus#450) is read only for those games
-        before his first game for ``team``.
-        """
-        rows = player_logs[player_logs["TEAM_ABBREVIATION"] == team]
-        games = dict(zip(rows["GAME_ID"].astype(str), pd.to_datetime(rows["GAME_DATE"]).dt.date, strict=True))
-        membership = TeamMembership(self.injury_reports, self.get_players_logs_by_id)
-        return membership.windows(
-            season,
-            team,
-            games,
-            {player_name: appearances(absent_player_logs)},
-            lambda name: int(self.get_player_id(name, season)),
-        )[player_name]
 
     @staticmethod
     def _absence_split(player_logs, absent_player_logs, windows):

@@ -2,12 +2,18 @@
 
 His window for team T runs from his first game for T in the season until his
 first later game for another team, open-ended if he never moves.  A team game
-before his first game for T (any team game, when he has none) is in it only
-when membership evidence places him on T for that game: the stored official
-injury report for the game lists him for T, or he ended the previous season on
-T and has played for no other team before that game.  A team game inside the
-window that he has no line in is a game he sat; a game outside it is neither
-with nor without him.
+before his first game for T (any team game, when he has none) is in it only on
+membership evidence, report evidence first:
+
+1. the stored official injury report for the game lists him for T: in;
+2. a stored report on that day or any earlier day this season lists him for
+   another team: out, and carry-over ends there;
+3. he ended the previous season on T and has played for no other team before
+   the game: in;
+4. otherwise: out.
+
+A team game inside the window that he has no line in is a game he sat; a game
+outside it is neither with nor without him.
 """
 
 from collections.abc import Iterable
@@ -19,10 +25,10 @@ from datetime import date
 class Membership:
     """Evidence that places him on a team before his first game for it."""
 
-    #: Team game days whose stored official injury report lists him for the team, any status.
-    listed: frozenset[date] = frozenset()
-    #: His last stored game before the season was for the team.
-    carried_over: bool = False
+    #: ``(game day, team)`` for each stored official report this season that lists him, any status.
+    listed: frozenset[tuple[date, str]] = frozenset()
+    #: His team in his last game of the previous season.
+    previous_team: str | None = None
 
 
 @dataclass(frozen=True)
@@ -34,7 +40,7 @@ class TeamWindow:
     #: Days before ``opens`` whose stored report lists him for the team.
     listed: frozenset[date] = frozenset()
     #: Before ``opens``, the days before this one count: he ended last season on
-    #: the team, until his first game for another team (``date.max`` while none).
+    #: the team, until his first game or report for another team (``date.max`` while none).
     carried_until: date | None = None
 
     def contains(self, day: date) -> bool:
@@ -57,9 +63,12 @@ def team_window(
     closes = None
     if opens is not None:
         closes = next((day for day, played_for in games if day > opens and played_for != team), None)
+    listed = frozenset(day for day, listed_for in membership.listed if listed_for == team)
     carried_until = None
-    if membership.carried_over:
-        carried_until = next((day for day, played_for in games if played_for != team), date.max)
-    if opens is None and not membership.listed and carried_until is None:
+    if membership.previous_team == team:
+        elsewhere = [day for day, played_for in games if played_for != team]
+        elsewhere += [day for day, listed_for in membership.listed if listed_for != team]
+        carried_until = min(elsewhere, default=date.max)
+    if opens is None and not listed and carried_until is None:
         return None
-    return TeamWindow(opens, closes, membership.listed, carried_until)
+    return TeamWindow(opens, closes, listed, carried_until)

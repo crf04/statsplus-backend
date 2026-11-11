@@ -14,8 +14,8 @@ def injury_reports(tmp_path):
     return InjurySnapshotRepository(engine)
 
 
-def store_reports(repository, season, game_ids, *listed):
-    """One stored report per game, each listing every ``(player_id, tricode)`` as Out."""
+def store_reports(repository, season, games, *listed, status="Out"):
+    """One stored report per game of ``{game_id: game day}``, each listing every ``(player_id, tricode)``."""
 
     repository.store_backfilled_report(
         source="nba_official",
@@ -29,13 +29,14 @@ def store_reports(repository, season, game_ids, *listed):
                     {
                         "canonical_player_id": player_id,
                         "tricode": team,
-                        "canonical_status": "Out",
+                        "canonical_status": status,
                         "source_player_name": f"Player {player_id}",
+                        "game_date": str(day),
                     }
                     for player_id, team in listed
                 ],
                 0,
             )
-            for game_id in game_ids
+            for game_id, day in games.items()
         ],
     )

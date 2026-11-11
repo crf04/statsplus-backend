@@ -22,6 +22,8 @@ from fractions import Fraction
 from functools import cache
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.domain.team_window import Membership, TeamWindow, team_window
 from app.errors import InvalidInputError, ResourceNotFoundError
@@ -229,8 +231,11 @@ def absent_windows(
     appearances: dict[int, list[tuple[Any, str]]] = {player_id: [] for player_id in absent_ids}
     for row in repository.player_games(season, player_ids=list(appearances)):
         appearances[row["player_id"]].append((row["game_date"], row["team_tricode"]))
-    games = {game_id: next(iter(lines.values()))["game_date"] for game_id, lines in lines_by_game.items()}
-    return membership.windows(season, team, games, appearances)
+    days = {next(iter(lines.values()))["game_date"] for lines in lines_by_game.values()}
+    windows = membership.windows(
+        season, {player_id: (rows, {team: days}) for player_id, rows in appearances.items()}
+    )
+    return {player_id: by_team[team] for player_id, by_team in windows.items()}
 
 
 def classify_games(
@@ -788,16 +793,12 @@ class RotationService:
 
         targets = {normalize_athlete_name(typed) for typed in requested}
         listed = {normalize_athlete_name(name) for name in names.values()}
-        catalog = (
-            ()
-            if self.athlete_catalog is None
-            else self.athlete_catalog.get_catalog(season, active_only=False)
-        )
+        missing = [typed for typed in requested if normalize_athlete_name(typed) not in listed]
+        catalog = self._optional_catalog(season) if missing else ()
         unlisted = {
             athlete.player_id: athlete.display_name
-            for typed in requested
-            if normalize_athlete_name(typed) not in listed
-            and (athlete := match_catalog_athlete(catalog, typed)) is not None
+            for typed in missing
+            if (athlete := match_catalog_athlete(catalog, typed)) is not None
         }
         candidates = [
             player_id
@@ -811,6 +812,16 @@ class RotationService:
         }
         absent = self._resolve_absent(requested, resolvable, team, subject_id=subject_id)
         return absent, {player_id: windows[player_id] for player_id in absent}
+
+    def _optional_catalog(self, season: str) -> list[dict[str, Any]]:
+        """The season's Athlete Catalog, or none when it cannot be read: a name it would place stays unresolved."""
+
+        if self.athlete_catalog is None:
+            return []
+        try:
+            return self.athlete_catalog.get_catalog(season, active_only=False)
+        except (SQLAlchemyError, ValueError):
+            return []
 
     @staticmethod
     def _resolve_absent(
