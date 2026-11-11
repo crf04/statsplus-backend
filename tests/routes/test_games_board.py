@@ -116,12 +116,14 @@ def _market(
     *,
     variant=MarketVariant.STANDARD,
     status=MarketStatus.AVAILABLE,
+    period=ScoringPeriod.FULL_GAME,
 ):
     player_id, name, team, game_id = player
     statistic = catalog.by_id[statistic_id]
     evidence = StatisticEvidence(provider_id=statistic_id, canonical_id=statistic.id)
     over, under = prices
-    suffix = "" if variant is MarketVariant.STANDARD and status is MarketStatus.AVAILABLE else f"-{threshold}"
+    standard = variant is MarketVariant.STANDARD and status is MarketStatus.AVAILABLE
+    suffix = "" if standard and period is ScoringPeriod.FULL_GAME else f"-{threshold}-{period.value}"
     return PlayerProjectionMarket(
         provider=provider,
         market_id=f"{provider}-{player_id}-{game_id}-{statistic_id}{suffix}",
@@ -132,14 +134,14 @@ def _market(
         statistic_match=StatisticMatch(
             state=MatchState.CANONICAL,
             evidence=evidence,
-            scoring_period=ScoringPeriod.FULL_GAME,
+            scoring_period=period,
             canonical=statistic,
             provider=provider,
         ),
         threshold=MarketThreshold(threshold, "count"),
         status=status,
         variant=variant,
-        scoring_period=ScoringPeriod.FULL_GAME,
+        scoring_period=period,
         selections=tuple(
             Selection(selection_id=f"{direction.value}", direction=direction, american_price=price)
             for direction, price in ((SelectionDirection.HIGHER, over), (SelectionDirection.LOWER, under))
@@ -714,10 +716,22 @@ def test_a_book_is_judged_on_its_quotes_for_games_not_yet_started(board, client)
 
 def test_each_unpriced_line_is_labelled_line_only_alternate_or_unpriced(board, client):
     # Novig posts Tatum's 9.5 and Brown's 30.5 with one side bid, so neither has a price.  The same
-    # poll priced Tatum at 27.5; Brown's priced 22.5 is tomorrow's game and his 25.5 is suspended.
+    # poll priced Tatum at 27.5.  None of Brown's priced lines is another number for this market in
+    # this poll: 22.5 is tomorrow's game, 25.5 is suspended, 30.5 is his own number, 15.5 is the
+    # first half, 8.5 is rebounds, and 24.5 was an earlier poll's.
     catalog = StatisticCatalog.load_default()
     brown_tomorrow = (BROWN[0], BROWN[1], BOS, TOMORROW)
-    ProjectionArchive(board.engine, catalog).ingest_complete_snapshot(
+    archive = ProjectionArchive(board.engine, catalog)
+    archive.ingest_complete_snapshot(
+        _snapshot(
+            "novig",
+            (_market(catalog, "novig", BROWN, "points", "24.5", (-110, -110)),),
+            NOW - timedelta(minutes=5),
+        ),
+        query=QUERY,
+        accepted_at=NOW - timedelta(minutes=5),
+    )
+    archive.ingest_complete_snapshot(
         _snapshot(
             "novig",
             (
@@ -730,6 +744,13 @@ def test_each_unpriced_line_is_labelled_line_only_alternate_or_unpriced(board, c
                 _market(
                     catalog, "novig", BROWN, "points", "25.5", (-115, -105), status=MarketStatus.SUSPENDED
                 ),
+                _market(
+                    catalog, "novig", BROWN, "points", "30.5", (-115, -105), variant=MarketVariant.ALTERNATE
+                ),
+                _market(
+                    catalog, "novig", BROWN, "points", "15.5", (-115, -105), period=ScoringPeriod.FIRST_HALF
+                ),
+                _market(catalog, "novig", BROWN, "rebounds", "8.5", (-115, -105)),
                 _market(catalog, "novig", WHITE, "points", "15.5", (-110, -110)),
             ),
             NOW - timedelta(minutes=1),
@@ -754,6 +775,40 @@ def test_each_unpriced_line_is_labelled_line_only_alternate_or_unpriced(board, c
         ),
         "Jalen Brunson": ({"dabble": 26.5, "prizepicks": 26.5}, {"prizepicks": "line-only"}),
     }
+
+
+def test_a_line_a_mapping_replay_moves_is_still_judged_against_its_own_poll(board, client):
+    # Novig's unpriced 9.5 was first mapped to assists; a replay moves it to points, a market the
+    # same poll priced at 27.5, so it is an alternate though the replay wrote it in a new generation.
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(board.engine, catalog)
+    archive.ingest_complete_snapshot(
+        _snapshot(
+            "novig",
+            (
+                _market(catalog, "novig", TATUM, "assists", "9.5", (-110, None)),
+                _market(
+                    catalog, "novig", TATUM, "points", "27.5", (-115, -105), variant=MarketVariant.ALTERNATE
+                ),
+            ),
+            NOW - timedelta(minutes=1),
+        ),
+        query=QUERY,
+        accepted_at=NOW - timedelta(minutes=1),
+    )
+    archive.replay_statistic_mapping(
+        provider="novig",
+        provider_statistic_id="assists",
+        canonical_statistic_id="points",
+        replayed_at=NOW - timedelta(seconds=30),
+    )
+
+    status, body = _get(client, f"date=2026-01-15&market=PTS&game={LATER}&sources=novig")
+
+    assert status == 200
+    assert [
+        (player["name"], player["lines"], player["line_labels"]) for player in body["games"][0]["players"]
+    ] == [("Jayson Tatum", {"novig": 9.5}, {"novig": "alternate"})]
 
 
 def _ingest_before_the_tip(board, provider, markets, *, freeze):
@@ -1109,8 +1164,8 @@ def test_the_slate_is_read_in_the_same_statements_whatever_its_game_count(board,
         # One closing-set lookup for every DFS provider, never per game.
         "projection_closing_sets": 1,
         "projection_closing_memberships": 1,
-        # Whether the poll behind PrizePicks' unpriced lines priced others, in one statement.
-        "projection_observations": 1,
+        # The polls behind PrizePicks' unpriced lines, then their priced lines: two statements.
+        "projection_observations": 2,
         "injury_snapshots": 1,
         "sportsbook_prop_latest": 1,
         # Every player only a book quotes is named in one statement.

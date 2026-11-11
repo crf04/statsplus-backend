@@ -1943,7 +1943,11 @@ A priced line has no label, and a row with every line priced carries `{}`.
 - `alternate`: a `novig`, `polymarket`, `kalshi` or `underdog` line with no
   price whose poll priced a different line for the same player, game and
   market (an available full-game market, any variant). The provider's
-  standard-line pick chose an unpriced number beside a priced one.
+  standard-line pick chose an unpriced number beside a priced one. The poll is
+  the line's stored snapshot, so a statistic-mapping replay keeps it. Retention
+  keeps a started game's closing set but prunes that poll's other markets, so
+  once they are pruned a frozen alternate reads `unpriced`, which is skipped
+  the same way.
 - `unpriced`: any other line with no price, typically a prediction market with
   one side bid or a book wider than the 1.10 overround rule. A market the
   provider's feed marks suspended or not accepting orders is never served, so

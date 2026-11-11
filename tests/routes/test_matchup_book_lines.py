@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from app.config.settings import OddsApiSettings
 from app.dependencies import build_dependencies
 from app.providers.dfs import NBAMarketQuery
+from app.services.projection_archive import ProjectionArchive
 from app.services.sportsbook_quotes import (
     ResolvedQuote,
     SportsbookQuoteReader,
@@ -157,6 +158,35 @@ def test_a_book_read_over_an_hour_before_tip_is_stale_and_never_best(projection_
         ("draftkings", "2026-01-15T12:00:00Z", False, True, False),
         ("fanduel", "2026-01-15T10:59:00Z", True, False, False),
     ]
+
+
+def test_a_game_in_progress_keeps_its_closing_books_fresh_and_best(projection_route_context):
+    # Both books were last read three hours ago, but the game has started: closing lines are never stale.
+    context = projection_route_context
+    _post_dfs_line(context)
+    old = NOW - timedelta(hours=3)
+    _seed(
+        context,
+        [_quote("draftkings", 27.5, -115, -110, stamp=old), _quote("fanduel", 27.5, -105, -120, stamp=old)],
+        closing=True,
+    )
+    _mark_event_final(context.engine, status_text="Q2 5:00", status_code=2)
+    ProjectionArchive(context.engine, context.catalog).freeze_closing_projection_set(
+        provider="dabble",
+        query=NBAMarketQuery(season=SEASON),
+        canonical_game_id=GAME_ID,
+        started_at=NOW,
+        created_at=NOW,
+    )
+
+    payload, row = _lebron(context.client.get(f"/api/games/matchup?game_id={GAME_ID}"))
+
+    assert payload["experience"]["mode"] == "current"
+    assert row["book_lines"]["PTS"]["closing"] is True
+    assert [
+        (book["book"], book["stale"], book["best_over"], book["best_under"])
+        for book in row["book_lines"]["PTS"]["books"]
+    ] == [("draftkings", False, False, True), ("fanduel", False, True, False)]
 
 
 def test_books_never_enter_provenance_or_posted_markets(projection_route_context):

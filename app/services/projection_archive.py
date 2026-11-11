@@ -688,12 +688,12 @@ def _newest_line_rows(rows: Iterable[Any]) -> list[Any]:
 def _with_priced_other_lines(connection: Any, rows: Sequence[Any]) -> tuple[Any, ...]:
     """``rows``, each unpriced line marked ``priced_other_line`` when its poll priced another.
 
-    The poll that posted a line with no price on either side is the row's
-    materialization generation.  When that generation holds an available,
-    full-game observation with a price from the same provider, for the same
-    player, game and market at a different line, the provider posted the
-    unpriced line beside a priced one (crf04/statsplus#495).  One statement
-    reads every such observation.
+    A row's poll is its observation's snapshot, which a statistic-mapping
+    replay keeps.  When that snapshot holds an available, full-game
+    observation with a price from the same provider, for the same player,
+    game and market at a different line, the provider posted the unpriced
+    line beside a priced one (crf04/statsplus#495).  Two statements: the
+    unpriced rows' snapshots, then those snapshots' priced lines.
     """
 
     def unpriced(row: Any) -> bool:
@@ -703,17 +703,25 @@ def _with_priced_other_lines(connection: Any, rows: Sequence[Any]) -> tuple[Any,
     if not candidates:
         return tuple(rows)
     observation = ProjectionObservation.__table__
+    snapshots = {
+        str(observation_id): str(snapshot_id)
+        for observation_id, snapshot_id in connection.execute(
+            select(observation.c.observation_id, observation.c.snapshot_id).where(
+                observation.c.observation_id.in_(sorted({str(row["observation_id"]) for row in candidates}))
+            )
+        )
+    }
     priced: dict[tuple[str, str, str, int, str], set[float]] = {}
     for found in connection.execute(
         select(
-            observation.c.generation_id,
+            observation.c.snapshot_id,
             observation.c.provider,
             observation.c.canonical_game_id,
             observation.c.canonical_player_id,
             observation.c.market_category,
             observation.c.line_value,
         ).where(
-            observation.c.generation_id.in_(sorted({str(row["generation_id"]) for row in candidates})),
+            observation.c.snapshot_id.in_(sorted(set(snapshots.values()))),
             observation.c.canonical_player_id.in_(
                 sorted({int(row["canonical_player_id"]) for row in candidates})
             ),
@@ -724,7 +732,7 @@ def _with_priced_other_lines(connection: Any, rows: Sequence[Any]) -> tuple[Any,
         )
     ):
         key = (
-            str(found.generation_id),
+            str(found.snapshot_id),
             str(found.provider),
             str(found.canonical_game_id),
             int(found.canonical_player_id),
@@ -734,7 +742,7 @@ def _with_priced_other_lines(connection: Any, rows: Sequence[Any]) -> tuple[Any,
 
     def priced_other_line(row: Any) -> bool:
         key = (
-            str(row["generation_id"]),
+            snapshots.get(str(row["observation_id"]), ""),
             str(row["provider"]),
             str(row["canonical_game_id"]),
             int(row["canonical_player_id"]),
@@ -3435,7 +3443,7 @@ class LatestProjectionPlayerPoolReader:
                     continue
                 rows.extend(
                     connection.execute(
-                        select(*_pool_row_columns(observation), observation.c.generation_id).where(
+                        select(*_pool_row_columns(observation)).where(
                             observation.c.observation_id.in_([row["observation_id"] for row in replay]),
                             observation.c.targetable.is_(True),
                             *(() if player_id is None else (observation.c.canonical_player_id == player_id,)),
