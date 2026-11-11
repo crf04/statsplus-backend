@@ -70,7 +70,10 @@ def game(game_id, date, home, away, players, periods=4):
 
 
 class Catalog:
-    """The Athlete Catalog read the service uses: season rows by display name."""
+    """The Athlete Catalog read the service uses: season rows by display name.
+
+    Each athlete is ``(player_id, name, team)`` or ``(player_id, name, team, roster_status)``.
+    """
 
     def __init__(self, *athletes):
         self.athletes = athletes
@@ -81,14 +84,14 @@ class Catalog:
                 "season": season,
                 "player_id": player_id,
                 "display_name": name,
-                "roster_status": "active",
-                "is_active": True,
-                "is_active_for_season": True,
+                "roster_status": status,
+                "is_active": status == "active",
+                "is_active_for_season": status == "active",
                 "team_id": TEAM_IDS.get(team),
                 "team_name": team,
                 "team_abbreviation": team,
             }
-            for player_id, name, team in self.athletes
+            for player_id, name, team, status in ((*athlete, "active")[:4] for athlete in self.athletes)
         ]
 
 

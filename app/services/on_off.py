@@ -9,8 +9,10 @@ totals and minutes.
 A season whose lineup segments are recorded as complete (crf04/statsplus#410)
 is answered from them: one SQL aggregate, ``source: "statsplus"``, never stale,
 with no cache, throttle, quota or deadline.  ``cached_at`` is when the newest
-included game's segments were written and ``games_missing`` lists the
-team-season's games that have none.  Every other season is a PBP Stats call,
+included game's segments were written, ``games_missing`` lists the
+team-season's games that have none, and ``team_games``, ``games_included``,
+``games_through``, ``split_games`` and ``last_split_game_date`` say which games
+the split covers (crf04/statsplus-backend#761).  Every other season is a PBP Stats call,
 as below; the provider translates the ids to PBP Stats ids.
 
 PBP Stats results are cached in Redis, keyed by team, season, on-set and off-set.  An
@@ -401,6 +403,11 @@ class OnOffService:
             "stale": False,
             "players": normalize_rows(segment_row(sums) for sums in split.rows),
             "games_missing": list(split.games_missing),
+            "team_games": split.team_games,
+            "games_included": split.games_included,
+            "games_through": split.games_through,
+            "split_games": split.split_games,
+            "last_split_game_date": split.last_split_game_date,
         }
 
     # -- upstream --------------------------------------------------------
