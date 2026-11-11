@@ -990,6 +990,11 @@ def test_a_covered_season_is_served_from_segments_without_pbp_stats_or_redis(cov
         "stale",
         "players",
         "games_missing",
+        "team_games",
+        "games_included",
+        "games_through",
+        "split_games",
+        "last_split_game_date",
     ]
     assert set(body["players"][0]) == {
         "player_id",
@@ -1102,6 +1107,41 @@ def test_cached_at_is_the_newest_write_among_the_games_the_split_includes(tmp_pa
 
     assert first_two["cached_at"] == "2026-11-02T09:00:00+00:00"
     assert all_three["cached_at"] == "2026-11-03T09:00:00+00:00"
+
+
+def test_a_split_says_which_of_the_teams_games_it_covers_and_when_the_state_last_occurred(tmp_path, provider):
+    engine = _engine(tmp_path)
+    # Game 1 was rewritten last: its write time is newer than game 3's date.
+    _store_lineup(engine, "0022500001", (1, 2, 3, 4, 5), datetime(2026, 11, 3, 9, 0, tzinfo=UTC))
+    _store_lineup(engine, "0022500002", (1, 2, 3, 4, 5), datetime(2026, 10, 30, 9, 0, tzinfo=UTC))
+    _store_lineup(engine, "0022500003", (6, 7, 8, 9, 10), datetime(2026, 10, 31, 9, 0, tzinfo=UTC))
+    bos_home = {"home": ("BOS", BOS), "away": ("DEN", DEN)}
+    with engine.begin() as connection:
+        connection.execute(
+            insert(EventCatalogEntry.__table__),
+            [
+                _event("0022500001", datetime(2025, 10, 22, 23, 0, tzinfo=UTC), **bos_home),
+                _event("0022500002", datetime(2025, 10, 24, 23, 0, tzinfo=UTC), **bos_home),
+                # 00:30 UTC on 2025-11-09 is the evening of 2025-11-08 in New York.
+                _event("0022500003", datetime(2025, 11, 9, 0, 30, tzinfo=UTC), **bos_home),
+                _event("0022500004", datetime(2025, 10, 28, 23, 0, tzinfo=UTC), **bos_home),  # not stored
+            ],
+        )
+    LineupSegmentRepository(engine).record_coverage("2025-26", WRITTEN_AT)
+    service = _service(provider, engine)
+
+    together = service.get("BOS", "2025-26", on=[1])
+    never = service.get("BOS", "2025-26", on=[1, 6])
+    without = service.get("BOS", "2025-26", off=[1])
+
+    coverage = ("team_games", "games_included", "games_through", "split_games", "last_split_game_date")
+    assert [together[key] for key in coverage] == [4, 3, "2025-11-08", 2, "2025-10-24"]
+    assert [never[key] for key in coverage] == [4, 3, "2025-11-08", 0, None]
+    assert [without[key] for key in coverage] == [4, 3, "2025-11-08", 1, "2025-11-08"]
+    assert together["games_missing"] == [
+        {"game_id": "0022500004", "game_date": "2025-10-28", "matchup": "DEN @ BOS"}
+    ]
+    assert together["cached_at"] == "2026-11-03T09:00:00+00:00"
 
 
 def test_naming_no_player_is_each_players_summed_segments_for_the_team(covered, provider):
