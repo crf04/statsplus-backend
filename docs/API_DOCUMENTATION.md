@@ -3695,9 +3695,21 @@ the split, so read currency from these fields instead.
 PBPStats rounds. `usage` is StatsPlus usage: 100 · (FGA + 0.44·FTA + TOV) /
 (team on-floor FGA + player-less heaves + 0.44·FTA + TOV). Free throws count
 for the lineup on the floor at the foul; from 2026-27 a heave counts as its
-shooter's missed FGA and 3PA. Every other season, and every season before
-2025-26, keeps the PBPStats path above unchanged, and the warm skips covered
-seasons. The nightly rotation job writes a game's segments with its stints;
+shooter's missed FGA and 3PA. Each player's `totals` and `per36` also carry
+`fg2a`, two-point attempts (`fga - fg3a`; crf04/statsplus#500), last and with
+the same rounding, `0.0` per 36 for a player with minutes and none; a split
+from PBPStats has no `fg2a`. Made field goals and made free throws are not in
+the segments, so neither source has them:
+
+```json
+"totals": {"pts": 55, "reb": 15, "ast": 5, "fg3m": 5, "fga": 46, "fg3a": 15,
+           "tov": 11, "fta": 14, "fg2a": 31},
+"per36": {"pts": 26.76, "reb": 7.3, "ast": 2.43, "fg3m": 2.43, "fga": 22.38,
+          "fg3a": 7.3, "tov": 5.35, "fta": 6.81, "fg2a": 15.08}
+```
+
+Every other season, and every season before 2025-26, keeps the PBPStats path
+above unchanged, and the warm skips covered seasons. The nightly rotation job writes a game's segments with its stints;
 `python scripts/lineup_segment_backfill.py YYYY-YY --database-url ...` fills a
 season (resumable, about one LiveData request a second) and records its
 coverage once every completed game is stored or rejected.

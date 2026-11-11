@@ -23,6 +23,7 @@ from app.services.injury_scenarios import _OnOffReads
 from app.services.lineup_segment_repository import (
     LineupSegmentRepository,
     RosterSlotsExhausted,
+    SegmentSplit,
     mask_of,
     write_game,
 )
@@ -1190,6 +1191,126 @@ def test_an_on_player_who_never_played_for_the_team_has_an_empty_split(covered, 
     assert provider.calls == []
 
 
+def _brown_shooting(body):
+    player = next(player for player in body["players"] if player["player_id"] == BROWN)
+    keys = ("fga", "fg3a", "fg2a")
+    return (
+        player["minutes"],
+        {key: player["totals"][key] for key in keys},
+        {key: player["per36"][key] for key in keys},
+    )
+
+
+def test_the_asked_state_and_the_full_season_carry_two_point_attempts(covered, provider):
+    service = _service(provider, covered.engine)
+
+    asked = service.get("BOS", "2025-26", on=[1628401])
+    season = service.get("BOS", "2025-26")
+
+    # Brown's 335,870 centiseconds with 1628401 on the floor are 56 minutes.
+    assert _brown_shooting(asked) == (
+        56,
+        {"fga": 34, "fg3a": 11, "fg2a": 23},
+        {"fga": 21.86, "fg3a": 7.07, "fg2a": 14.79},
+    )
+    assert _brown_shooting(season) == (
+        74,
+        {"fga": 46, "fg3a": 15, "fg2a": 31},
+        {"fga": 22.38, "fg3a": 7.3, "fg2a": 15.08},
+    )
+    for body in (asked, season):
+        assert [list(player["per36"]) for player in body["players"]] == [
+            ["pts", "reb", "ast", "fg3m", "fga", "fg3a", "tov", "fta", "fg2a"]
+        ] * len(body["players"])
+        assert list(body["players"][0]["totals"]) == list(body["players"][0]["per36"])
+
+
+class _OneSplit:
+    """Stored segments that answer every read with ``rows``."""
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def covered(self, season):
+        return True
+
+    def read_split(self, season, team_id, on, off):
+        return SegmentSplit(
+            rows=tuple(self.rows),
+            written_at=WRITTEN_AT,
+            games_missing=(),
+            team_games=1,
+            games_included=1,
+            games_through="2025-11-01",
+            split_games=1,
+            last_split_game_date="2025-11-01",
+        )
+
+
+def _sums(player_id, duration_cs, **counts):
+    return {
+        "player_id": player_id,
+        "name": f"P{player_id}",
+        "duration_cs": duration_cs,
+        "off_poss": 10,
+        **dict.fromkeys(COUNTS, 0),
+        **dict.fromkeys(("team_fga", "team_fta", "team_tov", "team_heaves"), 1),
+        **counts,
+    }
+
+
+def test_two_point_attempts_are_zero_without_one_and_round_from_the_totals(provider):
+    service = OnOffService(
+        provider,
+        _settings(),
+        segments=_OneSplit(
+            [
+                _sums(1, 10 * 6000, fga=4, fg3a=4),
+                _sums(2, 7 * 6000, fga=5, fg3a=2),
+                _sums(3, 2999),
+            ]
+        ),
+        clock=Clock(),
+    )
+
+    players = service.get("BOS", "2025-26", off=[TATUM])["players"]
+
+    assert [(player["player_id"], player["totals"]["fg2a"], player["per36"]) for player in players] == [
+        (
+            1,
+            0,
+            {
+                "pts": 0.0,
+                "reb": 0.0,
+                "ast": 0.0,
+                "fg3m": 0.0,
+                "fga": 14.4,
+                "fg3a": 14.4,
+                "tov": 0.0,
+                "fta": 0.0,
+                "fg2a": 0.0,
+            },
+        ),
+        # 3 * 36 / 7 is 15.43, not 25.71 - 10.29 from the rounded rates.
+        (
+            2,
+            3,
+            {
+                "pts": 0.0,
+                "reb": 0.0,
+                "ast": 0.0,
+                "fg3m": 0.0,
+                "fga": 25.71,
+                "fg3a": 10.29,
+                "tov": 0.0,
+                "fta": 0.0,
+                "fg2a": 15.43,
+            },
+        ),
+    ]
+    assert provider.calls == []
+
+
 def test_an_uncovered_season_keeps_the_pbp_stats_path_byte_for_byte(tmp_path, bos_games):
     engine = _engine(tmp_path)
     _collection(engine, bos_games).collect("2025-26", game_ids=sorted(bos_games)[:1])
@@ -1207,6 +1328,7 @@ def test_an_uncovered_season_keeps_the_pbp_stats_path_byte_for_byte(tmp_path, bo
 
     assert responses[0] == responses[1]
     assert '"source": "pbpstats"' in responses[0] and "games_missing" not in responses[0]
+    assert "fg2a" not in responses[0]
     assert with_segments.calls == plain.calls == [(DEN, "2025-26", (), (203999,))]
     assert not segment_service.serves_from_segments("2025-26")
 
