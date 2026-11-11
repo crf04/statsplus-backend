@@ -103,7 +103,10 @@ def test_a_bad_or_misplaced_date_is_refused(client, seeded, query):
     assert response.get_json()["error"]["details"] == {"parameters": ["date"]}
 
 
-@pytest.mark.parametrize("extra", ["", "&without=Unit%20One", "&season=2027-28", "&last_n=3&season=2026-27"])
+NO_HISTORY_EXITS = ["", "&without=Unit%20One", "&season=2027-28", "&last_n=3&season=2026-27"]
+
+
+@pytest.mark.parametrize("extra", NO_HISTORY_EXITS)
 def test_a_team_without_stored_rotations_still_reports_its_lineup_in_the_404(client, seeded, extra):
     response = client.get(f"{ROTATION}?team=POR{extra}")
 
@@ -112,6 +115,14 @@ def test_a_team_without_stored_rotations_still_reports_its_lineup_in_the_404(cli
     assert details["reason"] == "no_rotation_data"
     assert (details["lineup"]["status"], details["lineup"]["matchup"]) == ("posted", "POR vs. OKC")
     assert details["lineup"]["starters"][0]["lineup_status"] == "Expected"
+
+
+@pytest.mark.parametrize("extra", NO_HISTORY_EXITS)
+def test_the_404_lineup_follows_the_asked_date(client, seeded, extra):
+    response = client.get(f"{ROTATION}?team=POR&date=2026-11-09{extra}")
+
+    assert response.status_code == 404
+    assert response.get_json()["error"]["details"]["lineup"]["status"] == "no_game"
 
 
 def test_the_production_wiring_serves_the_stored_lineup(client, dependencies, tmp_path, monkeypatch):

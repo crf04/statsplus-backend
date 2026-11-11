@@ -1,6 +1,8 @@
 """NBA.com's daily lineups feed, parsed from a recorded document (crf04/statsplus#492)."""
 
 import json
+import subprocess
+import sys
 import threading
 import time
 from datetime import date
@@ -234,3 +236,22 @@ def test_a_real_response_that_trickles_is_abandoned_at_the_deadline():
         server.server_close()
 
     assert elapsed < 1.5
+
+
+def test_a_download_still_hanging_at_the_deadline_does_not_keep_the_host_process_alive():
+    host = """
+import threading
+from datetime import date
+
+import requests
+
+from app.providers.nba_daily_lineups import fetch_daily_lineups
+
+try:
+    fetch_daily_lineups(date(2026, 11, 10), timeout=0.2, get=lambda *_a, **_k: threading.Event().wait())
+except requests.Timeout:
+    print("timed out", flush=True)
+"""
+    finished = subprocess.run([sys.executable, "-c", host], capture_output=True, text=True, timeout=20)
+
+    assert finished.stdout == "timed out\n"
