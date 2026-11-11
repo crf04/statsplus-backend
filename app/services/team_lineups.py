@@ -15,7 +15,7 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
-from sqlalchemy import and_, delete, insert, or_, select
+from sqlalchemy import and_, delete, insert, or_, select, text
 from sqlalchemy.engine import Engine
 
 from app.domain.nba_events import is_postponed_event
@@ -27,6 +27,7 @@ from app.providers.nba_daily_lineups import EASTERN, parse_daily_lineups
 from app.services.event_catalog_repository import EventCatalogRepository
 
 logger = logging.getLogger(__name__)
+DATABASE_TIMEOUT = "5s"
 
 
 def collect_team_lineups(
@@ -45,6 +46,10 @@ def collect_team_lineups(
             return {"state": "not_published", "date": day.isoformat()}
         lineups = parse_daily_lineups(payload)
         with engine.begin() as connection:
+            if connection.dialect.name == "postgresql":
+                # A locked table must not hold up the odds beat that runs next.
+                connection.execute(text(f"SET LOCAL lock_timeout = '{DATABASE_TIMEOUT}'"))
+                connection.execute(text(f"SET LOCAL statement_timeout = '{DATABASE_TIMEOUT}'"))
             for lineup in lineups:
                 key = and_(
                     TeamLineup.game_id == lineup.game_id,
@@ -94,7 +99,7 @@ class TeamLineupRepository:
         events = EventCatalogEntry.__table__
         lineups = TeamLineup.__table__
         window = events.c.scheduled_at >= _eastern_midnight(start)
-        if day is not None:
+        if day is not None and day < date.max:
             window = and_(window, events.c.scheduled_at < _eastern_midnight(day + timedelta(days=1)))
         with self.engine.connect() as connection:
             rows = connection.execute(

@@ -60,3 +60,30 @@ def test_migration_087_reruns_and_a_second_collection_leaves_the_same_rows_on_po
         "starters": OKC_STARTERS,
         "inactive": OKC_INACTIVE,
     }
+
+
+def test_a_locked_table_fails_the_step_within_its_database_timeout_on_postgres(engine):
+    import threading
+    import time
+
+    outcome = {}
+
+    def collect():
+        started = time.monotonic()
+        outcome["result"] = collect_team_lineups(
+            engine, fetch=lambda _day: RECORDED, clock=lambda: LATE_EVENING
+        )
+        outcome["elapsed"] = time.monotonic() - started
+
+    with engine.connect() as holder:
+        holder.execute(text("LOCK TABLE team_lineups IN ACCESS EXCLUSIVE MODE"))
+        worker = threading.Thread(target=collect)
+        worker.start()
+        worker.join(timeout=9)
+        finished_while_locked = not worker.is_alive()
+        holder.rollback()
+    worker.join()
+
+    assert finished_while_locked, "the step waited on the lock past its timeout"
+    assert (outcome["result"]["state"], outcome["result"]["error"]) == ("failed", "OperationalError")
+    assert 4.5 < outcome["elapsed"] < 9

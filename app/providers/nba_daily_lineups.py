@@ -15,6 +15,8 @@ Eastern wall time with no offset.
 
 from __future__ import annotations
 
+import json
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -28,6 +30,7 @@ from app.utils.telemetry import ProviderResponseError
 EASTERN = ZoneInfo("America/New_York")
 URL = "https://stats.nba.com/js/data/leaders/00_daily_lineups_{day:%Y%m%d}.json"
 TIMEOUT_SECONDS = 10
+READ_TIMEOUT_SECONDS = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,16 +76,33 @@ def fetch_daily_lineups(
     *,
     timeout: float = TIMEOUT_SECONDS,
     get: Callable[..., Any] = requests.get,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any] | None:
-    """The feed document for one US Eastern day, or None when it is not published yet."""
+    """The feed document for one US Eastern day, or None when it is not published yet.
+
+    ``timeout`` bounds the whole download, not only each socket read, so a
+    body that trickles in is abandoned: at most ``timeout`` plus one read.
+    """
 
     from nba_api.stats.library.http import STATS_HEADERS
 
-    response = get(URL.format(day=day), headers=dict(STATS_HEADERS), timeout=timeout, allow_redirects=False)
-    if response.is_redirect or response.status_code == 404:
-        return None
-    response.raise_for_status()
-    return response.json()
+    deadline = monotonic() + timeout
+    with get(
+        URL.format(day=day),
+        headers=dict(STATS_HEADERS),
+        timeout=READ_TIMEOUT_SECONDS,
+        allow_redirects=False,
+        stream=True,
+    ) as response:
+        if response.is_redirect or response.status_code == 404:
+            return None
+        response.raise_for_status()
+        body = bytearray()
+        for chunk in response.iter_content(chunk_size=65536):
+            body += chunk
+            if monotonic() > deadline:
+                raise requests.Timeout(f"daily lineups download took longer than {timeout} s")
+    return json.loads(body)
 
 
 def parse_daily_lineups(payload: Any) -> list[TeamLineup]:

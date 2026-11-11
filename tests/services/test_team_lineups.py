@@ -230,3 +230,23 @@ def test_after_midnight_eastern_the_step_reads_the_new_day(tmp_path):
     )
 
     assert days == [date(2026, 11, 11)]
+
+
+def test_a_write_that_fails_after_its_deletes_keeps_every_stored_row(tmp_path):
+    engine = _world(tmp_path)
+    collect_team_lineups(engine, fetch=_fetched(RECORDED), clock=lambda: LATE_EVENING)
+    before = _stored(engine)
+    listed_twice = json.loads(json.dumps(RECORDED))
+    listed_twice["games"].insert(1, listed_twice["games"][0])
+    later = datetime(2026, 11, 11, 3, 45, tzinfo=UTC)
+
+    result = collect_team_lineups(engine, fetch=_fetched(listed_twice), clock=lambda: later)
+
+    assert (result["state"], result["error"]) == ("failed", "IntegrityError")
+    assert _stored(engine) == before
+
+
+def test_the_last_representable_date_is_no_game_not_an_error(tmp_path):
+    engine = _world(tmp_path)
+
+    assert _repository(engine).read("OKC", day=date.max)["status"] == "no_game"

@@ -101,3 +101,54 @@ def test_a_bad_or_misplaced_date_is_refused(client, seeded, query):
 
     assert response.status_code == 400
     assert response.get_json()["error"]["details"] == {"parameters": ["date"]}
+
+
+def test_a_team_without_stored_rotations_still_reports_its_lineup_in_the_404(client, seeded):
+    response = client.get(f"{ROTATION}?team=POR")
+
+    assert response.status_code == 404
+    details = response.get_json()["error"]["details"]
+    assert details["reason"] == "no_rotation_data"
+    assert (details["lineup"]["status"], details["lineup"]["matchup"]) == ("posted", "POR vs. OKC")
+    assert details["lineup"]["starters"][0]["lineup_status"] == "Expected"
+
+
+def test_the_production_wiring_serves_the_stored_lineup(client, dependencies, tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    from app.config.settings import RuntimeSettings
+    from app.dependencies import build_dependencies
+
+    repository = migrated_repository(tmp_path)
+    store(
+        repository,
+        game(
+            "0022600100", "2026-11-01", "OKC", "DEN", [line(1, "Unit One", "OKC", minutes=30, started=True)]
+        ),
+        season="2026-27",
+    )
+    schedule(
+        repository.engine,
+        "0022600216",
+        "2026-11-11T04:00:00+00:00",
+        (1610612760, "OKC"),
+        (1610612757, "POR"),
+        season="2026-27",
+    )
+    collect_team_lineups(repository.engine, fetch=lambda _day: RECORDED, clock=lambda: LATE_EVENING)
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=repository.engine))
+    monkeypatch.setattr("app.utils.cache_config.get_redis_client", Mock(return_value=None))
+    built = build_dependencies(
+        RuntimeSettings(
+            environment="testing",
+            auth={"firebase_admin_disabled": True},
+            database={"url": "sqlite:///unused.sqlite3"},
+        )
+    )
+    dependencies.rotation_service = built.rotation_service
+
+    response = client.get(f"{ROTATION}?team=OKC&season=2026-27&date=2026-11-10")
+
+    assert response.status_code == 200
+    lineup = response.get_json()["lineup"]
+    assert (lineup["status"], lineup["game_id"], len(lineup["starters"])) == ("posted", "0022600216", 5)

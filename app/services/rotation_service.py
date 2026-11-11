@@ -545,9 +545,10 @@ class RotationService:
         team_games = cache(lambda tricode: self.repository.team_games(season, tricode))
         recent_games = team_games(team)[:last_n]
         if not recent_games:
+            # Before a team's first stored game (opening night) its lineup is still news.
             raise ResourceNotFoundError(
                 "The requested team has no rotation data for the season.",
-                public_details={"reason": "no_rotation_data"},
+                public_details={"reason": "no_rotation_data", **self._with_lineup({}, team, day)},
             )
         team_rows = self.repository.player_games(season, team=team)
         recent_ids = {game["game_id"] for game in recent_games}

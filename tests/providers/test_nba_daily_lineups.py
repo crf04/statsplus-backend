@@ -131,10 +131,10 @@ def test_a_starter_listed_twice_as_a_starter_appears_once():
     (aaa, _) = parse_daily_lineups(
         _document(
             [
-                _player(1, "Twice", position="PG", status="Expected"),
-                _player(1, "Twice", position="PG", status="Confirmed"),
-                _player(2, "Hurt", roster="Inactive"),
-                _player(2, "Hurt", roster="Inactive"),
+                _player(10, "Twice", position="PG", status="Expected"),
+                _player(10, "Twice", position="PG", status="Confirmed"),
+                _player(20, "Hurt", roster="Inactive"),
+                _player(20, "Hurt", roster="Inactive"),
             ]
         )
     )
@@ -159,13 +159,22 @@ def test_a_malformed_document_is_refused_whole(payload):
 
 
 class _Response:
-    def __init__(self, status_code, payload=None):
+    """A streamed response: ``chunks`` are the body, read only through ``iter_content``."""
+
+    def __init__(self, status_code, chunks=(b"",)):
         self.status_code = status_code
-        self._payload = payload
+        self._chunks = chunks
         self.is_redirect = 300 <= status_code < 400
 
-    def json(self):
-        return self._payload
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def iter_content(self, chunk_size):
+        assert not self.is_redirect and self.status_code < 400, "the body of a refusal was read"
+        yield from self._chunks
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -177,19 +186,31 @@ def test_fetch_reads_the_eastern_day_document_with_the_stats_headers():
 
     def get(url, **kwargs):
         seen.update(url=url, **kwargs)
-        return _Response(200, {"games": []})
+        return _Response(200, (b'{"games": ', b"[]}"))
 
     assert fetch_daily_lineups(date(2026, 11, 10), get=get) == {"games": []}
     assert seen["url"] == "https://stats.nba.com/js/data/leaders/00_daily_lineups_20261110.json"
     assert seen["headers"]["Referer"] == "https://www.nba.com/"
     assert seen["allow_redirects"] is False
-    assert seen["timeout"] == 10
+    assert seen["timeout"] == 5
 
 
-def test_a_day_not_published_yet_redirects_and_reads_as_none():
-    assert fetch_daily_lineups(date(2026, 11, 11), get=lambda url, **_: _Response(302)) is None
+@pytest.mark.parametrize("status", [302, 404])
+def test_a_day_not_published_yet_reads_as_none_without_reading_the_body(status):
+    assert fetch_daily_lineups(date(2026, 11, 11), get=lambda url, **_: _Response(status)) is None
 
 
 def test_a_server_error_raises():
     with pytest.raises(requests.HTTPError):
         fetch_daily_lineups(date(2026, 11, 11), get=lambda url, **_: _Response(500))
+
+
+def test_a_body_that_trickles_past_the_deadline_is_abandoned():
+    ticks = iter([0.0, 4.0, 8.0, 12.0, 16.0])
+
+    with pytest.raises(requests.Timeout):
+        fetch_daily_lineups(
+            date(2026, 11, 10),
+            get=lambda url, **_: _Response(200, (b'{"ga', b'mes"', b": [", b"]}")),
+            monotonic=lambda: next(ticks),
+        )

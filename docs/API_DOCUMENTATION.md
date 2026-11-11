@@ -3868,6 +3868,8 @@ request reads only stored rows; the five-minute odds cron stores today's feed.
   run, so the stored lineup is at most about five minutes behind the feed.
 - A lineup stored for a game that has since moved to another date is not
   served (`not_posted` on the new date).
+- A team with no stored rotation in the season (before its first game) still
+  answers `404 no_rotation_data`; its `details.lineup` carries this block.
 
 Game view (crf04/statsplus#233): every box-score player of one stored game, both
 teams, with the stints the player view returns.
