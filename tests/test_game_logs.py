@@ -926,6 +926,23 @@ def test_a_teams_against_rank_is_the_filters_position_not_the_sheets_shared_rank
     assert (ranks["ATL"], ranks["BKN"]) == (3, 3)
 
 
+def test_a_ranking_missing_a_team_keeps_the_30_scale(monkeypatch, mock_db_engine, mock_redis_client):
+    """A play type CHI never faced ranks 29 teams; the top one is still 30."""
+
+    from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
+
+    others = sorted(set(NBA_TEAM_ID_TO_TRICODE.values()) - {"MIA", "LAL", "CHI"})
+    service = _ranked_service(monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", *others])
+    query = GameLogQuery(season_filter="2024-25", teams_against=["Isolation"], rank_filter=["1,2"])
+
+    result = service.get_filtered_logs("LeBron James", query)
+
+    assert [(row["MATCHUP"], row["teams_against_ranks"]) for row in result["game_logs"]] == [
+        ("BOS vs. LAL", {"Isolation": 29}),
+        ("BOS @ MIA", {"Isolation": 30}),
+    ]
+
+
 def test_a_sheet_rows_rank_reaches_each_game_over_http(
     monkeypatch, mock_db_engine, mock_redis_client, dependencies, client
 ):
