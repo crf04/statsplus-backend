@@ -44,7 +44,10 @@ Seasons
 Every sample is also reported per season (``seasons``), and a flag is computed
 on one season only (crf04/statsplus#485): the Slate season when the teammate
 has ``MIN_GAMES_WITHOUT`` games on each side in it, otherwise last season.
-The pooled figures stay for one release.
+That flag is the ``seasons`` entry for ``flag_season``.  For one release the
+row's own figures, ``shift``, ``flagged`` and ``limits`` stay pooled across the
+window's seasons under the old rule, so a reader that predates the change
+prints what it printed before.
 """
 
 from __future__ import annotations
@@ -389,9 +392,11 @@ class InjuryScenarioService:
                 listed_out.setdefault(row["team"], set()).add(int(row["player_id"]))
         reads = _RequestReads(self, fetch_on_off=bool(wanted), user_id=user_id)
         self._prefetch(selected, season, reads)
-        teammate_ids = (
-            self._teammate_ids(teammate, selected, season, reads) if teammate and selected else None
-        )
+        teammate_ids = None
+        if teammate:
+            # With no scenario selected, the name is still checked, against every team on the report.
+            on_report = selected or [row for row in listing["injuries"] if row["player_id"] is not None]
+            teammate_ids = self._teammate_ids(teammate, on_report, season, reads)
         return {
             "date": listing["date"],
             "g_league_skipped": g_league_skipped,
@@ -405,23 +410,33 @@ class InjuryScenarioService:
     def _teammate_ids(
         teammate: str, rows: Sequence[Mapping[str, Any]], season: str, reads: _RequestReads
     ) -> set[int]:
-        """The ids ``teammate`` (an id or full name, case-insensitive) names on the scenarios' team rosters."""
+        """The id ``teammate`` (an id or full name, case-insensitive) names on the rows' team rosters."""
 
         wanted = str(teammate).strip().casefold()
-        found = set()
-        for row in rows:
-            team_id = NBA_TEAM_TRICODE_TO_ID[row["team"]]
-            for s in (previous_nba_season(season), season):
-                for pid in reads.roster(team_id, s):
-                    name = _Logs(reads.logs(pid, s)).name() or ""
-                    if wanted in (str(pid), name.casefold()):
-                        found.add(pid)
+        teams = sorted({row["team"] for row in rows})
+        found: dict[int, dict[str, Any]] = {}
+        for s in (previous_nba_season(season), season):
+            roster = {pid: team for team in teams for pid in reads.roster(NBA_TEAM_TRICODE_TO_ID[team], s)}
+            reads.load_logs(roster, s)
+            for pid, team in roster.items():
+                name = _Logs(reads.logs(pid, s)).name() or ""
+                if wanted in (str(pid), name.casefold()):
+                    found[pid] = {"player_id": pid, "name": name, "team": team}
         if not found:
             raise InvalidInputError(
                 "The injury scenarios teammate is not on a listed player's team.",
                 public_details={"parameters": ["teammate"]},
             )
-        return found
+        if len(found) > 1:
+            raise InvalidInputError(
+                "The injury scenarios teammate matches more than one player; name him by player_id.",
+                public_details={
+                    "parameter": "teammate",
+                    "parameters": ["teammate"],
+                    "candidates": [found[pid] for pid in sorted(found)],
+                },
+            )
+        return set(found)
 
     def _prefetch(self, rows: Sequence[Mapping[str, Any]], season: str, reads: _RequestReads) -> None:
         """Read every log the request needs: one batch per season, whatever the scenarios.
@@ -1095,31 +1110,30 @@ class _Teammate:
                 "of": len(values),
             }
         row["seasons"] = [self._season_scored(column, keys, e, posted) for e in seasons]
-        (flag,) = [entry for entry in row["seasons"] if entry["season"] == flag_season]
         row["flag_season"] = flag_season
-        row["limits"] = list(flag["limits"])
+        limits, shift, flagged = self._judge(column, keys, pooled, baseline_floor=False)
+        row["limits"] = [limit for limit in limits if limit != "no_baseline"]
         if posted is None:
             row["limits"].append("no_line")
         if stale_report:
             row["limits"].append("stale_report")
-        if flag["shift"] is not None:
+        if "no_baseline" in limits:
+            row["limits"].append("no_baseline")
+        if shift is not None:
             row["shift"] = {
-                **flag["shift"],
-                "season_span": {
-                    "full_game": flag_season,
-                    "on_off": flag_season if flag["off_floor"]["minutes"] else None,
-                },
+                **shift,
+                "season_span": {"full_game": row["without"]["season_span"], "on_off": off_floor.span},
             }
-        row["flagged"] = flag["flagged"]
+        row["flagged"] = flagged
         return row
 
     def _season_scored(self, column, keys, evidence: _Evidence, posted) -> dict[str, Any]:
         """One season's samples, and whether they alone would flag the market."""
 
         values = evidence.values(column, False)
-        with_avg = _raw_mean(evidence.values(column, True))
-        on_floor, off_floor = evidence.on_floor, evidence.off_floor
-        entry: dict[str, Any] = {
+        off_floor = evidence.off_floor
+        limits, shift, flagged = self._judge(column, keys, evidence, baseline_floor=True)
+        return {
             "season": evidence.window[0].season,
             "baseline": self._baseline(column, keys, evidence),
             "without": {"avg": _round(_raw_mean(values)), "games": len(evidence.without_games)},
@@ -1127,17 +1141,31 @@ class _Teammate:
             "line": None
             if posted is None
             else {"beat": sum(1 for stat in values if stat > posted[0]), "of": len(values)},
-            "shift": None,
-            "flagged": False,
-            "limits": [],
+            "shift": shift,
+            "flagged": flagged,
+            "limits": limits,
         }
-        limits = entry["limits"]
+
+    @staticmethod
+    def _judge(
+        column, keys, evidence: _Evidence, *, baseline_floor: bool
+    ) -> tuple[list[str], dict[str, float | None] | None, bool]:
+        """The limits, shift and flag of one sample.
+
+        The per-season rule (crf04/statsplus#485) also needs a baseline of
+        ``MIN_GAMES_WITH`` games and ``MIN_ON_FLOOR_MINUTES``; the pooled row
+        keeps the rule it had before, for one release.
+        """
+
+        on_floor, off_floor = evidence.on_floor, evidence.off_floor
+        limits: list[str] = []
         on_off_limits, complete = evidence.on_off_limits()
         insufficient = len(evidence.without_games) < MIN_GAMES_WITHOUT or (
             bool(off_floor.covered) and off_floor.minutes < MIN_OFF_FLOOR_MINUTES
         )
-        thin_baseline = len(evidence.with_games) < MIN_GAMES_WITH or (
-            bool(on_floor.covered) and on_floor.minutes < MIN_ON_FLOOR_MINUTES
+        thin_baseline = baseline_floor and (
+            len(evidence.with_games) < MIN_GAMES_WITH
+            or (bool(on_floor.covered) and on_floor.minutes < MIN_ON_FLOOR_MINUTES)
         )
         if insufficient:
             limits.append("insufficient")
@@ -1145,14 +1173,15 @@ class _Teammate:
             limits.append("insufficient_baseline")
         limits.extend(on_off_limits)
         if insufficient or thin_baseline or not complete:
-            return entry
-        full_shift = _shift(_raw_mean(values), with_avg)
+            return limits, None, False
+        full_shift = _shift(
+            _raw_mean(evidence.values(column, False)), _raw_mean(evidence.values(column, True))
+        )
         on_off_shift = _shift(off_floor.per36(keys), on_floor.per36(keys))
         if full_shift is None or on_off_shift is None:
             limits.append("no_baseline")
-        entry["shift"] = {"full_game": _round(full_shift, 4), "on_off_per36": _round(on_off_shift, 4)}
-        entry["flagged"] = _agree(full_shift, on_off_shift)
-        return entry
+        shift = {"full_game": _round(full_shift, 4), "on_off_per36": _round(on_off_shift, 4)}
+        return limits, shift, _agree(full_shift, on_off_shift)
 
     def _context(
         self, market: str, branch: str, pooled: _Evidence, seasons: Sequence[_Evidence]

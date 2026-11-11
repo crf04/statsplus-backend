@@ -1038,9 +1038,14 @@ An absence whose report `reason` starts `G League` (a G League or two-way
 assignment) opens no scenario unless `player` names him; the response's
 `g_league_skipped` counts those left out (crf04/statsplus#485). `teammate` (a
 player id or full name, case-insensitive) keeps only that teammate's rows,
-`replacement_starters` and `minutes_jumps` entries in every scenario; a value
-that matches no player on a selected scenario's team roster (either season of
-the window) is `400 invalid_input` with `details.parameters: ["teammate"]`.
+`replacement_starters` and `minutes_jumps` entries in every scenario. It is
+matched against the team rosters (either season of the window) of the selected
+scenarios, or, when none is selected, of every team on the report. A value that
+matches no player there is `400 invalid_input` with
+`details.parameters: ["teammate"]`; a full name two players there share is
+`400 invalid_input` with `details` `{parameter: "teammate", parameters:
+["teammate"], candidates: [{player_id, name, team}]}`, and naming one of them
+by `player_id` selects him.
 
 With `player`, a missing or expired on/off split of that scenario (on and off,
 this season and, when it joins the window, last season) is fetched from
@@ -1075,15 +1080,14 @@ that are never flagged.
   [on/off](#get-onoff-splits) with the injured player in `off[]`.
 - `line`: `value`, `source` and `beat`/`of` counted in the `without` games
   against today's posted line, or `null`.
-- `shift`: `full_game` and `on_off_per36` in the `flag_season`, each against
-  its own baseline, with the `season_span` each was computed over (the flag
-  season, or `null` for `on_off` when it supplied no off-floor minutes). `baseline.on_floor_season_span` and
+- `shift`: `full_game` and `on_off_per36`, each against its own baseline, with
+  the `season_span` each was computed over. `baseline.on_floor_season_span` and
   `off_floor.season_span` name only the seasons that supplied on/off minutes.
-- `flagged`: both shifts at least +10%, or both at most -10%, in the
-  `flag_season`.
+- `flagged`: both shifts at least +10%, or both at most -10%.
 - `flag_season` (sits, scored rows; crf04/statsplus#485): the one season the
-  flag, `shift` and `limits` are computed on. It is the Slate season when the
-  teammate has at least 3 games on each side in it (without him and with him),
+  flag is computed on; the flag is the `seasons` entry for that season (its
+  `shift`, `flagged` and `limits`). It is the Slate season when the teammate
+  has at least 3 games on each side in it (without him and with him),
   otherwise last season; with no last season in the window it stays the Slate
   season.
 - `seasons` (crf04/statsplus#485): one entry per season of the window, the
@@ -1110,9 +1114,13 @@ that are never flagged.
   ]
   ```
 
-  The pooled `baseline`, `without`, `off_floor` and `line` (and their
-  `season_span` fields) still sum the window's seasons; they stay for one
-  release and then go.
+  **Legacy pooled fields, removed in the next release.** On every row,
+  `baseline`, `without`, `off_floor`, `line`, `shift`, `flagged` and `limits`
+  (with their `season_span` fields) keep their earlier meaning: they sum the
+  window's seasons and flag under the earlier rule (no baseline floor, so
+  never `insufficient_baseline`). A row can be flagged there and not in its
+  `flag_season` entry, or the reverse. Read the flag from `flag_season` and
+  `seasons`.
 - `on_off_sources` and `on_off_games_missing` (crf04/statsplus#410): the
   sorted, distinct `source` values (`pbpstats`, `statsplus`) of the on/off
   splits the row's numbers summed (the on-floor split, plus the off-floor one
@@ -1124,10 +1132,11 @@ that are never flagged.
   `excluded_games`, the teammate's games for this team in the seasons read
   that are on neither side because the two were not teammates then (before
   the injured player joined, or before either player's last team change).
-- `limits` (of the `flag_season` on scored `sits` rows; of the pooled on/off on
-  context rows): `insufficient` (under 3 games without or under 150 off-floor
-  minutes; never flagged), `insufficient_baseline` (under 3 games with him or
-  under 150 on-floor minutes; never flagged), `no_line`, `stale_report`, `no_baseline`, and the
+- `limits` (pooled, on the row; one season's, on a `seasons` entry):
+  `insufficient` (under 3 games without or under 150 off-floor minutes; never
+  flagged), `insufficient_baseline` (`seasons` entries only: under 3 games with
+  him or under 150 on-floor minutes; never flagged), `no_line` and
+  `stale_report` (row only), `no_baseline`, and the
   on/off limits `on_off_not_warmed` (no cached split; a request without
   `player` never calls PBPStats, the scheduled warm fills the cache, and
   naming the injured player fetches it), `on_off_unavailable` (no cache, or
@@ -1135,8 +1144,8 @@ that are never flagged.
   kept when the fetch failed), `on_off_unsliceable` (a
   player changed teams in that season, so its whole-season totals cannot match
   the window) and `on_off_seasons_differ` (the on and off states cover
-  different seasons). Any on/off limit other than `on_off_stale` in the flag
-  season blocks the flag; the full-game numbers are still returned.
+  different seasons). Any on/off limit other than `on_off_stale` blocks the
+  flag it is listed beside; the full-game numbers are still returned.
 
 The window is the current season plus last season, each read scoped to its
 season (`season_scoped`), so a current season after the Published Season counts
