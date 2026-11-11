@@ -1,7 +1,10 @@
 """NBA.com's daily lineups feed, parsed from a recorded document (crf04/statsplus#492)."""
 
 import json
+import threading
+import time
 from datetime import date
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -159,22 +162,14 @@ def test_a_malformed_document_is_refused_whole(payload):
 
 
 class _Response:
-    """A streamed response: ``chunks`` are the body, read only through ``iter_content``."""
-
-    def __init__(self, status_code, chunks=(b"",)):
+    def __init__(self, status_code, payload=None):
         self.status_code = status_code
-        self._chunks = chunks
+        self._payload = payload
         self.is_redirect = 300 <= status_code < 400
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
-
-    def iter_content(self, chunk_size):
+    def json(self):
         assert not self.is_redirect and self.status_code < 400, "the body of a refusal was read"
-        yield from self._chunks
+        return self._payload
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -186,7 +181,7 @@ def test_fetch_reads_the_eastern_day_document_with_the_stats_headers():
 
     def get(url, **kwargs):
         seen.update(url=url, **kwargs)
-        return _Response(200, (b'{"games": ', b"[]}"))
+        return _Response(200, {"games": []})
 
     assert fetch_daily_lineups(date(2026, 11, 10), get=get) == {"games": []}
     assert seen["url"] == "https://stats.nba.com/js/data/leaders/00_daily_lineups_20261110.json"
@@ -205,12 +200,37 @@ def test_a_server_error_raises():
         fetch_daily_lineups(date(2026, 11, 11), get=lambda url, **_: _Response(500))
 
 
-def test_a_body_that_trickles_past_the_deadline_is_abandoned():
-    ticks = iter([0.0, 4.0, 8.0, 12.0, 16.0])
+class _Trickle(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", "64")
+        self.end_headers()
+        for _ in range(64):
+            self.wfile.write(b" ")
+            self.wfile.flush()
+            time.sleep(0.1)
 
-    with pytest.raises(requests.Timeout):
-        fetch_daily_lineups(
-            date(2026, 11, 10),
-            get=lambda url, **_: _Response(200, (b'{"ga', b'mes"', b": [", b"]}")),
-            monotonic=lambda: next(ticks),
-        )
+    def log_message(self, *_args):
+        pass
+
+
+def test_a_real_response_that_trickles_is_abandoned_at_the_deadline():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Trickle)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    local = f"http://127.0.0.1:{server.server_address[1]}/lineups.json"
+    started = time.monotonic()
+    try:
+        with pytest.raises(requests.Timeout):
+            fetch_daily_lineups(
+                date(2026, 11, 10),
+                timeout=0.5,
+                get=lambda _url, headers, **kwargs: requests.get(local, **kwargs),
+            )
+        elapsed = time.monotonic() - started
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert elapsed < 1.5

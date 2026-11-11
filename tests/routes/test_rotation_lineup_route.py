@@ -103,8 +103,9 @@ def test_a_bad_or_misplaced_date_is_refused(client, seeded, query):
     assert response.get_json()["error"]["details"] == {"parameters": ["date"]}
 
 
-def test_a_team_without_stored_rotations_still_reports_its_lineup_in_the_404(client, seeded):
-    response = client.get(f"{ROTATION}?team=POR")
+@pytest.mark.parametrize("extra", ["", "&without=Unit%20One", "&season=2027-28", "&last_n=3&season=2026-27"])
+def test_a_team_without_stored_rotations_still_reports_its_lineup_in_the_404(client, seeded, extra):
+    response = client.get(f"{ROTATION}?team=POR{extra}")
 
     assert response.status_code == 404
     details = response.get_json()["error"]["details"]

@@ -5760,8 +5760,9 @@ bench row, which the parser drops. `timestamp` is Eastern wall time.
 document and, in one transaction, replaces the `team_lineups` row (migration
 087, `app/models/team_lineup.py`) of every team it lists, keyed by game and
 team, with the document's Eastern date. A rerun leaves the same rows. One
-request, no retry (the next run is the retry): the whole download has a
-ten-second deadline (plus at most one five-second socket read), and on
+request, no retry (the next run is the retry): it runs on a daemon thread
+that is abandoned after ten seconds however slowly the server answers
+(five-second socket reads inside), and on
 Postgres the transaction sets a five-second `lock_timeout` and
 `statement_timeout`, so a locked table fails the step instead of holding the
 odds beat. It never raises; an unpublished day, a failed request, a malformed document or a

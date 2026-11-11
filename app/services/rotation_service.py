@@ -538,17 +538,32 @@ class RotationService:
         game_logs: bool = False,
         day: date | None = None,
     ) -> dict[str, Any]:
+        """The team view; its ``lineup`` also rides on a ``no_rotation_data`` 404 (opening night)."""
+
+        try:
+            document = self._team_rotation(team, last_n, season, without, game_logs)
+        except ResourceNotFoundError as error:
+            details = error.public_details or {}
+            if self.lineups is not None and details.get("reason") == "no_rotation_data":
+                error._public_details = {**details, "lineup": self.lineups.read(team, day=day)}
+            raise
+        if self.lineups is None:
+            return document
+        return {**document, "lineup": self.lineups.read(team, day=day)}
+
+    def _team_rotation(
+        self, team: str, last_n: int, season: str | None, without: Sequence[str], game_logs: bool
+    ) -> dict[str, Any]:
         self._tricode_id(team, "team")
         season = self._season(season)
         if without:
-            return self._with_lineup(self._team_without(season, team, without, game_logs), team, day)
+            return self._team_without(season, team, without, game_logs)
         team_games = cache(lambda tricode: self.repository.team_games(season, tricode))
         recent_games = team_games(team)[:last_n]
         if not recent_games:
-            # Before a team's first stored game (opening night) its lineup is still news.
             raise ResourceNotFoundError(
                 "The requested team has no rotation data for the season.",
-                public_details={"reason": "no_rotation_data", **self._with_lineup({}, team, day)},
+                public_details={"reason": "no_rotation_data"},
             )
         team_rows = self.repository.player_games(season, team=team)
         recent_ids = {game["game_id"] for game in recent_games}
@@ -586,7 +601,7 @@ class RotationService:
                 player["name"],
             )
         )
-        document = {
+        return {
             "season": season,
             "last_n": last_n,
             "team_games_counted": True,
@@ -601,12 +616,6 @@ class RotationService:
             ],
             "players": players,
         }
-        return self._with_lineup(document, team, day)
-
-    def _with_lineup(self, document: dict[str, Any], team: str, day: date | None) -> dict[str, Any]:
-        if self.lineups is None:
-            return document
-        return {**document, "lineup": self.lineups.read(team, day=day)}
 
     def get_game_rotation(self, *, game_id: str) -> dict[str, Any]:
         """Every box-score player's stints in one stored game, both teams."""

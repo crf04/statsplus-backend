@@ -9,7 +9,7 @@ environment unless ``--database-url`` is given.  When ``SENTRY_DSN`` is set,
 Sentry is initialized as in the web app so the guard's alerts are delivered.
 
 Before the beat it stores NBA.com's daily lineups (crf04/statsplus#492): one
-request with a ten-second deadline and five-second database timeouts, whatever
+request abandoned after ten seconds and five-second database timeouts, whatever
 ``ODDS_API_ENABLED`` says.  That step reports its own failures and never
 changes the exit status.
 """

@@ -15,8 +15,7 @@ Eastern wall time with no offset.
 
 from __future__ import annotations
 
-import json
-import time
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -76,33 +75,44 @@ def fetch_daily_lineups(
     *,
     timeout: float = TIMEOUT_SECONDS,
     get: Callable[..., Any] = requests.get,
-    monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any] | None:
     """The feed document for one US Eastern day, or None when it is not published yet.
 
-    ``timeout`` bounds the whole download, not only each socket read, so a
-    body that trickles in is abandoned: at most ``timeout`` plus one read.
+    Gives up after ``timeout`` seconds however slowly the server answers: the
+    request runs on a daemon thread, which is abandoned rather than joined.
     """
 
+    outcome: dict[str, Any] = {}
+
+    def download() -> None:
+        try:
+            outcome["document"] = _download(day, get)
+        except Exception as error:
+            outcome["error"] = error
+
+    worker = threading.Thread(target=download, name="daily-lineups", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise requests.Timeout(f"daily lineups took longer than {timeout} s")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["document"]
+
+
+def _download(day: date, get: Callable[..., Any]) -> dict[str, Any] | None:
     from nba_api.stats.library.http import STATS_HEADERS
 
-    deadline = monotonic() + timeout
-    with get(
+    response = get(
         URL.format(day=day),
         headers=dict(STATS_HEADERS),
         timeout=READ_TIMEOUT_SECONDS,
         allow_redirects=False,
-        stream=True,
-    ) as response:
-        if response.is_redirect or response.status_code == 404:
-            return None
-        response.raise_for_status()
-        body = bytearray()
-        for chunk in response.iter_content(chunk_size=65536):
-            body += chunk
-            if monotonic() > deadline:
-                raise requests.Timeout(f"daily lineups download took longer than {timeout} s")
-    return json.loads(body)
+    )
+    if response.is_redirect or response.status_code == 404:
+        return None
+    response.raise_for_status()
+    return response.json()
 
 
 def parse_daily_lineups(payload: Any) -> list[TeamLineup]:
