@@ -1073,7 +1073,8 @@ shared, a named request does not reach PBPStats either: its rows carry `on_off_u
 Each scenario has `injured` (player, player_id, team, game_id, status,
 `reason`, report_time, and `seasons`: `[{season, missed, played}]`, the
 Slate season then last season, counting his team's games he missed and played
-by the game-log absence rule; `[]` when unresolved), `limits` (`stale_report`, or `player_unresolved` when the
+by the game-log absence rule, team window evidence included
+(crf04/statsplus#450); `[]` when unresolved), `limits` (`stale_report`, or `player_unresolved` when the
 report's name matched no Athlete Catalog player, in which case there are no
 branches) and `branches`: `plays` then `sits` for Questionable or Doubtful,
 `sits` only for Out. A branch's `rows` hold one row per rotation teammate
