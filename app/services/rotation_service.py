@@ -456,6 +456,22 @@ def _side_games(
     return out
 
 
+def _team_game_logs(
+    entries: Sequence[Mapping[str, Any]],
+    game_ids: set[str],
+    team: str,
+    logs: Mapping[str, Mapping[str, Fraction | None]],
+) -> list[dict[str, Any]]:
+    """His ``_side_games`` in the team's ``game_ids`` inside his window, each with its matchup: a game he
+    missed is a 0-minute entry with ``box: null`` (crf04/statsplus#504)."""
+
+    lines = [entry for entry in entries if entry["game_id"] in game_ids]
+    return [
+        {**game, "matchup": _matchup(line, team)}
+        for line, game in zip(lines, _side_games(lines, logs), strict=True)
+    ]
+
+
 class RotationService:
     """Compose the player and team rotation documents from stored rows."""
 
@@ -626,6 +642,7 @@ class RotationService:
         for row in team_rows:
             if row["game_id"] in recent_ids and row["started"]:
                 starters[row["game_id"]].append(row["player_name"])
+        logs = self._logs_by_player(season, team, player_ids) if game_logs else None
         players = []
         for player_id in player_ids:
             own_rows = rows_by_player[player_id]
@@ -640,6 +657,11 @@ class RotationService:
                     "recent": _window_counts(recent),
                     "season_summary": _window_counts(season_entries),
                     "minutes_change": _window_minutes_change(recent, season_entries),
+                    **(
+                        {}
+                        if logs is None
+                        else {"game_logs": _team_game_logs(entries, recent_ids, team, logs[player_id])}
+                    ),
                 }
             )
         players.sort(
