@@ -16,6 +16,7 @@ display.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
@@ -23,13 +24,18 @@ from fractions import Fraction
 from functools import cache
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.domain.team_window import Membership, TeamWindow, team_window
 from app.errors import InvalidInputError, ResourceNotFoundError
 from app.services.athlete_resolver import catalog_athlete_matches, normalize_athlete_name
+from app.services.injury_listing import listed_entry, report_status
 from app.services.research_season import season_scoped
 from app.services.rotation_derivation import clock_text
 from app.services.team_membership import TeamMembership
+
+logger = logging.getLogger(__name__)
 
 CS_PER_MINUTE = 6000
 #: A split with fewer asked games than this is returned but marked insufficient.
@@ -134,6 +140,14 @@ def _missed(game: Mapping[str, Any], team: str) -> dict[str, Any]:
         "on_box_score": False,
         **{column: 0 for column in _PERIOD_COLUMNS.values()},
     }
+
+
+def _report_fields(entry: Mapping[str, Any] | None) -> dict[str, str | None]:
+    """A missed game's status and reason from its stored report; null when the report does not list him."""
+
+    if entry is None:
+        return {"injury_status": None, "injury_reason": None}
+    return {"injury_status": report_status(entry), "injury_reason": str(entry.get("reason") or "")}
 
 
 def _team_entries(
@@ -457,7 +471,8 @@ class RotationService:
         self._default_season = default_season
         #: The game service: its publication-snapshot reads give ``without`` its box-score stats.
         self.game_logs = game_logs
-        #: The stored injury reports, membership evidence for a ``without`` window.
+        #: The stored injury reports: a missed game's status, and membership evidence for a ``without`` window.
+        self.injury_reports = injury_reports
         self.membership = TeamMembership(injury_reports, game_logs.get_players_logs_by_id, athlete_catalog)
 
     # -- public reads ---------------------------------------------------
@@ -524,6 +539,9 @@ class RotationService:
         stints = self.repository.stints(
             athlete.player_id, [row["game_id"] for row in recent if row["on_box_score"]]
         )
+        reported = self._reported(
+            season, athlete.player_id, [row for row in recent if not row["on_box_score"]]
+        )
         return {
             "season": season,
             "last_n": last_n,
@@ -539,6 +557,7 @@ class RotationService:
                     "minutes": _minutes(game["minutes_cs"]),
                     "closed": game["closed"],
                     "on_box_score": game["on_box_score"],
+                    **_report_fields(reported.get(game["game_id"])),
                     "minutes_by_period": _period_minutes([game]),
                     "stints": [_stint(stint) for stint in stints.get(game["game_id"], ())],
                 }
@@ -891,6 +910,31 @@ class RotationService:
         return named
 
     # -- helpers --------------------------------------------------------
+
+    def _reported(
+        self, season: str, player_id: int, missed: Sequence[Mapping[str, Any]]
+    ) -> dict[str, Mapping[str, Any]]:
+        """His row on each missed game's stored report, by game; one read, and none when it fails."""
+
+        if not missed or self.injury_reports is None:
+            return {}
+        try:
+            snapshots = self.injury_reports.get_season_mentions(season, [player_id])
+        except (SQLAlchemyError, ValueError) as error:
+            logger.warning("missed-game injury reports unreadable season=%s: %s", season, error)
+            return {}
+        by_game = {scope.game_id: snapshot for scope, snapshot in snapshots.items()}
+        found = {}
+        for game in missed:
+            snapshot = by_game.get(game["game_id"])
+            entry = (
+                None
+                if snapshot is None
+                else listed_entry(snapshot, player_id, game["team_tricode"], game["game_date"].isoformat())
+            )
+            if entry is not None:
+                found[game["game_id"]] = entry
+        return found
 
     def _season(self, requested: str | None) -> str:
         seasons = self.repository.seasons()
