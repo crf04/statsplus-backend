@@ -3940,21 +3940,29 @@ for the lineup on the floor at the foul; from 2026-27 a heave counts as its
 shooter's missed FGA and 3PA. Each player's `totals` and `per36` also carry
 `fg2a`, two-point attempts (`fga - fg3a`; crf04/statsplus#500), last and with
 the same rounding, `0.0` per 36 for a player with minutes and none; a split
-from PBPStats has no `fg2a`. Made field goals and made free throws are not in
-the segments, so neither source has them:
+from PBPStats has no `fg2a`. After it come the makes (crf04/statsplus#500):
+`fgm`, made field goals; `fg2m`, made twos (`fgm - fg3m`); and `ftm`, made
+free throws, with the same rounding. Segments stored before migration 089 have
+no makes until `lineup_segment_backfill.py --makes` fills their game, so the
+three keys appear only when every segment in the split has them: a split that
+holds any segment without them omits all three for every player, never a
+partial count. A split from PBPStats has none of them:
 
 ```json
 "totals": {"pts": 55, "reb": 15, "ast": 5, "fg3m": 5, "fga": 46, "fg3a": 15,
-           "tov": 11, "fta": 14, "fg2a": 31},
+           "tov": 11, "fta": 14, "fg2a": 31, "fgm": 20, "fg2m": 15, "ftm": 10},
 "per36": {"pts": 26.76, "reb": 7.3, "ast": 2.43, "fg3m": 2.43, "fga": 22.38,
-          "fg3a": 7.3, "tov": 5.35, "fta": 6.81, "fg2a": 15.08}
+          "fg3a": 7.3, "tov": 5.35, "fta": 6.81, "fg2a": 15.08, "fgm": 9.73,
+          "fg2m": 7.3, "ftm": 4.86}
 ```
 
 Every other season, and every season before 2025-26, keeps the PBPStats path
 above unchanged, and the warm skips covered seasons. The nightly rotation job writes a game's segments with its stints;
 `python scripts/lineup_segment_backfill.py YYYY-YY --database-url ...` fills a
 season (resumable, about one LiveData request a second) and records its
-coverage once every completed game is stored or rejected.
+coverage once every completed game is stored or rejected. With `--makes` it
+instead fills the makes of games stored before migration 089, refetching each
+and writing only when every count already stored is unchanged.
 
 ### Get Rotation
 

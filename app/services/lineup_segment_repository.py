@@ -8,6 +8,9 @@ time a segment holds him, and keeps it; a 65th player is
 
 The split read is one aggregate over ``lineup_segment_players``: a row counts
 when its lineup mask holds every ``on`` slot and no ``off`` slot.
+
+A row collected before migration 089 has no makes; ``fill_makes`` writes them
+from the game's re-derived segments once every count it already stores matches.
 """
 
 from __future__ import annotations
@@ -17,7 +20,20 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, and_, delete, func, insert, literal, or_, select, text, update
+from sqlalchemy import (
+    BigInteger,
+    and_,
+    bindparam,
+    case,
+    delete,
+    func,
+    insert,
+    literal,
+    or_,
+    select,
+    text,
+    update,
+)
 from sqlalchemy.engine import Connection, Engine
 
 from app.domain.nba_events import (
@@ -34,7 +50,7 @@ from app.models.lineup_segments import (
     LineupSegmentPlayer,
     LineupSegmentSeason,
 )
-from app.services.lineup_segments import COUNTS, GameSegments
+from app.services.lineup_segments import COUNTS, MAKES, GameSegments, Segment
 from app.services.request_reads import read_connection
 
 _SLOTS = LineupRosterSlot.__table__
@@ -43,6 +59,8 @@ _PLAYERS = LineupSegmentPlayer.__table__
 _SEASONS = LineupSegmentSeason.__table__
 _EVENTS = EventCatalogEntry.__table__
 _TEAM_TOTALS = ("team_fga", "team_fta", "team_tov", "team_heaves", "off_poss")
+#: What a stored row keeps from before migration 089, so what a refill must match.
+_KEPT = ("duration_cs", *(key for key in COUNTS if key not in MAKES), *_TEAM_TOTALS)
 
 
 class RosterSlotsExhausted(RuntimeError):
@@ -54,7 +72,8 @@ class SegmentSplit:
     """One lineup state's sums per player, and the games behind them."""
 
     #: Per player: ``player_id``, ``name``, ``duration_cs``, the :data:`COUNTS`
-    #: and the team's on-floor totals while he played in the state.
+    #: and the team's on-floor totals while he played in the state.  A
+    #: :data:`MAKES` sum is ``None`` when any of his rows has none.
     rows: tuple[Mapping[str, Any], ...]
     #: When the newest game with a row in the split was written; ``None``
     #: when no game has one.
@@ -118,13 +137,7 @@ def write_game(connection: Connection, season: str, segments: GameSegments, writ
                         "season": season,
                         "written_at": written_at,
                         "lineup_mask": mask,
-                        "duration_cs": segment.duration_cs,
-                        **segment.counts[player_id],
-                        "team_fga": segment.team_fga,
-                        "team_fta": segment.team_fta,
-                        "team_tov": segment.team_tov,
-                        "team_heaves": segment.team_heaves,
-                        "off_poss": segment.off_poss,
+                        **_values(segment, player_id),
                     }
                 )
     if rows:
@@ -139,6 +152,21 @@ def write_game(connection: Connection, season: str, segments: GameSegments, writ
             rejected_reason=None,
         )
     )
+
+
+def _values(segment: Segment, player_id: int) -> dict[str, int]:
+    """One on-floor player's stored values: the segment's length, his counts
+    and the team's on-floor totals."""
+
+    return {
+        "duration_cs": segment.duration_cs,
+        **segment.counts[player_id],
+        "team_fga": segment.team_fga,
+        "team_fta": segment.team_fta,
+        "team_tov": segment.team_tov,
+        "team_heaves": segment.team_heaves,
+        "off_poss": segment.off_poss,
+    }
 
 
 def record_rejected(
@@ -232,6 +260,83 @@ class LineupSegmentRepository:
             return set(
                 connection.execute(select(_GAMES.c.game_id).where(_GAMES.c.season == season)).scalars()
             )
+
+    def games_without_makes(self, season: str) -> list[str]:
+        """Stored games of ``season`` with a row lacking makes, by game id."""
+
+        with self.engine.connect() as connection:
+            return list(
+                connection.execute(
+                    select(_PLAYERS.c.game_id)
+                    .where(
+                        _PLAYERS.c.season == season,
+                        or_(*(_PLAYERS.c[key].is_(None) for key in MAKES)),
+                    )
+                    .distinct()
+                    .order_by(_PLAYERS.c.game_id)
+                ).scalars()
+            )
+
+    def fill_makes(self, segments: GameSegments) -> str | None:
+        """Write a stored game's makes from its re-derived ``segments``.
+
+        Nothing is written, and the reason is returned, unless the derivation
+        has exactly the stored rows with every value they already hold, and
+        each row's points are 2 per two, 3 per three and 1 per free throw
+        made.  ``None`` means the game's makes are stored.  The game's rows
+        are locked, so a concurrent rewrite of it waits or wins whole.
+        """
+
+        derived = {
+            (segment.team_id, segment.seg, player_id): _values(segment, player_id)
+            for segment in segments.segments
+            for player_id in segment.players
+        }
+        with self.engine.begin() as connection:
+            stored = {
+                (row["team_id"], row["seg"], row["player_id"]): row
+                for row in connection.execute(
+                    select(_PLAYERS).where(_PLAYERS.c.game_id == segments.game_id).with_for_update()
+                ).mappings()
+            }
+            if not stored:
+                return "no stored segments"
+            if all(row[key] is not None for row in stored.values() for key in MAKES):
+                return None
+            if set(stored) != set(derived):
+                return f"stored segments differ: {len(stored)} player rows stored, {len(derived)} derived"
+            for (team_id, seg, player_id), values in sorted(derived.items()):
+                where = f"team {team_id} segment {seg} player {player_id}"
+                changed = [key for key in _KEPT if stored[team_id, seg, player_id][key] != values[key]]
+                if changed:
+                    return f"stored counts differ for {where}: {', '.join(changed)}"
+                twos = values["fgm"] - values["fg3m"]
+                if values["pts"] != 2 * twos + 3 * values["fg3m"] + values["ftm"]:
+                    return (
+                        f"points identity fails for {where}: pts {values['pts']}, fgm {values['fgm']},"
+                        f" fg3m {values['fg3m']}, ftm {values['ftm']}"
+                    )
+            connection.execute(
+                update(_PLAYERS)
+                .where(
+                    _PLAYERS.c.game_id == segments.game_id,
+                    _PLAYERS.c.team_id == bindparam("key_team"),
+                    _PLAYERS.c.seg == bindparam("key_seg"),
+                    _PLAYERS.c.player_id == bindparam("key_player"),
+                )
+                .values(fgm=bindparam("new_fgm"), ftm=bindparam("new_ftm")),
+                [
+                    {
+                        "key_team": team_id,
+                        "key_seg": seg,
+                        "key_player": player_id,
+                        "new_fgm": values["fgm"],
+                        "new_ftm": values["ftm"],
+                    }
+                    for (team_id, seg, player_id), values in derived.items()
+                ],
+            )
+        return None
 
     def record_coverage(self, season: str, at: datetime) -> None:
         """Serve ``season`` from segments from now on; a rerun keeps the first time."""
@@ -353,7 +458,7 @@ class LineupSegmentRepository:
             select(
                 _PLAYERS.c.player_id,
                 func.sum(_PLAYERS.c.duration_cs).label("duration_cs"),
-                *(func.sum(_PLAYERS.c[key]).label(key) for key in (*COUNTS, *_TEAM_TOTALS)),
+                *(_summed(key) for key in (*COUNTS, *_TEAM_TOTALS)),
                 func.max(_PLAYERS.c.written_at).label("written_at"),
             )
             .where(*in_split)
@@ -366,6 +471,16 @@ class LineupSegmentRepository:
             max(written, default=None),
             set(connection.execute(select(_PLAYERS.c.game_id).where(*in_split).distinct()).scalars()),
         )
+
+
+def _summed(key: str):
+    """A column's sum; for a :data:`MAKES` column, null when any summed row has
+    none, so a split never reports a partial count."""
+
+    column = _PLAYERS.c[key]
+    if key in MAKES:
+        return case((func.count(column) == func.count(), func.sum(column))).label(key)
+    return func.sum(column).label(key)
 
 
 def _completed_regular_season(event: Mapping[str, Any]) -> bool:

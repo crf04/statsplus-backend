@@ -2696,6 +2696,26 @@ def _add_ledger_offensive_possessions(connection: Connection) -> None:
         )
 
 
+def _add_lineup_segment_makes(connection: Connection) -> None:
+    """Add nullable ``fgm`` and ``ftm`` to ``lineup_segment_players`` (crf04/statsplus#500).
+
+    NULL means "collected before the makes were counted": the migration
+    invents no value, a split holding such a row serves no makes, and
+    ``scripts/lineup_segment_backfill.py --makes`` fills each stored game.  A
+    nullable column with no default is a catalog-only change in PostgreSQL,
+    so the table is not rewritten.  Rerun-safe: a database created from the
+    current model already has them.
+    """
+
+    inspector = inspect(connection)
+    if not inspector.has_table("lineup_segment_players"):
+        return
+    present = {column["name"] for column in inspector.get_columns("lineup_segment_players")}
+    for name in ("fgm", "ftm"):
+        if name not in present:
+            connection.execute(text(f"ALTER TABLE lineup_segment_players ADD COLUMN {name} SMALLINT"))
+
+
 def _create_game_context_tables(connection: Connection) -> None:
     """Create the stored per-game team context tables (crf04/statsplus#466).
 
@@ -3600,6 +3620,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(86, "086_game_contexts", _create_game_context_tables),
     Migration(87, "087_game_lines", _create_game_lines_table),
     Migration(88, "088_team_lineups", _create_team_lineup_table),
+    Migration(89, "089_lineup_segment_makes", _add_lineup_segment_makes),
 )
 
 

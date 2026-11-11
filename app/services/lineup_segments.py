@@ -57,7 +57,9 @@ from app.services.rotation_derivation import (
 )
 
 #: The per-player counts each segment row carries, in column order.
-COUNTS = ("pts", "reb", "ast", "fg3m", "fga", "fg3a", "tov", "fta")
+COUNTS = ("pts", "reb", "ast", "fg3m", "fga", "fg3a", "tov", "fta", "fgm", "ftm")
+#: The counts migration 089 added: null on a row collected before it.
+MAKES = ("fgm", "ftm")
 #: Foul descriptor words for trips after which the shooter's team keeps the ball.
 _KEEPS_BALL = (
     "flagrant",
@@ -338,6 +340,7 @@ def _count(
             segment.count(player_id, "fg3a")
         if action.get("shotResult") == "Made":
             segment.count(player_id, "pts", 3 if three else 2)
+            segment.count(player_id, "fgm")
             if three:
                 segment.count(player_id, "fg3m")
             if action.get("assistPersonId"):
@@ -347,6 +350,7 @@ def _count(
         segment.count_team("fta")
         if action.get("shotResult") == "Made":
             segment.count(player_id, "pts")
+            segment.count(player_id, "ftm")
     elif action_type == "rebound":
         if player_id:
             segment.count(player_id, "reb")
@@ -458,4 +462,4 @@ def _scores(action: Mapping[str, Any]) -> bool:
     )
 
 
-__all__ = ["COUNTS", "GameSegments", "RejectedSegments", "Segment", "derive_segments"]
+__all__ = ["COUNTS", "MAKES", "GameSegments", "RejectedSegments", "Segment", "derive_segments"]

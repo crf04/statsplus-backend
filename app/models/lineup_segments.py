@@ -96,6 +96,11 @@ class LineupSegmentPlayer(Base):
     team_tov = Column(SmallInteger, nullable=False)
     team_heaves = Column(SmallInteger, nullable=False)
     off_poss = Column(SmallInteger, nullable=False)
+    #: Made field goals and free throws (migration 089): null on a row
+    #: collected before them until ``lineup_segment_backfill.py --makes``
+    #: fills its game.
+    fgm = Column(SmallInteger)
+    ftm = Column(SmallInteger)
 
     __table_args__ = (Index("ix_lineup_segment_players_team_season", "team_id", "season"),)
 
