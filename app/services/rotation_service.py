@@ -17,6 +17,7 @@ display.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from fractions import Fraction
 from functools import cache
@@ -430,6 +431,7 @@ class RotationService:
         default_season: Callable[[], str],
         game_logs: Any,
         injury_reports: Any | None = None,
+        lineups: Any | None = None,
     ) -> None:
         self.repository = repository
         self.athlete_catalog = athlete_catalog
@@ -438,6 +440,8 @@ class RotationService:
         self.game_logs = game_logs
         #: The stored injury reports, membership evidence for a ``without`` window.
         self.membership = TeamMembership(injury_reports, game_logs.get_players_logs_by_id, athlete_catalog)
+        #: The stored daily lineups the team view reports as ``lineup``.
+        self.lineups = lineups
 
     # -- public reads ---------------------------------------------------
 
@@ -532,11 +536,12 @@ class RotationService:
         season: str | None,
         without: Sequence[str] = (),
         game_logs: bool = False,
+        day: date | None = None,
     ) -> dict[str, Any]:
         self._tricode_id(team, "team")
         season = self._season(season)
         if without:
-            return self._team_without(season, team, without, game_logs)
+            return self._with_lineup(self._team_without(season, team, without, game_logs), team, day)
         team_games = cache(lambda tricode: self.repository.team_games(season, tricode))
         recent_games = team_games(team)[:last_n]
         if not recent_games:
@@ -580,7 +585,7 @@ class RotationService:
                 player["name"],
             )
         )
-        return {
+        document = {
             "season": season,
             "last_n": last_n,
             "team_games_counted": True,
@@ -595,6 +600,12 @@ class RotationService:
             ],
             "players": players,
         }
+        return self._with_lineup(document, team, day)
+
+    def _with_lineup(self, document: dict[str, Any], team: str, day: date | None) -> dict[str, Any]:
+        if self.lineups is None:
+            return document
+        return {**document, "lineup": self.lineups.read(team, day=day)}
 
     def get_game_rotation(self, *, game_id: str) -> dict[str, Any]:
         """Every box-score player's stints in one stored game, both teams."""

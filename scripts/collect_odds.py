@@ -7,11 +7,16 @@ slow Odds API must never delay a DFS beat.  Requires ``ODDS_API_ENABLED=true``
 and ``ODDS_API_KEY`` in the environment; ``DATABASE_URL`` is read from the
 environment unless ``--database-url`` is given.  When ``SENTRY_DSN`` is set,
 Sentry is initialized as in the web app so the guard's alerts are delivered.
+
+Before the beat it stores NBA.com's daily lineups (crf04/statsplus#492): one
+request with a ten-second timeout, whatever ``ODDS_API_ENABLED`` says.  That
+step reports its own failures and never changes the exit status.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -22,6 +27,7 @@ if __package__ in {None, ""}:
 from app.config.settings import load_settings
 from app.dependencies import build_dependencies
 from app.services import odds_collection
+from app.services.team_lineups import collect_team_lineups
 from app.utils.db import is_demo_database_url
 from app.utils.json_logging import configure_json_logging
 from app.utils.sentry_setup import init_sentry
@@ -48,8 +54,10 @@ def main(argv: list[str] | None = None) -> int:
         # Cron logs show the cycle's INFO lines (tier, calls, remaining=...),
         # in the same JSON format the web app writes.
         configure_json_logging(settings.log_level)
+        dependencies = build_dependencies(settings)
+        print(f"lineups: {json.dumps(collect_team_lineups(dependencies.engine), sort_keys=True)}")
         try:
-            coordinator = odds_collection.build_odds_collection(build_dependencies(settings), settings)
+            coordinator = odds_collection.build_odds_collection(dependencies, settings)
         except RuntimeError as error:
             print(f"failed: {error}")
             return 1

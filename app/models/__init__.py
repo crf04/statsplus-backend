@@ -158,6 +158,7 @@ from .rotation import RotationAttempt, RotationGame, RotationPlayerGame, Rotatio
 from .saved_filter_set import SavedFilterSet  # noqa: E402
 from .stats_freshness import StatsRefresh  # noqa: E402
 from .target import Target, TargetQualifier  # noqa: E402
+from .team_lineup import TeamLineup  # noqa: E402
 from .team_matchup import (  # noqa: E402
     TeamMatchupFactRow,
     TeamMatchupSurfaceObservationRow,
@@ -256,6 +257,7 @@ __all__ = [
     "StatsRefresh",
     "Target",
     "TargetQualifier",
+    "TeamLineup",
     "TeamMatchupFactRow",
     "TeamMatchupSurfaceObservationRow",
     "UsageEvent",

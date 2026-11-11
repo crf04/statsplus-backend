@@ -90,7 +90,7 @@ _UNSCHEDULED_PARAMETERS = frozenset({*_UNSCHEDULED_SELECTORS, "player_team", "op
 _TRICODE = re.compile(r"[A-Za-z]{3}\Z")
 _ROTATION_SELECTORS = ("player_name", "team", "game_id")
 _ROTATION_PARAMETERS = frozenset(
-    {*_ROTATION_SELECTORS, "player_team", "last_n", "season", "without", "game_logs"}
+    {*_ROTATION_SELECTORS, "player_team", "last_n", "season", "without", "game_logs", "date"}
 )
 _ROTATION_DEFAULT_LAST_N = 5
 _ROTATION_MAX_LAST_N = 20
@@ -797,6 +797,8 @@ def get_rotation():
     (selector,) = selectors
     if "player_team" in request.args and selector != "player_name":
         raise _invalid_rotation("player_team")
+    if "date" in request.args and selector != "team":
+        raise _invalid_rotation("date")
     for name in request.args:
         if name != "without" and len(request.args.getlist(name)) != 1:
             raise _invalid_rotation(name)
@@ -836,9 +838,22 @@ def get_rotation():
     if selector == "team":
         if _TRICODE.fullmatch(value) is None:
             raise _invalid_rotation("team")
+        day = None
+        if "date" in request.args:
+            try:
+                day = date.fromisoformat(request.args["date"])
+            except ValueError:
+                raise _invalid_rotation("date") from None
+            if day.isoformat() != request.args["date"]:
+                raise _invalid_rotation("date")
         return jsonify(
             rotation_service.get_team_rotation(
-                team=value.upper(), last_n=last_n, season=season, without=without, game_logs=game_logs
+                team=value.upper(),
+                last_n=last_n,
+                season=season,
+                without=without,
+                game_logs=game_logs,
+                day=day,
             )
         )
     if not value.strip():

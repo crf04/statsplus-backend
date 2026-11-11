@@ -4963,6 +4963,7 @@ books), `app/services/odds_identity.py` (event and player resolution),
 
 ```text
 beat (every 5 min, its own Railway cron service: scripts/collect_odds.py)
+  → first, the daily lineups step (crf04/statsplus#492; never fails the beat)
   → lease row "odds" in projection_collection_leases (own fence)
   → GET /events for the next 36h (free) → EventResolver → canonical game
   → plan_cycle: tier + due calls from poll history and odds_api_quota_state
@@ -5744,6 +5745,34 @@ runs nightly after `scripts/ledger_refresh.py` in the `ledger-refresh` Railway
 service and is also the season backfill. `RotationService` serves
 `GET /api/games/rotation`, computing every average and comparison from the
 stored centiseconds.
+
+### Daily lineups from NBA.com (crf04/statsplus#492)
+
+NBA.com's daily lineups feed is one static document per US Eastern day
+(`stats.nba.com/js/data/leaders/00_daily_lineups_YYYYMMDD.json`, sent with
+`nba_api`'s `STATS_HEADERS`; a day not published yet redirects to `/error/`).
+`app/providers/nba_daily_lineups.py` fetches and parses it: a starter is a row
+whose `position` is set, and its `lineupStatus` (`Expected`, then `Confirmed`)
+is the lineup's state; until confirmation each starter is also listed as a
+bench row, which the parser drops. `timestamp` is Eastern wall time.
+
+`collect_team_lineups` (`app/services/team_lineups.py`) reads today's
+document and, in one transaction, replaces the `team_lineups` row (migration
+087, `app/models/team_lineup.py`) of every team it lists, keyed by game and
+team, with the document's Eastern date. A rerun leaves the same rows. One
+request, ten-second timeout, no retry: the next run is the retry. It never
+raises; an unpublished day, a failed request, a malformed document or a
+database error is reported in its result and changes no row.
+`scripts/collect_odds.py` runs it before every odds beat (the `*/5 * * * *`
+odds cron, whatever `ODDS_API_ENABLED` says), so a lineup confirmed about 30
+minutes before tip is stored within about five minutes. Staging runs no
+collectors, so staging stores no lineups.
+
+`TeamLineupRepository.read` serves the rotation team view's `lineup`: the
+team's first non-postponed Event Catalog game on the asked Eastern day (or from
+today on), and its stored row only when the row's date is that game's Eastern
+date, so a moved game is not served an old lineup. The request never fetches
+the feed.
 
 ### Stored game context (crf04/statsplus#466)
 
