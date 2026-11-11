@@ -561,7 +561,11 @@ market without both joins cannot affect a slate count. Pool membership is the
 union by canonical player ID, with deterministic Market Categories and
 per-provider provenance retained on each internal `PoolPlayer`.
 
-The Player Pool never synthesizes players. It persists the governed canonical
+The Player Pool never synthesizes players. A scheduled Matchup lists
+Rotation Players beside it (crf04/statsplus#459): players with no line who
+played 10 or more minutes for their team in one of its last 5 games, read from
+the stored game logs and the active Athlete Catalog. They never enter the
+pool, its counts, or anything targetable. The pool persists the governed canonical
 pool result for each season and exact Slate game set in the application
 database; raw provider labels and identities do not enter this store. A
 snapshot at most 15 minutes old is reused with its original provider

@@ -58,6 +58,7 @@ def _player(
     components=None,
     missing=(),
     slices=(("Transition", 0.3), ("Isolation", 0.2), ("Spotup", 0.1)),
+    source="player_pool",
 ):
     window = {
         "components": components if components is not None else {},
@@ -69,6 +70,7 @@ def _player(
         "name": name,
         "team_id": team,
         "tricode": tricode,
+        "player_source": source,
         "season_scoring": scoring,
         "diet_shares": {"play_types": [_slice(k, s) for k, s in slices]},
         "scores": {"PTS": {"season": window}},
@@ -288,6 +290,21 @@ def test_picks_need_twelve_points_a_game():
 
     edges = _edges([_game()], {"G1": _matchup(players, {HOME: HOME_DEFENSE, AWAY: AWAY_DEFENSE})})
 
+    assert edges["spotlight"]["best"]["canonical_id"] == 2
+
+
+def test_a_rotation_player_is_an_effect_and_a_leader_but_never_a_pick():
+    """A pick should be playable, so it keeps to players with a line (statsplus#459)."""
+
+    players = [
+        _blend_player(1, "No Line", 0.4, source="rotation"),
+        _blend_player(2, "Posted", 0.1),
+    ]
+
+    edges = _edges([_game()], {"G1": _matchup(players, {HOME: HOME_DEFENSE, AWAY: AWAY_DEFENSE})})
+
+    assert [effect["canonical_id"] for effect in edges["games"][0]["effects"]] == [1, 2]
+    assert [leader["canonical_id"] for leader in edges["games"][0]["leaders"]] == [1, 2]
     assert edges["spotlight"]["best"]["canonical_id"] == 2
 
 
@@ -1245,7 +1262,7 @@ def test_a_cached_response_keeps_its_trailing_families_under_the_current_schema(
     assert (cold["trailing"], warm["trailing"]) == ([DEFENSE_TRAILING], [DEFENSE_TRAILING])
     # A body cached before ``trailing`` (schema 2) or the preview cards'
     # ``players`` (schema 3) existed is never served.
-    assert [key.split(":")[2] for key in redis_client.values] == ["v9"]
+    assert [key.split(":")[2] for key in redis_client.values] == ["v10"]
 
 
 def test_the_edges_and_their_matchups_write_what_the_previous_release_wrote():
@@ -1303,15 +1320,17 @@ def test_the_edges_and_their_matchups_write_what_the_previous_release_wrote():
         key: hashlib.sha256(zlib.decompress(payload)).hexdigest()
         for key, payload in redis_client.values.items()
     } == {
-        # v13 (statsplus#493): every Matchup's game_context carries its stored game_line.
-        "matchup:composed:v13:a8e7c4c10005640ba87f716fa652d508092a83eec37300d86b5e97656f26dbe7": (
+        # v12/v8 (statsplus#466): every Matchup carries its stored game_context;
+        # v13/v10 (statsplus#459): rows may be Rotation Players;
+        # v14 (statsplus#493): every Matchup's game_context carries its stored game_line.
+        "matchup:composed:v14:d224a279f072a43eea8f594a250c1197c0e5cf53237e9a81a64740250939d8b5": (
             "6319622a4476f2688c3c7c632ed7768f4df865c563c0a77becdcbd315e4732b6"
         ),
-        "matchup:composed:v13:d564655c285601e4ecfef0307a5daca75a946332345e9a279c17b7706e9c53ff": (
+        "matchup:composed:v14:958469890bfc578ee11146d706c50c971b768005fb08a3983729bafe2a09a975": (
             "bb8c59d79c8aac7fbe9fd66f7a9437f8ba74be2ae5b397d84ee5a306bfb4b325"
         ),
         # v9 (statsplus#470): each game carries ``leaders``.
-        "slate:edges:v9:841c49e16c6e10cf5938b977e6ea160dd81f1e591fb3d1b08b0dd1bbdb15d2fc": (
+        "slate:edges:v10:aa411456db22b7f601373770889ae6752ad8943bb0d67a099a57beede6a8e482": (
             "3b122d82fa39ffbd2cc84f8b61fc1b1a4e3779e6ff3a4e611c4e76599e2e53ec"
         ),
     }

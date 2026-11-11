@@ -864,6 +864,142 @@ def test_a_traditional_sheet_row_filters_game_logs_by_its_per_48_metric(
     assert matchups(["sheet:traditional:OPP_PTS"], ["-1"]) == matchups(["OPP_PTS"], ["-1"]) == ["BOS @ MIA"]
 
 
+def _free_throw_league():
+    """MIA allows the most free throws made per 48, LAL the second most and
+    CHI the fewest; points run the other way, with twenty-seven teams tied."""
+
+    from tests.support.publication_stubs import league, traditional_per48
+
+    free_throws = {"MIA": 30.0, "LAL": 25.0, "CHI": 10.0}
+    points = {"MIA": 100.0, "LAL": 105.0, "CHI": 130.0}
+    return league(
+        lambda tricode: traditional_per48(
+            free_throws_made=free_throws.get(tricode, 20.0),
+            points=points.get(tricode, 110.0),
+        )
+    )
+
+
+def test_each_game_carries_its_opponents_rank_on_every_teams_against_filter(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    """statsplus#498: the rank each filter compared, keyed as the request named it."""
+
+    service = _traditional_ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, _free_throw_league()
+    )
+    query = GameLogQuery(
+        season_filter="2024-25",
+        teams_against=["sheet:traditional:OPP_FTM", "OPP_PTS"],
+        rank_filter=["1,2", "-2"],
+    )
+
+    result = service.get_filtered_logs("LeBron James", query)
+
+    assert [(row["MATCHUP"], row["teams_against_ranks"]) for row in result["game_logs"]] == [
+        ("BOS vs. LAL", {"sheet:traditional:OPP_FTM": 29, "OPP_PTS": 2}),
+        ("BOS @ MIA", {"sheet:traditional:OPP_FTM": 30, "OPP_PTS": 1}),
+    ]
+    GameLogResponse.model_validate(result)
+
+
+def test_a_teams_against_rank_is_the_filters_position_not_the_sheets_shared_rank(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    """Tied teams hold distinct ranks in tricode order, as the filter selects them."""
+
+    service = _traditional_ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, _free_throw_league()
+    )
+    query = GameLogQuery(season_filter="2024-25", teams_against=["OPP_PTS"], rank_filter=["2,3"])
+
+    with monkeypatch.context() as patch:
+        tied = _game_logs_frame().assign(MATCHUP=["BOS vs. ATL", "BOS @ BKN", "BOS vs. CHI"])
+        patch.setattr(service, "_get_game_logs", lambda name, season: (tied, None))
+        result = service.get_filtered_logs("LeBron James", query)
+
+    assert [(row["MATCHUP"], row["teams_against_ranks"]) for row in result["game_logs"]] == [
+        ("BOS vs. ATL", {"OPP_PTS": 29}),
+        ("BOS @ BKN", {"OPP_PTS": 28}),
+    ]
+    ranks = result["opponent_ranks"]["PTS"]["ranks"]
+    assert (ranks["ATL"], ranks["BKN"]) == (3, 3)
+
+
+def test_a_ranking_missing_a_team_keeps_the_30_scale(monkeypatch, mock_db_engine, mock_redis_client):
+    """A play type CHI never faced ranks 29 teams; the top one is still 30."""
+
+    from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
+
+    others = sorted(set(NBA_TEAM_ID_TO_TRICODE.values()) - {"MIA", "LAL", "CHI"})
+    service = _ranked_service(monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", *others])
+    query = GameLogQuery(season_filter="2024-25", teams_against=["Isolation"], rank_filter=["1,2"])
+
+    result = service.get_filtered_logs("LeBron James", query)
+
+    assert [(row["MATCHUP"], row["teams_against_ranks"]) for row in result["game_logs"]] == [
+        ("BOS vs. LAL", {"Isolation": 29}),
+        ("BOS @ MIA", {"Isolation": 30}),
+    ]
+
+
+def test_a_sheet_rows_rank_reaches_each_game_over_http(
+    monkeypatch, mock_db_engine, mock_redis_client, dependencies, client
+):
+    """statsplus#498 evidence: an Arc3Assists 21-30 game prints its Arc3Assists rank."""
+
+    import app.utils.auth as auth
+    from app.services.team_filter_rankings import TeamFilterRankingService
+    from tests.support.publication_stubs import StubGovernance, StubReader, league, read
+
+    monkeypatch.setattr(auth, "get_firebase_app", lambda: None)
+    arc3 = {"LAL": 9.0, "MIA": 8.0, "CHI": 1.0}
+    streams = {
+        "traditional_opponent_season": _free_throw_league(),
+        "assist_locations_season": league(lambda tricode: {"arc3_assists": arc3.get(tricode, 3.0)}),
+    }
+    service = GameService(
+        mock_db_engine,
+        mock_redis_client,
+        settings=RuntimeSettings(environment="testing", nba=NBASeasonSettings(current_season="2024-25")),
+        team_filter_rankings=TeamFilterRankingService(
+            StubReader({stream: read(stream, rows) for stream, rows in streams.items()}),
+            governance_resolver=StubGovernance(),
+        ),
+    )
+    monkeypatch.setattr(service, "_get_game_logs", lambda name, season: (_game_logs_frame(), None))
+    dependencies.game_service = service
+
+    response = client.get(
+        "/api/games/game_logs?player_name=LeBron%20James&season_filter=2024-25"
+        "&teams_against[]=sheet:assist_locations:Arc3Assists&rank_filter[]=1,10"
+    )
+
+    assert response.status_code == 200, response.get_json()
+    body = response.get_json()
+    assert [(row["MATCHUP"], row["teams_against_ranks"]) for row in body["game_logs"]] == [
+        ("BOS vs. LAL", {"sheet:assist_locations:Arc3Assists": 30}),
+        ("BOS @ MIA", {"sheet:assist_locations:Arc3Assists": 29}),
+    ]
+    assert body["opponent_ranks"]["AST"]["label"] == "Assists Allowed"
+    assert "sheet:assist_locations:Arc3Assists" not in body["opponent_ranks"]
+
+
+def test_game_logs_without_a_teams_against_filter_carry_no_filter_ranks(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    service = _traditional_ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, _free_throw_league()
+    )
+
+    for query in (
+        GameLogQuery(season_filter="2024-25"),
+        GameLogQuery(season_filter="2024-25", opponent_tricode="MIA"),
+    ):
+        rows = service.get_filtered_logs("LeBron James", query)["game_logs"]
+        assert rows and not any("teams_against_ranks" in row for row in rows)
+
+
 def test_a_play_type_turnover_sheet_row_filters_game_logs_by_its_per_48_metric(
     monkeypatch, mock_db_engine, mock_redis_client
 ):

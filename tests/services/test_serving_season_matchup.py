@@ -151,7 +151,9 @@ def _diet_payload():
 class _Catalog:
     """The athlete catalog an Unscheduled Matchup names its player from."""
 
-    def get_catalog(self, season, *, active_only=False):
+    def get_catalog(self, season, *, active_only=False, player_ids=None):
+        if player_ids is not None and PLAYER_ID not in player_ids:
+            return []
         return [
             {
                 "season": season,

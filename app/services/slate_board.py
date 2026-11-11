@@ -8,6 +8,8 @@ committed between two of those reads never mixes into a response.  It composes
 no Matchup: a row carries the Matchup player row's ``lines``, ``line_prices``
 and ``book_lines`` for one market, and a player ruled Out stays in with his
 status.  A started game's pool is its closing set, as every pool read serves it.
+With ``moves`` it also reads the books' line history for the market
+(``app.services.line_moves``) in one more statement on the same connection.
 """
 
 from __future__ import annotations
@@ -18,11 +20,13 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 from app.domain.nba_events import is_final_event, is_started_event
+from app.domain.slate_time import slate_day_bounds_utc
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import InvalidInputError, ProviderUnavailableError
 from app.providers.odds_api import BOOK_ALLOWLIST
 from app.providers.registry import dfs_provider_names
 from app.services.injury_listing import slate_events
+from app.services.line_moves import book_histories, moves_of, pulled_value
 from app.services.player_pool import PlayerPool
 from app.services.publication_snapshot_calls import call_with_read_scope
 from app.services.request_reads import request_read_scope
@@ -124,14 +128,29 @@ class SlateBoardService:
         game_id: str | None = None,
         team: str | None = None,
         sources: frozenset[str] | None = None,
+        moves: bool = False,
     ) -> dict[str, Any]:
-        """The index of the date's markets without ``market``, else that market's rows per game."""
+        """The index of the date's markets without ``market``, else that market's rows per game.
+
+        ``moves`` adds each sportsbook cell's moves on the date and each book's pulled lines.
+        """
 
         if market is not None and market not in self.markets:
             raise InvalidInputError(
                 "The board market must be a catalog market such as PTS.",
                 public_details={"parameters": ["market"]},
             )
+        if moves and market is None:
+            raise InvalidInputError(
+                "Line moves need a market.",
+                public_details={"parameters": ["moves"]},
+            )
+        # Without a reader the board shows no book lines, so it serves no book history either.
+        history_books = sorted(
+            book
+            for book in BOOK_ALLOWLIST
+            if self.sportsbook_reader is not None and (sources is None or book in sources)
+        )
         if self.event_catalog is None:
             raise ProviderUnavailableError("The NBA schedule is not available. Please try again later.")
         season = season or schedule_season(self.settings, self.event_catalog, slate_date)
@@ -168,6 +187,20 @@ class SlateBoardService:
                 sources=sources,
                 athletes=lambda player_ids: self._athletes(season, player_ids, connection),
             )
+            if moves:
+                day_start = slate_day_bounds_utc(slate_date)[0]
+                histories = book_histories(
+                    connection,
+                    game_ids=game_ids,
+                    market=market,
+                    books=history_books,
+                    posted=(
+                        (str(row.canonical_game_id), int(row.canonical_player_id), str(row.book))
+                        for row in quotes
+                        if row.market_category == market
+                    ),
+                )
+                pulled = self._pulled(histories, events, pool, team, day_start, season, connection)
         now = assume_utc(self._clock())
         board: dict[str, Any] = {
             "date": slate_date.isoformat(),
@@ -196,12 +229,72 @@ class SlateBoardService:
         found, unnamed = postings.of(market)
         found.sort(key=lambda posting: (posting.team, posting.name, posting.player_id))
         for posting in found:
-            rows_by_game[posting.game_id].append(posting.row())
+            row = posting.row()
+            if moves:
+                books = (
+                    () if row["book_lines"] is None else (book["book"] for book in row["book_lines"]["books"])
+                )
+                row["moves"] = {
+                    book: moves_of(histories.get((book, posting.game_id, posting.player_id)), day_start)
+                    for book in sorted(books)
+                }
+            rows_by_game[posting.game_id].append(row)
         for game in board["games"]:
             game["players"] = rows_by_game[game["game_id"]]
         board["players_total"] = len(found)
         board["omitted"] = {"book_only_unnamed": len(unnamed)}
+        if moves:
+            board["moves_sources"] = history_books
+            board["pulled"] = pulled
         return board
+
+    def _pulled(
+        self,
+        histories: Mapping[tuple[str, str, int], Any],
+        events: Sequence[Mapping[str, Any]],
+        pool: PlayerPool,
+        team: str | None,
+        day_start: datetime,
+        season: str,
+        connection: Any,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Each book's lines posted on the date and no longer posted, named and in board order."""
+
+        candidates = {
+            key: value
+            for key, history in histories.items()
+            for value in (pulled_value(history, day_start),)
+            if value is not None
+        }
+        tricodes = {
+            int(event[f"{side}_team_id"]): str(event[f"{side}_team_tricode"])
+            for event in events
+            for side in ("away", "home")
+        }
+        names: dict[int, tuple[str, str | None]] = {
+            int(player.canonical_player_id): (player.name, tricodes.get(player.team_id))
+            for player in pool.players
+        }
+        unnamed = sorted({player_id for _book, _game, player_id in candidates} - set(names))
+        for athlete in self._athletes(season, unnamed, connection):
+            names[int(athlete["player_id"])] = (
+                str(athlete["display_name"]),
+                athlete.get("team_abbreviation"),
+            )
+        order = {str(event["nba_game_id"]): index for index, event in enumerate(events)}
+        pulled: dict[str, list[dict[str, Any]]] = {}
+        for (book, game_id, player_id), value in candidates.items():
+            name, player_team = names.get(player_id, (None, None))
+            if name is None or player_team is None or (team is not None and player_team != team):
+                continue
+            pulled.setdefault(book, []).append(
+                {"game_id": game_id, "player_id": player_id, "name": name, "team": player_team, **value}
+            )
+        for entries in pulled.values():
+            entries.sort(
+                key=lambda entry: (order[entry["game_id"]], entry["team"], entry["name"], entry["player_id"])
+            )
+        return dict(sorted(pulled.items()))
 
     def _pool(self, season: str, game_ids: Sequence[str], connection: Any) -> PlayerPool:
         if self.player_pool is None:
