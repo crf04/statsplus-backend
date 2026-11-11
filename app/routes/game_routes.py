@@ -90,13 +90,16 @@ _UNSCHEDULED_PARAMETERS = frozenset({*_UNSCHEDULED_SELECTORS, "player_team", "op
 _TRICODE = re.compile(r"[A-Za-z]{3}\Z")
 _ROTATION_SELECTORS = ("player_name", "team", "game_id")
 _ROTATION_PARAMETERS = frozenset(
-    {*_ROTATION_SELECTORS, "player_team", "last_n", "season", "without", "game_logs"}
+    {*_ROTATION_SELECTORS, "player_team", "last_n", "season", "with", "without", "game_logs"}
 )
+_ROTATION_NAME_LISTS = ("with", "without")
 _ROTATION_DEFAULT_LAST_N = 5
 _ROTATION_MAX_LAST_N = 20
 _LAST_N = re.compile(r"[0-9]{1,2}\Z")
 _NBA_GAME_ID = re.compile(r"[0-9]{10}\Z")
-_BOARD_PARAMETERS = frozenset({"date", "season", "market", "game", "team", "sources"})
+_BOARD_PARAMETERS = frozenset({"date", "season", "market", "game", "team", "sources", "moves"})
+#: One player's stored statuses over a date range (crf04/statsplus#494).
+_INJURY_HISTORY_PARAMETERS = frozenset({"player", "from_date", "to_date"})
 
 
 def _is_canonical_player_id(value: str) -> bool:
@@ -126,12 +129,30 @@ def get_slate_edges():
 @injuries_bp.route("", methods=["GET"], strict_slashes=False)
 @require_auth
 def get_injuries():
-    """List the stored official injury report for one ET date, or one team."""
-    unknown = sorted(set(request.args) - {"date", "team"})
+    """List the stored official injury report for one ET date, or one team; or one player's statuses over a range."""
+    unknown = sorted(set(request.args) - {"date", "team", *_INJURY_HISTORY_PARAMETERS})
     if unknown:
         raise InvalidInputError(
             "The injuries parameters are invalid.",
             public_details={"parameters": [sanitize_public_value(name) for name in unknown]},
+        )
+    if "player" in request.args:
+        conflicting = sorted({"date", "team"} & set(request.args))
+        if conflicting:
+            raise InvalidInputError(
+                "The injuries player cannot be combined with date or team.",
+                public_details={"parameters": conflicting},
+            )
+        return jsonify(
+            injuries_service.player_history(
+                request.args["player"], request.args.get("from_date"), request.args.get("to_date")
+            )
+        )
+    misplaced = sorted(_INJURY_HISTORY_PARAMETERS & set(request.args))
+    if misplaced:
+        raise InvalidInputError(
+            "The injuries from_date and to_date need a player.",
+            public_details={"parameters": misplaced},
         )
     return jsonify(injuries_service.list_injuries(request.args.get("date"), request.args.get("team")))
 
@@ -197,6 +218,9 @@ def get_board():
         )
         if not sources or not sources <= BOARD_SOURCES:
             raise _invalid_board("sources")
+    moves = request.args.get("moves", "false")
+    if moves not in ("true", "false"):
+        raise _invalid_board("moves")
     return jsonify(
         slate_board_service.get_board(
             slate_date=slate_date,
@@ -205,6 +229,7 @@ def get_board():
             game_id=game_id,
             team=team,
             sources=sources,
+            moves=moves == "true",
         )
     )
 
@@ -778,7 +803,7 @@ def _invalid_rotation(*parameters: str) -> InvalidInputError:
     return InvalidInputError(
         f"The rotation parameters are invalid: {names}.",
         public_details={
-            **({"parameter": "without"} if "without" in parameters else {}),
+            **next(({"parameter": name} for name in ("without", "with") if name in parameters), {}),
             "parameters": list(parameters),
         },
     )
@@ -798,18 +823,20 @@ def get_rotation():
     if "player_team" in request.args and selector != "player_name":
         raise _invalid_rotation("player_team")
     for name in request.args:
-        if name != "without" and len(request.args.getlist(name)) != 1:
+        if name not in _ROTATION_NAME_LISTS and len(request.args.getlist(name)) != 1:
             raise _invalid_rotation(name)
+    with_ = request.args.getlist("with")
     without = request.args.getlist("without")
-    if without and selector == "game_id":
-        raise _invalid_rotation("without")
-    if without and "last_n" in request.args:
-        raise _invalid_rotation("last_n", "without")
-    if any(not name.strip() for name in without):
-        raise _invalid_rotation("without")
+    for name, names in (("with", with_), ("without", without)):
+        if names and selector == "game_id":
+            raise _invalid_rotation(name)
+        if names and "last_n" in request.args:
+            raise _invalid_rotation("last_n", name)
+        if any(not typed.strip() for typed in names):
+            raise _invalid_rotation(name)
     game_logs = False
     if "game_logs" in request.args:
-        if not without or request.args["game_logs"] not in ("true", "false"):
+        if not (with_ or without) or request.args["game_logs"] not in ("true", "false"):
             raise _invalid_rotation("game_logs")
         game_logs = request.args["game_logs"] == "true"
     if selector == "game_id":
@@ -838,7 +865,12 @@ def get_rotation():
             raise _invalid_rotation("team")
         return jsonify(
             rotation_service.get_team_rotation(
-                team=value.upper(), last_n=last_n, season=season, without=without, game_logs=game_logs
+                team=value.upper(),
+                last_n=last_n,
+                season=season,
+                with_=with_,
+                without=without,
+                game_logs=game_logs,
             )
         )
     if not value.strip():
@@ -854,6 +886,7 @@ def get_rotation():
             player_team=player_team,
             last_n=last_n,
             season=season,
+            with_=with_,
             without=without,
             game_logs=game_logs,
         )

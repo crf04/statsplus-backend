@@ -85,6 +85,7 @@ READERS = {
     "app/models/sportsbook_odds.py",
     "app/services/closing_lines.py",
     "app/services/closing_line_backfill.py",
+    "app/services/line_moves.py",
     "scripts/backfill_closing_lines.py",
 }
 
