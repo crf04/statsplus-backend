@@ -62,6 +62,7 @@ QUESTIONABLE = 1006
 BOS_ROTATION = 1007
 TWO_TEAMS = 1008
 INACTIVE = 1010
+EXACT_TEN = 1011
 
 SCORED_MARKETS = [
     "3PM",
@@ -134,7 +135,8 @@ def _season_rows(*, bos_games=True):
         rows.append(_row(TRADED_IN, "Traded In", MIA, LAL, game, 30.0, 11))
     last = LAL_GAMES[-1]
     rows.append(_row(ROTATION, "Rotation Guy", LAL, MIA, last, 12.0, 5))
-    rows.append(_row(QUESTIONABLE, "Questionable Guy", LAL, MIA, last, 15.0, 8))
+    rows.append(_row(QUESTIONABLE, "Questionable Guy", LAL, MIA, last, 15.0, 30))
+    rows.append(_row(EXACT_TEN, "Exactly Ten", LAL, MIA, last, 10.0, 4))
     rows.append(_row(TWO_TEAMS, "Two Teams", LAL, MIA, last, 15.0, 6))
     rows.append(_row(INACTIVE, "Inactive Guy", LAL, MIA, last, 18.0, 7))
     for game in LAL_GAMES[1:]:
@@ -163,6 +165,7 @@ CATALOG = (
     (BOS_ROTATION, "Celtics Rotation", BOS, True),
     (TWO_TEAMS, "Two Teams", LAL, True),
     (INACTIVE, "Inactive Guy", LAL, False),
+    (EXACT_TEN, "Exactly Ten", LAL, True),
 )
 
 
@@ -227,6 +230,15 @@ def _injuries(out=frozenset({OUT}), badges=None):
     )
 
 
+#: A sportsbook quote for a player no DFS source lists: still a Rotation Player.
+BOOK_QUOTE = {"PTS": {"as_of": "2026-01-15T11:00:00Z", "closing": False, "books": []}}
+
+
+class Books:
+    def book_lines(self, game_id, *, connection=None):
+        return {ROTATION: BOOK_QUOTE}
+
+
 @dataclass
 class World:
     engine: object
@@ -234,7 +246,7 @@ class World:
     reader: DatabaseFirstPublicationReader
 
     def service(self, *, catalog=True, events=None, injuries=None, pool=None):
-        return MatchupService(
+        service = MatchupService(
             event_catalog=events or RecordedEvents(),
             player_pool=RecordedPool(pool or _pool()),
             player_logs=self.logs,
@@ -247,7 +259,9 @@ class World:
             publication_reader=self.reader,
             statistic_catalog=StatisticCatalog.load_default(),
             athlete_catalog=AthleteCatalogReader(self.engine) if catalog else None,
+            sportsbook_reader=Books(),
         )
+        return service
 
 
 def world(engine, rows=None):
@@ -309,13 +323,15 @@ def _sources(payload):
 def assert_rotation_scenario(served):
     payload = served.service().get_matchup(game_id=GAME_ID)
 
-    # Pool rows first, then Rotation Players by season scoring.
+    # Pool rows first, even below a Rotation Player who scores more, then
+    # Rotation Players by season scoring; exactly 10 minutes is enough.
     assert _sources(payload) == [
         (LEBRON, "LAL", "player_pool"),
-        (BOS_ROTATION, "BOS", "rotation"),
         (QUESTIONABLE, "LAL", "rotation"),
+        (BOS_ROTATION, "BOS", "rotation"),
         (TWO_TEAMS, "LAL", "rotation"),
         (ROTATION, "LAL", "rotation"),
+        (EXACT_TEN, "LAL", "rotation"),
     ]
     rotation = next(row for row in payload["players"] if row["canonical_id"] == ROTATION)
     assert {key: rotation[key] for key in _LINE_FIELDS} == {
@@ -327,7 +343,7 @@ def assert_rotation_scenario(served):
         "provenance": {},
         "lines": {},
         "line_prices": {},
-        "book_lines": {},
+        "book_lines": BOOK_QUOTE,
         "season_averages": {},
         "season_scoring": 5.0,
         "last_10_minutes": [12.0],
@@ -344,6 +360,7 @@ def assert_rotation_scenario(served):
         }
     ]
     assert sorted(rotation["scores"]) == SCORED_MARKETS
+    assert sorted(rotation["scores"]["PTS"]["season"]["components"]) == ["play_types"]
     assert rotation["diet_shares"]["play_types"][0]["key"] == "Transition"
     questionable = next(row for row in payload["players"] if row["canonical_id"] == QUESTIONABLE)
     assert questionable["injury_badge_ref"] == "nba_official:2"
@@ -395,7 +412,37 @@ def test_a_team_without_a_game_this_season_adds_no_one(tmp_path):
     payload = served.service().get_matchup(game_id=GAME_ID)
 
     assert [row for row in _sources(payload) if row[1] == "BOS"] == []
-    assert [row[0] for row in _sources(payload)] == [LEBRON, QUESTIONABLE, TWO_TEAMS, ROTATION]
+    assert [row[0] for row in _sources(payload)] == [LEBRON, QUESTIONABLE, TWO_TEAMS, ROTATION, EXACT_TEN]
+
+
+def test_a_rotation_player_is_scored_exactly_as_he_would_be_from_the_pool(tmp_path):
+    served = _sqlite_world(tmp_path)
+    pool = _pool()
+    posted = PlayerPool(
+        players=(
+            *pool.players,
+            PoolPlayer(
+                ROTATION,
+                "Rotation Guy",
+                LAL,
+                ("PTS",),
+                {"prizepicks": ("PTS",)},
+                lines={"prizepicks": {"PTS": 4.5}},
+            ),
+        ),
+        team_counts={LAL: 2},
+        freshness=pool.freshness,
+    )
+
+    def row(payload):
+        return next(row for row in payload["players"] if row["canonical_id"] == ROTATION)
+
+    rotation = row(served.service().get_matchup(game_id=GAME_ID))
+    pooled = row(served.service(pool=posted).get_matchup(game_id=GAME_ID))
+
+    assert (rotation["player_source"], pooled["player_source"]) == ("rotation", "player_pool")
+    assert rotation["scores"] == pooled["scores"]
+    assert rotation["diet_shares"] == pooled["diet_shares"]
 
 
 def test_without_an_athlete_catalog_the_matchup_is_todays(tmp_path):

@@ -1936,7 +1936,9 @@ archive. `focal_game_line` is `null` in current mode.
 each player with no line in CourtAI's books who played recent minutes: a
 player who is not in the game's Player Pool, played 10 or more minutes for his
 team in at least one of its 5 most recent Regular Season games before the
-game's date in the game's own season, is placed on that team by the season's
+game's date in the game's own season (read from that season's game logs
+whether or not the request selects it, so an unselected read of a game in a
+season not yet published still lists them), is placed on that team by the season's
 active Athlete Catalog, and is not listed `Out` on the game's stored injury
 report (a `Doubtful` or `Questionable` player stays, with his
 `injury_badge_ref`). Only the team's own logs count, so a team's first game of

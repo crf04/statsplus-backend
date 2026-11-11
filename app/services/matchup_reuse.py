@@ -52,6 +52,7 @@ ACCEPTED_LAG_INPUTS: Mapping[str, str] = {
     "log_sync": "canonical-log sync completion for a final game's participants",
     "stored_game_context": "the stored team context the ledger cron rewrites (crf04/statsplus#466)",
     "athlete_catalog": "the active Athlete Catalog team that admits a Rotation Player (crf04/statsplus#459)",
+    "game_season_logs": "an unpublished game season's logs that admit a Rotation Player (crf04/statsplus#459)",
 }
 
 #: Every section of a composed Matchup (top level, plus the nested sections of
@@ -119,7 +120,14 @@ SECTION_TREATMENT: Mapping[str, tuple[tuple[str, ...], str, tuple[str, ...]]] = 
         (KEYED, ACCEPTED_LAG),
         "generation, pool, game, retained Publication, settings are keyed; the "
         "rest is read from stored inputs",
-        ("stored_injuries", "durable_last_15", "mapping_replays", "log_sync", "athlete_catalog"),
+        (
+            "stored_injuries",
+            "durable_last_15",
+            "mapping_replays",
+            "log_sync",
+            "athlete_catalog",
+            "game_season_logs",
+        ),
     ),
     "injuries": ((ACCEPTED_LAG,), "stored injuries", ("stored_injuries",)),
     "game_context": ((ACCEPTED_LAG,), "stored team context", ("stored_game_context",)),

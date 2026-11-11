@@ -33,7 +33,7 @@ from app.domain.matchup_experience import (
     is_historical_matchup,
     player_source,
 )
-from app.domain.nba_events import REGULAR_SEASON_TYPE, resolve_stored_event_classification
+from app.domain.nba_events import resolve_stored_event_classification
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE, NBA_TEAM_TRICODE_TO_ID
 from app.domain.play_type_matchup import complete_play_type_shares, play_type_matchup
 from app.domain.rebound_types import REBOUND_TYPE_WIRE_NAMES, REBOUND_TYPES_BASE
@@ -58,7 +58,11 @@ from app.errors import (
     ResourceNotFoundError,
 )
 from app.services.athlete_resolver import CanonicalAthlete, catalog_athlete_matches
-from app.services.database_first_activation import DatabaseFirstPublicationReader
+from app.services.database_first_activation import (
+    DatabaseFirstPublicationReader,
+    ReadSeason,
+    SeasonUnavailable,
+)
 from app.services.matchup_injuries import (
     MatchupInjuryResult,
     unavailable_injury_result,
@@ -342,6 +346,8 @@ _OWN = object()
 #: team in at least one of its last ``ROTATION_RECENT_GAMES`` games.
 ROTATION_MIN_MINUTES = 10
 ROTATION_RECENT_GAMES = 5
+_GAME_LOG_STREAM_KEYS = ("player_game_logs",)
+_NO_GAME_LOGS = object()
 
 
 @dataclass
@@ -368,6 +374,9 @@ class MatchupComposeCache:
     #: The Event Catalog's refresh row per schedule season: every game of a
     #: season reports the same schedule retrieval.
     schedule_refreshes: dict[str, Mapping[str, Any]] = field(default_factory=dict)
+    #: A game season's game-log capture, when it is not the evidence season:
+    #: Rotation Players are read from it.
+    game_season_logs: dict[str, Any] = field(default_factory=dict)
 
 
 class EventCatalogReader(Protocol):
@@ -1246,6 +1255,7 @@ class MatchupService:
                 schedule_season=schedule_season,
                 publication_snapshot=publication_snapshot,
                 connection=connection,
+                compose_cache=compose_cache,
             )
             participants_section = self._pool_participants_section(pool_players)
         player_ids = tuple(player.canonical_player_id for player in players)
@@ -1489,6 +1499,7 @@ class MatchupService:
         schedule_season: str,
         publication_snapshot: Any,
         connection: Connection | None,
+        compose_cache: MatchupComposeCache | None,
     ) -> tuple[_Participant, ...]:
         """The game's Rotation Players: no line, recent minutes (crf04/statsplus#459).
 
@@ -1496,11 +1507,14 @@ class MatchupService:
         team in one of its last ``ROTATION_RECENT_GAMES`` games before this
         one, whom the active Athlete Catalog places on that team, and who is
         not listed Out.  Only the game's own season's logs count, so a team's
-        first game, or a season not yet published, adds no one; a player
-        traded to the team counts once he has played for it.
+        first game adds no one and a player traded to the team counts once he
+        has played for it.
         """
 
-        if self.athlete_catalog is None or season != schedule_season:
+        if self.athlete_catalog is None:
+            return ()
+        logs = self._game_season_logs(season, schedule_season, publication_snapshot, compose_cache)
+        if logs is _NO_GAME_LOGS:
             return ()
         listed = {int(player.canonical_player_id) for player in pool_players} | out_player_ids
         before = self._event_date(event)
@@ -1509,16 +1523,14 @@ class MatchupService:
             for team_id in team_ids
             for row in call_with_read_scope(
                 self.player_logs.list_team_recent_rows,
-                season,
+                schedule_season,
                 team_id,
                 before_date=before,
                 games=ROTATION_RECENT_GAMES,
-                publication_snapshot=publication_snapshot,
+                publication_snapshot=logs,
                 connection=connection,
             )
-            if row.season_type == REGULAR_SEASON_TYPE
-            and row.minutes >= ROTATION_MIN_MINUTES
-            and int(row.player_id) not in listed
+            if row.minutes >= ROTATION_MIN_MINUTES and int(row.player_id) not in listed
         }
         if not played:
             return ()
@@ -1543,6 +1555,38 @@ class MatchupService:
             for athlete in athletes
             if (athlete.player_id, athlete.team_id) in played
         )
+
+    def _game_season_logs(
+        self,
+        season: str,
+        schedule_season: str,
+        publication_snapshot: Any,
+        compose_cache: MatchupComposeCache | None,
+    ) -> Any:
+        """The capture holding the game's own season's game logs.
+
+        The evidence capture when the seasons agree.  Otherwise, while the
+        game's season is still unpublished, a capture of that season alone, as
+        a request selecting it would read it; ``_NO_GAME_LOGS`` while that
+        season is not offered at all.
+        """
+
+        if season == schedule_season or self.publication_reader is None:
+            return publication_snapshot
+        held = None if compose_cache is None else compose_cache.game_season_logs
+        if held is not None and schedule_season in held:
+            return held[schedule_season]
+        try:
+            capture = self.publication_reader.for_season(schedule_season).snapshot(
+                _GAME_LOG_STREAM_KEYS,
+                season=ReadSeason(schedule_season, requested=schedule_season),
+                projection_only_keys=frozenset(_GAME_LOG_STREAM_KEYS),
+            )
+        except SeasonUnavailable:
+            capture = _NO_GAME_LOGS
+        if held is not None:
+            held[schedule_season] = capture
+        return capture
 
     @staticmethod
     def _pool_participants_section(
