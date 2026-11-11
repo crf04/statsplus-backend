@@ -765,6 +765,7 @@ def build_dependencies(
         # The closing-line table exists once migration 067 has run; the
         # read-only demo database never has it.
         closing_lines=closing_line_reader,
+        injury_reports=injury_snapshot_repository,
         posted_lines=(
             PostedLinesReader(
                 event_catalog=stored_schedule,
@@ -979,7 +980,11 @@ def build_dependencies(
         target_preview_service=target_preview_service,
         rotation_repository=rotation_repository,
         rotation_service=RotationService(
-            rotation_repository, athlete_catalog_service, game_service.default_season, game_service
+            rotation_repository,
+            athlete_catalog_service,
+            game_service.default_season,
+            game_service,
+            injury_reports=injury_snapshot_repository,
         ),
         player_season_stats_service=PlayerSeasonStatsService(PlayerSeasonStatsRepository(engine)),
         rotation_collection_service=RotationCollectionService(

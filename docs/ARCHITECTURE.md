@@ -1321,6 +1321,23 @@ primary player and every named teammate; `players_off[]` removes the union of
 same-team pairs where any named teammate has a row, and keeps only games inside
 each named teammate's team window, from his first game for the team in the
 season until his first later game for another team (crf04/statsplus#449). A
+team game before his first game for the team is in the window only on
+membership evidence, report evidence first (crf04/statsplus#450): the game's
+stored official injury report (`injury_snapshots`) listing him for the team puts
+it in; a stored report on that day or earlier in the season listing him for
+another team keeps it out and ends carry-over; otherwise his last
+previous-season game being for the team, with no game for another team since,
+puts it in. `app/services/team_membership.py` reads that evidence for game logs,
+rotations and Injury Scenarios alike, only when a named player has a judged team
+game before his first game for the team (or has none), and once per request
+(per season in Injury Scenarios) for all named players: the season's snapshots
+that list them in one statement, matched in SQL on the stored
+`"canonical_player_id":<id>` member (about 82 of a season's 1,230 rows for a
+player out all season), and their previous-season logs in one batch. The
+evidence is optional: every read it takes, a name's identity and the Athlete
+Catalog lookup for a `without` name with no box-score line included, goes
+through one fallback, so when any of them fails the window opens at his first
+game for the team. A
 player appearing for the
 opponent in the same game is therefore never treated as the primary player's
 teammate. Every named player's rows come from an active durable publication;

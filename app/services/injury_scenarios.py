@@ -60,10 +60,12 @@ import pandas as pd
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
+from app.domain.team_window import TeamWindow
 from app.errors import InvalidInputError
 from app.services.posted_lines import posted_line
 from app.services.research_season import previous_nba_season, schedule_season, season_scoped
-from app.services.rotation_service import absent_windows, classify_games, rotation_split
+from app.services.rotation_service import classify_games, rotation_split
+from app.services.team_membership import TeamMembership, appearances
 
 #: Statuses that get a scenario; Probable and Available get none.
 SCENARIO_STATUSES = ("Out", "Doubtful", "Questionable")
@@ -244,6 +246,8 @@ class _RequestReads:
         self._catalog: dict[str, dict[int, int]] = {}
         self._rotation_lines: dict[tuple[str, str], dict[str, dict[int, dict[str, Any]]]] = {}
         self._games: dict[str, Any] = {}
+        #: Each listed player's team window per season: ``{season: {player_id: {team: window}}}``.
+        self.windows: dict[str, dict[int, dict[str, TeamWindow | None]]] = {}
 
     def games(self, season: str) -> Any:
         """The game service scoped to ``season``.
@@ -294,6 +298,13 @@ class _RequestReads:
         for pid in missing:
             self._logs[(pid, season)] = frames.get(pid)
 
+    def logs_by_id(self, player_ids: Iterable[int], season: str) -> dict[int, pd.DataFrame | None]:
+        """``logs`` for several players, those not yet read in one batch."""
+
+        ids = {int(pid) for pid in player_ids}
+        self.load_logs(ids, season)
+        return {pid: self.logs(pid, season) for pid in ids}
+
     def logs(self, player_id: int, season: str) -> pd.DataFrame | None:
         key = (int(player_id), season)
         if key not in self._logs:
@@ -318,11 +329,20 @@ class _RequestReads:
 class _RotationReads:
     """One injured player's stored rotation lines for his team, read once per season."""
 
-    def __init__(self, rotations: Any | None, team: str, injured_id: int, request: _RequestReads) -> None:
+    def __init__(
+        self,
+        rotations: Any | None,
+        team: str,
+        injured_id: int,
+        request: _RequestReads,
+        windows: Mapping[str, TeamWindow | None],
+    ) -> None:
         self.rotations = rotations
         self.team = team
         self.injured_id = injured_id
         self.request = request
+        #: His team window per season.
+        self.windows = windows
         self._memo: dict[str, tuple[dict[str, dict[int, dict[str, Any]]], list[str], list[str]]] = {}
 
     def season(self, season: str) -> tuple[dict[str, dict[int, dict[str, Any]]], list[str], list[str]]:
@@ -330,7 +350,7 @@ class _RotationReads:
 
         if season not in self._memo:
             lines = self.request.rotation_lines(self.rotations, self.team, season)
-            windows = absent_windows(self.rotations, season, self.team, [self.injured_id]) if lines else {}
+            windows = {self.injured_id: self.windows[season]} if lines else {}
             without, played = classify_games(lines, windows)
             self._memo[season] = (lines, without, played)
         return self._memo[season]
@@ -392,6 +412,7 @@ class InjuryScenarioService:
                 listed_out.setdefault(row["team"], set()).add(int(row["player_id"]))
         reads = _RequestReads(self, fetch_on_off=bool(wanted), user_id=user_id)
         self._prefetch(selected, season, reads)
+        self._windows(selected, season, reads)
         teammate_ids = None
         if teammate:
             # With no scenario selected, the name is still checked, against every team on the report.
@@ -561,8 +582,9 @@ class InjuryScenarioService:
         seasons = [previous_nba_season(season), season]  # chronological
         injured_logs = {s: _Logs(request.logs(injured_id, s)) for s in seasons}
         reads = _OnOffReads(self.on_off, team, injured_id, request)
-        rotation_reads = _RotationReads(self.rotations, team, injured_id, request)
         roster = self._roster(injured_id, team, season, request, listed_out)
+        windows = {s: request.windows[s][injured_id][team] for s in seasons}
+        rotation_reads = _RotationReads(self.rotations, team, injured_id, request, windows)
         pool_lines = self._pool_lines(season, game_id)
         teammates = []
         for teammate_id in sorted(roster):
@@ -572,6 +594,7 @@ class InjuryScenarioService:
                 team,
                 seasons,
                 injured_logs,
+                windows,
                 reads,
                 rotation_reads,
                 pool_lines,
@@ -580,6 +603,39 @@ class InjuryScenarioService:
             if built is not None:
                 teammates.append(built)
         return teammates, self._rotation_starts(team, seasons, injured_logs, rotation_reads)
+
+    def _windows(self, rows: Sequence[Mapping[str, Any]], season: str, request: _RequestReads) -> None:
+        """Every listed player's team window per season, with one evidence read per season for all of them.
+
+        Each is judged on his team's stored rotation games and its season roster's log games.
+        """
+
+        seasons = [previous_nba_season(season), season]
+        membership = TeamMembership(self.injuries.snapshot_repository, request.logs_by_id)
+        for s in seasons:
+            judged = {}
+            for row in rows:
+                if row["player_id"] is None:
+                    continue
+                injured_id, team = int(row["player_id"]), row["team"]
+                judged[injured_id] = (
+                    appearances(request.logs(injured_id, s)),
+                    {team: self._team_days(team, s, request)},
+                )
+            request.windows[s] = membership.windows(s, judged)
+
+    def _team_days(self, team: str, season: str, request: _RequestReads) -> set[Any]:
+        """The days of the team's stored rotation games and its season roster's log games."""
+
+        days = {
+            next(iter(by_player.values()))["game_date"]
+            for by_player in request.rotation_lines(self.rotations, team, season).values()
+        }
+        for teammate_id in request.roster(NBA_TEAM_TRICODE_TO_ID[team], season):
+            rows = _Logs(request.logs(teammate_id, season)).team_rows(team)
+            if rows is not None:
+                days.update(pd.to_datetime(rows["GAME_DATE"]).dt.date)
+        return days
 
     def _injured_seasons(
         self, injured_id: int, team: str, season: str, request: _RequestReads
@@ -603,7 +659,9 @@ class InjuryScenarioService:
             if frames:
                 team_games = pd.concat(frames).drop_duplicates("GAME_ID")
                 missed, played = self.games.games_without_and_with_player(
-                    team_games, _Logs(request.logs(injured_id, s)).absent_frame()
+                    team_games,
+                    _Logs(request.logs(injured_id, s)).absent_frame(),
+                    {team: request.windows[s][injured_id][team]},
                 )
             counts.append({"season": s, "missed": len(missed), "played": len(played)})
         return counts
@@ -644,6 +702,7 @@ class InjuryScenarioService:
         team: str,
         seasons: Sequence[str],
         injured_logs: Mapping[str, _Logs],
+        windows: Mapping[str, TeamWindow | None],
         reads: _OnOffReads,
         rotation_reads: _RotationReads,
         pool_lines: Mapping[int, Mapping[str, Mapping[str, float]]],
@@ -663,8 +722,8 @@ class InjuryScenarioService:
             rows = mates[s].team_rows(team)
             if rows is None:
                 continue
-            # Last season counts only with evidence he was on this team then.
-            if s != seasons[-1] and injured_logs[s].team_rows(team) is None:
+            # Last season counts only when his team window places him on this team then.
+            if s != seasons[-1] and windows[s] is None:
                 continue
             if last_other is not None:
                 rows = rows[rows["GAME_DATE"] > last_other]
@@ -674,7 +733,9 @@ class InjuryScenarioService:
                 injured_logs[s].other_team_rows(team) is not None
                 or mates[s].other_team_rows(team) is not None
             )
-            without, played = self.games.games_without_and_with_player(rows, injured_logs[s].absent_frame())
+            without, played = self.games.games_without_and_with_player(
+                rows, injured_logs[s].absent_frame(), {team: windows[s]}
+            )
             window.append(_WindowSeason(s, rows, without, played, sliceable=not changed))
         if not window:
             return None

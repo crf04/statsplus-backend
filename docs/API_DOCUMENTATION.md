@@ -1073,7 +1073,8 @@ shared, a named request does not reach PBPStats either: its rows carry `on_off_u
 Each scenario has `injured` (player, player_id, team, game_id, status,
 `reason`, report_time, and `seasons`: `[{season, missed, played}]`, the
 Slate season then last season, counting his team's games he missed and played
-by the game-log absence rule; `[]` when unresolved), `limits` (`stale_report`, or `player_unresolved` when the
+by the game-log absence rule, team window evidence included
+(crf04/statsplus#450); `[]` when unresolved), `limits` (`stale_report`, or `player_unresolved` when the
 report's name matched no Athlete Catalog player, in which case there are no
 branches) and `branches`: `plays` then `sits` for Questionable or Doubtful,
 `sits` only for Out. A branch's `rows` hold one row per rotation teammate
@@ -1084,7 +1085,8 @@ that are never flagged.
 - `baseline`: the teammate with the injured player: game-log `avg`/`games`,
   on-floor `per36`/`minutes` (on/off `on[]`), and `season_span`.
 - `without` (sits only): `avg`, `games`, `season_span` in games the injured
-  player missed, by the game-log `players_off` absence rule.
+  player missed, by the game-log `players_off` absence rule, team window
+  evidence included.
 - `off_floor` (sits only): `per36`, `minutes`, `season_span` from
   [on/off](#get-onoff-splits) with the injured player in `off[]`.
 - `line`: `value`, `source` and `beat`/`of` counted in the `without` games
@@ -1160,7 +1162,9 @@ The window is the current season plus last season, each read scoped to its
 season (`season_scoped`), so a current season after the Published Season counts
 its games as a selected season does. It starts after the later of
 the two players' last appearance for a different team, and last season also
-needs a game for this team by the injured player. Without a team change the
+needs the injured player's team window for this team that season (a game for
+it, or the membership evidence of `players_off[]`; crf04/statsplus#450), the
+same window `injured.seasons` counts. Without a team change the
 `without` games are those `GET /api/games/game_logs?players_off[]=` returns.
 Teammates are the players with a game for the team in the Slate season, minus
 players the Athlete Catalog has since placed on another team; before the
@@ -3455,7 +3459,7 @@ Query parameters:
 | `player_name` | Yes | Player name; resolved against the requested `season_filter`'s Athlete Catalog first (exact case-insensitive match, then fuzzy), preferring the namesake active for that season when multiple catalog rows share a display name, falling back to the legacy `player_information` table when no catalog exists for that season |
 | `minutes_filter` | No | Comma-separated min,max minutes. Default `0,48` |
 | `players_on[]` | No | Teammates that must have a game-log appearance in the same game for the same team; this is game-level played/didn't-play evidence, not lineup-stint evidence |
-| `players_off[]` | No | Teammates that must have no game-log appearance in the same game for the same team, counted only inside each one's team window: from his first game for that team in the season until his first later game for another team (crf04/statsplus#449). A game outside the window is excluded; multiple names keep only games inside every window with no appearance by any of them |
+| `players_off[]` | No | Teammates that must have no game-log appearance in the same game for the same team, counted only inside each one's team window: from his first game for that team in the season until his first later game for another team (crf04/statsplus#449). A team game before his first game for the team (any team game, when he has none) is inside the window only on membership evidence, report evidence first (crf04/statsplus#450): it is inside when the game's stored official injury report lists him for the team (any status); outside when a stored report on that day or an earlier day of the season lists him for another team, which also ends carry-over; otherwise inside when his last game of the previous season was for the team and he has played for no other team before that game. When any read that evidence needs fails (the stored reports, the previous season's logs, or the Athlete Catalog read that identifies a name with no game), the window opens at his first game for the team and the request still succeeds. A game outside the window is excluded; multiple names keep only games inside every window with no appearance by any of them |
 | `date_filter` | No | `YYYY-MM-DD` start date that trims the player's own game logs. It never reshapes Team Filter rankings, which are always whole-Regular-Season |
 | `date_to` | No | `YYYY-MM-DD` inclusive end date that trims the player's own game logs; with `date_filter` it selects an inclusive range (#307). It never reshapes Team Filter rankings, which are always whole-Regular-Season. An unparsable value, or one earlier than `date_filter`, is rejected with `400` `invalid_input` |
 | `teams_against[]` | No | Opponent filter names such as `OPP_PTS`. Every filter ranks opponents from the durable Season publications for the requested `season_filter` (#198); a request-time provider call is no longer made for any combination of filters. A season with no Season publication ranks no opponents, so the filter resolves to an empty result rather than borrowing another season's rankings. The authoritative accepted set (and its legacy aliases) is not enumerated here except by example: a rejection's `details` carry the full canonical `supported_values` and `supported_aliases` (#145). An entry may instead be a Defense Sheet row reference, `sheet:<base>:<row key>`, which ranks that Sheet row's Season allowed per 48 (#308; see Filtering Reference) |
@@ -3861,7 +3865,15 @@ named player or players **absent** against those with them **present**, over the
 whole `season`; `last_n` is rejected because a "last 5" without sample is rarely
 a sample. A named player's *team window* runs from his first game for the team
 in the season until his first later game for another team, open-ended if he
-never moves (crf04/statsplus#449). Inside it he is *absent* in a game when he
+never moves (crf04/statsplus#449). A team game before his first game for the
+team (any team game, when he has none) is inside it only on membership
+evidence, report evidence first (crf04/statsplus#450): inside when the game's
+stored official injury report lists him for the team (any status); outside when
+a stored report on that day or an earlier day of the season lists him for
+another team, which also ends carry-over; otherwise inside when his last game of
+the previous season was for the team and he has played for no other team before
+that game. When any read that evidence needs fails, the window opens at his
+first game for the team. Inside it he is *absent* in a game when he
 has no box-score line for the team (inactive) or a 0-minute line (DNP), and
 *present* when his line shows more than 0; a game outside his window is
 excluded. *Without games* are those where every named player is absent, *with games*
@@ -3870,7 +3882,10 @@ his box-score line for the team, a DNP counts as 0 minutes, and a game where he
 has no line for the team is excluded from his split.
 
 Names resolve against players with a box-score line for the team in the season
-(case, punctuation and diacritics ignored). An unknown name is `400
+(case, punctuation and diacritics ignored); a name with no line resolves through
+the season's Athlete Catalog, read only for such a name, when that evidence puts
+one of the team's games in his window, as for an injured player who has not
+played (crf04/statsplus#450). An unreadable catalog leaves the name unresolved, as with no evidence. An unknown name is `400
 invalid_input` with `details.parameter: "without"`; an ambiguous one adds
 `details.candidates` (`name`, `team`); naming the `player_name` subject is a
 `400` too. `without` with `game_id` or `last_n` is a `400` whose

@@ -17,8 +17,19 @@ g6    2026-01-11  32 S    0       18     12      Cade plays, Duren out
 """
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
-from tests.support.rotation_world import Catalog, game, line, migrated_repository, service_for, store
+from app.services.injury_snapshot_repository import InjurySnapshotRepository
+from tests.support.injury_reports import store_reports
+from tests.support.rotation_world import (
+    Catalog,
+    StoredLogs,
+    game,
+    line,
+    migrated_repository,
+    service_for,
+    store,
+)
 
 ROTATION = "/api/games/rotation"
 CADE, DUREN, AUSAR, ISAIAH, LATE, SAM_A, SAM_B = 10, 11, 20, 21, 22, 30, 31
@@ -419,6 +430,89 @@ def test_an_inactive_player_with_no_line_counts_as_without(client, tmp_path, dep
     assert (player["with"]["games"], player["with"]["minutes"]) == (2, 20.0)
 
 
+def _minnesota(repository, *lines_by_game):
+    """MIN games n1.. on 2026-10-12, 10-14, ..., one per entry of box-score lines."""
+
+    store(
+        repository,
+        *(_min(n, f"2026-10-{10 + 2 * n}", *lines) for n, lines in enumerate(lines_by_game, start=1)),
+        season="2026-27",
+    )
+
+
+INGRAM, BROWN = 43, 44
+
+
+def _min_days(*numbers):
+    """``{game_id: game day}`` of the ``_minnesota`` games numbered ``numbers``."""
+
+    return {f"00226000{n:02d}": f"2026-10-{10 + 2 * n}" for n in numbers}
+
+
+def test_a_missed_opener_counts_as_without_when_he_ended_last_season_on_the_team(
+    client, tmp_path, dependencies
+):
+    # Hart's shape (crf04/statsplus#450): Edwards has no line in the first two
+    # games and plays the next two; his last 2025-26 game was for MIN.
+    repository = migrated_repository(tmp_path)
+    ayo = lambda m: line(DOSUNMU, "Ayo Dosunmu", "MIN", minutes=m)  # noqa: E731
+    edwards = line(EDWARDS, "Anthony Edwards", "MIN", minutes=36)
+    _minnesota(repository, [ayo(30)], [ayo(30)], [edwards, ayo(20)], [edwards, ayo(20)])
+    logs = StoredLogs()
+    logs.add(EDWARDS, "MIN", "0022501230", "2026-04-12", season="2025-26", minutes=36)
+    dependencies.rotation_service = service_for(
+        repository, Catalog((DOSUNMU, "Ayo Dosunmu", "MIN")), default_season="2026-27", logs=logs
+    )
+
+    team = _get(client, "team=MIN&without=Anthony%20Edwards").get_json()["without"]
+
+    assert (team["games_without"], team["games_with"]) == (2, 2)
+
+
+def test_a_player_with_no_line_is_without_in_every_game_whose_report_lists_him(
+    client, tmp_path, dependencies
+):
+    # Ingram's shape (crf04/statsplus-backend#759): out all season with no
+    # box-score line, on every MIN report.
+    repository = migrated_repository(tmp_path)
+    ayo = lambda m: line(DOSUNMU, "Ayo Dosunmu", "MIN", minutes=m)  # noqa: E731
+    _minnesota(repository, [ayo(30)], [ayo(28)], [ayo(26)], [ayo(24)])
+    reports = InjurySnapshotRepository(repository.engine)
+    store_reports(reports, "2026-27", _min_days(1, 2, 3, 4), (INGRAM, "MIN"))
+    dependencies.rotation_service = service_for(
+        repository,
+        Catalog((DOSUNMU, "Ayo Dosunmu", "MIN"), (INGRAM, "Brandon Ingram", "MIN")),
+        default_season="2026-27",
+        injury_reports=reports,
+    )
+
+    team = _get(client, "team=MIN&without=Brandon%20Ingram").get_json()["without"]
+    player = _get(client, "player_name=Ayo%20Dosunmu&without=Brandon%20Ingram").get_json()["without"]
+
+    assert (team["absent"], team["games_without"], team["games_with"]) == (["Brandon Ingram"], 4, 0)
+    assert (player["without"]["games"], player["without"]["minutes"]) == (4, 27.0)
+
+
+@pytest.mark.parametrize("listed", [[], [(INGRAM, "BOS")]], ids=["no-report", "listed-for-another-team"])
+def test_a_player_with_no_line_and_no_evidence_for_the_team_is_a_400(client, tmp_path, dependencies, listed):
+    repository = migrated_repository(tmp_path)
+    _minnesota(repository, [line(DOSUNMU, "Ayo Dosunmu", "MIN", minutes=30)])
+    reports = InjurySnapshotRepository(repository.engine)
+    if listed:
+        store_reports(reports, "2026-27", _min_days(1), *listed)
+    dependencies.rotation_service = service_for(
+        repository,
+        Catalog((DOSUNMU, "Ayo Dosunmu", "MIN"), (INGRAM, "Brandon Ingram", "MIN")),
+        default_season="2026-27",
+        injury_reports=reports,
+    )
+
+    response = _get(client, "team=MIN&without=Brandon%20Ingram")
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["details"]["parameter"] == "without"
+
+
 def test_games_after_the_absent_player_moved_to_another_team_are_left_out(client, tmp_path, dependencies):
     repository = migrated_repository(tmp_path)
     steady = line(AUSAR, "Steady", "DET", minutes=20)
@@ -436,3 +530,93 @@ def test_games_after_the_absent_player_moved_to_another_team_are_left_out(client
     without = _get(client, "team=DET&without=Moved%20On").get_json()["without"]
 
     assert (without["games_without"], without["games_with"]) == (1, 1)
+
+
+def _unreadable(*args, **kwargs):
+    raise SQLAlchemyError("unreadable")
+
+
+class _UnreadablePastLogs(StoredLogs):
+    def get_players_logs_by_id(self, player_ids, season, *, publication_snapshot=None):
+        if season != "2026-27":
+            _unreadable()
+        return super().get_players_logs_by_id(player_ids, season, publication_snapshot=publication_snapshot)
+
+
+@pytest.mark.parametrize(
+    ("unreadable", "split"),
+    [(None, (1, 1)), ("reports", (0, 1)), ("last-season-logs", (0, 1))],
+    ids=["readable", "reports", "last-season-logs"],
+)
+def test_unreadable_membership_evidence_opens_the_window_at_the_first_game(
+    client, tmp_path, dependencies, monkeypatch, unreadable, split
+):
+    # Edwards debuts in game 2; game 1's report lists him for MIN.
+    repository = migrated_repository(tmp_path)
+    ayo = lambda m: line(DOSUNMU, "Ayo Dosunmu", "MIN", minutes=m)  # noqa: E731
+    _minnesota(repository, [ayo(30)], [ayo(20), line(EDWARDS, "Anthony Edwards", "MIN", minutes=36)])
+    reports = InjurySnapshotRepository(repository.engine)
+    store_reports(reports, "2026-27", _min_days(1), (EDWARDS, "MIN"))
+    if unreadable == "reports":
+        monkeypatch.setattr(reports, "get_season_mentions", _unreadable)
+    dependencies.rotation_service = service_for(
+        repository,
+        Catalog((DOSUNMU, "Ayo Dosunmu", "MIN")),
+        default_season="2026-27",
+        logs=_UnreadablePastLogs() if unreadable == "last-season-logs" else StoredLogs(),
+        injury_reports=reports,
+    )
+
+    response = _get(client, "team=MIN&without=Anthony%20Edwards")
+
+    assert response.status_code == 200
+    without = response.get_json()["without"]
+    assert (without["games_without"], without["games_with"]) == split
+
+
+def test_names_on_the_box_scores_resolve_without_reading_the_catalog(client, detroit, monkeypatch):
+    catalog = detroit.rotation_service.athlete_catalog
+    read, reads = catalog.get_catalog, []
+
+    def counted(season, **kwargs):
+        reads.append(season)
+        return read(season, **kwargs)
+
+    monkeypatch.setattr(catalog, "get_catalog", counted)
+
+    without = _get(client, "team=DET&without=Cade%20Cunningham").get_json()["without"]
+
+    assert (without["games_without"], without["games_with"], len(reads)) == (5, 2, 0)
+
+
+def test_an_offseason_mover_counts_for_the_new_team_on_its_reports_and_not_the_old_one(
+    client, tmp_path, dependencies
+):
+    # Ingram ended 2025-26 on MIN, is on BOS's reports from opening night and
+    # has not played: MIN's games are not without him, BOS's are.
+    repository = migrated_repository(tmp_path)
+    ayo = lambda m: line(DOSUNMU, "Ayo Dosunmu", "MIN", minutes=m)  # noqa: E731
+    brown = lambda m: line(BROWN, "Jaylen Brown", "BOS", minutes=m)  # noqa: E731
+    _minnesota(repository, [ayo(30), brown(34)], [ayo(28), brown(36)])
+    reports = InjurySnapshotRepository(repository.engine)
+    store_reports(reports, "2026-27", _min_days(1, 2), (INGRAM, "BOS"))
+    logs = StoredLogs()
+    logs.add(INGRAM, "MIN", "0022501230", "2026-04-12", season="2025-26", minutes=36)
+    dependencies.rotation_service = service_for(
+        repository,
+        Catalog(
+            (DOSUNMU, "Ayo Dosunmu", "MIN"), (BROWN, "Jaylen Brown", "BOS"), (INGRAM, "Brandon Ingram", "BOS")
+        ),
+        default_season="2026-27",
+        logs=logs,
+        injury_reports=reports,
+    )
+
+    old = _get(client, "team=MIN&without=Brandon%20Ingram")
+    old_player = _get(client, "player_name=Ayo%20Dosunmu&without=Brandon%20Ingram")
+    new = _get(client, "team=BOS&without=Brandon%20Ingram").get_json()["without"]
+    new_player = _get(client, "player_name=Jaylen%20Brown&without=Brandon%20Ingram").get_json()["without"]
+
+    assert (old.status_code, old_player.status_code) == (400, 400)
+    assert (new["absent"], new["games_without"], new["games_with"]) == (["Brandon Ingram"], 2, 0)
+    assert (new_player["without"]["games"], new_player["without"]["minutes"]) == (2, 35.0)
