@@ -5760,8 +5760,29 @@ schedule, so a rerun reports every game `unchanged`. It calls no provider.
 `scripts/game_context_refresh.py` runs it nightly in the `ledger-refresh`
 service after the ledger and rotation steps, and by hand for an earlier season.
 `MatchupService` reads the two rows per game as `game_context`, on the
-request's own connection, and computes nothing. A later game-lines table
-(spread, total, team totals) is meant to join `game_contexts` by `game_id`.
+request's own connection, and computes nothing.
+
+### Stored game lines (crf04/statsplus#493)
+
+`game_lines` (migration 087, `app/models/game_lines.py`) holds one row per Event
+Catalog game: the home team's spread, the total, the sportsbook ESPN names, the
+ESPN event id and `read_at`. `game_lines.collect` (`app/services/game_lines.py`)
+reads ESPN's scoreboard
+(`site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=`) once
+for the current Eastern date, with a 5 s connect and 10 s read timeout, and
+takes `competitions[0].odds[0]` of every game whose state is `pre`. A line is
+stored only when both `spread` and `overUnder` are finite numbers and
+`details` ("NY -15.5", "EVEN") does not contradict the spread. ESPN's
+abbreviations are mapped to NBA tricodes (NY, GS, SA, NO, UTAH, WSH, PHO) and
+each line is matched to the single non-postponed Event Catalog game on the same
+Eastern date between the same two teams, either way round; anything else is
+reported `unmatched`. A matched row is inserted or rewritten with the new
+`read_at`; a started game, or one ESPN shows no line for, is not written, so it
+keeps its last pre-tip line. `scripts/collect_odds.py` runs it after every odds
+beat in the `odds-collector` cron (every five minutes); a failure prints
+`game_lines failed: ...` and never changes the exit code. The Matchup reads the
+row as `game_context.game_line` and never calls ESPN; the favourite and implied
+totals are computed from the stored spread and total on read.
 
 ### Player tracking (crf04/statsplus#349)
 

@@ -2376,7 +2376,21 @@ nothing. `scripts/game_context_refresh.py` stores it on the ledger cron (see
         {"game_date": "2026-11-06", "opponent_tricode": "MIN", "is_home": true, "points": 109, "opponent_points": 115, "result": "L", "margin": -6}
       ]
     }
-  ]
+  ],
+  "game_line": {
+    "status": "available",
+    "source": "espn_scoreboard",
+    "provider": "DraftKings",
+    "read_at": "2026-11-11T00:25:04+00:00",
+    "favorite_team_id": 1610612752,
+    "favorite_tricode": "NYK",
+    "spread": -15.5,
+    "total": 222.5,
+    "teams": [
+      {"team_id": 1610612749, "tricode": "MIL", "is_home": false, "spread": 15.5, "implied_total": 103.5},
+      {"team_id": 1610612752, "tricode": "NYK", "is_home": true, "spread": -15.5, "implied_total": 119.0}
+    ]
+  }
 }
 ```
 
@@ -2403,6 +2417,20 @@ nothing. `scripts/game_context_refresh.py` stores it on the ledger cron (see
   `possession_games` is 0.
 - `last_5` holds up to five results, newest first; `margin` is points minus
   opponent points and `result` is `W` or `L`.
+- `game_line` (crf04/statsplus#493) is the game's line from ESPN's scoreboard,
+  read from `game_lines` whatever `status` says about the team rows.
+  `source` is always `espn_scoreboard`; `provider` is the sportsbook ESPN
+  names. `read_at` is the last time the line was read: the odds cron reads it
+  every five minutes until ESPN lists the game as started, so after tip, and
+  once the game is final, it is the last line read before tip, and a line ESPN
+  stops showing before tip keeps its last value and `read_at`.
+  `spread` is the favourite's spread (negative), `favorite_team_id` and
+  `favorite_tricode` name the favourite, and `total` is the game total. A
+  pick'em has `spread: 0.0` and null favourite fields. `teams` lists the away
+  team, then the home team, each with its own `spread` (negative when
+  favoured) and `implied_total` = (`total` - its `spread`) / 2. With no stored
+  line, `status` is `unavailable`, `source` stays `espn_scoreboard`, every
+  other value is null and `teams` is `[]`.
 
 The Unscheduled Matchup has no game and carries no `game_context`.
 

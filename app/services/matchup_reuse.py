@@ -32,7 +32,7 @@ from app.utils.redis_breaker import RedisCircuitBreaker
 
 #: Bumped whenever the Matchup document's shape changes, so a stored document
 #: of the old shape is never served.
-MATCHUP_CACHE_SCHEMA = 12
+MATCHUP_CACHE_SCHEMA = 13
 #: A snapshot of the live generation plus, briefly, the one it replaced.
 _SNAPSHOT_REUSE_ENTRIES = 2
 
@@ -51,6 +51,7 @@ ACCEPTED_LAG_INPUTS: Mapping[str, str] = {
     "mapping_replays": "projection statistic-mapping replays, which change a posted market's category",
     "log_sync": "canonical-log sync completion for a final game's participants",
     "stored_game_context": "the stored team context the ledger cron rewrites (crf04/statsplus#466)",
+    "stored_game_lines": "the stored ESPN game line the odds cron rewrites (crf04/statsplus#493)",
 }
 
 #: Every section of a composed Matchup (top level, plus the nested sections of
@@ -121,7 +122,11 @@ SECTION_TREATMENT: Mapping[str, tuple[tuple[str, ...], str, tuple[str, ...]]] = 
         ("stored_injuries", "durable_last_15", "mapping_replays", "log_sync"),
     ),
     "injuries": ((ACCEPTED_LAG,), "stored injuries", ("stored_injuries",)),
-    "game_context": ((ACCEPTED_LAG,), "stored team context", ("stored_game_context",)),
+    "game_context": (
+        (ACCEPTED_LAG,),
+        "stored team context and game line",
+        ("stored_game_context", "stored_game_lines"),
+    ),
     "freshness.schedule": ((REBUILT,), "the request's Slate schedule stamp", ()),
     "freshness.pool": ((KEYED,), "the Slate's pool block with each provider's stamp", ()),
     "freshness.stats": (

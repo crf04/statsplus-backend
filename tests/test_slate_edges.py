@@ -1303,12 +1303,12 @@ def test_the_edges_and_their_matchups_write_what_the_previous_release_wrote():
         key: hashlib.sha256(zlib.decompress(payload)).hexdigest()
         for key, payload in redis_client.values.items()
     } == {
-        # v12/v8 (statsplus#466): every Matchup carries its stored game_context.
-        "matchup:composed:v12:2c911ce929e6fc18c53f488c9ae3264c902326c5e85f64abfeb564cf75623d70": (
-            "c6df08eabadee3a70e6f976db0b5023572ceaf6413deffeaa9794121f9d3e2db"
+        # v13 (statsplus#493): every Matchup's game_context carries its stored game_line.
+        "matchup:composed:v13:a8e7c4c10005640ba87f716fa652d508092a83eec37300d86b5e97656f26dbe7": (
+            "6319622a4476f2688c3c7c632ed7768f4df865c563c0a77becdcbd315e4732b6"
         ),
-        "matchup:composed:v12:5c0835a4443299290f09c871cbe74182d1da02674ebfab54832d63280067fdd2": (
-            "f9f5ce48a89836db75473ccc175465ec90c05ca9d457b30c0a8b5fa20eddf596"
+        "matchup:composed:v13:d564655c285601e4ecfef0307a5daca75a946332345e9a279c17b7706e9c53ff": (
+            "bb8c59d79c8aac7fbe9fd66f7a9437f8ba74be2ae5b397d84ee5a306bfb4b325"
         ),
         # v9 (statsplus#470): each game carries ``leaders``.
         "slate:edges:v9:841c49e16c6e10cf5938b977e6ea160dd81f1e591fb3d1b08b0dd1bbdb15d2fc": (
