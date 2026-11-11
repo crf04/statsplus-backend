@@ -3931,6 +3931,76 @@ class CollectionControlService(_SessionService):
             row.details, row.status, row.resolved_at = details, "open", None
             return row
 
+    def reconcile_box_score_differences(
+        self, *, season: str, game_id: str, differences: tuple[Mapping[str, Any], ...]
+    ) -> None:
+        """Keep one open item per game, player and stat the provider and NBA's box score differ on.
+
+        Items of the game that no longer differ are resolved.
+        """
+
+        now = self.clock()
+        current = {
+            _checksum(
+                _json(
+                    {
+                        "season": season,
+                        "kind": BOX_SCORE_DIFFERENCE_KIND,
+                        "game_id": game_id,
+                        "player_id": difference["player_id"],
+                        "stat": difference["stat"],
+                    }
+                )
+            )[:128]: difference
+            for difference in differences
+        }
+        with self.session() as session, session.begin():
+            for row in session.scalars(
+                select(ReconciliationItem).where(
+                    ReconciliationItem.kind == BOX_SCORE_DIFFERENCE_KIND,
+                    ReconciliationItem.season == season,
+                    ReconciliationItem.status == "open",
+                )
+            ):
+                if row.dedupe_key not in current and json.loads(row.details).get("game_id") == game_id:
+                    row.status, row.resolved_at = "resolved", now
+            for dedupe_key, difference in current.items():
+                row = session.scalar(
+                    select(ReconciliationItem).where(ReconciliationItem.dedupe_key == dedupe_key)
+                )
+                if row is None:
+                    row = ReconciliationItem(
+                        item_id=_uuid(),
+                        season=season,
+                        kind=BOX_SCORE_DIFFERENCE_KIND,
+                        reason="box_score_mismatch",
+                        dedupe_key=dedupe_key,
+                        created_at=now,
+                    )
+                    session.add(row)
+                row.details = _json({**difference, "game_id": game_id, "last_seen": _aware(now).isoformat()})
+                row.status, row.resolved_at = "open", None
+
+    def open_box_score_differences(self, *, season: str | None = None) -> list[dict[str, Any]]:
+        """Open box-score differences, oldest first."""
+
+        query = select(ReconciliationItem).where(
+            ReconciliationItem.kind == BOX_SCORE_DIFFERENCE_KIND, ReconciliationItem.status == "open"
+        )
+        if season is not None:
+            query = query.where(ReconciliationItem.season == season)
+        with self.session() as session:
+            return [
+                {
+                    "season": row.season,
+                    **json.loads(row.details),
+                    "first_seen": _aware(row.created_at).isoformat(),
+                }
+                for row in session.scalars(
+                    query.order_by(ReconciliationItem.created_at, ReconciliationItem.details)
+                )
+            ]
+
     def publish_catalog(
         self,
         request_id: str,
@@ -10879,10 +10949,11 @@ def _parse_datetime(value: Any) -> datetime:
 
 
 FALLBACK_EVIDENCE_KIND = "ledger_fallback_evidence"
+BOX_SCORE_DIFFERENCE_KIND = "ledger_box_score_difference"
 
 
 def reconciliation_item_view(row: ReconciliationItem) -> dict[str, Any]:
-    """An item as operators read it; only a fallback-evidence item's details, which name its game, are shown."""
+    """An item as operators read it; only fallback-evidence and box-score items' details, which name a game, are shown."""
 
     view = {
         "item_id": row.item_id,
@@ -10891,7 +10962,7 @@ def reconciliation_item_view(row: ReconciliationItem) -> dict[str, Any]:
         "reason": row.reason,
         "status": row.status,
     }
-    if row.kind == FALLBACK_EVIDENCE_KIND:
+    if row.kind in {FALLBACK_EVIDENCE_KIND, BOX_SCORE_DIFFERENCE_KIND}:
         view["details"] = json.loads(row.details)
     return view
 

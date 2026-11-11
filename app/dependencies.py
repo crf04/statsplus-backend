@@ -520,6 +520,10 @@ def build_dependencies(
                     engine, ledger_observation_recorder
                 ),
                 observation_recorder=ledger_observation_recorder,
+                box_score_provider=NBATrackingProvider(pace_seconds=0.6),
+                open_box_score_differences=lambda season: len(
+                    collection_control.open_box_score_differences(season=season)
+                ),
                 reconciliation_sink=collection_control_reconciliation_sink(
                     collection_control, default_season=settings.nba.current_season
                 ),

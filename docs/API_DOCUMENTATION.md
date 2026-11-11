@@ -2036,6 +2036,15 @@ the shot type's population, restricted to players whose fact has a stored
 split. `shot_values` is `null` when the stored fact has no split. Other Bases
 carry no `shot_values` key.
 
+From 2026-27 the ledger publishes NBA's official box-score counts
+(crf04/statsplus-backend#763), and a correction never makes a Diet
+unavailable. A player-game whose assists that box score corrected reads the
+official AST in game logs, but keeps the provider's assist locations, and its
+`assist_locations` Diet counts the provider's assists, the count those
+locations describe, so the shares still add up to 1. Rebounds are not
+corrected: a differing REB, OREB or DREB is recorded and the provider's count
+stays published everywhere, so the `rebound_types` Diet is unchanged.
+
 The `rebound_types` Diet (crf04/statsplus#234) is derived from the Canonical
 Game Ledger like the assist-location Diet and has the same fact shape, in the
 unit `rebounds`: a player with any rebounds in the Season has all six slices
@@ -5057,8 +5066,12 @@ POST /api/admin/collection/publication-rebuilds/<family>/rollback
 `GET /api/admin/collection/reconciliation` lists open items with `item_id`,
 `season`, `kind`, `reason`, and `status`; diagnostics' `reconciliation` rows
 have the same shape. Only a `ledger_fallback_evidence` item adds `details`
-(`game_id` and the comma-separated `missing_families`); other kinds keep their
-details private.
+(`game_id` and the comma-separated `missing_families`), and a
+`ledger_box_score_difference` item adds `details` with `game_id`, `player_id`,
+`player_name`, `stat`, `ledger_value` (the provider's count), `box_score_value`
+(NBA's official box score), `applied` (`true` when the box score's value is the
+published one; `false` for REB, OREB and DREB, whose provider count stays
+published) and `last_seen`; other kinds keep their details private.
 
 `POST /api/admin/collection/publication-rebuilds` starts one durable
 publication-format rebuild. The body names the publication `family`, an

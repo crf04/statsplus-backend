@@ -2010,9 +2010,57 @@ without either family keeps one `ledger_fallback_evidence` Reconciliation Item
 (reason `evidence_incomplete`) per season and game, whose details name the game
 and the families it still lacks; each later acceptance updates that list, and
 the first acceptance with both families, from LiveData or a PBP replacement,
-resolves the item. These details are the only ones the admin reconciliation
-route and collection diagnostics show, so the streams held at
-`*_evidence_incomplete` point at the game.
+resolves the item. These details, and a box-score difference's below, are the
+only ones the admin reconciliation route and collection diagnostics show, so
+the streams held at `*_evidence_incomplete` point at the game.
+From 2026-27 every acceptance, including each daily and weekly recheck, also
+fetches NBA's official box score (`boxscoretraditionalv3` on `stats.nba.com`,
+through `NBATrackingProvider`): one request per game with a 10 s timeout, never
+retried (the next run is the retry), starting at least 0.6 s after the previous
+one without waiting for it to finish. Each player's PTS, REB, OREB, DREB, AST,
+STL, BLK, TOV, FGM, FGA, FG3M, FG3A, FTM, FTA and PF are compared with the
+provider's row (crf04/statsplus-backend#763: PBP Stats and LiveData credit
+Darryn Peterson with 6 assists on 2026-11-02, NBA's box score with 5). A
+correction never makes a Base unavailable. Every differing count except
+rebounds takes the box score's value before normalization, the side's
+`team_results` total moves by the same amount, and the row keeps the
+provider's count of each wire it rewrote under `LedgerProvider<wire>`
+(`LEDGER_PROVIDER_COUNT_KEYS`). Game logs, Traditional and per-36 carry the
+official counts. A corrected AST keeps the provider's assist locations, which
+describe the provider's count: `located_player_facts` reads each corrected
+player-game at `LedgerProviderAssists` wherever the locations are proven
+against the assists (`governed_assist_locations`, the assist-location windows
+and the assist-location Diet), so those windows compose as before and that
+player's Diet shares still add up to 1. The opponent AST total in the
+assist-location window is the official one. REB, OREB and DREB differences are
+recorded and not applied: each team's six miss-type slices must add up to the
+player-credited `OPP_REB` of the traditional publication, in
+`materialize_rebound_type_window` and again at activation
+(`rebound_types_identity.check_identity`), and that gate compares two
+publications that cannot say which games were corrected, so a corrected total
+beside the provider's split would make the Rebound Types Base unavailable.
+Each difference keeps one `ledger_box_score_difference` Reconciliation Item
+(reason `box_score_mismatch`) per game, player and stat, with both values,
+`applied` and `last_seen`; a later acceptance on which the two agree resolves
+it. `scripts/ledger_box_score_differences.py` lists the open items; the run
+summary reports `box_score_differences` (found by this run) and
+`open_box_score_differences` (open in the season, the items the command lists).
+The fields a correction writes are the ledger's, so a replacement that adds or
+drops them raises no `schema_drift` alert. When the box-score check gives no
+whole reference, nothing is applied or resolved and the game is listed in
+`unreconciled_game_ids`: when the request fails or times out, when the run has
+spent its 120 s box-score budget or the request's pacing wait plus its timeout
+would end less than 5 s before the manifest's `collect_before`, or when the
+document is not a whole reference. The document is checked whole before
+anything is applied or resolved, every count of both teams' players whether or
+not it is applied: a missing team, a negative or non-integer count, makes above
+attempts, points that disagree with the makes, or REB other than OREB plus DREB
+rejects it, and so does a player of the game it leaves out, a player it credits
+who is not in the game, or counts that miss the final score. A first acceptance then stores the provider's game, as without the
+check. A recheck of a stored game that carries corrections leaves it as it is,
+so a published count never flips back to the provider's because one check
+failed; the game is rechecked inside the daily and weekly windows like any
+other.
 Repair is operator-invoked and bounded per run by `--max-games` and the
 provider retry cap; there is no persisted per-game attempt budget, so a game
 PBP keeps refusing is re-attempted on each run. Every target also fetches its

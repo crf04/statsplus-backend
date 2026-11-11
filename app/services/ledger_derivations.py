@@ -7,7 +7,7 @@ import json
 import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from typing import Any
 
@@ -18,6 +18,7 @@ from app.domain.rebound_types import (
     REBOUND_TYPES_VOLUME_UNIT,
 )
 from app.services.canonical_game_ledger import (
+    LEDGER_PROVIDER_COUNT_KEYS,
     CanonicalGame,
     LedgerValidationError,
     PlayerGameFact,
@@ -481,12 +482,36 @@ def governed_assist_locations(player: PlayerGameFact) -> dict[str, int] | None:
     return values
 
 
+def located_player_facts(game: CanonicalGame) -> tuple[PlayerGameFact, ...]:
+    """The game's player facts with the assist count their locations describe.
+
+    NBA's official box score corrects a player's assists without saying which
+    location the correction came from, so a corrected row publishes the
+    official count and keeps the provider's locations, which describe the
+    provider's count its archived row still holds
+    (crf04/statsplus-backend#763).  Every other fact is returned as stored.
+    """
+
+    key = LEDGER_PROVIDER_COUNT_KEYS["Assists"]
+    provider_assists = {
+        (row.team_id, row.entity_id): int(row.payload[key])
+        for row in game.raw_rows
+        if row.row_type == "player" and key in row.payload
+    }
+    if not provider_assists:
+        return game.player_facts
+    return tuple(
+        replace(player, assists=provider_assists.get((player.team_id, player.player_id), player.assists))
+        for player in game.player_facts
+    )
+
+
 def derive_assist_location_facts(games: Iterable[CanonicalGame]) -> tuple[AssistLocationFact, ...]:
     """Derive assist-location counts, refusing a partial location observation."""
 
     output: list[AssistLocationFact] = []
     for game in _regular_games(games):
-        for player in game.player_facts:
+        for player in located_player_facts(game):
             values = governed_assist_locations(player)
             if values is None:
                 raise LedgerDerivationUnavailable(
@@ -601,7 +626,10 @@ def derive_player_assist_diet_rows(games: Iterable[CanonicalGame]) -> tuple[dict
     player with no assists is skipped.  Every location count is proven, so a
     slice with no volume is a known zero and is published with share 0: the
     Diet stays a complete partition the Matchup can score
-    (crf04/statsplus#407).  ``games_played`` counts distinct games with a retained
+    (crf04/statsplus#407).  A player-game whose assists NBA's box score
+    corrected counts the provider's assists, the count its locations describe
+    (``located_player_facts``), so the partition holds there too.
+    ``games_played`` counts distinct games with a retained
     ``PlayerGameFact`` row -- an appearance, matching the provider's
     ``GamesPlayed`` -- including a zero-minute appearance; a player with
     assists necessarily has at least one such row.  Raises
@@ -613,7 +641,7 @@ def derive_player_assist_diet_rows(games: Iterable[CanonicalGame]) -> tuple[dict
     totals: dict[int, dict[str, int]] = {}
     games_by_player: dict[int, set[str]] = defaultdict(set)
     for game in _regular_games(games):
-        for player in game.player_facts:
+        for player in located_player_facts(game):
             values = governed_assist_locations(player)
             if values is None:
                 raise LedgerDerivationUnavailable(
@@ -915,7 +943,7 @@ def materialize_assist_location_window(
             # breakdown below stays player-sourced, so a location observation
             # never has to explain the residual.
             counts[ASSIST_TOTAL_METRIC] += opponent.assists
-            for player in game.player_facts:
+            for player in located_player_facts(game):
                 if player.team_id != opponent_id:
                     continue
                 values = governed_assist_locations(player)
@@ -1184,6 +1212,7 @@ __all__ = [
     "derive_player_rebound_type_diet_rows",
     "derive_traditional_opponent_facts",
     "governed_assist_locations",
+    "located_player_facts",
     "materialize_assist_location_window",
     "materialize_rebound_type_window",
     "materialize_team_window",
