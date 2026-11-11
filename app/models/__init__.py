@@ -120,6 +120,7 @@ from .event_mapping import (  # noqa: E402
     ProviderEventMapping,
 )
 from .game_context import GameContext, GameContextTeam  # noqa: E402
+from .game_lines import GameLine  # noqa: E402
 from .injury_snapshot import InjurySnapshot, InjurySourceSnapshot  # noqa: E402
 from .job import DataRefreshJob  # noqa: E402
 from .lineup_segments import (  # noqa: E402
@@ -207,6 +208,7 @@ __all__ = [
     "EventMappingRejection",
     "GameContext",
     "GameContextTeam",
+    "GameLine",
     "GovernedNotApplicable",
     "InjurySnapshot",
     "InjurySourceSnapshot",

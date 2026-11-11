@@ -5,6 +5,7 @@ import json
 import re
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -3877,6 +3878,7 @@ def test_the_matchup_serves_each_teams_stored_game_context(tmp_path):
     from sqlalchemy import text
 
     from app.services.game_context import GameContextRepository
+    from app.services.game_lines import collect
     from tests.support.game_context_world import final, migrated_engine, schedule
 
     engine = migrated_engine(tmp_path)
@@ -3887,6 +3889,16 @@ def test_the_matchup_serves_each_teams_stored_game_context(tmp_path):
         engine, "0022500570", "2026-01-13", (BOS, "BOS", 112, 100.0), (LAL, "LAL", 108, 100.0), season=SEASON
     )
     GameContextRepository(engine, clock=lambda: NOW).refresh(SEASON)
+    # ESPN lists BOS at home, favoured by 6.5, total 228.5, before tip.
+    scoreboard = json.loads(
+        (Path(__file__).resolve().parents[1] / "fixtures/espn/scoreboard_2026-11-10.json").read_text()
+    )
+    event = scoreboard["events"][0]
+    event["date"] = "2026-01-16T00:30Z"
+    for side in event["competitions"][0]["competitors"]:
+        side["team"]["abbreviation"] = "BOS" if side["homeAway"] == "home" else "LAL"
+    event["competitions"][0]["odds"][0].update(details="BOS -6.5", spread=-6.5, overUnder=228.5)
+    collect(engine, fetch=lambda _day: {"events": [event]}, clock=lambda: NOW)
     # The request reads the stored rows only: with the ledger and schedule gone it serves the same values.
     with engine.begin() as connection:
         connection.execute(text("DELETE FROM canonical_game_ledger_team_facts"))
@@ -3952,10 +3964,39 @@ def test_the_matchup_serves_each_teams_stored_game_context(tmp_path):
                 ],
             },
         ],
+        "game_line": {
+            "status": "available",
+            "source": "espn_scoreboard",
+            "provider": "DraftKings",
+            "read_at": "2026-01-15T12:00:00+00:00",
+            "favorite_team_id": BOS,
+            "favorite_tricode": "BOS",
+            "spread": -6.5,
+            "total": 228.5,
+            "teams": [
+                {"team_id": LAL, "tricode": "LAL", "is_home": False, "spread": 6.5, "implied_total": 111.0},
+                {"team_id": BOS, "tricode": "BOS", "is_home": True, "spread": -6.5, "implied_total": 117.5},
+            ],
+        },
     }
 
 
 def test_a_matchup_without_stored_game_context_says_it_is_unavailable():
     payload = _service().get_matchup(game_id=GAME_ID)
 
-    assert payload["game_context"] == {"status": "unavailable", "computed_at": None, "teams": []}
+    assert payload["game_context"] == {
+        "status": "unavailable",
+        "computed_at": None,
+        "teams": [],
+        "game_line": {
+            "status": "unavailable",
+            "source": "espn_scoreboard",
+            "provider": None,
+            "read_at": None,
+            "favorite_team_id": None,
+            "favorite_tricode": None,
+            "spread": None,
+            "total": None,
+            "teams": [],
+        },
+    }

@@ -61,6 +61,18 @@ EMPTY_RATINGS = {
     "net_rating": None,
 }
 
+NO_LINE = {
+    "status": "unavailable",
+    "source": "espn_scoreboard",
+    "provider": None,
+    "read_at": None,
+    "favorite_team_id": None,
+    "favorite_tricode": None,
+    "spread": None,
+    "total": None,
+    "teams": [],
+}
+
 UPCOMING_CONTEXT = {
     "status": "available",
     "computed_at": "2026-10-25T14:15:00+00:00",
@@ -158,6 +170,7 @@ UPCOMING_CONTEXT = {
             ],
         },
     ],
+    "game_line": NO_LINE,
 }
 
 
@@ -293,7 +306,12 @@ def test_a_postponed_game_loses_its_stored_context(tmp_path):
     summary = repository.refresh(SEASON)
 
     assert (summary["games"], summary["removed"]) == (3, 1)
-    assert repository.read(UPCOMING) == {"status": "unavailable", "computed_at": None, "teams": []}
+    assert repository.read(UPCOMING) == {
+        "status": "unavailable",
+        "computed_at": None,
+        "teams": [],
+        "game_line": NO_LINE,
+    }
 
 
 @pytest.mark.parametrize("game_id", ["0012600001", "0022600004", "0022699999"])
@@ -302,7 +320,12 @@ def test_preseason_postponed_and_unknown_games_have_no_context(tmp_path, game_id
     repository = GameContextRepository(engine, clock=lambda: FIRST_RUN)
     repository.refresh(SEASON)
 
-    assert repository.read(game_id) == {"status": "unavailable", "computed_at": None, "teams": []}
+    assert repository.read(game_id) == {
+        "status": "unavailable",
+        "computed_at": None,
+        "teams": [],
+        "game_line": NO_LINE,
+    }
 
 
 def test_rest_reads_the_schedule_not_the_ledger_and_skips_all_star_games(tmp_path):

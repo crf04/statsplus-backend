@@ -63,6 +63,7 @@ from app.services.database_first_activation import (
     ReadSeason,
     SeasonUnavailable,
 )
+from app.services.game_lines import unavailable_game_line
 from app.services.matchup_injuries import (
     MatchupInjuryResult,
     unavailable_injury_result,
@@ -3117,7 +3118,12 @@ class MatchupService:
         """The game's stored team context, or the unavailable block when none is stored."""
 
         if self.game_context is None:
-            return {"status": "unavailable", "computed_at": None, "teams": []}
+            return {
+                "status": "unavailable",
+                "computed_at": None,
+                "teams": [],
+                "game_line": unavailable_game_line(),
+            }
         return self.game_context.read(game_id, connection=connection)
 
     @staticmethod
