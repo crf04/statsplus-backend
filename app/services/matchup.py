@@ -33,7 +33,7 @@ from app.domain.matchup_experience import (
     is_historical_matchup,
     player_source,
 )
-from app.domain.nba_events import resolve_stored_event_classification
+from app.domain.nba_events import REGULAR_SEASON_TYPE, resolve_stored_event_classification
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE, NBA_TEAM_TRICODE_TO_ID
 from app.domain.play_type_matchup import complete_play_type_shares, play_type_matchup
 from app.domain.rebound_types import REBOUND_TYPE_WIRE_NAMES, REBOUND_TYPES_BASE
@@ -1255,6 +1255,7 @@ class MatchupService:
                 schedule_season=schedule_season,
                 publication_snapshot=publication_snapshot,
                 connection=connection,
+                session=session,
                 compose_cache=compose_cache,
             )
             participants_section = self._pool_participants_section(pool_players)
@@ -1499,6 +1500,7 @@ class MatchupService:
         schedule_season: str,
         publication_snapshot: Any,
         connection: Connection | None,
+        session: Session | None,
         compose_cache: MatchupComposeCache | None,
     ) -> tuple[_Participant, ...]:
         """The game's Rotation Players: no line, recent minutes (crf04/statsplus#459).
@@ -1513,7 +1515,7 @@ class MatchupService:
 
         if self.athlete_catalog is None:
             return ()
-        logs = self._game_season_logs(season, schedule_season, publication_snapshot, compose_cache)
+        logs = self._game_season_logs(season, schedule_season, publication_snapshot, compose_cache, session)
         if logs is _NO_GAME_LOGS:
             return ()
         listed = {int(player.canonical_player_id) for player in pool_players} | out_player_ids
@@ -1530,7 +1532,11 @@ class MatchupService:
                 publication_snapshot=logs,
                 connection=connection,
             )
-            if row.minutes >= ROTATION_MIN_MINUTES and int(row.player_id) not in listed
+            # A publication holds Regular Season rows only; the legacy table
+            # can also hold Playoffs rows.
+            if row.season_type == REGULAR_SEASON_TYPE
+            and row.minutes >= ROTATION_MIN_MINUTES
+            and int(row.player_id) not in listed
         }
         if not played:
             return ()
@@ -1562,13 +1568,15 @@ class MatchupService:
         schedule_season: str,
         publication_snapshot: Any,
         compose_cache: MatchupComposeCache | None,
+        session: Session | None,
     ) -> Any:
         """The capture holding the game's own season's game logs.
 
         The evidence capture when the seasons agree.  Otherwise, while the
         game's season is still unpublished, a capture of that season alone, as
-        a request selecting it would read it; ``_NO_GAME_LOGS`` while that
-        season is not offered at all.
+        a request selecting it would read it, on the request's own session so
+        the capture and its projection read share one database snapshot;
+        ``_NO_GAME_LOGS`` while that season is not offered at all.
         """
 
         if season == schedule_season or self.publication_reader is None:
@@ -1581,6 +1589,7 @@ class MatchupService:
                 _GAME_LOG_STREAM_KEYS,
                 season=ReadSeason(schedule_season, requested=schedule_season),
                 projection_only_keys=frozenset(_GAME_LOG_STREAM_KEYS),
+                session=session,
             )
         except SeasonUnavailable:
             capture = _NO_GAME_LOGS

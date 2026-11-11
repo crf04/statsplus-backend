@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from types import SimpleNamespace
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 from app.config.settings import NBASeasonSettings, RuntimeSettings
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
@@ -31,7 +31,7 @@ from app.services.matchup import (
 )
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_diet import PlayerDietResult, StoredPlayerDietFact
-from app.services.player_game_log_repository import PlayerGameLogRepository
+from app.services.player_game_log_repository import PlayerGameLogRecord, PlayerGameLogRepository
 from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.statistic_catalog import StatisticCatalog
 from app.services.stats_freshness_repository import StatsFreshness
@@ -504,3 +504,31 @@ def test_the_team_rows_read_keeps_each_teams_last_five_games_before_a_date(tmp_p
         (game_id for game_id, _ in projected), reverse=True
     )
     assert sorted(read(None)) == expected
+
+
+def test_a_playoffs_log_on_the_legacy_table_never_admits_a_rotation_player(tmp_path):
+    """The legacy fallback, unlike a publication, can hold Playoffs rows."""
+
+    served = _sqlite_world(tmp_path)
+    rows = _season_rows()
+    for row in rows:
+        row["game_date"] = date.fromisoformat(row["game_date"])
+        if row["player_id"] == ROTATION:
+            row.update(season_type="Playoffs", game_id="0042500106")
+    served.logs.publish(
+        SEASON,
+        [PlayerGameLogRecord(**row) for row in rows],
+        retrieved_at=RETRIEVED_AT,
+        source_provider="nba_stats",
+        source_row_count=len(rows),
+        publication_status="complete",
+    )
+    with served.engine.begin() as connection:
+        connection.execute(
+            text("UPDATE publication_streams SET enabled = false WHERE stream_key = 'player_game_logs'")
+        )
+
+    payload = served.service().get_matchup(game_id=GAME_ID)
+
+    assert ROTATION not in [row["canonical_id"] for row in payload["players"]]
+    assert QUESTIONABLE in [row["canonical_id"] for row in payload["players"]]
