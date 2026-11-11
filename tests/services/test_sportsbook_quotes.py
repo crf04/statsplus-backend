@@ -18,6 +18,14 @@ from app.services.sportsbook_quotes import (
 )
 
 T0 = datetime(2026, 10, 21, 21, 0, tzinfo=UTC)
+#: A read a few minutes after the default quote stamp: every default quote is fresh.
+READ_AT = datetime(2026, 10, 21, 21, 5, tzinfo=UTC)
+
+
+def _entry(rows, *, now=READ_AT, started=False):
+    return build_market_entry(rows, now=now, started=started)
+
+
 GAME = "0022600001"
 
 
@@ -42,7 +50,7 @@ def flags(entry):
 
 
 def test_higher_price_wins_across_the_negative_and_positive_ranges():
-    entry = build_market_entry(
+    entry = _entry(
         [
             row("draftkings", 27.5, -115, -105),
             row("fanduel", 27.5, -110, -110),
@@ -61,13 +69,13 @@ def test_higher_price_wins_across_the_negative_and_positive_ranges():
 
 
 def test_minus_105_beats_minus_115():
-    entry = build_market_entry([row("draftkings", 27.5, -115, -115), row("fanduel", 27.5, -105, -105)])
+    entry = _entry([row("draftkings", 27.5, -115, -115), row("fanduel", 27.5, -105, -105)])
 
     assert flags(entry) == [("draftkings", False, False), ("fanduel", True, True)]
 
 
 def test_ties_all_flag():
-    entry = build_market_entry(
+    entry = _entry(
         [
             row("draftkings", 27.5, -110, -105),
             row("fanduel", 27.5, -110, -110),
@@ -83,13 +91,13 @@ def test_ties_all_flag():
 
 
 def test_even_money_written_as_plus_or_minus_100_is_a_tie():
-    entry = build_market_entry([row("draftkings", 27.5, 100, -105), row("fanduel", 27.5, -100, -110)])
+    entry = _entry([row("draftkings", 27.5, 100, -105), row("fanduel", 27.5, -100, -110)])
 
     assert flags(entry) == [("draftkings", True, True), ("fanduel", True, False)]
 
 
 def test_books_at_different_lines_are_never_compared():
-    entry = build_market_entry(
+    entry = _entry(
         [
             row("draftkings", 26.5, 140, -170),
             row("fanduel", 27.5, -140, 110),
@@ -111,13 +119,13 @@ def test_books_at_different_lines_are_never_compared():
 
 
 def test_a_book_alone_at_its_line_is_never_best():
-    entry = build_market_entry([row("draftkings", 27.5, -110, -110)])
+    entry = _entry([row("draftkings", 27.5, -110, -110)])
 
     assert flags(entry) == [("draftkings", False, False)]
 
 
 def test_a_missing_side_is_none_and_cannot_win_or_be_compared_alone():
-    entry = build_market_entry(
+    entry = _entry(
         [
             row("williamhill_us", 27.5, 105, None),
             row("draftkings", 27.5, -115, -105),
@@ -139,13 +147,13 @@ def test_a_missing_side_is_none_and_cannot_win_or_be_compared_alone():
 
 
 def test_entry_metadata_is_sorted_stamped_and_closing_only_when_all_closing():
-    live = build_market_entry(
+    live = _entry(
         [
             row("fanduel", 27.5, -110, -110, updated="2026-10-21T21:03:02Z"),
             row("draftkings", 27.5, -115, -105, updated="2026-10-21T21:02:40Z", closing=True),
         ]
     )
-    closed = build_market_entry(
+    closed = _entry(
         [row("fanduel", 27.5, -110, -110, closing=True), row("draftkings", 27.5, -115, -105, closing=True)]
     )
 
@@ -159,6 +167,7 @@ def test_entry_metadata_is_sorted_stamped_and_closing_only_when_all_closing():
                 "over": -115,
                 "under": -105,
                 "updated_at": "2026-10-21T21:02:40Z",
+                "stale": False,
                 "best_over": False,
                 "best_under": True,
             },
@@ -168,6 +177,7 @@ def test_entry_metadata_is_sorted_stamped_and_closing_only_when_all_closing():
                 "over": -110,
                 "under": -110,
                 "updated_at": "2026-10-21T21:03:02Z",
+                "stale": False,
                 "best_over": True,
                 "best_under": False,
             },
@@ -177,10 +187,10 @@ def test_entry_metadata_is_sorted_stamped_and_closing_only_when_all_closing():
 
 
 def test_offshore_rows_are_never_served_even_if_stored():
-    entry = build_market_entry([row("bovada", 27.5, 150, 130), row("draftkings", 27.5, -115, -105)])
+    entry = _entry([row("bovada", 27.5, 150, 130), row("draftkings", 27.5, -115, -105)])
 
     assert [b["book"] for b in entry["books"]] == ["draftkings"]
-    assert build_market_entry([row("bovada", 27.5, 150, 130)]) is None
+    assert _entry([row("bovada", 27.5, 150, 130)]) is None
 
 
 # -- change-only storage ------------------------------------------------------
@@ -266,7 +276,7 @@ def test_one_changed_price_writes_exactly_one_history_row(store):
             .order_by(SportsbookPropQuote.__table__.c.quote_id)
         ).all()
     assert series == [(-115, -105), (-120, -100)]
-    assert store.reader.book_lines(GAME)[2544]["PTS"]["books"][0]["over"] == -120
+    assert store.reader.book_lines(GAME, now=T0, started=False)[2544]["PTS"]["books"][0]["over"] == -120
 
 
 def test_a_line_move_with_the_same_prices_is_a_change(store):
@@ -289,7 +299,7 @@ def test_a_closing_snapshot_is_always_written_even_when_nothing_changed(store):
             .where(SportsbookPropQuote.__table__.c.is_closing.is_(True))
         ).scalar_one()
     assert closing_rows == 3
-    entry = store.reader.book_lines(GAME)[2544]["PTS"]
+    entry = store.reader.book_lines(GAME, now=T0, started=False)[2544]["PTS"]
     assert entry["closing"] is True
 
 
@@ -299,8 +309,10 @@ def test_quotes_a_later_response_no_longer_carries_are_removed_from_latest(store
     write = poll(store, BASE[:1], at=T0 + timedelta(hours=1))
 
     assert write.removed_rows == 2
-    assert set(store.reader.book_lines(GAME)[2544]) == {"PTS"}
-    assert [b["book"] for b in store.reader.book_lines(GAME)[2544]["PTS"]["books"]] == ["draftkings"]
+    assert set(store.reader.book_lines(GAME, now=T0, started=False)[2544]) == {"PTS"}
+    assert [
+        b["book"] for b in store.reader.book_lines(GAME, now=T0, started=False)[2544]["PTS"]["books"]
+    ] == ["draftkings"]
     assert count(store, SportsbookPropQuote) == 3  # history is kept
 
 
@@ -319,15 +331,15 @@ def test_a_snapshot_whose_every_quote_was_omitted_clears_the_stale_lines(store):
     write = poll(store, [], at=T0 + timedelta(hours=1), replace_latest=True)
 
     assert (write.history_rows, write.removed_rows) == (0, 3)
-    assert store.reader.book_lines(GAME) == {}
+    assert store.reader.book_lines(GAME, now=T0, started=False) == {}
     assert count(store, SportsbookPropQuote) == 3  # history is kept
 
 
 def test_reader_returns_only_that_games_players_and_empty_for_unknown_games(store):
     poll(store, BASE)
 
-    assert set(store.reader.book_lines(GAME)) == {2544}
-    assert store.reader.book_lines("0022600999") == {}
+    assert set(store.reader.book_lines(GAME, now=T0, started=False)) == {2544}
+    assert store.reader.book_lines("0022600999", now=T0, started=False) == {}
 
 
 def test_reader_drops_a_stored_offshore_row_defensively(store):
@@ -348,7 +360,7 @@ def test_reader_drops_a_stored_offshore_row_defensively(store):
             )
         )
 
-    books = [b["book"] for b in store.reader.book_lines(GAME)[2544]["PTS"]["books"]]
+    books = [b["book"] for b in store.reader.book_lines(GAME, now=T0, started=False)[2544]["PTS"]["books"]]
 
     assert books == ["draftkings", "fanduel"]
 
@@ -356,9 +368,89 @@ def test_reader_drops_a_stored_offshore_row_defensively(store):
 def test_a_null_side_does_not_make_the_only_quoted_side_best():
     # Over is quoted by one book only, so it is never flagged; counting books
     # (two) instead of non-null prices (one) would wrongly flag it.
-    entry = build_market_entry([row("draftkings", 27.5, -120, -105), row("fanduel", 27.5, None, -110)])
+    entry = _entry([row("draftkings", 27.5, -120, -105), row("fanduel", 27.5, None, -110)])
 
     assert flags(entry) == [("draftkings", False, True), ("fanduel", False, False)]
+
+
+# -- stale quotes (crf04/statsplus#496) --------------------------------------
+
+
+def test_a_quote_over_an_hour_old_before_tip_is_stale_and_never_best():
+    # FanDuel posts the best Over and Under, but its newest read is 61 minutes old.
+    entry = _entry(
+        [
+            row("draftkings", 27.5, -115, -110, updated="2026-10-21T21:00:00Z"),
+            row("betmgm", 27.5, -120, -105, updated="2026-10-21T20:59:00Z"),
+            row("fanduel", 27.5, 120, 110, updated="2026-10-21T19:59:00Z"),
+        ],
+        now=datetime(2026, 10, 21, 21, 0, tzinfo=UTC),
+    )
+
+    assert [(b["book"], b["stale"], b["best_over"], b["best_under"]) for b in entry["books"]] == [
+        ("betmgm", False, False, True),
+        ("draftkings", False, True, False),
+        ("fanduel", True, False, False),
+    ]
+
+
+def test_a_quote_exactly_an_hour_old_is_not_stale():
+    entry = _entry(
+        [
+            row("draftkings", 27.5, -115, -110, updated="2026-10-21T20:00:00Z"),
+            row("fanduel", 27.5, -105, -120, updated="2026-10-21T21:00:00Z"),
+        ],
+        now=datetime(2026, 10, 21, 21, 0, tzinfo=UTC),
+    )
+
+    assert [(b["book"], b["stale"], b["best_over"], b["best_under"]) for b in entry["books"]] == [
+        ("draftkings", False, False, True),
+        ("fanduel", False, True, False),
+    ]
+
+
+def test_one_fresh_book_beside_a_stale_one_is_alone_at_its_line_and_never_best():
+    entry = _entry(
+        [
+            row("draftkings", 27.5, -115, -110, updated="2026-10-21T21:00:00Z"),
+            row("fanduel", 27.5, 120, 110, updated="2026-10-21T18:00:00Z"),
+        ],
+        now=datetime(2026, 10, 21, 21, 0, tzinfo=UTC),
+    )
+
+    assert flags(entry) == [("draftkings", False, False), ("fanduel", False, False)]
+
+
+def test_after_tip_no_quote_is_stale_and_closing_lines_keep_their_label():
+    entry = _entry(
+        [
+            row("draftkings", 27.5, -115, -110, updated="2026-10-21T18:00:00Z", closing=True),
+            row("fanduel", 27.5, 120, 110, updated="2026-10-21T17:00:00Z", closing=True),
+        ],
+        now=datetime(2026, 10, 21, 23, 0, tzinfo=UTC),
+        started=True,
+    )
+
+    assert entry["closing"] is True
+    assert [(b["book"], b["stale"], b["best_over"], b["best_under"]) for b in entry["books"]] == [
+        ("draftkings", False, False, False),
+        ("fanduel", False, True, True),
+    ]
+
+
+def test_the_reader_judges_each_quote_at_the_read_time_it_is_given(store):
+    poll(store, BASE)
+
+    fresh = store.reader.book_lines(GAME, now=T0 + timedelta(minutes=60), started=False)
+    stale = store.reader.book_lines(GAME, now=T0 + timedelta(minutes=61), started=False)
+    tipped = store.reader.book_lines(GAME, now=T0 + timedelta(minutes=61), started=True)
+
+    def states(lines):
+        return [(b["book"], b["stale"], b["best_over"]) for b in lines[2544]["PTS"]["books"]]
+
+    assert states(fresh) == [("draftkings", False, False), ("fanduel", False, True)]
+    assert states(stale) == [("draftkings", True, False), ("fanduel", True, False)]
+    assert states(tipped) == [("draftkings", False, False), ("fanduel", False, True)]
 
 
 # -- a poll written ahead and settled later (crf04/statsplus#215) -------------

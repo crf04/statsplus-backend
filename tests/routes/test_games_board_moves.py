@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, insert
 
 from app.migrations import run_migrations
 from app.models.athlete_catalog import AthleteCatalog
+from app.providers.dfs import MarketVariant
 from app.providers.odds_api import BOOK_ALLOWLIST
 from app.providers.registry import dfs_provider_names
 from app.services.athlete_catalog_service import AthleteCatalogReader
@@ -329,3 +330,39 @@ def test_without_a_sportsbook_reader_no_line_is_pulled(moves_board, client, depe
     assert status == 200
     assert (body["moves_sources"], body["pulled"]) == ([], {})
     assert _rows(body)["Jayson Tatum"]["moves"] == {}
+
+
+def test_a_stale_book_keeps_its_moves_and_unpriced_provider_cells_have_none(moves_board, client):
+    # FanDuel last re-read Tatum's 28.5 at 03:00, 21 hours before the board and before the tip: stale,
+    # with its moves.  Novig's unpriced 9.5 (an alternate beside its priced 27.5) and Brown's unpriced
+    # 30.5 are provider cells: labelled, never given moves (crf04/statsplus#495, #496).
+    catalog = StatisticCatalog.load_default()
+    ProjectionArchive(moves_board, catalog).ingest_complete_snapshot(
+        _snapshot(
+            "novig",
+            (
+                _market(catalog, "novig", TATUM, "points", "9.5", (-110, None)),
+                _market(
+                    catalog, "novig", TATUM, "points", "27.5", (-115, -105), variant=MarketVariant.ALTERNATE
+                ),
+                _market(catalog, "novig", BROWN, "points", "30.5", (-110, None)),
+            ),
+            NOW,
+        ),
+        query=QUERY,
+        accepted_at=NOW,
+    )
+
+    status, body = _get(client, "date=2026-01-15&market=PTS&moves=true")
+
+    assert status == 200
+    rows = _rows(body)
+    tatum, brown = rows["Jayson Tatum"], rows["Jaylen Brown"]
+    assert [(book["book"], book["stale"]) for book in tatum["book_lines"]["books"]] == [
+        ("draftkings", False),
+        ("fanduel", True),
+    ]
+    assert tatum["moves"] == TATUM_MOVES
+    assert (tatum["lines"], tatum["line_labels"]) == ({"dabble": 27.5, "novig": 9.5}, {"novig": "alternate"})
+    assert (brown["lines"], brown["line_labels"]) == ({"novig": 30.5}, {"novig": "unpriced"})
+    assert set(brown["moves"]) == {book["book"] for book in brown["book_lines"]["books"]}

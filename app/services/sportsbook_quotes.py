@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import delete, insert, select, update
@@ -29,6 +29,9 @@ from app.services.request_reads import read_connection
 
 #: The categories ``book_lines`` may carry, in contract order.
 BOOK_LINE_CATEGORIES = tuple(MARKET_CATEGORIES.values())
+#: A quote read longer ago than this before its game starts is stale
+#: (crf04/statsplus#496).
+BOOK_STALE_AFTER = timedelta(minutes=60)
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,27 +321,40 @@ def _iso_z(value: datetime) -> str:
     return assume_utc(value).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def build_market_entry(rows: Iterable[Any]) -> dict[str, Any] | None:
+def quote_updated_at(row: Any) -> datetime:
+    """When a latest row's quote was last read: the book's market update, else our poll."""
+
+    return assume_utc(row.market_last_update or row.observed_at)
+
+
+def is_stale_read(updated_at: datetime, *, now: datetime, started: bool) -> bool:
+    """Whether a read is over ``BOOK_STALE_AFTER`` old while its game has not started."""
+
+    return not started and assume_utc(now) - assume_utc(updated_at) > BOOK_STALE_AFTER
+
+
+def build_market_entry(rows: Iterable[Any], *, now: datetime, started: bool) -> dict[str, Any] | None:
     """One ``book_lines`` category entry from the latest rows of one market.
 
-    ``best_over``/``best_under`` are decided only among books that post the
-    same line, higher American price wins, ties all flag, and a book alone at
-    its line (or alone on that side) is never flagged.
+    ``best_over``/``best_under`` are decided only among the fresh books that
+    post the same line, higher American price wins, ties all flag, and a book
+    alone at its line (or alone on that side) is never flagged.  A stale book
+    (``is_stale_read`` at ``now``) is listed but never flagged.
     """
 
     rows = [row for row in rows if row.book in BOOK_ALLOWLIST]
     if not rows:
         return None
     rows.sort(key=lambda row: (float(row.line), row.book))
+    stale = {row.book for row in rows if is_stale_read(quote_updated_at(row), now=now, started=started)}
     best_over: set[tuple[float, str]] = set()
     best_under: set[tuple[float, str]] = set()
     for line in {float(row.line) for row in rows}:
-        same_line = [row for row in rows if float(row.line) == line]
+        same_line = [row for row in rows if float(row.line) == line and row.book not in stale]
         best_over |= {(line, book) for book in _flag_best({row.book: row.over_price for row in same_line})}
         best_under |= {(line, book) for book in _flag_best({row.book: row.under_price for row in same_line})}
-    updated = [row.market_last_update or row.observed_at for row in rows]
     return {
-        "as_of": _iso_z(max(assume_utc(value) for value in updated)),
+        "as_of": _iso_z(max(quote_updated_at(row) for row in rows)),
         "closing": all(bool(row.is_closing) for row in rows),
         "books": [
             {
@@ -346,7 +362,8 @@ def build_market_entry(rows: Iterable[Any]) -> dict[str, Any] | None:
                 "line": float(row.line),
                 "over": row.over_price,
                 "under": row.under_price,
-                "updated_at": _iso_z(row.market_last_update or row.observed_at),
+                "updated_at": _iso_z(quote_updated_at(row)),
+                "stale": row.book in stale,
                 "best_over": (float(row.line), row.book) in best_over,
                 "best_under": (float(row.line), row.book) in best_under,
             }
@@ -375,16 +392,16 @@ class SportsbookQuoteReader:
             ).all()
 
     def book_lines(
-        self, game_id: str, *, connection: Connection | None = None
+        self, game_id: str, *, now: datetime, started: bool, connection: Connection | None = None
     ) -> dict[int, dict[str, dict[str, Any]]]:
-        """``{canonical_player_id: {category: entry}}`` for one game."""
+        """``{canonical_player_id: {category: entry}}`` for one game, judged stale at ``now``."""
 
         grouped: dict[tuple[int, str], list[Any]] = {}
         for row in self.latest_quotes((game_id,), connection=connection):
             grouped.setdefault((row.canonical_player_id, row.market_category), []).append(row)
         result: dict[int, dict[str, dict[str, Any]]] = {}
         for (player_id, category), group in sorted(grouped.items()):
-            entry = build_market_entry(group)
+            entry = build_market_entry(group, now=now, started=started)
             if entry is not None:
                 result.setdefault(player_id, {})[category] = entry
         return result
@@ -392,9 +409,12 @@ class SportsbookQuoteReader:
 
 __all__ = [
     "BOOK_LINE_CATEGORIES",
+    "BOOK_STALE_AFTER",
     "PollWrite",
     "ResolvedQuote",
     "SportsbookQuoteReader",
     "SportsbookQuoteStore",
     "build_market_entry",
+    "is_stale_read",
+    "quote_updated_at",
 ]

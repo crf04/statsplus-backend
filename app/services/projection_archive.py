@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import threading
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from copy import copy
 from dataclasses import dataclass, replace
@@ -683,6 +683,128 @@ def _newest_line_rows(rows: Iterable[Any]) -> list[Any]:
         confirmed = assume_utc(row["confirmed_at"])
         newest[key(row)] = max(newest.get(key(row), confirmed), confirmed)
     return [row for row in candidates if assume_utc(row["confirmed_at"]) == newest[key(row)]]
+
+
+def _with_priced_other_lines(connection: Any, rows: Sequence[Any]) -> tuple[Any, ...]:
+    """``rows``, each unpriced line marked ``priced_other_line`` when its poll priced another.
+
+    A row's poll is its observation's snapshot, which a statistic-mapping
+    replay keeps.  A market in that snapshot counts as its newest generation's
+    observation, so a replay that moved it to another market or player moves
+    its price too.  When the snapshot holds such a market, available and full
+    game, with a price from the same provider, for the same player, game and
+    market at a different line, the provider posted the unpriced line beside a
+    priced one (crf04/statsplus#495).  Two statements: the unpriced rows'
+    snapshots, then every observation of each market there that was ever
+    mapped to one of their players.
+    """
+
+    def unpriced(row: Any) -> bool:
+        return row["line_value"] is not None and row["over_price"] is None and row["under_price"] is None
+
+    candidates = [row for row in rows if unpriced(row)]
+    if not candidates:
+        return tuple(rows)
+    observation = ProjectionObservation.__table__
+    generation = ProjectionMaterializationGeneration.__table__
+    snapshots = {
+        str(observation_id): str(snapshot_id)
+        for observation_id, snapshot_id in connection.execute(
+            select(observation.c.observation_id, observation.c.snapshot_id).where(
+                observation.c.observation_id.in_(sorted({str(row["observation_id"]) for row in candidates}))
+            )
+        )
+    }
+    in_snapshots = observation.c.snapshot_id.in_(sorted(set(snapshots.values())))
+    touched = (
+        select(observation.c.snapshot_id, observation.c.source_ordinal)
+        .where(
+            in_snapshots,
+            observation.c.canonical_player_id.in_(
+                sorted({int(row["canonical_player_id"]) for row in candidates})
+            ),
+        )
+        .subquery()
+    )
+    newest: dict[tuple[str, int], Any] = {}
+    for found in connection.execute(
+        select(
+            observation.c.snapshot_id,
+            observation.c.source_ordinal,
+            observation.c.provider,
+            observation.c.canonical_game_id,
+            observation.c.canonical_player_id,
+            observation.c.market_category,
+            observation.c.market_status,
+            observation.c.scoring_period,
+            observation.c.line_value,
+            observation.c.over_price,
+            observation.c.under_price,
+            generation.c.created_at,
+            generation.c.generation_id,
+        )
+        .select_from(observation.join(generation, generation.c.generation_id == observation.c.generation_id))
+        .where(
+            in_snapshots,
+            tuple_(observation.c.snapshot_id, observation.c.source_ordinal).in_(select(touched)),
+        )
+    ):
+        market = (str(found.snapshot_id), int(found.source_ordinal))
+        current = newest.get(market)
+        order = (assume_utc(found.created_at), str(found.generation_id))
+        if current is None or order > (assume_utc(current.created_at), str(current.generation_id)):
+            newest[market] = found
+    priced: dict[tuple[str, str, str, int, str], set[float]] = {}
+    for found in newest.values():
+        if (
+            found.market_status == MarketStatus.AVAILABLE.value
+            and found.scoring_period == ScoringPeriod.FULL_GAME.value
+            and found.line_value is not None
+            and found.canonical_player_id is not None
+            and (found.over_price is not None or found.under_price is not None)
+        ):
+            key = (
+                str(found.snapshot_id),
+                str(found.provider),
+                str(found.canonical_game_id),
+                int(found.canonical_player_id),
+                str(found.market_category),
+            )
+            priced.setdefault(key, set()).add(float(found.line_value))
+
+    def priced_other_line(row: Any) -> bool:
+        key = (
+            snapshots.get(str(row["observation_id"]), ""),
+            str(row["provider"]),
+            str(row["canonical_game_id"]),
+            int(row["canonical_player_id"]),
+            str(row["market_category"]),
+        )
+        return bool(priced.get(key, set()) - {float(row["line_value"])})
+
+    return tuple(
+        {**row, "priced_other_line": priced_other_line(row)} if unpriced(row) else row for row in rows
+    )
+
+
+def _resolved_priced_other_lines(
+    observed: Mapping[str, set[str]],
+    lines: Mapping[str, Mapping[str, float]],
+    line_prices: Mapping[str, Mapping[str, Any]],
+) -> dict[str, tuple[str, ...]]:
+    """The observed markets whose served line has no price, by provider."""
+
+    resolved = {
+        provider: tuple(
+            sorted(
+                market
+                for market in markets
+                if market in lines.get(provider, {}) and market not in line_prices.get(provider, {})
+            )
+        )
+        for provider, markets in sorted(observed.items())
+    }
+    return {provider: markets for provider, markets in resolved.items() if markets}
 
 
 def _resolved_lines(
@@ -3360,6 +3482,7 @@ class LatestProjectionPlayerPoolReader:
                         )
                     ).mappings()
                 )
+            rows = list(_with_priced_other_lines(connection, rows))
         if not rows:
             return PlayerPool(
                 (),
@@ -3607,6 +3730,7 @@ class LatestProjectionPlayerPoolReader:
                         "line_conflicts": {},
                         "line_prices": {},
                         "price_conflicts": {},
+                        "priced_other_lines": {},
                     },
                 )
                 entry["categories"].update(player.market_categories)
@@ -3624,6 +3748,8 @@ class LatestProjectionPlayerPoolReader:
                         markets.setdefault(category, set()).add((pair["over"], pair["under"]))
                 for provider, categories in player.price_conflicts.items():
                     entry["price_conflicts"].setdefault(provider, set()).update(categories)
+                for provider, categories in player.priced_other_lines.items():
+                    entry["priced_other_lines"].setdefault(provider, set()).update(categories)
         players = tuple(
             PoolPlayer(
                 canonical_player_id=player_id,
@@ -3638,6 +3764,9 @@ class LatestProjectionPlayerPoolReader:
                 line_conflicts=line_conflicts,
                 line_prices=line_prices,
                 price_conflicts=price_conflicts,
+                priced_other_lines=_resolved_priced_other_lines(
+                    entry["priced_other_lines"], lines, line_prices
+                ),
             )
             for player_id, entry in sorted(contributions.items())
             for lines, line_conflicts in (_resolved_lines(entry["lines"], entry["line_conflicts"]),)
@@ -3739,7 +3868,8 @@ class LatestProjectionPlayerPoolReader:
                     )
                 ).scalars()
             ]
-            return _closing_member_rows(connection, closing_set_ids, roster=roster)
+            rows = _closing_member_rows(connection, closing_set_ids, roster=roster)
+            return rows if roster else _with_priced_other_lines(connection, rows)
 
     def _closing_pool(
         self, rows: tuple[Any, ...], requested_games: tuple[str, ...], *, roster: bool = False
@@ -3847,6 +3977,7 @@ class LatestProjectionPlayerPoolReader:
                     "providers": {},
                     "lines": {},
                     "line_prices": {},
+                    "priced_other_lines": {},
                 },
             )
             entry["providers"].setdefault(str(row["provider"]), set()).add(str(row["market_category"]))
@@ -3855,6 +3986,10 @@ class LatestProjectionPlayerPoolReader:
             entry["lines"].setdefault(str(row["provider"]), {}).setdefault(
                 str(row["market_category"]), set()
             ).add(float(row["line_value"]))
+            if row.get("priced_other_line"):
+                entry["priced_other_lines"].setdefault(str(row["provider"]), set()).add(
+                    str(row["market_category"])
+                )
             # A row stored before migration 072, or one with no priced side,
             # adds no price.
             if row["over_price"] is not None or row["under_price"] is not None:
@@ -3879,6 +4014,9 @@ class LatestProjectionPlayerPoolReader:
                 line_conflicts=line_conflicts,
                 line_prices=line_prices,
                 price_conflicts=price_conflicts,
+                priced_other_lines=_resolved_priced_other_lines(
+                    entry["priced_other_lines"], lines, line_prices
+                ),
             )
             for player_id, entry in sorted(contributions.items())
             for lines, line_conflicts in (_resolved_lines(entry["lines"]),)
@@ -3980,6 +4118,8 @@ class LatestProjectionPlayerPoolReader:
                 .mappings()
                 .all()
             )
+            if not roster:
+                rows = _with_priced_other_lines(connection, rows)
             # Provider health reads only each provider's newest promoted
             # poll and newest failed one, so no other poll is selected.
             ranked = (

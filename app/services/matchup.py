@@ -33,7 +33,7 @@ from app.domain.matchup_experience import (
     is_historical_matchup,
     player_source,
 )
-from app.domain.nba_events import REGULAR_SEASON_TYPE, resolve_stored_event_classification
+from app.domain.nba_events import REGULAR_SEASON_TYPE, is_started_event, resolve_stored_event_classification
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE, NBA_TEAM_TRICODE_TO_ID
 from app.domain.play_type_matchup import complete_play_type_shares, play_type_matchup
 from app.domain.rebound_types import REBOUND_TYPE_WIRE_NAMES, REBOUND_TYPES_BASE
@@ -86,7 +86,7 @@ from app.services.player_game_log_repository import (
 )
 from app.services.player_game_log_values import player_game_log_focal_line
 from app.services.player_pool import PlayerPool, PoolPlayer, PoolRead, SingleGamePlayerPoolReader
-from app.services.posted_lines import serialize_line_prices, serialize_lines
+from app.services.posted_lines import line_labels, serialize_line_prices, serialize_lines
 from app.services.publication_snapshot_calls import (
     accepts_keyword,
     call_with_read_scope,
@@ -457,7 +457,7 @@ class StatsFreshnessReader(Protocol):
 
 class SportsbookBookLinesReader(Protocol):
     def book_lines(
-        self, game_id: str, *, connection: Connection | None = None
+        self, game_id: str, *, now: datetime, started: bool, connection: Connection | None = None
     ) -> Mapping[int, Mapping[str, Any]]: ...
 
 
@@ -499,6 +499,7 @@ class _Participant:
     focal_game_line: dict[str, Any] | None = None
     lines: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
     line_prices: Mapping[str, Mapping[str, Mapping[str, int | None]]] = field(default_factory=dict)
+    priced_other_lines: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1243,6 +1244,7 @@ class MatchupService:
                     source=PLAYER_POOL_SOURCE,
                     lines=player.lines,
                     line_prices=player.line_prices,
+                    priced_other_lines=player.priced_other_lines,
                 )
                 for player in pool_players
                 if player.canonical_player_id not in injury_result.out_player_ids
@@ -1360,7 +1362,14 @@ class MatchupService:
                 availability,
                 {} if historical else injury_result.badge_refs,
                 book_lines=(
-                    {} if historical or not with_book_lines else self._book_lines(game_id, connection)
+                    {}
+                    if historical or not with_book_lines
+                    else self._book_lines(
+                        game_id,
+                        connection,
+                        now=observed_at,
+                        started=is_started_event(event, now=observed_at),
+                    )
                 ),
                 historical=historical,
             ),
@@ -2235,6 +2244,7 @@ class MatchupService:
                     },
                     "lines": serialize_lines(player.lines),
                     "line_prices": serialize_line_prices(player.line_prices),
+                    "line_labels": line_labels(player.lines, player.line_prices, player.priced_other_lines),
                     "season_scoring": (None if scoring is None else self._number(scoring)),
                     # The rate's own Evidence-season rows, so the last five
                     # and the averages describe the games season_scoring does.
@@ -2280,7 +2290,9 @@ class MatchupService:
         )
         return rows
 
-    def _book_lines(self, game_id: str, connection: Connection | None) -> Mapping[int, Mapping[str, Any]]:
+    def _book_lines(
+        self, game_id: str, connection: Connection | None, *, now: datetime, started: bool
+    ) -> Mapping[int, Mapping[str, Any]]:
         """Latest sportsbook lines for a game; never fails the Matchup.
 
         The read runs in a savepoint so a store error cannot poison the
@@ -2292,9 +2304,11 @@ class MatchupService:
             return {}
         try:
             if connection is None:
-                return self.sportsbook_reader.book_lines(game_id)
+                return self.sportsbook_reader.book_lines(game_id, now=now, started=started)
             with connection.begin_nested():
-                return self.sportsbook_reader.book_lines(game_id, connection=connection)
+                return self.sportsbook_reader.book_lines(
+                    game_id, now=now, started=started, connection=connection
+                )
         except Exception:
             logger.exception("Sportsbook book_lines read failed for game %s", game_id)
             return {}
