@@ -1944,7 +1944,8 @@ A priced line has no label, and a row with every line priced carries `{}`.
   price whose poll priced a different line for the same player, game and
   market (an available full-game market, any variant). The provider's
   standard-line pick chose an unpriced number beside a priced one. The poll is
-  the line's stored snapshot, so a statistic-mapping replay keeps it. Retention
+  the line's stored snapshot, so a statistic-mapping replay keeps it, and each
+  of its markets counts under its newest mapping. Retention
   keeps a started game's closing set but prunes that poll's other markets, so
   once they are pruned a frozen alternate reads `unpriced`, which is skipped
   the same way.

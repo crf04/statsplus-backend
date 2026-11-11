@@ -811,6 +811,41 @@ def test_a_line_a_mapping_replay_moves_is_still_judged_against_its_own_poll(boar
     ] == [("Jayson Tatum", {"novig": 9.5}, {"novig": "alternate"})]
 
 
+def test_a_priced_line_a_replay_moved_to_another_market_no_longer_counts(board, client):
+    # The poll priced 27.5 as points and posted 9.5 unpriced as assists.  A replay moves the 27.5 to
+    # rebounds, a second moves the 9.5 to points: points then has no priced line in the poll.
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(board.engine, catalog)
+    archive.ingest_complete_snapshot(
+        _snapshot(
+            "novig",
+            (
+                _market(catalog, "novig", TATUM, "assists", "9.5", (-110, None)),
+                _market(
+                    catalog, "novig", TATUM, "points", "27.5", (-115, -105), variant=MarketVariant.ALTERNATE
+                ),
+            ),
+            NOW - timedelta(minutes=1),
+        ),
+        query=QUERY,
+        accepted_at=NOW - timedelta(minutes=1),
+    )
+    for moved, to, at in (("points", "rebounds", 40), ("assists", "points", 30)):
+        archive.replay_statistic_mapping(
+            provider="novig",
+            provider_statistic_id=moved,
+            canonical_statistic_id=to,
+            replayed_at=NOW - timedelta(seconds=at),
+        )
+
+    status, body = _get(client, f"date=2026-01-15&market=PTS&game={LATER}&sources=novig")
+
+    assert status == 200
+    assert [
+        (player["name"], player["lines"], player["line_labels"]) for player in body["games"][0]["players"]
+    ] == [("Jayson Tatum", {"novig": 9.5}, {"novig": "unpriced"})]
+
+
 def _ingest_before_the_tip(board, provider, markets, *, freeze):
     catalog = StatisticCatalog.load_default()
     archive = ProjectionArchive(board.engine, catalog)
@@ -1164,8 +1199,9 @@ def test_the_slate_is_read_in_the_same_statements_whatever_its_game_count(board,
         # One closing-set lookup for every DFS provider, never per game.
         "projection_closing_sets": 1,
         "projection_closing_memberships": 1,
-        # The polls behind PrizePicks' unpriced lines, then their priced lines: two statements.
-        "projection_observations": 2,
+        # The polls behind PrizePicks' unpriced lines, then their markets: two statements, the
+        # second with a subquery.
+        "projection_observations": 3,
         "injury_snapshots": 1,
         "sportsbook_prop_latest": 1,
         # Every player only a book quotes is named in one statement.

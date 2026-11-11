@@ -689,11 +689,14 @@ def _with_priced_other_lines(connection: Any, rows: Sequence[Any]) -> tuple[Any,
     """``rows``, each unpriced line marked ``priced_other_line`` when its poll priced another.
 
     A row's poll is its observation's snapshot, which a statistic-mapping
-    replay keeps.  When that snapshot holds an available, full-game
-    observation with a price from the same provider, for the same player,
-    game and market at a different line, the provider posted the unpriced
-    line beside a priced one (crf04/statsplus#495).  Two statements: the
-    unpriced rows' snapshots, then those snapshots' priced lines.
+    replay keeps.  A market in that snapshot counts as its newest generation's
+    observation, so a replay that moved it to another market or player moves
+    its price too.  When the snapshot holds such a market, available and full
+    game, with a price from the same provider, for the same player, game and
+    market at a different line, the provider posted the unpriced line beside a
+    priced one (crf04/statsplus#495).  Two statements: the unpriced rows'
+    snapshots, then every observation of each market there that was ever
+    mapped to one of their players.
     """
 
     def unpriced(row: Any) -> bool:
@@ -703,6 +706,7 @@ def _with_priced_other_lines(connection: Any, rows: Sequence[Any]) -> tuple[Any,
     if not candidates:
         return tuple(rows)
     observation = ProjectionObservation.__table__
+    generation = ProjectionMaterializationGeneration.__table__
     snapshots = {
         str(observation_id): str(snapshot_id)
         for observation_id, snapshot_id in connection.execute(
@@ -711,34 +715,62 @@ def _with_priced_other_lines(connection: Any, rows: Sequence[Any]) -> tuple[Any,
             )
         )
     }
-    priced: dict[tuple[str, str, str, int, str], set[float]] = {}
+    in_snapshots = observation.c.snapshot_id.in_(sorted(set(snapshots.values())))
+    touched = (
+        select(observation.c.snapshot_id, observation.c.source_ordinal)
+        .where(
+            in_snapshots,
+            observation.c.canonical_player_id.in_(
+                sorted({int(row["canonical_player_id"]) for row in candidates})
+            ),
+        )
+        .subquery()
+    )
+    newest: dict[tuple[str, int], Any] = {}
     for found in connection.execute(
         select(
             observation.c.snapshot_id,
+            observation.c.source_ordinal,
             observation.c.provider,
             observation.c.canonical_game_id,
             observation.c.canonical_player_id,
             observation.c.market_category,
+            observation.c.market_status,
+            observation.c.scoring_period,
             observation.c.line_value,
-        ).where(
-            observation.c.snapshot_id.in_(sorted(set(snapshots.values()))),
-            observation.c.canonical_player_id.in_(
-                sorted({int(row["canonical_player_id"]) for row in candidates})
-            ),
-            observation.c.market_status == MarketStatus.AVAILABLE.value,
-            observation.c.scoring_period == ScoringPeriod.FULL_GAME.value,
-            observation.c.line_value.is_not(None),
-            or_(observation.c.over_price.is_not(None), observation.c.under_price.is_not(None)),
+            observation.c.over_price,
+            observation.c.under_price,
+            generation.c.created_at,
+            generation.c.generation_id,
+        )
+        .select_from(observation.join(generation, generation.c.generation_id == observation.c.generation_id))
+        .where(
+            in_snapshots,
+            tuple_(observation.c.snapshot_id, observation.c.source_ordinal).in_(select(touched)),
         )
     ):
-        key = (
-            str(found.snapshot_id),
-            str(found.provider),
-            str(found.canonical_game_id),
-            int(found.canonical_player_id),
-            str(found.market_category),
-        )
-        priced.setdefault(key, set()).add(float(found.line_value))
+        market = (str(found.snapshot_id), int(found.source_ordinal))
+        current = newest.get(market)
+        order = (assume_utc(found.created_at), str(found.generation_id))
+        if current is None or order > (assume_utc(current.created_at), str(current.generation_id)):
+            newest[market] = found
+    priced: dict[tuple[str, str, str, int, str], set[float]] = {}
+    for found in newest.values():
+        if (
+            found.market_status == MarketStatus.AVAILABLE.value
+            and found.scoring_period == ScoringPeriod.FULL_GAME.value
+            and found.line_value is not None
+            and found.canonical_player_id is not None
+            and (found.over_price is not None or found.under_price is not None)
+        ):
+            key = (
+                str(found.snapshot_id),
+                str(found.provider),
+                str(found.canonical_game_id),
+                int(found.canonical_player_id),
+                str(found.market_category),
+            )
+            priced.setdefault(key, set()).add(float(found.line_value))
 
     def priced_other_line(row: Any) -> bool:
         key = (
