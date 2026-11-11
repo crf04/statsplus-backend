@@ -437,7 +437,7 @@ def test_a_corrected_rebound_count_is_published_and_that_players_rebound_types_b
     peterson = ledger.player(PETERSON)
     assert (peterson.rebounds, peterson.defensive_rebounds) == (5, 5)
     assert _rebound_types(peterson) == (None,) * 6
-    assert _rebound_types(ledger.player(SENSABAUGH)) == (2, 0, 0, 0, 0, 0)
+    assert _rebound_types(ledger.player(SENSABAUGH)) == (0, 1, 0, 0, 1, 0)
     uta = ledger.team(UTA)
     assert (uta.rebounds, uta.defensive_rebounds) == (uta_rebounds[0] + 1, uta_rebounds[1] + 1)
     assert _rebound_types(uta) == (None,) * 6

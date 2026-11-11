@@ -1998,21 +1998,43 @@ only ones the admin reconciliation route and collection diagnostics show, so
 the streams held at `*_evidence_incomplete` point at the game.
 From 2026-27 every acceptance, including each daily and weekly recheck, also
 fetches NBA's official box score (`boxscoretraditionalv3` on `stats.nba.com`,
-one call per game, at least 0.6 s apart, through `NBATrackingProvider`). Each
-player's PTS, REB, OREB, DREB, AST, STL, BLK, TOV, FGM, FGA, FG3M, FG3A, FTM,
-FTA and PF are compared with the provider's row; a differing count takes the
-box score's value before normalization, the side's `team_results` total moves
-by the same amount, and the observation records the corrections under
-`_ledger_box_score_corrections` (crf04/statsplus-backend#763: PBP Stats and
-LiveData credit Darryn Peterson with 6 assists on 2026-11-02, NBA's box score
-with 5). A rebound count is compared but not applied when the game carries the
-miss-type rebound split, which must add up to the provider's rebounds. Each
-difference keeps one `ledger_box_score_difference` Reconciliation Item (reason
-`box_score_mismatch`) per game, player and stat, with both values, `applied`
-and `last_seen`; a later acceptance on which the two agree resolves it.
-`scripts/ledger_box_score_differences.py` lists the open items, and the run
-summary counts `box_score_differences`. A game whose box score cannot be
-fetched is accepted from its provider and listed in `unreconciled_game_ids`.
+through `NBATrackingProvider`): one request per game with a 10 s timeout, never
+retried (the next run is the retry), starting at least 0.6 s after the previous
+one without waiting for it to finish. Each player's PTS, REB, OREB, DREB, AST,
+STL, BLK, TOV, FGM, FGA, FG3M, FG3A, FTM, FTA and PF are compared with the
+provider's row; a differing count takes the box score's value before
+normalization, the side's `team_results` total moves by the same amount, and
+the observation records the corrections under `_ledger_box_score_corrections`
+(crf04/statsplus-backend#763: PBP Stats and LiveData credit Darryn Peterson with
+6 assists on 2026-11-02, NBA's box score with 5). Nothing says which location
+or miss type a correction came from, so a corrected AST leaves that player's
+assist locations unknown (its location fields are nulled and no longer add
+up), and a corrected OREB or DREB in a game that carries the miss-type split
+drops that player's split and marks the row `LedgerReboundTypesUnknown`: the
+player fact's six rebound types and its side's team rebound types are `None`,
+the only player rows a split-deriving game may leave underived. A reader of the
+assist-location or Rebound Types Base therefore sees every window that selects
+a corrected player-game `unavailable` (`assist_location_evidence_incomplete`
+or `rebound_type_evidence_incomplete`), and the player assist-location and
+rebound-type Diets of the season unavailable, never an uncorrected total; game
+logs, Traditional and per-36 carry the corrected counts. Each difference keeps
+one `ledger_box_score_difference` Reconciliation Item (reason
+`box_score_mismatch`) per game, player and stat, with both values and
+`last_seen`; a later acceptance on which the two agree resolves it.
+`scripts/ledger_box_score_differences.py` lists the open items; the run summary
+reports `box_score_differences` (found by this run) and
+`open_box_score_differences` (open in the season, the items the command lists).
+Whatever the box-score check does, the game is accepted exactly as it would be
+without it and listed in `unreconciled_game_ids`, and nothing is applied or
+resolved: when the request fails or times out, when the run has spent its
+120 s box-score budget or the timeout would end past the manifest's
+`collect_before`, or when the document does not make a whole game of the
+evidence (a malformed or inconsistent row, a player of the game it leaves out,
+a player it credits who is not in the game, or counts that miss the final
+score). Such a game, like any accepted one, is rechecked inside the daily and
+weekly windows. A failed check republishes the provider's counts, so a game
+corrected by an earlier run reads its provider value until a later check
+succeeds; its open items stay open.
 Repair is operator-invoked and bounded per run by `--max-games` and the
 provider retry cap; there is no persisted per-game attempt budget, so a game
 PBP keeps refusing is re-attempted on each run. Every target also fetches its

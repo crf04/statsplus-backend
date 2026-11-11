@@ -3,9 +3,9 @@
 Each ledger acceptance from 2026-27 compares every player's counting stats with
 ``boxscoretraditionalv3`` and publishes the box score's value
 (crf04/statsplus-backend#763).  This prints one JSON object per game, player
-and stat the provider still disagrees on, oldest first; ``applied`` is false
-for a rebound count the ledger kept because the game carries the miss-type
-split.  An item resolves when a later acceptance finds the two agree::
+and stat the provider still disagrees on, oldest first, the same items the
+run summary's ``open_box_score_differences`` counts.  An item resolves when a
+later acceptance finds the two agree::
 
     python scripts/ledger_box_score_differences.py --database-url "$DATABASE_URL" [--season 2026-27]
 """

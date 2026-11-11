@@ -12,7 +12,8 @@ Three ``stats.nba.com`` endpoints, all sent with ``nba_api``'s standard
   NBA LiveData and even ``playergamelogs`` can miss (crf04/statsplus-backend#763).
 
 The day feed's ``Rebounding`` sibling is deliberately not used: it leaves out
-every player with 0 rebounds.  Empty bodies and timeouts are retried.
+every player with 0 rebounds.  Empty bodies and timeouts of the tracking feeds
+are retried; the box score is fetched once.
 """
 
 from __future__ import annotations
@@ -77,7 +78,7 @@ class NBATrackingProvider:
         self._sleep = sleep
         self._monotonic = monotonic
         self._pace_lock = threading.Lock()
-        self._last_box_score: float | None = None
+        self._next_box_score: float | None = None
 
     def fetch_game_rebound_chances(self, game_id: str) -> dict[int, dict[str, int | None]]:
         """``{player_id: {"minutes", "total", "offensive", "defensive"}}`` for one game.
@@ -124,40 +125,39 @@ class NBATrackingProvider:
         )
         return parse_day_passing(payload)
 
-    def fetch_game_box_score(self, game_id: str) -> dict[int, dict[str, int]]:
+    def fetch_game_box_score(self, game_id: str, *, timeout: float) -> dict[int, dict[str, int]]:
         """``{player_id: {stat: count}}`` from NBA's official box score of one game.
 
-        Requests are at least ``pace_seconds`` apart, like the tracking refresh's
-        throttle between games.
+        One request, never retried: the ledger's next run is the retry.  Requests
+        start at least ``pace_seconds`` apart, like the tracking refresh's
+        throttle between games, but a slow request never holds up the next.
         """
 
         from nba_api.stats.library.http import NBAStatsHTTP
 
         with self._pace_lock:
-            if self._last_box_score is not None:
-                wait = self.pace_seconds - (self._monotonic() - self._last_box_score)
-                if wait > 0:
-                    self._sleep(wait)
-            try:
-                payload = self._call(
-                    lambda: NBAStatsHTTP()
-                    .send_api_request(
-                        endpoint="boxscoretraditionalv3",
-                        parameters={
-                            "GameID": game_id,
-                            "StartPeriod": 0,
-                            "EndPeriod": 0,
-                            "StartRange": 0,
-                            "EndRange": 0,
-                            "RangeType": 0,
-                        },
-                        headers=_standard_headers(),
-                        timeout=self.timeout,
-                    )
-                    .get_dict()
-                )
-            finally:
-                self._last_box_score = self._monotonic()
+            now = self._monotonic()
+            start = now if self._next_box_score is None else max(now, self._next_box_score)
+            self._next_box_score = start + self.pace_seconds
+        if start > now:
+            self._sleep(start - now)
+        payload = (
+            NBAStatsHTTP()
+            .send_api_request(
+                endpoint="boxscoretraditionalv3",
+                parameters={
+                    "GameID": game_id,
+                    "StartPeriod": 0,
+                    "EndPeriod": 0,
+                    "StartRange": 0,
+                    "EndRange": 0,
+                    "RangeType": 0,
+                },
+                headers=_standard_headers(),
+                timeout=timeout,
+            )
+            .get_dict()
+        )
         return parse_box_score_traditional(payload)
 
     def _call(self, request: Callable[[], Any]) -> Any:

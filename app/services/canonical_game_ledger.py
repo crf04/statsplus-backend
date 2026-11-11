@@ -610,6 +610,9 @@ LEDGER_GOVERNED_FULLGAME_FIELDS = PBP_BOXSCORE_ITEM_FIELDS | frozenset(
         # Self-identification of LiveData fallback evidence (see
         # ``game_derives_rebound_types``).
         "LedgerEvidenceProvider",
+        # A player row whose rebounds NBA's box score corrected (see
+        # ``_rebound_types_from_row``).
+        "LedgerReboundTypesUnknown",
     }
 )
 NBA_CALENDAR_TIMEZONE = ZoneInfo("America/New_York")
@@ -997,6 +1000,10 @@ def row_observes_rebound_types(row: Mapping[str, Any]) -> bool:
 #: split to offer.
 LEDGER_EVIDENCE_PROVIDER_KEY = "LedgerEvidenceProvider"
 LEDGER_FALLBACK_EVIDENCE_PROVIDERS = frozenset({"nba_live_data", "pbp+nba_live_data"})
+#: The player-row key that says the row's miss-type split is unknown: NBA's box
+#: score corrected the player's rebounds, and nothing says which miss type the
+#: correction came from (crf04/statsplus-backend#763).
+LEDGER_REBOUND_TYPES_UNKNOWN_KEY = "LedgerReboundTypesUnknown"
 
 
 def rows_identify_fallback_evidence(rows: Iterable[Mapping[str, Any]]) -> bool:
@@ -1057,10 +1064,11 @@ def _rebound_types_from_row(
     only the identity can check, hence the rejection when the parts do not
     add up to the row's rebounds.  A game that never carried the split (a
     LiveData fallback, or a game ingested before this vocabulary) derives
-    nothing: ``None`` on all six, never a zero-fill.
+    nothing: ``None`` on all six, never a zero-fill, and so does a row marked
+    ``LEDGER_REBOUND_TYPES_UNKNOWN_KEY``.
     """
 
-    if not observed:
+    if not observed or row.get(LEDGER_REBOUND_TYPES_UNKNOWN_KEY):
         return {attribute: None for attribute in REBOUND_TYPE_ATTRIBUTES}
     parts: dict[str, int | None] = {}
     for attribute, wire in REBOUND_TYPE_FIELDS:
@@ -1459,6 +1467,9 @@ def raw_rows_from_facts(game: CanonicalGame) -> tuple[LedgerGameRow, ...]:
 
     rows: list[LedgerGameRow] = []
     team_facts_by_id = {fact.team_id: fact for fact in game.team_facts}
+    splits_rebounds = any(
+        getattr(player, REBOUND_TYPE_ATTRIBUTES[0]) is not None for player in game.player_facts
+    )
     players_by_side = {
         "Home": tuple(player for player in game.player_facts if player.team_id == game.home_team_id),
         "Away": tuple(player for player in game.player_facts if player.team_id == game.away_team_id),
@@ -1488,7 +1499,7 @@ def raw_rows_from_facts(game: CanonicalGame) -> tuple[LedgerGameRow, ...]:
                 payload[names[0]] = residual
         if team_fact.possessions is not None:
             payload["Possessions"] = team_fact.possessions
-        if any(getattr(player, REBOUND_TYPE_ATTRIBUTES[0]) is None for player in side_players):
+        if not splits_rebounds:
             # Facts that never derived the split are the fallback's shape, and
             # their archive must say so or extraction would hold them to it.
             payload[LEDGER_EVIDENCE_PROVIDER_KEY] = "nba_live_data"
@@ -1526,6 +1537,8 @@ def raw_rows_from_facts(game: CanonicalGame) -> tuple[LedgerGameRow, ...]:
                 value = getattr(player, attribute)
                 if value is not None:
                     payload[wire] = value
+            if splits_rebounds and getattr(player, REBOUND_TYPE_ATTRIBUTES[0]) is None:
+                payload[LEDGER_REBOUND_TYPES_UNKNOWN_KEY] = True
             if player.usage_pct is not None:
                 payload["Usage"] = player.usage_pct
             if player.offensive_possessions is not None:
@@ -2660,9 +2673,24 @@ def validate_complete_game(game: CanonicalGame, *, tolerate_pending_backfills: b
         if fact.is_home != expected_home:
             raise LedgerValidationError("team fact has a contradictory home/away identity")
     observed_by_team: dict[int, set[int]] = {game.home_team_id: set(), game.away_team_id: set()}
-    if len({getattr(fact, REBOUND_TYPE_ATTRIBUTES[0]) is None for fact in game.player_facts}) > 1:
+    unknown_rebound_types = {
+        (row.team_id, row.entity_id)
+        for row in game.raw_rows
+        if row.row_type == "player" and row.payload.get(LEDGER_REBOUND_TYPES_UNKNOWN_KEY)
+    }
+    if (
+        len(
+            {
+                getattr(fact, REBOUND_TYPE_ATTRIBUTES[0]) is None
+                for fact in game.player_facts
+                if (fact.team_id, fact.player_id) not in unknown_rebound_types
+            }
+        )
+        > 1
+    ):
         raise LedgerValidationError(
-            "a game derives the miss-type rebound counts for every player or for none"
+            "a game derives the miss-type rebound counts for every player or for none, "
+            "except a player whose rebounds NBA's box score corrected"
         )
     if len({fact.usage_pct is None for fact in game.player_facts}) > 1:
         raise LedgerValidationError("a game derives usage_pct for every player or for none")
@@ -4339,6 +4367,7 @@ __all__ = [
     "COUNT_FIELDS",
     "LEDGER_GOVERNED_DIAGNOSTIC_COUNTS",
     "LEDGER_GOVERNED_FULLGAME_FIELDS",
+    "LEDGER_REBOUND_TYPES_UNKNOWN_KEY",
     "LEDGER_SCHEMA_VERSION",
     "CanonicalGame",
     "CanonicalGameLedgerRepository",

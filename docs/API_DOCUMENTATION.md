@@ -1589,7 +1589,9 @@ A slice includes both how often the team misses that shot type and how well it
 secures those misses. Rank, `percent_vs_league_average` and `sigma_deviation`
 use the same convention as every other row (rank 1 allows the fewest). When the
 Base cannot be served (its streams are not yet activated, a game has not
-derived the split, or the six slices fail to add up to `OPP_REB`) the Base is
+derived the split, a game holds a player whose rebounds NBA's official box score
+corrected, so his split is unknown, or the six slices fail to add up to
+`OPP_REB`) the Base is
 still listed: its `league.surface_availability` window is `missing` or
 `unavailable` with a reason (for example `rebound_type_evidence_incomplete`),
 its rows are `[]`, and it is never zero-filled. Because the Base was added after
@@ -1959,6 +1961,13 @@ attempts as a share of all the player's FGA (the provider's
 the shot type's population, restricted to players whose fact has a stored
 split. `shot_values` is `null` when the stored fact has no split. Other Bases
 carry no `shot_values` key.
+
+From 2026-27 the ledger publishes NBA's official box-score counts
+(crf04/statsplus-backend#763). A player-game whose assists that box score
+corrected has unknown assist locations, and one whose offensive or defensive
+rebounds it corrected has an unknown miss-type split; while the Season holds
+such a game, its `assist_locations` or `rebound_types` Diets are unavailable
+rather than built on the uncorrected count.
 
 The `rebound_types` Diet (crf04/statsplus#234) is derived from the Canonical
 Game Ledger like the assist-location Diet and has the same fact shape, in the
@@ -4931,7 +4940,7 @@ have the same shape. Only a `ledger_fallback_evidence` item adds `details`
 (`game_id` and the comma-separated `missing_families`), and a
 `ledger_box_score_difference` item adds `details` with `game_id`, `player_id`,
 `player_name`, `stat`, `ledger_value` (the provider's count), `box_score_value`
-(NBA's official box score), `applied` and `last_seen`; other kinds keep their
+(NBA's official box score, the published value) and `last_seen`; other kinds keep their
 details private.
 
 `POST /api/admin/collection/publication-rebuilds` starts one durable

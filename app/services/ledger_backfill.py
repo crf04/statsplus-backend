@@ -38,7 +38,12 @@ from app.services.canonical_game_ledger import (
     ReboundTypeIdentityError,
     canonical_game_from_pbp,
 )
-from app.services.ledger_box_score import BOX_SCORE_RECONCILED_SEASON, reconcile_to_box_score
+from app.services.ledger_box_score import (
+    BOX_SCORE_BUDGET_SECONDS,
+    BOX_SCORE_RECONCILED_SEASON,
+    BOX_SCORE_TIMEOUT_SECONDS,
+    reconcile_to_box_score,
+)
 from app.services.ledger_derivations import (
     IncompleteGameError,
     governed_assist_locations,
@@ -68,7 +73,7 @@ class LedgerLiveDataProvider(Protocol):
 class LedgerBoxScoreProvider(Protocol):
     """NBA's official box score on ``stats.nba.com``: ``{player_id: {stat: count}}``."""
 
-    def fetch_game_box_score(self, game_id: str) -> Mapping[int, Mapping[str, int]]: ...
+    def fetch_game_box_score(self, game_id: str, *, timeout: float) -> Mapping[int, Mapping[str, int]]: ...
 
 
 class LedgerAthleteCatalogReader(Protocol):
@@ -249,6 +254,7 @@ class BackfillResult:
     lower_priority_remaining: int
     reason: str | None = None
     box_score_differences: int = 0
+    open_box_score_differences: int | None = None
     unreconciled_game_ids: tuple[str, ...] = ()
 
 
@@ -272,6 +278,9 @@ class LedgerBackfillService:
         reconciliation_sink: Callable[[str, Mapping[str, object]], None],
         observation_recorder: LedgerObservationRecorder,
         box_score_provider: LedgerBoxScoreProvider | None = None,
+        box_score_timeout_seconds: float = BOX_SCORE_TIMEOUT_SECONDS,
+        box_score_budget_seconds: float = BOX_SCORE_BUDGET_SECONDS,
+        open_box_score_differences: Callable[[str], int] | None = None,
         max_concurrency: int = 3,
         daily_recheck_days: int = 7,
         weekly_recheck_days: int = 30,
@@ -289,6 +298,9 @@ class LedgerBackfillService:
         self.reconciliation_sink = reconciliation_sink
         self.observation_recorder = observation_recorder
         self.box_score_provider = box_score_provider
+        self.box_score_timeout_seconds = box_score_timeout_seconds
+        self.box_score_budget_seconds = box_score_budget_seconds
+        self.open_box_score_differences = open_box_score_differences
         for collaborator, methods, label in (
             (athlete_catalog, ("get_catalog", "get_freshness"), "athlete_catalog"),
             (participant_catalog, ("get_participants",), "participant_catalog"),
@@ -394,10 +406,38 @@ class LedgerBackfillService:
         failures: list[str] = []
         unreconciled: list[str] = []
         box_score_differences = 0
+        box_score_seconds_left = self.box_score_budget_seconds
+        box_score_lock = threading.Lock()
         writes = []
         processed = 0
         active_staged: set[str] = set()
         lifecycle_lock = threading.Lock()
+
+        def official_box_score(game_id: str):
+            """NBA's official box score of one game, or ``None`` when this run cannot check it.
+
+            Whatever the request does, it never costs the game its acceptance:
+            a check starts only while the run's budget lasts and when its
+            timeout ends before the manifest's deadline, and any failure reads
+            as no box score.
+            """
+
+            nonlocal box_score_seconds_left
+            started = _aware(self.clock())
+            with box_score_lock:
+                if box_score_seconds_left <= 0 or started + timedelta(
+                    seconds=self.box_score_timeout_seconds
+                ) >= _aware(collect_before):
+                    return None
+            try:
+                return self.box_score_provider.fetch_game_box_score(
+                    game_id, timeout=self.box_score_timeout_seconds
+                )
+            except Exception:
+                return None
+            finally:
+                with box_score_lock:
+                    box_score_seconds_left -= (_aware(self.clock()) - started).total_seconds()
 
         def fetch_and_commit(target: _Target):
             event = target.event
@@ -408,20 +448,30 @@ class LedgerBackfillService:
             box_score_outcome: list = []
             differences = None
 
-            def official_box_score():
-                if not box_score_outcome:
-                    try:
-                        box_score_outcome.append(self.box_score_provider.fetch_game_box_score(game_id))
-                    except (ProviderResponseError, ProviderUnavailableError, OSError):
-                        # The game is still accepted from its provider; the
-                        # run counts it unreconciled.
-                        box_score_outcome.append(None)
-                return box_score_outcome[0]
-
             def stage_and_normalize(observation, *, final_score, source_provider="pbp"):
-                nonlocal observation_id, differences
-                if reconciles and official_box_score() is not None:
-                    observation, differences = reconcile_to_box_score(observation, official_box_score())
+                nonlocal differences
+                differences = None
+                if reconciles and not box_score_outcome:
+                    box_score_outcome.append(official_box_score(game_id))
+                official = box_score_outcome[0] if reconciles else None
+                if official is not None:
+                    try:
+                        corrected, found = reconcile_to_box_score(observation, official)
+                        normalized = normalize(
+                            corrected, final_score=final_score, source_provider=source_provider
+                        )
+                    except Exception:
+                        # A box score that does not make a whole game of this
+                        # evidence is no reference: the game is accepted from
+                        # its provider and the run counts it unreconciled.
+                        pass
+                    else:
+                        differences = found
+                        return normalized
+                return normalize(observation, final_score=final_score, source_provider=source_provider)
+
+            def normalize(observation, *, final_score, source_provider):
+                nonlocal observation_id
                 if source_provider not in {
                     "pbp",
                     "nba_live_data",
@@ -655,6 +705,9 @@ class LedgerBackfillService:
             lower_priority_remaining=lower_priority_remaining,
             reason=None if complete else "ledger identities do not exactly match governance",
             box_score_differences=box_score_differences,
+            open_box_score_differences=(
+                None if self.open_box_score_differences is None else self.open_box_score_differences(season)
+            ),
             unreconciled_game_ids=tuple(sorted(unreconciled)),
         )
 
