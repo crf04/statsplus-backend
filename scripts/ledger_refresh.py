@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 from dataclasses import asdict
+from datetime import UTC, datetime, time
 from pathlib import Path
 
 if __package__ in {None, ""}:
@@ -18,10 +19,19 @@ from app.services.ledger_runtime import (
     ActiveManifestLedgerGovernanceReader,
     LedgerRuntime,
 )
+from app.services.team_matchup_publications import PublicationGovernanceUnavailable
 from app.utils.db import get_engine
 
+#: Each morning's collection manifest opens between the 10:15 and 12:15 UTC runs. Before
+#: then a run has no manifest to collect under, which is not a failure; from noon on it is.
+MANIFEST_EXPECTED_BY = time(12, 0)
 
-def main() -> int:
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("season")
     parser.add_argument("--database-url", required=True)
@@ -33,7 +43,7 @@ def main() -> int:
         action="store_true",
         help="compose already accepted jobs without authorizing provider collection",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     settings = RuntimeSettings(
         environment="development",
         database={"url": args.database_url},
@@ -52,11 +62,21 @@ def main() -> int:
         composed = runtime.compose_queued(args.season)
         print(json.dumps({"season": args.season, "composed_jobs": composed}, sort_keys=True))
         return 0
-    result = runtime.refresh(
-        args.season,
-        max_games=args.max_games,
-        historical_repair=args.historical_repair,
-    )
+    try:
+        result = runtime.refresh(
+            args.season,
+            max_games=args.max_games,
+            historical_repair=args.historical_repair,
+        )
+    except PublicationGovernanceUnavailable as error:
+        if _now().time() >= MANIFEST_EXPECTED_BY:
+            raise
+        print(
+            json.dumps(
+                {"season": args.season, "skipped": "no_active_manifest", "detail": str(error)}, sort_keys=True
+            )
+        )
+        return 0
     composed = runtime.compose_queued(args.season) if args.compose and result.complete else 0
     print(json.dumps({**asdict(result), "composed_jobs": composed}, default=str, sort_keys=True))
     return 0 if result.complete else 2
