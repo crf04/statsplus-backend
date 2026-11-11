@@ -144,10 +144,26 @@ def test_the_player_and_team_reads_run_on_postgres(engine):
     assert player["games"][0]["stints"] == [
         {"in": {"period": 1, "clock": "12:00"}, "out": {"period": 2, "clock": "0:00"}, "minutes": 20.0},
     ]
-    # Unit Two is not on the box score of DET's most recent game, so drops out.
+    # Unit Two missed DET's most recent game inside his open DET window: he is
+    # listed with his team games, none played, and no averages.
     assert [(p["name"], p["minutes_change"]) for p in team["players"]] == [
         ("Unit One", -5.0),
+        ("Unit Two", None),
     ]
+    assert team["players"][1]["recent"] == {
+        "games": 1,
+        "played": 0,
+        "starts": 0,
+        "minutes": None,
+        "closed": 0,
+    }
+    assert team["players"][1]["season_summary"] == {
+        "games": 2,
+        "played": 0,
+        "starts": 0,
+        "minutes": None,
+        "closed": 0,
+    }
 
 
 def test_the_game_read_runs_on_postgres(engine):
