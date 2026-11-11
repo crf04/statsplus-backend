@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from collections import Counter
 from datetime import UTC, datetime, timedelta
@@ -843,6 +844,55 @@ def test_a_priced_line_a_replay_moved_to_another_market_no_longer_counts(board, 
     assert status == 200
     assert [
         (player["name"], player["lines"], player["line_labels"]) for player in body["games"][0]["players"]
+    ] == [("Jayson Tatum", {"novig": 9.5}, {"novig": "unpriced"})]
+
+
+def test_a_priced_line_a_replay_moved_to_another_player_no_longer_counts(board, client):
+    # The poll priced Tatum's points at 27.5 under one Novig athlete id and posted his 9.5 unpriced as
+    # assists under another.  A replay gives the first id to Brown, a second moves the 9.5 to points:
+    # Tatum's points then have no priced line in the poll.
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(board.engine, catalog)
+    unpriced = _market(catalog, "novig", TATUM, "assists", "9.5", (-110, None))
+    priced = _market(catalog, "novig", TATUM, "points", "27.5", (-115, -105), variant=MarketVariant.ALTERNATE)
+    archive.ingest_complete_snapshot(
+        _snapshot(
+            "novig",
+            (
+                dataclasses.replace(
+                    unpriced, athlete=dataclasses.replace(unpriced.athlete, provider_id="tatum-a")
+                ),
+                dataclasses.replace(
+                    priced, athlete=dataclasses.replace(priced.athlete, provider_id="tatum-b")
+                ),
+            ),
+            NOW - timedelta(minutes=1),
+        ),
+        query=QUERY,
+        accepted_at=NOW - timedelta(minutes=1),
+    )
+    archive.replay_athlete_mapping(
+        provider="novig",
+        provider_athlete_id="tatum-b",
+        canonical_player_id=BROWN[0],
+        canonical_player_name=BROWN[1],
+        canonical_team_id=BOS.canonical_id,
+        replayed_at=NOW - timedelta(seconds=40),
+    )
+    archive.replay_statistic_mapping(
+        provider="novig",
+        provider_statistic_id="assists",
+        canonical_statistic_id="points",
+        replayed_at=NOW - timedelta(seconds=30),
+    )
+
+    status, body = _get(client, f"date=2026-01-15&market=PTS&game={LATER}&sources=novig")
+
+    assert status == 200
+    assert [
+        (player["name"], player["lines"], player["line_labels"])
+        for player in body["games"][0]["players"]
+        if player["name"] == "Jayson Tatum"
     ] == [("Jayson Tatum", {"novig": 9.5}, {"novig": "unpriced"})]
 
 
