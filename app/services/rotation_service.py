@@ -241,11 +241,22 @@ def classify_games(
 
 
 def _side_counts(lines: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """:func:`_counts`, with ``minutes`` null for a side with no games."""
+    """:func:`_counts`, with ``minutes`` null for a side with no games, and
+    ``minutes_per_game_played`` (null when he played none)."""
 
     if not lines:
-        return {"games": 0, "played": 0, "starts": 0, "minutes": None, "closed": 0}
-    return _counts(lines)
+        return {
+            "games": 0,
+            "played": 0,
+            "starts": 0,
+            "minutes": None,
+            "minutes_per_game_played": None,
+            "closed": 0,
+        }
+    counts = _counts(lines)
+    played = counts["played"]
+    total = sum(line["minutes_cs"] for line in lines)
+    return {**counts, "minutes_per_game_played": _average_minutes(total, played) if played else None}
 
 
 def _side_detail(lines: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -255,11 +266,7 @@ def _side_detail(lines: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         return {**_side_counts(lines), "minutes_by_period": None, "stints": None}
     summary = _summary(lines)
     return {
-        "games": summary["games"],
-        "played": summary["played"],
-        "starts": summary["starts"],
-        "minutes": summary["minutes"],
-        "closed": summary["closed"],
+        **_side_counts(lines),
         "minutes_by_period": summary["minutes_by_period"],
         "stints": summary["stints"],
     }
