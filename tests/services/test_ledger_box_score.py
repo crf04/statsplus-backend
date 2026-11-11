@@ -339,6 +339,22 @@ def test_a_box_score_that_is_not_a_whole_reference_leaves_the_game_as_its_provid
     assert ledger.reports == []
 
 
+INCONSISTENT_ROWS = (
+    "made shots exceed attempts",
+    "points disagree with the shots",
+    "rebounds disagree with their split",
+)
+
+
+@pytest.mark.parametrize("name", INCONSISTENT_ROWS)
+def test_a_box_score_with_an_inconsistent_row_is_rejected_whole(name):
+    document = _official()
+    UNUSABLE_BOX_SCORES[name](document["boxScoreTraditional"])
+
+    with pytest.raises(ProviderResponseError, match="inconsistent player row"):
+        parse_box_score_traditional(document)
+
+
 def test_a_box_score_listing_players_who_did_not_play_is_still_a_reference(tmp_path):
     document = _official()
     document["boxScoreTraditional"]["awayTeam"]["players"].append(
