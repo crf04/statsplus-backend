@@ -838,11 +838,14 @@ _BOS_GAMES = _logs(*((f"b{n}", f"2026-11-{2 * n - 1:02d}", "BOS") for n in range
 
 
 def test_players_off_counts_only_reports_that_list_his_exact_id(evidence, monkeypatch):
-    # 201's digits begin 2011's; c6's report also lists a player it could not identify.
+    # 201's digits begin 2011's.  c6's report lists 201 for BOS beside 2011 for
+    # LAC, and a player it could not identify.
     evidence.service.athlete_catalog.names.update({201: "Short Id", 2011: "Long Id"})
     store_reports(evidence.reports, "2026-27", _days(_LAC_GAMES, "c1", "c2", "c3"), (2011, "LAC"))
     store_reports(evidence.reports, "2026-27", _days(_LAC_GAMES, "c4", "c5"), (201, "LAC"))
-    store_reports(evidence.reports, "2026-27", _days(_LAC_GAMES, "c6"), (None, "LAC"), (2011, "LAC"))
+    store_reports(
+        evidence.reports, "2026-27", _days(_LAC_GAMES, "c6"), (201, "BOS"), (2011, "LAC"), (None, "LAC")
+    )
     _stub_game_logs(evidence.service, monkeypatch, {"Short Id": _NO_GAMES, "Long Id": _NO_GAMES})
 
     short = run(evidence.service.filter_players_on_off(_LAC_GAMES, [], ["Short Id"], "2026-27"))
