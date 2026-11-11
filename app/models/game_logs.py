@@ -685,6 +685,10 @@ class GameLogResponse(BaseModel):
     ``opponent_ranks`` maps a chart line type to each opponent's whole-season
     rank in its allowed metric, 30 = allows the most; ``{}`` when the season
     cannot be ranked (crf04/statsplus#456).
+    With ``teams_against`` filters, each ``game_logs`` row carries
+    ``teams_against_ranks``: each filter, as the request named it, mapped to the
+    rank its ``rank_filter`` compared for that game's opponent, 1-30 with 30 =
+    allows the most (crf04/statsplus#498).
     """
 
     game_logs: list[dict[str, Any]]
