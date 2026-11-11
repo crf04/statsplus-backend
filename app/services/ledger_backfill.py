@@ -35,6 +35,7 @@ from app.services.canonical_game_ledger import (
     CanonicalGameLedgerRepository,
     LedgerBackfillProgress,
     LedgerValidationError,
+    LedgerWriteResult,
     ReboundTypeIdentityError,
     canonical_game_from_pbp,
 )
@@ -42,11 +43,13 @@ from app.services.ledger_box_score import (
     BOX_SCORE_BUDGET_SECONDS,
     BOX_SCORE_RECONCILED_SEASON,
     BOX_SCORE_TIMEOUT_SECONDS,
+    carries_box_score_corrections,
     reconcile_to_box_score,
 )
 from app.services.ledger_derivations import (
     IncompleteGameError,
     governed_assist_locations,
+    located_player_facts,
     nominal_game_minutes,
 )
 from app.utils.telemetry import ProviderResponseError
@@ -601,6 +604,24 @@ class LedgerBackfillService:
                             "PBP game contains an unresolved Athlete Catalog identity"
                         )
                 validated = True
+                if reconciles and differences is None:
+                    stored = self.repository.get_game(game_id)
+                    if stored is not None and carries_box_score_corrections(stored):
+                        # Without a whole box score this run cannot say the
+                        # correction is wrong, so the published game stays.
+                        return (
+                            game_id,
+                            LedgerWriteResult(
+                                game_id=game_id,
+                                checksum=stored.checksum,
+                                inserted=False,
+                                replaced=False,
+                                row_count=0,
+                            ),
+                            validated,
+                            None,
+                            None,
+                        )
                 accepted_at = _aware(self.clock())
                 if accepted_at >= _aware(collect_before):
                     raise LedgerValidationError("ledger manifest collection deadline elapsed")
@@ -901,7 +922,7 @@ def _missing_evidence_families(game: CanonicalGame) -> tuple[str, ...]:
         for family, missing in (
             (
                 "assist_locations",
-                any(governed_assist_locations(player) is None for player in game.player_facts),
+                any(governed_assist_locations(player) is None for player in located_player_facts(game)),
             ),
             ("rebound_types", any(player.def_two_pt_rebounds is None for player in game.player_facts)),
         )

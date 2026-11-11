@@ -1,10 +1,12 @@
 """List the open differences between the ledger's provider and NBA's official box score.
 
 Each ledger acceptance from 2026-27 compares every player's counting stats with
-``boxscoretraditionalv3`` and publishes the box score's value
+``boxscoretraditionalv3`` and publishes the box score's value, except for
+REB, OREB and DREB, whose provider count stays published
 (crf04/statsplus-backend#763).  This prints one JSON object per game, player
 and stat the provider still disagrees on, oldest first, the same items the
-run summary's ``open_box_score_differences`` counts.  An item resolves when a
+run summary's ``open_box_score_differences`` counts; ``applied`` tells the
+published differences from the recorded-only ones.  An item resolves when a
 later acceptance finds the two agree::
 
     python scripts/ledger_box_score_differences.py --database-url "$DATABASE_URL" [--season 2026-27]

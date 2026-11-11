@@ -7,10 +7,13 @@ the official counts before normalization, the side's ``team_results`` totals
 move with them, and every count that differed is reported
 (crf04/statsplus-backend#763).
 
-Nothing says which location or miss type a correction came from, so a
-corrected assist count leaves that player's assist locations unknown, and a
-corrected offensive or defensive rebound count in a game that carries the
-miss-type split leaves that player's split unknown.
+A correction never makes a Base unavailable.  A corrected row keeps the
+provider's assist locations, which describe the provider's count its row
+still holds (``LEDGER_PROVIDER_COUNT_KEYS``).  Rebounds are reported and not
+applied: each team's miss-type slices must add up to the player-credited
+``OPP_REB`` of the traditional publication (``materialize_rebound_type_window``,
+and ``check_identity`` again at activation), so a corrected rebound beside the
+provider's split would make the Rebound Types Base unavailable.
 """
 
 from __future__ import annotations
@@ -20,9 +23,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from app.domain.rebound_types import REBOUND_TYPE_WIRE_NAMES
 from app.providers.nba_tracking import BOX_SCORE_STATS
-from app.services.canonical_game_ledger import LEDGER_REBOUND_TYPES_UNKNOWN_KEY, row_observes_rebound_types
+from app.services.canonical_game_ledger import LEDGER_PROVIDER_COUNT_KEYS, CanonicalGame
 from app.utils.telemetry import ProviderResponseError
 
 BOX_SCORE_RECONCILED_SEASON = "2026-27"
@@ -35,16 +37,7 @@ BOX_SCORE_TIMEOUT_SECONDS = 10.0
 #: flight (production runs one worker): about 2 minutes in a cron that runs
 #: every 2 hours.
 BOX_SCORE_BUDGET_SECONDS = 120.0
-
-_ASSIST_LOCATION_WIRES = (
-    "TwoPtAssists",
-    "ThreePtAssists",
-    "Arc3Assists",
-    "Corner3Assists",
-    "AtRimAssists",
-    "ShortMidRangeAssists",
-    "LongMidRangeAssists",
-)
+UNAPPLIED_STATS = frozenset({"REB", "OREB", "DREB"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +47,7 @@ class BoxScoreDifference:
     stat: str
     ledger_value: int
     box_score_value: int
+    applied: bool
 
 
 def reconcile_to_box_score(
@@ -72,7 +66,6 @@ def reconcile_to_box_score(
         any(counts.values()) for player_id, counts in box_score.items() if player_id not in player_ids
     ):
         raise ProviderResponseError("boxscoretraditionalv3 does not cover the game's players")
-    splits_rebounds = any(row_observes_rebound_types(row) for row in rows)
     differences: list[BoxScoreDifference] = []
     for side in ("Home", "Away"):
         total = _team_total(observation, side)
@@ -87,36 +80,27 @@ def reconcile_to_box_score(
                     stat=stat,
                     ledger_value=recorded[stat],
                     box_score_value=official[stat],
+                    applied=stat not in UNAPPLIED_STATS,
                 )
                 for stat in changed
             )
             if not changed:
                 continue
             for wire, value in _official_wire(official, row).items():
-                delta = value - int(row.get(wire) or 0)
-                if delta:
+                provider = int(row.get(wire) or 0)
+                if value != provider:
+                    row[LEDGER_PROVIDER_COUNT_KEYS[wire]] = provider
                     row[wire] = value
                     if total is not None:
-                        total[wire] = int(total.get(wire) or 0) + delta
-            if "AST" in changed:
-                for wire in _ASSIST_LOCATION_WIRES:
-                    if wire in row:
-                        row[wire] = None
-            if splits_rebounds and {"OREB", "DREB"} & set(changed):
-                for wire in REBOUND_TYPE_WIRE_NAMES:
-                    row.pop(wire, None)
-                row[LEDGER_REBOUND_TYPES_UNKNOWN_KEY] = True
-    if differences:
-        observation["_ledger_box_score_corrections"] = [
-            {
-                "player_id": difference.player_id,
-                "stat": difference.stat,
-                "provider": difference.ledger_value,
-                "box_score": difference.box_score_value,
-            }
-            for difference in differences
-        ]
+                        total[wire] = int(total.get(wire) or 0) + value - provider
     return observation, tuple(differences)
+
+
+def carries_box_score_corrections(game: CanonicalGame) -> bool:
+    """Whether any player row of a stored game publishes a corrected count."""
+
+    keys = set(LEDGER_PROVIDER_COUNT_KEYS.values())
+    return any(row.row_type == "player" and not keys.isdisjoint(row.payload) for row in game.raw_rows)
 
 
 def _player_rows(observation: Mapping[str, Any], side: str) -> list[dict[str, Any]]:
@@ -174,17 +158,15 @@ def _official_wire(official: Mapping[str, int], row: Mapping[str, Any]) -> dict[
         "FG3A": official["FG3A"],
         "FtPoints": official["FTM"],
         "FTA": official["FTA"],
-        "OffRebounds": official["OREB"],
-        "DefRebounds": official["DREB"],
         "Assists": official["AST"],
         "Steals": official["STL"],
         "Blocks": official["BLK"],
         "Turnovers": official["TOV"],
         "Fouls": official["PF"],
     }
-    for composite, stat in (("FGM", "FGM"), ("FGA", "FGA"), ("Rebounds", "REB")):
+    for composite in ("FGM", "FGA"):
         if row.get(composite) is not None:
-            wire[composite] = official[stat]
+            wire[composite] = official[composite]
     return wire
 
 
@@ -192,6 +174,8 @@ __all__ = [
     "BOX_SCORE_BUDGET_SECONDS",
     "BOX_SCORE_RECONCILED_SEASON",
     "BOX_SCORE_TIMEOUT_SECONDS",
+    "UNAPPLIED_STATS",
     "BoxScoreDifference",
+    "carries_box_score_corrections",
     "reconcile_to_box_score",
 ]
