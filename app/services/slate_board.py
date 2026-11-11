@@ -24,6 +24,7 @@ from app.providers.odds_api import BOOK_ALLOWLIST
 from app.providers.registry import dfs_provider_names
 from app.services.injury_listing import slate_events
 from app.services.player_pool import PlayerPool
+from app.services.posted_lines import line_labels
 from app.services.publication_snapshot_calls import call_with_read_scope
 from app.services.request_reads import request_read_scope
 from app.services.research_season import schedule_season
@@ -55,6 +56,7 @@ class _Posting:
     injury_status: str | None
     lines: Mapping[str, float]
     line_prices: Mapping[str, Mapping[str, int | None]]
+    line_labels: Mapping[str, str]
     book_rows: tuple[Any, ...]
 
     def row(self, *, now: datetime, started: bool) -> dict[str, Any]:
@@ -66,6 +68,7 @@ class _Posting:
             "injury_status": self.injury_status,
             "lines": dict(self.lines),
             "line_prices": {provider: dict(prices) for provider, prices in self.line_prices.items()},
+            "line_labels": dict(self.line_labels),
             "book_lines": (
                 None
                 if entry is None
@@ -373,6 +376,7 @@ class _Postings:
             books = tuple(self._books.get((game_id, int(player.canonical_player_id), market), ()))
             if not lines and not books:
                 continue
+            labels = line_labels(player.lines, player.line_prices, player.priced_other_lines)
             found.append(
                 self._posting(
                     game_id,
@@ -387,6 +391,11 @@ class _Postings:
                         }
                         for provider in lines
                         if market in player.line_prices.get(provider, {})
+                    },
+                    line_labels={
+                        provider: labels[provider][market]
+                        for provider in lines
+                        if market in labels.get(provider, {})
                     },
                     books=books,
                 )
@@ -410,6 +419,7 @@ class _Postings:
                     str(team),
                     lines={},
                     line_prices={},
+                    line_labels={},
                     books=books,
                 )
             )
@@ -424,6 +434,7 @@ class _Postings:
         *,
         lines: Mapping[str, float],
         line_prices: Mapping[str, Mapping[str, int | None]],
+        line_labels: Mapping[str, str],
         books: tuple[Any, ...],
     ) -> _Posting:
         status = self._statuses.get(player_id)
@@ -435,6 +446,7 @@ class _Postings:
             injury_status=status if status in BOARD_INJURY_STATUSES else None,
             lines=lines,
             line_prices=line_prices,
+            line_labels=line_labels,
             book_rows=books,
         )
 

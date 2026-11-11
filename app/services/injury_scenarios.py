@@ -62,7 +62,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.domain.team_window import TeamWindow
 from app.errors import InvalidInputError
-from app.services.posted_lines import posted_line
+from app.services.posted_lines import line_labels, posted_line, reported_lines
 from app.services.research_season import previous_nba_season, schedule_season, season_scoped
 from app.services.rotation_service import classify_games, rotation_split
 from app.services.team_membership import TeamMembership, appearances
@@ -833,9 +833,9 @@ class InjuryScenarioService:
         if pool is None:
             return {}
         return {
-            int(player.canonical_player_id): {
-                provider: dict(lines) for provider, lines in player.lines.items()
-            }
+            int(player.canonical_player_id): reported_lines(
+                player.lines, line_labels(player.lines, player.line_prices, player.priced_other_lines)
+            )
             for player in pool.players
         }
 

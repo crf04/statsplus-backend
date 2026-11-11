@@ -80,7 +80,7 @@ from app.services.player_game_log_repository import (
 )
 from app.services.player_game_log_values import player_game_log_focal_line
 from app.services.player_pool import PlayerPool, PoolPlayer, PoolRead, SingleGamePlayerPoolReader
-from app.services.posted_lines import serialize_line_prices, serialize_lines
+from app.services.posted_lines import line_labels, serialize_line_prices, serialize_lines
 from app.services.publication_snapshot_calls import (
     accepts_keyword,
     call_with_read_scope,
@@ -471,6 +471,7 @@ class _Participant:
     focal_game_line: dict[str, Any] | None = None
     lines: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
     line_prices: Mapping[str, Mapping[str, Mapping[str, int | None]]] = field(default_factory=dict)
+    priced_other_lines: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1215,6 +1216,7 @@ class MatchupService:
                     source=PLAYER_POOL_SOURCE,
                     lines=player.lines,
                     line_prices=player.line_prices,
+                    priced_other_lines=player.priced_other_lines,
                 )
                 for player in pool_players
                 if player.canonical_player_id not in injury_result.out_player_ids
@@ -2094,6 +2096,7 @@ class MatchupService:
                     },
                     "lines": serialize_lines(player.lines),
                     "line_prices": serialize_line_prices(player.line_prices),
+                    "line_labels": line_labels(player.lines, player.line_prices, player.priced_other_lines),
                     "season_scoring": (None if scoring is None else self._number(scoring)),
                     # The rate's own Evidence-season rows, so the last five
                     # and the averages describe the games season_scoring does.

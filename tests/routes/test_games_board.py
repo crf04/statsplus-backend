@@ -106,14 +106,25 @@ def _event(game_id, away, home, tip):
     }
 
 
-def _market(catalog, provider, player, statistic_id, threshold, prices=(-110, None)):
+def _market(
+    catalog,
+    provider,
+    player,
+    statistic_id,
+    threshold,
+    prices=(-110, None),
+    *,
+    variant=MarketVariant.STANDARD,
+    status=MarketStatus.AVAILABLE,
+):
     player_id, name, team, game_id = player
     statistic = catalog.by_id[statistic_id]
     evidence = StatisticEvidence(provider_id=statistic_id, canonical_id=statistic.id)
     over, under = prices
+    suffix = "" if variant is MarketVariant.STANDARD and status is MarketStatus.AVAILABLE else f"-{threshold}"
     return PlayerProjectionMarket(
         provider=provider,
-        market_id=f"{provider}-{player_id}-{statistic_id}",
+        market_id=f"{provider}-{player_id}-{game_id}-{statistic_id}{suffix}",
         athlete=AthleteEvidence(canonical_id=player_id, name=name, team=team),
         event=EventEvidence(canonical_id=game_id),
         team=team,
@@ -126,8 +137,8 @@ def _market(catalog, provider, player, statistic_id, threshold, prices=(-110, No
             provider=provider,
         ),
         threshold=MarketThreshold(threshold, "count"),
-        status=MarketStatus.AVAILABLE,
-        variant=MarketVariant.STANDARD,
+        status=status,
+        variant=variant,
         scoring_period=ScoringPeriod.FULL_GAME,
         selections=tuple(
             Selection(selection_id=f"{direction.value}", direction=direction, american_price=price)
@@ -444,6 +455,7 @@ CURRY_PTS = {
     "injury_status": None,
     "lines": {"dabble": 29.5},
     "line_prices": {"dabble": {"over": -122, "under": -104}},
+    "line_labels": {},
     "book_lines": {
         "as_of": "2026-01-15T23:29:00Z",
         "closing": True,
@@ -466,6 +478,7 @@ LEBRON_PTS = {
     "injury_status": None,
     "lines": {"dabble": 24.5},
     "line_prices": {"dabble": {"over": -115, "under": -111}},
+    "line_labels": {},
     "book_lines": None,
 }
 TATUM_PTS = {
@@ -475,6 +488,7 @@ TATUM_PTS = {
     "injury_status": "Questionable",
     "lines": {"dabble": 27.5, "prizepicks": 28.5},
     "line_prices": {"dabble": {"over": -122, "under": -104}},
+    "line_labels": {"prizepicks": "line-only"},
     "book_lines": {
         "as_of": "2026-01-15T23:57:00Z",
         "closing": False,
@@ -505,6 +519,7 @@ BROWN_PTS = {
     "injury_status": None,
     "lines": {"dabble": 23.5},
     "line_prices": {"dabble": {"over": -115, "under": -105}},
+    "line_labels": {},
     "book_lines": None,
 }
 WHITE_PTS = {
@@ -514,6 +529,7 @@ WHITE_PTS = {
     "injury_status": None,
     "lines": {"dabble": 15.5},
     "line_prices": {"dabble": {"over": -110, "under": -110}},
+    "line_labels": {},
     "book_lines": None,
 }
 HAUSER_PTS = {
@@ -523,6 +539,7 @@ HAUSER_PTS = {
     "injury_status": "Probable",
     "lines": {},
     "line_prices": {},
+    "line_labels": {},
     "book_lines": {
         "as_of": "2026-01-15T23:57:00Z",
         "closing": False,
@@ -545,6 +562,7 @@ NAMESAKE_PTS = {
     "injury_status": None,
     "lines": {},
     "line_prices": {},
+    "line_labels": {},
     "book_lines": {
         "as_of": "2026-01-15T23:52:00Z",
         "closing": False,
@@ -567,6 +585,7 @@ BRUNSON_PTS = {
     "injury_status": "Out",
     "lines": {"dabble": 26.5, "prizepicks": 26.5},
     "line_prices": {"dabble": {"over": -120, "under": -106}},
+    "line_labels": {"prizepicks": "line-only"},
     "book_lines": None,
 }
 
@@ -693,6 +712,107 @@ def test_a_book_is_judged_on_its_quotes_for_games_not_yet_started(board, client)
     ]
 
 
+def test_each_unpriced_line_is_labelled_line_only_alternate_or_unpriced(board, client):
+    # Novig posts Tatum's 9.5 and Brown's 30.5 with one side bid, so neither has a price.  The same
+    # poll priced Tatum at 27.5; Brown's priced 22.5 is tomorrow's game and his 25.5 is suspended.
+    catalog = StatisticCatalog.load_default()
+    brown_tomorrow = (BROWN[0], BROWN[1], BOS, TOMORROW)
+    ProjectionArchive(board.engine, catalog).ingest_complete_snapshot(
+        _snapshot(
+            "novig",
+            (
+                _market(catalog, "novig", TATUM, "points", "9.5", (-110, None)),
+                _market(
+                    catalog, "novig", TATUM, "points", "27.5", (-115, -105), variant=MarketVariant.ALTERNATE
+                ),
+                _market(catalog, "novig", BROWN, "points", "30.5", (-110, None)),
+                _market(catalog, "novig", brown_tomorrow, "points", "22.5", (-115, -105)),
+                _market(
+                    catalog, "novig", BROWN, "points", "25.5", (-115, -105), status=MarketStatus.SUSPENDED
+                ),
+                _market(catalog, "novig", WHITE, "points", "15.5", (-110, -110)),
+            ),
+            NOW - timedelta(minutes=1),
+        ),
+        query=QUERY,
+        accepted_at=NOW - timedelta(minutes=1),
+    )
+
+    status, body = _get(client, f"date=2026-01-15&market=PTS&game={LATER}&sources=dabble,novig,prizepicks")
+
+    assert status == 200
+    assert {
+        player["name"]: (player["lines"], player["line_labels"])
+        for player in body["games"][0]["players"]
+        if player["lines"]
+    } == {
+        "Derrick White": ({"dabble": 15.5, "novig": 15.5}, {}),
+        "Jaylen Brown": ({"dabble": 23.5, "novig": 30.5}, {"novig": "unpriced"}),
+        "Jayson Tatum": (
+            {"dabble": 27.5, "novig": 9.5, "prizepicks": 28.5},
+            {"novig": "alternate", "prizepicks": "line-only"},
+        ),
+        "Jalen Brunson": ({"dabble": 26.5, "prizepicks": 26.5}, {"prizepicks": "line-only"}),
+    }
+
+
+def _ingest_before_the_tip(board, provider, markets, *, freeze):
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(board.engine, catalog)
+    pre_tip = STARTED_TIP - timedelta(minutes=10)
+    archive.ingest_complete_snapshot(
+        _snapshot(provider, markets(catalog), pre_tip), query=QUERY, accepted_at=pre_tip
+    )
+    if freeze:
+        archive.freeze_closing_projection_set(
+            provider=provider,
+            query=QUERY,
+            canonical_game_id=STARTED,
+            started_at=STARTED_TIP,
+            created_at=STARTED_TIP,
+        )
+
+
+def _curry_and_lebron(catalog, provider):
+    return (
+        _market(catalog, provider, CURRY, "points", "9.5", (-110, None)),
+        _market(catalog, provider, CURRY, "points", "29.5", (-115, -105), variant=MarketVariant.ALTERNATE),
+        _market(catalog, provider, LEBRON, "points", "30.5", (-110, None)),
+    )
+
+
+def test_a_started_games_closing_set_labels_its_unpriced_lines(board, client):
+    _ingest_before_the_tip(board, "novig", lambda catalog: _curry_and_lebron(catalog, "novig"), freeze=True)
+
+    status, body = _get(client, "date=2026-01-15&market=PTS&sources=novig")
+
+    assert status == 200
+    assert {
+        player["name"]: (player["lines"], player["line_labels"]) for player in body["games"][0]["players"]
+    } == {
+        "Stephen Curry": ({"novig": 9.5}, {"novig": "alternate"}),
+        "LeBron James": ({"novig": 30.5}, {"novig": "unpriced"}),
+    }
+
+
+@pytest.mark.parametrize("freeze", [True, False])
+def test_a_started_games_own_pool_labels_its_unpriced_lines_from_a_set_or_a_replay(board, freeze):
+    _ingest_before_the_tip(
+        board, "polymarket", lambda catalog: _curry_and_lebron(catalog, "polymarket"), freeze=freeze
+    )
+
+    pool = board.service.player_pool.get_started_pool_for_game(season=SEASON, game_id=STARTED)
+
+    assert {
+        player.name: (player.lines.get("polymarket"), player.priced_other_lines)
+        for player in pool.players
+        if "polymarket" in player.lines
+    } == {
+        "Stephen Curry": ({"PTS": 9.5}, {"polymarket": ("PTS",)}),
+        "LeBron James": ({"PTS": 30.5}, {}),
+    }
+
+
 def test_a_player_only_a_book_quotes_has_book_columns_and_a_catalog_name(board, client):
     status, body = _get(client, "date=2026-01-15&market=PTS&team=BOS")
 
@@ -814,6 +934,7 @@ def test_a_dfs_only_market_has_no_book_lines(board, client):
                         "injury_status": None,
                         "lines": {"dabble": 11.5},
                         "line_prices": {"dabble": {"over": -118, "under": -108}},
+                        "line_labels": {},
                         "book_lines": None,
                     }
                 ],
@@ -825,6 +946,7 @@ def test_a_dfs_only_market_has_no_book_lines(board, client):
                         "injury_status": "Questionable",
                         "lines": {"dabble": 8.5},
                         "line_prices": {"dabble": {"over": -125, "under": None}},
+                        "line_labels": {},
                         "book_lines": None,
                     }
                 ],
@@ -987,6 +1109,8 @@ def test_the_slate_is_read_in_the_same_statements_whatever_its_game_count(board,
         # One closing-set lookup for every DFS provider, never per game.
         "projection_closing_sets": 1,
         "projection_closing_memberships": 1,
+        # Whether the poll behind PrizePicks' unpriced lines priced others, in one statement.
+        "projection_observations": 1,
         "injury_snapshots": 1,
         "sportsbook_prop_latest": 1,
         # Every player only a book quotes is named in one statement.

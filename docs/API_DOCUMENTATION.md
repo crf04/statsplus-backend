@@ -1090,7 +1090,8 @@ that are never flagged.
 - `off_floor` (sits only): `per36`, `minutes`, `season_span` from
   [on/off](#get-onoff-splits) with the injured player in `off[]`.
 - `line`: `value`, `source` and `beat`/`of` counted in the `without` games
-  against today's posted line, or `null`.
+  against today's posted line, or `null`. A provider line labelled `alternate`
+  or `unpriced` (crf04/statsplus#495) is never today's posted line.
 - `shift`: `full_game` and `on_off_per36`, each against its own baseline, with
   the `season_span` each was computed over. `baseline.on_floor_season_span` and
   `off_floor.season_span` name only the seasons that supplied on/off minutes.
@@ -1397,7 +1398,8 @@ Index (no `market`):
   "sources": [
     {"source": "dabble", "kind": "provider", "status": "fresh", "retrieved_at": "2026-01-15T23:58:00Z"},
     {"source": "prizepicks", "kind": "provider", "status": "stale-served", "retrieved_at": "2026-01-15T23:40:00Z"},
-    {"source": "draftkings", "kind": "sportsbook", "status": "fresh", "retrieved_at": "2026-01-15T23:57:00Z"}
+    {"source": "draftkings", "kind": "sportsbook", "status": "fresh", "retrieved_at": "2026-01-15T23:57:00Z"},
+    {"source": "fanduel", "kind": "sportsbook", "status": "stale-served", "retrieved_at": "2026-01-15T22:40:00Z"}
   ],
   "markets": [
     {"market": "PTS", "players": 4, "book_only_unnamed": 1, "sources": ["dabble", "prizepicks", "draftkings"]},
@@ -1416,13 +1418,15 @@ filters) and `"omitted": {"book_only_unnamed": 1}`, and gives each game its
   "name": "Jayson Tatum",
   "team": "BOS",
   "injury_status": "Questionable",
-  "lines": {"dabble": 27.5, "prizepicks": 28.5},
+  "lines": {"dabble": 27.5, "novig": 9.5, "prizepicks": 28.5},
   "line_prices": {"dabble": {"over": -122, "under": -122}},
+  "line_labels": {"novig": "alternate", "prizepicks": "line-only"},
   "book_lines": {
     "as_of": "2026-01-15T23:57:00Z",
     "closing": false,
     "books": [
-      {"book": "draftkings", "line": 27.5, "over": -128, "under": 100, "updated_at": "2026-01-15T23:57:00Z"}
+      {"book": "draftkings", "line": 27.5, "over": -128, "under": 100, "updated_at": "2026-01-15T23:57:00Z",
+       "stale": false}
     ]
   }
 }
@@ -1455,16 +1459,28 @@ filters) and `"omitted": {"book_only_unnamed": 1}`, and gives each game its
   `line_prices` holds American prices as posted, `null` for a missing side; a
   provider with no per-pick price (PrizePicks, or Dabble on a line that is not
   near-even) is absent from it.
+- `line_labels` (crf04/statsplus#495) is the Matchup row's `line_labels` for
+  this market only, `{provider: label}`: `line-only`, `alternate` or
+  `unpriced` for each `lines` entry with no `line_prices` entry, `{}` when
+  every line is priced. An `alternate` or `unpriced` line is not that
+  provider's line for the player and does not disagree with the other sources.
 - `book_lines` is the Matchup's `book_lines` entry for this market without the
   best-price flags, or `null` when no book quotes it. `as_of` is the newest
   book's update and `closing` is `true` when every listed book's quote is a
-  closing quote.
+  closing quote. Each book carries the Matchup's `stale` (crf04/statsplus#496):
+  its quote is more than 60 minutes old and its game has not started.
 - A started game reads its closing set, as every pool read does, so a line
   posted after the tip is not shown.
 - `sources` lists each provider the pool reports (the
   `freshness.pool.providers` vocabulary: `fresh`, `stale-served`, `missing`,
   and `closing` when every game read has started), then each book quoting a
-  game read, `fresh` with its newest update. Times are UTC with a `Z` suffix.
+  game read in the same vocabulary (crf04/statsplus#496). A book is judged on
+  its quotes for the games that have not started: `retrieved_at` is the newest
+  of their updates, and its status is `stale-served` when that is more than 60
+  minutes old, else `fresh`. A book whose every quoted game has started is
+  `closing`, with the newest update of all its quotes. A book can be `fresh`
+  while its quotes for one game are stale; each row's `book_lines.books[].stale`
+  says which. Times are UTC with a `Z` suffix.
 
 The board is not a research action and records no usage event.
 
@@ -1918,6 +1934,27 @@ always present: the Over and Under price of the pick behind each `lines` entry,
   the provider is absent until its next changed board. Game-log participants
   (historical mode, and the Unscheduled Matchup) carry `"line_prices": {}`.
 
+`line_labels` (crf04/statsplus#495) is additive and always present: a label for
+every `lines` entry with no `line_prices` entry, `{provider: {market: label}}`.
+A priced line has no label, and a row with every line priced carries `{}`.
+
+- `line-only`: a `dabble` or `prizepicks` line. Both price the entry, never the
+  pick, so their line has no per-pick price and is still that provider's line.
+- `alternate`: a `novig`, `polymarket`, `kalshi` or `underdog` line with no
+  price whose poll priced a different line for the same player, game and
+  market (an available full-game market, any variant). The provider's
+  standard-line pick chose an unpriced number beside a priced one.
+- `unpriced`: any other line with no price, typically a prediction market with
+  one side bid or a book wider than the 1.10 overround rule. A market the
+  provider's feed marks suspended or not accepting orders is never served, so
+  a served line is never labelled suspended: the feed cannot tell a suspended
+  main line from an unpriced one.
+
+An `alternate` or `unpriced` line stays in `lines` but is never reported as the
+player's line: the game-log `posted_line.lines` majority and the injury
+scenarios' `line` skip it, and a client should not count it as a source
+disagreeing with the others.
+
 `player_source`, `stat_categories`, and `focal_game_line` are additive and
 always present. `player_source` is `player_pool` for a stored pool player and
 `game_logs` for a Historical Matchup participant. In current mode
@@ -1957,10 +1994,10 @@ market only books post is not targetable.
     "closing": false,
     "books": [
       { "book": "draftkings", "line": 27.5, "over": -115, "under": -105,
-        "updated_at": "2026-10-21T21:02:40Z",
+        "updated_at": "2026-10-21T21:02:40Z", "stale": false,
         "best_over": false, "best_under": true },
       { "book": "fanduel", "line": 27.5, "over": -110, "under": -110,
-        "updated_at": "2026-10-21T21:03:02Z",
+        "updated_at": "2026-10-21T21:03:02Z", "stale": false,
         "best_over": true, "best_under": false }
     ]
   }
@@ -1971,10 +2008,14 @@ market only books post is not targetable.
 (`draftkings`, `fanduel`, `betmgm`, `williamhill_us`, `betrivers`,
 `fanatics`); offshore books are never served. `line` is a finite number
 >= 0. `over` and `under` are integer American prices, either `null` when the
-book posts one side only. `best_over` and `best_under` are computed only among
-books posting the same `line`: the higher American price wins (+120 beats
-+110 beats -105 beats -115; +100 and -100 tie), ties all flag, and a book
-alone at its line (or alone on that side) is never flagged. `books` is sorted
+book posts one side only. `updated_at` is the Odds API's update of that
+book's market, else the poll that read it. `stale` (crf04/statsplus#496) is
+`true` when `updated_at` is more than 60 minutes before the read while the game
+has not started; once it has started no quote is stale. `best_over` and
+`best_under` are computed only among the books that are not stale and post the
+same `line`: the higher American price wins (+120 beats +110 beats -105 beats
+-115; +100 and -100 tie), ties all flag, and a book alone at its line (or
+alone on that side) is never flagged. A stale book is never flagged. `books` is sorted
 by `line` ascending, then `book`. `as_of` is the newest `updated_at`.
 `closing` is true only when every entry comes from the game's closing snapshot
 (taken between tip-10 and tip-5 minutes; a missed closing fetch is not
@@ -3282,13 +3323,15 @@ changes no average.
   "lines": { "PTS": { "value": 27.5, "provider": "prizepicks" } },
   "provider_lines": { "prizepicks": { "PTS": 27.5 }, "underdog": { "PTS": 27.5 } },
   "line_prices": { "underdog": { "PTS": { "over": -112, "under": -112 } } },
+  "line_labels": { "prizepicks": { "PTS": "line-only" } },
   "book_lines": {
     "PTS": {
       "as_of": "2026-10-21T21:04:11Z",
       "closing": false,
       "books": [
         { "book": "draftkings", "line": 27.5, "over": -115, "under": -105,
-          "updated_at": "2026-10-21T21:02:40Z", "best_over": false, "best_under": true }
+          "updated_at": "2026-10-21T21:02:40Z", "stale": false,
+          "best_over": false, "best_under": true }
       ]
     }
   }
@@ -3307,6 +3350,12 @@ changes no average.
   store is off, has no quotes, or fails to read (logged; the logs and
   `posted_line` are unaffected). On the closing-line fallback `provider_lines`
   and `line_prices` are `{}` and `book_lines` is still read for that game.
+  `book_lines` judges `stale` at the request's time, against the posted line's
+  game.
+* `line_labels` (crf04/statsplus#495) is additive and always present whenever
+  `posted_line` is non-null: the Matchup row's `line_labels` for
+  `provider_lines`. It is `{}` on the closing-line fallback and is served to
+  every caller, prices or not.
 * Anonymous and waitlisted callers (crf04/statsplus#381) get `posted_line`
   without prices: `line_prices` is absent, and each `book_lines[<market>].books`
   entry keeps `book`, `line` and `updated_at` but has no `over`, `under`,
@@ -3321,8 +3370,11 @@ changes no average.
 * `matchup` reads from the player's side: `LAL vs GSW` at home, `LAL @ GSW` away.
 * `lines` has one entry per market the stored player pool holds for that game
   (`PTS`, `REB`, `AST`, `PRA`, `3PM`, ...), one value each: the majority line
-  (crf04/statsplus#274). Each provider in `provider_lines` posting the market
-  and each book in `book_lines[<market>].books` is one source with one vote;
+  (crf04/statsplus#274). Each provider in `provider_lines` posting the market,
+  except one whose line `line_labels` marks `alternate` or `unpriced`
+  (crf04/statsplus#495), and each book in `book_lines[<market>].books` is one
+  source with one vote; a market whose only lines are such lines and no book
+  quotes is not in `lines`;
   `value` is the line the most sources post. Sources are ordered providers first
   (PrizePicks, then alphabetical), then books in served order; a tie between
   lines goes to the line of the first source posting one of them, and

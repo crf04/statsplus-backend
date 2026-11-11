@@ -56,10 +56,19 @@ class Catalog:
         return [EVENT]
 
 
-def _pool(lines, line_prices=None):
+def _pool(lines, line_prices=None, priced_other_lines=None):
     return PlayerPool(
         players=(
-            PoolPlayer(PLAYER, "LeBron James", LAL, ("PTS",), {}, lines, line_prices=line_prices or {}),
+            PoolPlayer(
+                PLAYER,
+                "LeBron James",
+                LAL,
+                ("PTS",),
+                {},
+                lines,
+                line_prices=line_prices or {},
+                priced_other_lines=priced_other_lines or {},
+            ),
         ),
         team_counts={LAL: 1},
         freshness={},
@@ -128,6 +137,47 @@ def test_a_live_pool_serves_every_provider_line_price_and_book_line():
     assert result["book_lines"] == {"PTS": BOOK_ENTRY}
 
 
+def test_an_alternate_or_unpriced_line_is_labelled_and_never_the_posted_line():
+    # Novig's 9.5 and Polymarket's 9.5 carry no price and outnumber Underdog's priced 19.5;
+    # Novig priced another number in the same poll.
+    pool = _pool(
+        {"novig": {"PTS": 9.5}, "polymarket": {"PTS": 9.5}, "underdog": {"PTS": 19.5}},
+        {"underdog": {"PTS": {"over": -112, "under": -112}}},
+        {"novig": ("PTS",)},
+    )
+
+    result = _read(Pools(pool))
+
+    assert result["lines"] == {"PTS": {"value": 19.5, "provider": "underdog"}}
+    assert result["provider_lines"] == {
+        "novig": {"PTS": 9.5},
+        "polymarket": {"PTS": 9.5},
+        "underdog": {"PTS": 19.5},
+    }
+    assert result["line_labels"] == {"novig": {"PTS": "alternate"}, "polymarket": {"PTS": "unpriced"}}
+
+
+def test_a_dabble_line_only_pick_is_labelled_and_still_its_line():
+    pool = _pool({"dabble": {"PTS": 20.5}, "novig": {"PTS": 9.5}})
+
+    result = _read(Pools(pool))
+
+    assert result["lines"] == {"PTS": {"value": 20.5, "provider": "dabble"}}
+    assert result["line_labels"] == {"dabble": {"PTS": "line-only"}, "novig": {"PTS": "unpriced"}}
+
+
+def test_a_market_with_only_an_unpriced_line_has_no_posted_line():
+    pool = _pool(
+        {"novig": {"PTS": 9.5}, "underdog": {"REB": 7.5}},
+        {"underdog": {"REB": {"over": -110, "under": None}}},
+    )
+
+    result = _read(Pools(pool))
+
+    assert result["lines"] == {"REB": {"value": 7.5, "provider": "underdog"}}
+    assert result["line_labels"] == {"novig": {"PTS": "unpriced"}}
+
+
 def test_the_new_fields_are_present_and_empty_without_prices_or_a_book_store():
     result = _read(Pools(_pool({"prizepicks": {"PTS": 27.5}})))
 
@@ -167,6 +217,7 @@ def test_the_closing_line_fallback_has_no_provider_lines_or_prices_but_reads_boo
         "lines": {"PTS": {"value": 24.5, "provider": "draftkings"}},
         "provider_lines": {},
         "line_prices": {},
+        "line_labels": {},
         "book_lines": {"PTS": BOOK_ENTRY},
     }
     assert books.calls == [GAME]

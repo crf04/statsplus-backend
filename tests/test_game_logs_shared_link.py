@@ -51,6 +51,7 @@ UNPRICED = {
     "matchup": "LAL vs GSW",
     "lines": {"PTS": {"value": 27.5, "provider": "prizepicks"}},
     "provider_lines": {"prizepicks": {"PTS": 27.5}, "underdog": {"PTS": 27.5}},
+    "line_labels": {"prizepicks": {"PTS": "line-only"}},
     "book_lines": {
         "PTS": {
             "as_of": "2026-10-21T21:04:11Z",

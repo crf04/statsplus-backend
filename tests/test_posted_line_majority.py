@@ -9,13 +9,16 @@ from __future__ import annotations
 
 from tests.test_posted_line_prices import PLAYER, Books, Closing, Pools, _pool, _read
 
+#: A per-pick price, so a provider's line counts toward the majority (crf04/statsplus#495).
+EVEN = {"over": -110, "under": -110}
+
 
 def _books(*lines):
     return {"books": [{"book": book, "line": line, "over": -110, "under": -110} for book, line in lines]}
 
 
 def test_one_outlier_never_beats_the_line_seven_sources_post():
-    pool = _pool({"dabble": {"PTS": 30.5}, "underdog": {"PTS": 29.5}})
+    pool = _pool({"dabble": {"PTS": 30.5}, "underdog": {"PTS": 29.5}}, {"underdog": {"PTS": EVEN}})
     books = _books(
         ("betmgm", 29.5),
         ("draftkings", 29.5),
@@ -61,7 +64,10 @@ def test_a_majority_no_provider_posts_is_named_by_the_first_book_in_served_order
 
 
 def test_without_book_lines_the_majority_among_providers_wins():
-    pool = _pool({"dabble": {"PTS": 30.5}, "novig": {"PTS": 29.5}, "underdog": {"PTS": 29.5}})
+    pool = _pool(
+        {"dabble": {"PTS": 30.5}, "novig": {"PTS": 29.5}, "underdog": {"PTS": 29.5}},
+        {"novig": {"PTS": EVEN}, "underdog": {"PTS": EVEN}},
+    )
 
     result = _read(Pools(pool))
 

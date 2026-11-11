@@ -32,6 +32,57 @@ LINE_PROVIDER_PREFERENCE = ("prizepicks",)
 LOOKAHEAD_DAYS = 7
 
 
+#: Providers that price the entry, never one pick: a line of theirs with no
+#: per-pick price is a line-only pick (crf04/statsplus-backend#714).
+LINE_ONLY_PROVIDERS = frozenset({"dabble", "prizepicks"})
+#: Labels of a line that is not its provider's line for the player
+#: (crf04/statsplus#495).
+UNREPORTED_LINE_LABELS = frozenset({"alternate", "unpriced"})
+
+
+def line_labels(
+    lines: Mapping[str, Mapping[str, float]],
+    line_prices: Mapping[str, Mapping[str, Any]],
+    priced_other_lines: Mapping[str, Any],
+) -> dict[str, dict[str, str]]:
+    """Each line with no per-pick price, labelled (crf04/statsplus#495).
+
+    ``line-only`` for a provider that prices only the entry, ``alternate``
+    when the provider priced a different line in the poll that posted this
+    one, else ``unpriced``.  A priced line has no label.
+    """
+
+    labels: dict[str, dict[str, str]] = {}
+    for provider, markets in sorted(lines.items()):
+        for market in sorted(markets):
+            if market in line_prices.get(provider, {}):
+                continue
+            if provider in LINE_ONLY_PROVIDERS:
+                label = "line-only"
+            elif market in priced_other_lines.get(provider, ()):
+                label = "alternate"
+            else:
+                label = "unpriced"
+            labels.setdefault(provider, {})[market] = label
+    return labels
+
+
+def reported_lines(
+    lines: Mapping[str, Mapping[str, float]], labels: Mapping[str, Mapping[str, str]]
+) -> dict[str, dict[str, float]]:
+    """``lines`` without the alternate and unpriced ones, which are never a provider's line."""
+
+    kept = {
+        provider: {
+            market: value
+            for market, value in markets.items()
+            if labels.get(provider, {}).get(market) not in UNREPORTED_LINE_LABELS
+        }
+        for provider, markets in lines.items()
+    }
+    return {provider: markets for provider, markets in kept.items() if markets}
+
+
 def _provider_order(lines: Mapping[str, Mapping[str, float]]) -> list[str]:
     providers = [p for p in LINE_PROVIDER_PREFERENCE if p in lines]
     return providers + sorted(p for p in lines if p not in providers)
@@ -293,6 +344,7 @@ class PostedLinesReader:
                 "lines": {"PTS": {"value": closing.value, "provider": closing.book}},
                 "provider_lines": {},
                 "line_prices": {},
+                "line_labels": {},
                 "book_lines": self._book_lines(player_id, event),
             }
         return None
@@ -325,9 +377,11 @@ class PostedLinesReader:
         if not by_provider:
             return None
         book_lines = self._book_lines(player_id, event)
+        labels = line_labels(by_provider, prices_by_provider, player.priced_other_lines)
+        reported = reported_lines(by_provider, labels)
         lines = {}
         for market in sorted({m for by_market in by_provider.values() for m in by_market}):
-            found = majority_line(by_provider, market, book_lines)
+            found = majority_line(reported, market, book_lines)
             if found is not None:
                 lines[market] = {"value": found[0], "provider": found[1]}
         return {
@@ -337,6 +391,7 @@ class PostedLinesReader:
             "lines": lines,
             "provider_lines": serialize_lines(by_provider),
             "line_prices": serialize_line_prices(prices_by_provider),
+            "line_labels": labels,
             "book_lines": book_lines,
         }
 

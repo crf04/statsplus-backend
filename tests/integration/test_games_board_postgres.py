@@ -26,6 +26,10 @@ from tests.routes.test_games_board import (
     _games,
     _get,
     seed_board,
+    test_a_book_is_judged_on_its_quotes_for_games_not_yet_started,
+    test_a_started_games_closing_set_labels_its_unpriced_lines,
+    test_a_started_games_own_pool_labels_its_unpriced_lines_from_a_set_or_a_replay,
+    test_each_unpriced_line_is_labelled_line_only_alternate_or_unpriced,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_migrations]
@@ -230,3 +234,22 @@ def test_a_failed_injury_read_leaves_the_rest_of_the_board(board, client):
     assert status == 200
     assert _tatum(body) == (27.5, {"draftkings": 27.5, "fanduel": 28.5}, None)
     assert {row["injury_status"] for game in body["games"] for row in game["players"]} == {None}
+
+
+def test_unpriced_lines_are_labelled_from_their_poll_on_postgres(board, client):
+    """The same-poll priced-line lookup (crf04/statsplus#495) on the live, closing and replay reads."""
+
+    test_each_unpriced_line_is_labelled_line_only_alternate_or_unpriced(board, client)
+
+
+def test_a_closing_set_labels_its_unpriced_lines_on_postgres(board, client):
+    test_a_started_games_closing_set_labels_its_unpriced_lines(board, client)
+
+
+@pytest.mark.parametrize("freeze", [True, False])
+def test_a_started_games_own_pool_labels_its_unpriced_lines_on_postgres(board, freeze):
+    test_a_started_games_own_pool_labels_its_unpriced_lines_from_a_set_or_a_replay(board, freeze)
+
+
+def test_a_book_is_stale_served_on_its_pending_games_on_postgres(board, client):
+    test_a_book_is_judged_on_its_quotes_for_games_not_yet_started(board, client)
