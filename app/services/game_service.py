@@ -25,7 +25,6 @@ from sqlalchemy.engine import Engine
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.domain.play_type_matchup import complete_play_type_shares, play_type_matchup
 from app.domain.team_matchup_taxonomy import LEDGER_DEFENSE_SHEET_METRICS
-from app.domain.team_window import team_window
 from app.models.game_logs import GameLogQuery, GameLogResponse
 from app.services.database_first_activation import ReadSeason
 from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS
@@ -42,6 +41,7 @@ from app.services.team_matchup_query import (
     combined_league_column,
     publication_league_table,
 )
+from app.services.team_membership import TeamMembership, appearances
 from app.utils.cache_config import get_redis_client
 from app.utils.tables import normalize_table_name
 
@@ -189,6 +189,7 @@ class GameService:
         game_log_seasons=None,
         closing_lines=None,
         posted_lines=None,
+        injury_reports=None,
     ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
@@ -224,6 +225,11 @@ class GameService:
         # Today's posted lines for ``posted_line`` (#238); absent against the
         # read-only demo database, which leaves it null.
         self.posted_lines = posted_lines
+
+        # Stored official injury reports, membership evidence for a
+        # ``players_off`` team window (crf04/statsplus#450); absent against the
+        # read-only demo database, which reads none.
+        self.injury_reports = injury_reports
 
         # Initialize cache
         if redis_client is None:
@@ -401,31 +407,39 @@ class GameService:
     ):
         """Ids of ``player_logs``' games that are not "without" every named player."""
         season = season or self.default_season()
-        exclude_game_ids = set()
-        for player_name in players_off_names:
-            player_gamelogs, _ = call_with_read_scope(
+        absent = {
+            player_name: call_with_read_scope(
                 self._get_game_logs,
                 player_name,
                 season,
                 publication_snapshot=publication_snapshot,
                 connection=connection,
-            )
-            without, _ = self._absence_split(player_logs, player_gamelogs)
+            )[0]
+            for player_name in players_off_names
+        }
+        games = {
+            team: set(pd.to_datetime(rows["GAME_DATE"]).dt.date)
+            for team, rows in player_logs.groupby("TEAM_ABBREVIATION")
+        }
+        membership = TeamMembership(self.injury_reports, self.get_players_logs_by_id)
+        windows = membership.windows(
+            season,
+            {player_name: (appearances(logs), games) for player_name, logs in absent.items()},
+            lambda name: int(self.get_player_id(name, season)),
+        )
+        exclude_game_ids = set()
+        for player_name, player_gamelogs in absent.items():
+            without, _ = self._absence_split(player_logs, player_gamelogs, windows[player_name])
             exclude_game_ids |= set(player_logs["GAME_ID"]) - without
 
         return exclude_game_ids
 
     @staticmethod
-    def _absence_split(player_logs, absent_player_logs):
-        """Ids of ``player_logs``' games inside the absent player's team window: those he has no row in, then those he has."""
-        appearances = list(
-            zip(
-                pd.to_datetime(absent_player_logs["GAME_DATE"]).dt.date,
-                absent_player_logs["TEAM_ABBREVIATION"],
-                strict=True,
-            )
-        )
-        windows = {team: team_window(appearances, team) for team in set(player_logs["TEAM_ABBREVIATION"])}
+    def _absence_split(player_logs, absent_player_logs, windows):
+        """Ids of ``player_logs``' games inside the absent player's team window: those he has no row in, then those he has.
+
+        ``windows`` holds his window for each of ``player_logs``' teams.
+        """
         appeared = set(
             zip(absent_player_logs["GAME_ID"], absent_player_logs["TEAM_ABBREVIATION"], strict=True)
         )
@@ -500,7 +514,7 @@ class GameService:
         )
         return {int(row.player_id) for row in rows}
 
-    def games_without_and_with_player(self, player_logs, absent_player_logs):
+    def games_without_and_with_player(self, player_logs, absent_player_logs, windows):
         """The ``players_off`` absence rule, for logs already read by id.
 
         Same rule as ``get_games_to_exclude``: a game of team T counts as
@@ -508,9 +522,10 @@ class GameService:
         (crf04/statsplus#449) and he has no game-log row for T that day, and as
         "with" him when it falls inside the window and he has one.  Returns the
         ids of ``player_logs``' games on each side; a game outside the window is
-        on neither.
+        on neither.  ``windows`` holds his window for each of ``player_logs``'
+        teams (``app.services.team_membership``).
         """
-        without, played = self._absence_split(player_logs, absent_player_logs)
+        without, played = self._absence_split(player_logs, absent_player_logs, windows)
         return {str(game_id) for game_id in without}, {str(game_id) for game_id in played}
 
     def filter_players_on_off(

@@ -183,9 +183,13 @@ class StoredLogs:
         return derive_game_log_frame(pd.DataFrame(rows))
 
 
-def service_for(repository, catalog, default_season=SEASON, logs=None):
+def service_for(repository, catalog, default_season=SEASON, logs=None, injury_reports=None):
     return RotationService(
-        repository, catalog, lambda: default_season, logs if logs is not None else StoredLogs()
+        repository,
+        catalog,
+        lambda: default_season,
+        logs if logs is not None else StoredLogs(),
+        injury_reports=injury_reports,
     )
 
 
