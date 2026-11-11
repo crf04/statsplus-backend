@@ -84,6 +84,8 @@ def seed_moves(engine, dependencies):
             _quote(WHITE, "draftkings", 15.5, -110, -110, P0),
             _quote(HAUSER, "draftkings", 9.5, -115, -105, P0),
             _quote(BROWN, "draftkings", 23.5, -115, -105, P0),
+            _quote(WHITE, "fanduel", 15.5, -110, -110, P0),
+            _quote(BROWN, "fanduel", 23.5, -110, -110, P0),
         ],
         P1: [
             _quote(TATUM, "draftkings", 27.5, -110, -110, P0),
@@ -91,6 +93,8 @@ def seed_moves(engine, dependencies):
             _quote(WHITE, "draftkings", 15.5, -110, -110, P0),
             # Hauser's price moves before DraftKings pulls him.
             _quote(HAUSER, "draftkings", 9.5, -120, 100, P1),
+            _quote(WHITE, "fanduel", 15.5, -110, -110, P0),
+            _quote(BROWN, "fanduel", 23.5, -110, -110, P0),
         ],
         P2: [
             _quote(TATUM, "draftkings", 28.5, -115, -105, P2),
@@ -98,6 +102,9 @@ def seed_moves(engine, dependencies):
             _quote(WHITE, "draftkings", 15.5, -125, 105, P2),
             _quote(BROWN, "draftkings", 23.5, -115, -105, P2),
             _quote(BRUNSON, "fanduel", 26.5, -120, -106, P2),
+            # One side's price moves alone: FanDuel's under on White, its over on Brown.
+            _quote(WHITE, "fanduel", 15.5, -110, -120, P2),
+            _quote(BROWN, "fanduel", 23.5, -120, -110, P2),
         ],
     }
     polls[P3] = [_quote(TATUM, "draftkings", 27.5, -110, -110, P3), *polls[P2][1:]]
@@ -217,12 +224,23 @@ def test_the_board_names_the_sources_with_line_history(moves_board, client):
 def test_a_price_only_change_is_a_move(moves_board, client):
     _status, body = _get(client, "date=2026-01-15&market=PTS&moves=true")
 
-    assert _rows(body)["Derrick White"]["moves"] == {
+    rows = _rows(body)
+    assert rows["Derrick White"]["moves"] == {
         "draftkings": {
             "open": _value(15.5, -110, -110, seen_at="2026-01-15T03:00:00Z"),
             "previous": _value(15.5, -110, -110, changed_at="2026-01-15T18:00:00Z"),
             "unchanged": False,
-        }
+        },
+        "fanduel": {
+            "open": _value(15.5, -110, -110, seen_at="2026-01-15T03:00:00Z"),
+            "previous": _value(15.5, -110, -110, changed_at="2026-01-15T18:00:00Z"),
+            "unchanged": False,
+        },
+    }
+    assert rows["Jaylen Brown"]["moves"]["fanduel"] == {
+        "open": _value(23.5, -110, -110, seen_at="2026-01-15T03:00:00Z"),
+        "previous": _value(23.5, -110, -110, changed_at="2026-01-15T18:00:00Z"),
+        "unchanged": False,
     }
 
 
@@ -231,12 +249,10 @@ def test_a_same_value_repost_is_not_a_move(moves_board, client):
 
     rows = _rows(body)
     # DraftKings pulled Brown at 10:00 ET and re-posted the same line at 13:00 ET.
-    assert rows["Jaylen Brown"]["moves"] == {
-        "draftkings": {
-            "open": _value(23.5, -115, -105, seen_at="2026-01-15T03:00:00Z"),
-            "previous": None,
-            "unchanged": True,
-        }
+    assert rows["Jaylen Brown"]["moves"]["draftkings"] == {
+        "open": _value(23.5, -115, -105, seen_at="2026-01-15T03:00:00Z"),
+        "previous": None,
+        "unchanged": True,
     }
     # First posted at 13:00 ET: its opening value is its first.
     assert rows["Jalen Brunson"]["moves"] == {
@@ -302,3 +318,14 @@ def test_an_unservable_moves_request_is_refused(moves_board, client, query):
 
     assert status == 400
     assert body["error"]["details"]["parameters"] == ["moves"]
+
+
+def test_without_a_sportsbook_reader_no_line_is_pulled(moves_board, client, dependencies):
+    # ODDS_API_ENABLED=false wires no reader: the board shows no book lines, so it reads no book history.
+    dependencies.slate_board_service.sportsbook_reader = None
+
+    status, body = _get(client, "date=2026-01-15&market=PTS&moves=true")
+
+    assert status == 200
+    assert (body["moves_sources"], body["pulled"]) == ([], {})
+    assert _rows(body)["Jayson Tatum"]["moves"] == {}

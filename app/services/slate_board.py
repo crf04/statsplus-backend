@@ -145,7 +145,12 @@ class SlateBoardService:
                 "Line moves need a market.",
                 public_details={"parameters": ["moves"]},
             )
-        history_books = sorted(book for book in BOOK_ALLOWLIST if sources is None or book in sources)
+        # Without a reader the board shows no book lines, so it serves no book history either.
+        history_books = sorted(
+            book
+            for book in BOOK_ALLOWLIST
+            if self.sportsbook_reader is not None and (sources is None or book in sources)
+        )
         if self.event_catalog is None:
             raise ProviderUnavailableError("The NBA schedule is not available. Please try again later.")
         season = season or schedule_season(self.settings, self.event_catalog, slate_date)

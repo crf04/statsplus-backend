@@ -306,10 +306,21 @@ def test_the_book_history_read_scans_only_the_requested_games(dependencies):
             yield from scans(child)
 
     read = [node for node in scans(plan["Plan"]) if node["Node Type"].endswith("Scan")]
+    indexed = [node for node in read if "Index Name" in node]
     assert "Seq Scan" not in {node["Node Type"] for node in read}
-    assert {node["Index Name"] for node in read if "Index Name" in node} == {
-        "ix_sportsbook_prop_quotes_series"
-    }
-    # The slate game's eleven PTS rows (Tatum 4, White 2, Hauser 2, Brown 2, Brunson 1), none of the
-    # 4,000 rows of other games.
-    assert max(node["Actual Rows"] for node in read) == 11
+    assert {node["Index Name"] for node in indexed} == {"ix_sportsbook_prop_quotes_series"}
+    # The index itself narrows to the slate game and the market: no row is read and then discarded.
+    assert all(
+        "canonical_game_id" in node["Index Cond"] and "market_category" in node["Index Cond"]
+        for node in indexed
+    )
+    assert (
+        sum(
+            node.get("Rows Removed by Filter", 0) + node.get("Rows Removed by Index Recheck", 0)
+            for node in read
+        )
+        == 0
+    )
+    # The slate game's fifteen PTS rows (Tatum 4, White 4, Hauser 2, Brown 4, Brunson 1), none of
+    # the 4,000 rows of other games.
+    assert max(node["Actual Rows"] for node in read) == 15
