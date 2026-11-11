@@ -3722,6 +3722,7 @@ GET /api/games/rotation?team=<tricode>[&last_n=5][&season=YYYY-YY]
 GET /api/games/rotation?game_id=<NBA game id>
 GET /api/games/rotation?player_name=<name>&without=<name>[&without=<name>][&season=YYYY-YY]
 GET /api/games/rotation?team=<tricode>&without=<name>[&without=<name>][&season=YYYY-YY]
+GET /api/games/rotation?(player_name=<name>|team=<tricode>)&with=<name>[&with=<name>][&without=<name>][&season=YYYY-YY]
 Authorization: Bearer <firebase-id-token>
 ```
 
@@ -3739,8 +3740,9 @@ The backend computes every average and recent-versus-season comparison.
 | `last_n` | No | Whole number 1-20, default 5. Counts his current team's games inside his team window |
 | `season` | No | `YYYY-YY`. Default: the current season, or the latest season with rotation data when the current one has none |
 | `without` | No | Repeatable (crf04/statsplus#239). A player name; with `player_name` or `team`, switches to the [without split](#rotation-without-a-player). Rejected with `game_id` and with `last_n` |
+| `with` | No | Repeatable (crf04/statsplus#499). A player name; with `player_name` or `team`, switches to the [with split](#rotation-with-a-player), alone or beside `without`. Rejected with `game_id` and with `last_n` |
 
-Exactly one of `player_name`, `team` and `game_id` is required, each parameter except `without` may appear
+Exactly one of `player_name`, `team` and `game_id` is required, each parameter except `with` and `without` may appear
 once, and an unknown parameter is rejected. Every rejected request is
 `400 invalid_input` whose `details.parameters` lists the offending names (a
 tricode that is not an NBA team lists nothing but the message names the
@@ -3766,7 +3768,7 @@ The player and team views carry `team_games_counted: true`
 team's games inside his team window and the averages are per game played. A
 response without the field comes from a backend whose `games` counted only the
 games whose box score lists him, averaged over those games.
-The `without` split and the one-game view never carry it: they have no
+The `without` and `with` splits and the one-game view never carry it: they have no
 `recent` or `season_summary`.
 In the team view each player's `recent` is the same rule applied to that team,
 while `games` lists the team's own last `last_n` games. *Played* is minutes above 0, *started* is the box-score starter
@@ -3931,7 +3933,7 @@ has its stats too (crf04/statsplus#484). The game set is unchanged.
   but no game-log row exists. They are excluded from the averages.
 - `stats` is `null` for a side where he has no game-log row in any game.
 
-`game_logs=true` (only with `without`; `true` or `false`, anything else is a
+`game_logs=true` (only with `without` or `with`; `true` or `false`, anything else is a
 `400` naming `game_logs`) adds `game_logs` to each side, beside `stats`: the
 side's games, newest first, each with `game_date`, `started`, `minutes` (the
 rotation's, a DNP as 0) and `box`, the game-log row in the same keys as
@@ -3998,6 +4000,66 @@ under 3 (a player traded in can have fewer without games than the team). Every
                           "stats": {"played": 2, "minutes": 12.0, "PTS": 4.5, "REB": 3.0, "AST": 0.5,
                                     "3PM": 0.0, "PRA": 8.0, "FGA": 3.5, "missing_logs": 0}},
                  "minutes_change": 8.4, "insufficient": false}]
+  }
+}
+```
+
+#### Rotation with a player
+
+`with` (crf04/statsplus#499) reads the same team games, windows and name
+resolution as `without`, from the other side. A named player *played* a game
+inside his team window when his line shows more than 0 and *missed* it
+otherwise (no line, or a 0-minute line).
+
+- `with` alone: the *asked* games are those every `with` player played, the
+  *other* games those every one of them missed. A game where they disagree is
+  *mixed* and on neither side. `with=X` is `without=X` with the sides swapped.
+- `with` and `without` together: the asked games are those every `with` player
+  played and every `without` player missed; every other game inside every
+  named player's window is an other game, so `games_mixed` is 0.
+
+A game outside any named player's window is on neither side and not counted. A
+`with` player who has not played for the team resolves on membership evidence
+as a `without` player does, and leaves the asked side empty. Name errors are the
+`without` errors with `details.parameter: "with"`; `with` with `game_id` or
+`last_n` is a `400` whose `details.parameter` is `"with"`. A player named in
+both `with` and `without` (case, punctuation and diacritics ignored) is a `400`
+whose `details.parameters` is `["with", "without"]`. A request with `with`
+answers `split` in place of `without`; a request with `without` alone answers
+the `without` document above, unchanged.
+
+`split` has `with` and `without` (the resolved names in request order, `[]` for
+a list not given), `games_asked`, `games_other` and `games_mixed` (stored team
+games), and the sides `asked` and `other`, each exactly a `without` side (counts,
+`minutes_per_game_played`, `stats`, `game_logs` on request).
+`minutes_change` is asked minus other per-game minutes, from exact values
+(`null` when a side has no games). `insufficient` is true when the asked side
+has fewer than 3 games: the subject's own asked games in the player view, the
+team's `games_asked` at the top of the team view and each player's own in
+`players`. The player view lists the asked games in `games`, newest first. The
+team view's `starters` are the players who started an asked game (`starts_asked`,
+`starts_other`, by `starts_asked` high to low, then name) and `players` every
+player with a line in an asked game; named players are in neither list.
+
+```json
+{
+  "season": "2025-26",
+  "team": "DET",
+  "split": {
+    "with": ["Jalen Duren"],
+    "without": ["Cade Cunningham"],
+    "games_asked": 2,
+    "games_other": 4,
+    "games_mixed": 0,
+    "insufficient": true,
+    "starters": [{"name": "Ausar Thompson", "starts_asked": 2, "starts_other": 2},
+                 {"name": "Isaiah Stewart", "starts_asked": 1, "starts_other": 2}],
+    "players": [{"name": "Ausar Thompson",
+                 "asked": {"games": 2, "played": 2, "starts": 2, "minutes": 22.0,
+                           "minutes_per_game_played": 22.0, "closed": 0, "stats": null},
+                 "other": {"games": 4, "played": 3, "starts": 2, "minutes": 21.0,
+                           "minutes_per_game_played": 28.0, "closed": 2, "stats": null},
+                 "minutes_change": 1.0, "insufficient": true}]
   }
 }
 ```

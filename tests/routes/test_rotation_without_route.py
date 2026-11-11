@@ -620,3 +620,321 @@ def test_an_offseason_mover_counts_for_the_new_team_on_its_reports_and_not_the_o
     assert (old.status_code, old_player.status_code) == (400, 400)
     assert (new["absent"], new["games_without"], new["games_with"]) == (["Brandon Ingram"], 2, 0)
     assert (new_player["without"]["games"], new_player["without"]["minutes"]) == (2, 35.0)
+
+
+# -- with (crf04/statsplus#499) ---------------------------------------------
+
+
+def test_player_with_one_player_is_the_without_split_from_the_other_side(client, detroit):
+    response = _get(client, "player_name=Ausar%20Thompson&with=Cade%20Cunningham")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "season": "2025-26",
+        "player": {"name": "Ausar Thompson", "team": "DET"},
+        "split": {
+            "with": ["Cade Cunningham"],
+            "without": [],
+            "games_asked": 2,
+            "games_other": 5,
+            "games_mixed": 0,
+            # g1 and g6, the games Cade played: 30 + 18 over 2 games.
+            "asked": {
+                "games": 2,
+                "played": 2,
+                "starts": 1,
+                "minutes": 24.0,
+                "minutes_per_game_played": 24.0,
+                "closed": 1,
+                "minutes_by_period": {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0, "OT": 0.0},
+                "stints": 0.0,
+                "stats": None,
+            },
+            # g0, g2, g3, g4 (DNP), g5, the games Cade missed: 105 over 5 games.
+            "other": {
+                "games": 5,
+                "played": 4,
+                "starts": 4,
+                "minutes": 21.0,
+                "minutes_per_game_played": 26.3,
+                "closed": 1,
+                "minutes_by_period": {"Q1": 1.8, "Q2": 1.8, "Q3": 1.8, "Q4": 1.8, "OT": 0.0},
+                "stints": 0.4,
+                "stats": None,
+            },
+            "minutes_change": 3.0,
+            "insufficient": True,
+            "games": [
+                {
+                    "game_date": "2026-01-11",
+                    "matchup": "DET vs. BOS",
+                    "started": False,
+                    "minutes": 18.0,
+                    "closed": False,
+                },
+                {
+                    "game_date": "2026-01-01",
+                    "matchup": "DET vs. BOS",
+                    "started": True,
+                    "minutes": 30.0,
+                    "closed": True,
+                },
+            ],
+        },
+    }
+
+
+def test_team_with_one_player_lists_every_teammate_of_his_games(client, detroit):
+    body = _get(client, "team=DET&with=Cade%20Cunningham").get_json()
+
+    assert body["season"] == "2025-26" and body["team"] == "DET" and "without" not in body
+    split = body["split"]
+    assert {k: split[k] for k in ("with", "without", "games_asked", "games_other", "games_mixed")} == {
+        "with": ["Cade Cunningham"],
+        "without": [],
+        "games_asked": 2,
+        "games_other": 5,
+        "games_mixed": 0,
+    }
+    assert split["insufficient"] is True
+    assert split["starters"] == [
+        {"name": "Ausar Thompson", "starts_asked": 1, "starts_other": 4},
+        {"name": "Jalen Duren", "starts_asked": 1, "starts_other": 2},
+    ]
+    # Isaiah 12 - 20.4; Ausar 24 - 21; Duren 12.5 - 11.75 (half-up); Late 10 - 10; the Sams have no other game.
+    assert [(p["name"], p["minutes_change"]) for p in split["players"]] == [
+        ("Isaiah Stewart", -8.4),
+        ("Ausar Thompson", 3.0),
+        ("Jalen Duren", 0.8),
+        ("Late Joiner", 0.0),
+        ("Sam Same", None),
+        ("Sam Same", None),
+    ]
+    assert split["players"][0] == {
+        "name": "Isaiah Stewart",
+        "asked": {
+            "games": 2,
+            "played": 2,
+            "starts": 0,
+            "minutes": 12.0,
+            "minutes_per_game_played": 12.0,
+            "closed": 0,
+            "stats": None,
+        },
+        "other": {
+            "games": 5,
+            "played": 5,
+            "starts": 3,
+            "minutes": 20.4,
+            "minutes_per_game_played": 20.4,
+            "closed": 1,
+            "stats": None,
+        },
+        "minutes_change": -8.4,
+        "insufficient": True,
+    }
+
+
+@pytest.mark.parametrize(
+    ("query", "counts"),
+    [
+        # Both played g1; both missed g3, g4; g2, g5, g6 are mixed; g0 is before Duren's window.
+        ("with=Cade%20Cunningham&with=Jalen%20Duren", (1, 2, 3)),
+        # Duren played and Cade missed g2, g5; every other game from g1 on is the other side.
+        ("with=Jalen%20Duren&without=Cade%20Cunningham", (2, 4, 0)),
+        # Cade played and Duren missed g6 only.
+        ("with=Cade%20Cunningham&without=Jalen%20Duren", (1, 5, 0)),
+        # Duren's window opens at g1: g1, g2, g5 played, g3, g4, g6 missed.
+        ("with=Jalen%20Duren", (3, 3, 0)),
+    ],
+    ids=["two-with", "with-duren-without-cade", "with-cade-without-duren", "with-window"],
+)
+def test_split_counts_follow_each_named_players_status_and_window(client, detroit, query, counts):
+    split = _get(client, f"team=DET&{query}").get_json()["split"]
+
+    assert (split["games_asked"], split["games_other"], split["games_mixed"]) == counts
+    assert split["insufficient"] is (counts[0] < 3)
+
+
+def test_with_and_without_name_their_players_and_leave_them_out_of_the_lists(client, detroit):
+    split = _get(client, "team=DET&with=Jalen%20Duren&without=Cade%20Cunningham").get_json()["split"]
+
+    assert (split["with"], split["without"]) == (["Jalen Duren"], ["Cade Cunningham"])
+    names = {p["name"] for p in split["players"]} | {s["name"] for s in split["starters"]}
+    assert names == {"Ausar Thompson", "Isaiah Stewart", "Late Joiner"}
+    assert split["starters"] == [
+        {"name": "Ausar Thompson", "starts_asked": 2, "starts_other": 2},
+        {"name": "Isaiah Stewart", "starts_asked": 1, "starts_other": 2},
+    ]
+    # Ausar: g2 20 + g5 24 asked; g1 30, g3 36, g4 0, g6 18 other.
+    ausar = next(p for p in split["players"] if p["name"] == "Ausar Thompson")
+    assert ausar == {
+        "name": "Ausar Thompson",
+        "asked": {
+            "games": 2,
+            "played": 2,
+            "starts": 2,
+            "minutes": 22.0,
+            "minutes_per_game_played": 22.0,
+            "closed": 0,
+            "stats": None,
+        },
+        "other": {
+            "games": 4,
+            "played": 3,
+            "starts": 2,
+            "minutes": 21.0,
+            "minutes_per_game_played": 28.0,
+            "closed": 2,
+            "stats": None,
+        },
+        "minutes_change": 1.0,
+        "insufficient": True,
+    }
+
+
+def test_player_with_and_without_lists_the_asked_games(client, detroit):
+    split = _get(
+        client, "player_name=Ausar%20Thompson&with=Jalen%20Duren&without=Cade%20Cunningham"
+    ).get_json()["split"]
+
+    assert [g["game_date"] for g in split["games"]] == ["2026-01-09", "2026-01-03"]
+    assert (split["games_asked"], split["games_other"], split["asked"]["games"], split["other"]["games"]) == (
+        2,
+        4,
+        2,
+        4,
+    )
+
+
+@pytest.mark.parametrize(
+    ("query", "parameters"),
+    [
+        ("game_id=0022500003&with=Cade%20Cunningham", ["with"]),
+        ("player_name=Ausar%20Thompson&with=Cade%20Cunningham&last_n=5", ["last_n", "with"]),
+        ("team=DET&with=Cade%20Cunningham&last_n=5", ["last_n", "with"]),
+        ("team=DET&with=%20", ["with"]),
+        ("team=DET&with=Cade%20Cunningham&game_logs=maybe", ["game_logs"]),
+    ],
+)
+def test_with_is_rejected_with_game_id_last_n_and_a_blank_name(client, detroit, query, parameters):
+    response = _get(client, query)
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["details"]["parameters"] == parameters
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "team=DET&with=Cade%20Cunningham&without=cade%20cunningham",
+        "player_name=Ausar%20Thompson&with=Jalen%20Duren&with=Cade%20Cunningham&without=CADE%20CUNNINGHAM",
+    ],
+)
+def test_the_same_player_in_with_and_without_is_a_400_naming_both(client, detroit, query):
+    response = _get(client, query)
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["details"]["parameters"] == ["with", "without"]
+
+
+@pytest.mark.parametrize(
+    ("query", "candidates"),
+    [
+        ("player_name=Ausar%20Thompson&with=Nobody%20Here", None),
+        (
+            "team=DET&with=Sam%20Same",
+            [{"name": "Sam Same", "team": "DET"}, {"name": "Sam Same", "team": "DET"}],
+        ),
+        ("player_name=Ausar%20Thompson&with=ausar%20thompson", None),
+        ("player_name=Ausar%20Thompson&without=Cade%20Cunningham&with=Nobody%20Here", None),
+    ],
+    ids=["unknown", "ambiguous", "subject", "unknown-beside-without"],
+)
+def test_an_unresolvable_with_name_is_a_400_naming_with(client, detroit, query, candidates):
+    response = _get(client, query)
+
+    assert response.status_code == 400
+    details = response.get_json()["error"]["details"]
+    assert (details["parameter"], details["parameters"], details.get("candidates")) == (
+        "with",
+        ["with"],
+        candidates,
+    )
+
+
+def test_game_logs_true_reaches_both_sides_of_a_with_split(client, detroit):
+    split = _get(client, "player_name=Ausar%20Thompson&with=Cade%20Cunningham&game_logs=true").get_json()[
+        "split"
+    ]
+
+    assert [g["game_date"] for g in split["asked"]["game_logs"]] == ["2026-01-11", "2026-01-01"]
+    assert len(split["other"]["game_logs"]) == 5
+
+
+def test_a_with_player_who_has_not_played_for_the_team_leaves_the_asked_side_empty(
+    client, tmp_path, dependencies
+):
+    repository = migrated_repository(tmp_path)
+    ayo = lambda m: line(DOSUNMU, "Ayo Dosunmu", "MIN", minutes=m)  # noqa: E731
+    _minnesota(repository, [ayo(30)], [ayo(28)], [ayo(26)], [ayo(24)])
+    reports = InjurySnapshotRepository(repository.engine)
+    store_reports(reports, "2026-27", _min_days(1, 2, 3, 4), (INGRAM, "MIN"))
+    dependencies.rotation_service = service_for(
+        repository,
+        Catalog((DOSUNMU, "Ayo Dosunmu", "MIN"), (INGRAM, "Brandon Ingram", "MIN")),
+        default_season="2026-27",
+        injury_reports=reports,
+    )
+
+    team = _get(client, "team=MIN&with=Brandon%20Ingram").get_json()["split"]
+    player = _get(client, "player_name=Ayo%20Dosunmu&with=Brandon%20Ingram").get_json()["split"]
+
+    assert (team["with"], team["games_asked"], team["games_other"], team["insufficient"]) == (
+        ["Brandon Ingram"],
+        0,
+        4,
+        True,
+    )
+    assert (team["players"], team["starters"]) == ([], [])
+    assert (player["asked"]["games"], player["asked"]["minutes"], player["other"]["minutes"]) == (
+        0,
+        None,
+        27.0,
+    )
+    assert (player["minutes_change"], player["games"]) == (None, [])
+
+
+def test_a_with_player_with_no_line_and_no_evidence_for_the_team_is_a_400(client, tmp_path, dependencies):
+    repository = migrated_repository(tmp_path)
+    _minnesota(repository, [line(DOSUNMU, "Ayo Dosunmu", "MIN", minutes=30)])
+    dependencies.rotation_service = service_for(
+        repository,
+        Catalog((DOSUNMU, "Ayo Dosunmu", "MIN"), (INGRAM, "Brandon Ingram", "MIN")),
+        default_season="2026-27",
+        injury_reports=InjurySnapshotRepository(repository.engine),
+    )
+
+    response = _get(client, "team=MIN&with=Brandon%20Ingram")
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["details"]["parameter"] == "with"
+
+
+def test_games_after_the_with_player_moved_to_another_team_are_left_out(client, tmp_path, dependencies):
+    repository = migrated_repository(tmp_path)
+    steady = line(AUSAR, "Steady", "DET", minutes=20)
+    mover = lambda m: line(CADE, "Moved On", "DET", minutes=m)  # noqa: E731
+    store(
+        repository,
+        _g(1, "2026-01-01", mover(30), steady),
+        _g(2, "2026-01-03", mover(0), steady),
+        game("0022500099", "2026-01-04", "BOS", "NYK", [line(CADE, "Moved On", "BOS", minutes=25)]),
+        _g(3, "2026-01-05", steady),
+        _g(4, "2026-01-07", steady),
+    )
+    dependencies.rotation_service = service_for(repository, Catalog())
+
+    split = _get(client, "team=DET&with=Moved%20On").get_json()["split"]
+
+    assert (split["games_asked"], split["games_other"], split["games_mixed"]) == (1, 1, 0)
