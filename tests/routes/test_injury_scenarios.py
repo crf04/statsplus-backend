@@ -37,6 +37,7 @@ from app.services.matchup_injuries import MatchupInjuryService
 from app.services.on_off import OnOffService, build_request, injury_warm_requests
 from app.services.pbp_stats_adapter import WowyPlayerRow
 from app.services.player_pool import PlayerPool, PoolPlayer
+from tests.support.injury_reports import store_reports
 from tests.support.rotation_world import game as rotation_game
 from tests.support.rotation_world import line as rotation_line
 from tests.support.rotation_world import migrated_repository, store
@@ -1045,14 +1046,22 @@ def test_a_game_before_the_injured_player_joined_is_on_neither_side(client, auth
     assert pts["pair_window"] == {"from": "2026-10-25", "excluded_games": 6}
 
 
-def test_games_before_the_injured_players_debut_count_without_him_when_the_catalog_places_him_on_the_team(
-    client, authenticate, world
-):
-    # Ingram's shape (crf04/statsplus-backend#759): with BOS last season, on
-    # LAL since and out all season, so every LAL game this season is without him.
+def _out_all_season(world, *listed):
+    """Ingram's shape (crf04/statsplus-backend#759): LeBron ended last season
+    with BOS and has no game this season; each LAL game's stored report lists
+    ``listed``."""
+
     for row in world.logs.rows[(LEBRON, PRIOR)]:
         row["TEAM_ABBREVIATION"] = "BOS"
     del world.logs.rows[(LEBRON, CURRENT)]
+    if listed:
+        store_reports(world.listing.snapshot_repository, CURRENT, [game_id for game_id, _ in G], *listed)
+
+
+def test_every_game_whose_report_lists_an_injured_player_with_no_game_is_without_him(
+    client, authenticate, world
+):
+    _out_all_season(world, (LEBRON, "LAL"))
 
     pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
 
@@ -1060,6 +1069,17 @@ def test_games_before_the_injured_players_debut_count_without_him_when_the_catal
     assert pts["baseline"]["games"] == 0
     # Only last season's h1-h4, before his team change, are left out.
     assert pts["pair_window"] == {"from": "2026-10-21", "excluded_games": 4}
+
+
+@pytest.mark.parametrize("listed", [(), ((LEBRON, "BOS"),)], ids=["no-report", "listed-for-another-team"])
+def test_an_injured_player_with_no_game_and_no_evidence_for_the_team_has_no_games_without_him(
+    client, authenticate, world, listed
+):
+    _out_all_season(world, *listed)
+
+    pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
+
+    assert (pts["without"]["games"], pts["baseline"]["games"]) == (0, 0)
 
 
 def _mates(client, authenticate):
@@ -1156,8 +1176,12 @@ def _rotation_lines():
 def rotation_world(world, tmp_path):
     for player in (EXACT_SIX, JUST_BELOW, THIN_SAMPLE):
         world.logs.add(player, CURRENT, "LAL", _flat(G, 10, 5, 2, 1, 0, 4))
+    _store_rotations(world, tmp_path, _rotation_lines())
+    return world
+
+
+def _store_rotations(world, tmp_path, lines):
     repository = migrated_repository(tmp_path)
-    lines = _rotation_lines()
     store(
         repository,
         *(
@@ -1184,7 +1208,6 @@ def rotation_world(world, tmp_path):
         season=CURRENT,
     )
     world.scenarios.rotations = repository
-    return world
 
 
 def _split(without, played, change, *, insufficient=False, seasons="2026-27", missing=0):
@@ -1332,6 +1355,24 @@ def test_a_teammate_who_left_and_returned_counts_rotation_games_only_after_the_r
 
     assert _row(scenario, "sits", RETURNER, "MIN")["rotation"] == _split(
         (3, 3, 3, 20.0, 0), (1, 1, 0, 20.0, 0), 0.0
+    )
+
+
+def test_an_injured_player_with_no_game_gets_a_rotation_split_from_his_reports(
+    client, authenticate, world, tmp_path
+):
+    # Ingram's shape: no box-score line all season, on every LAL report, so
+    # every stored LAL game is a without game.
+    _out_all_season(world, (LEBRON, "LAL"))
+    lines = _rotation_lines()
+    del lines[LEBRON]
+    _store_rotations(world, tmp_path, lines)
+
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    # Reaves: 5 x 30.0 + 3 x 34.0 = 252 over 8 games, all started, 3 closed.
+    assert _row(scenario, "sits", REAVES, "PTS")["rotation"] == _split(
+        (8, 8, 8, 31.5, 3), (0, 0, 0, None, 0), None
     )
 
 

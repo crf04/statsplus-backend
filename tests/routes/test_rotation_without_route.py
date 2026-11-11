@@ -18,7 +18,17 @@ g6    2026-01-11  32 S    0       18     12      Cade plays, Duren out
 
 import pytest
 
-from tests.support.rotation_world import Catalog, game, line, migrated_repository, service_for, store
+from app.services.injury_snapshot_repository import InjurySnapshotRepository
+from tests.support.injury_reports import store_reports
+from tests.support.rotation_world import (
+    Catalog,
+    StoredLogs,
+    game,
+    line,
+    migrated_repository,
+    service_for,
+    store,
+)
 
 ROTATION = "/api/games/rotation"
 CADE, DUREN, AUSAR, ISAIAH, LATE, SAM_A, SAM_B = 10, 11, 20, 21, 22, 30, 31
@@ -173,20 +183,18 @@ def test_player_without_one_player_counts_dnp_subject_as_zero_minutes(client, de
     }
 
 
-def test_two_absent_names_exclude_mixed_games_and_count_games_before_a_season_debut(client, detroit):
+def test_two_absent_names_exclude_mixed_and_pre_roster_games_and_flag_a_short_sample(client, detroit):
     body = _get(
         client, "player_name=Ausar%20Thompson&without=Cade%20Cunningham&without=Jalen%20Duren"
     ).get_json()["without"]
 
-    # g0, g3 and g4 have both out: g0 is before Duren's debut, but his first
-    # game is for DET, so his window opens at DET's first game
-    # (crf04/statsplus#450).  g2/g5/g6 are mixed.
+    # Only g3 and g4 have both out: g0 has no Duren line (pre-roster), g2/g5/g6 are mixed.
     assert body["absent"] == ["Cade Cunningham", "Jalen Duren"]
     assert {k: body["without"][k] for k in ("games", "played", "starts", "minutes", "closed")} == {
-        "games": 3,
-        "played": 2,
-        "starts": 2,
-        "minutes": 20.3,
+        "games": 2,
+        "played": 1,
+        "starts": 1,
+        "minutes": 18.0,
         "closed": 1,
     }
     assert {k: body["with"][k] for k in ("games", "played", "starts", "minutes", "closed")} == {
@@ -196,8 +204,8 @@ def test_two_absent_names_exclude_mixed_games_and_count_games_before_a_season_de
         "minutes": 30.0,
         "closed": 1,
     }
-    assert (body["minutes_change"], body["insufficient"]) == (-9.7, False)
-    assert [g["game_date"] for g in body["games"]] == ["2026-01-07", "2026-01-05", "2025-12-30"]
+    assert (body["minutes_change"], body["insufficient"]) == (-12.0, True)
+    assert [g["game_date"] for g in body["games"]] == ["2026-01-07", "2026-01-05"]
 
 
 def test_team_without_lists_starters_and_minute_changes(client, detroit):
@@ -234,10 +242,10 @@ def test_team_without_lists_starters_and_minute_changes(client, detroit):
     }
 
 
-def test_team_without_two_names_counts_the_games_before_a_season_debut(client, detroit):
+def test_team_without_two_names_is_insufficient(client, detroit):
     without = _get(client, "team=DET&without=Cade%20Cunningham&without=Jalen%20Duren").get_json()["without"]
 
-    assert (without["games_without"], without["games_with"], without["insufficient"]) == (3, 1, False)
+    assert (without["games_without"], without["games_with"], without["insufficient"]) == (2, 1, True)
 
 
 @pytest.mark.parametrize(
@@ -401,27 +409,81 @@ def test_an_inactive_player_with_no_line_counts_as_without(client, tmp_path, dep
     assert (player["with"]["games"], player["with"]["minutes"]) == (2, 20.0)
 
 
-def test_games_before_the_absent_players_season_debut_count_as_without(client, tmp_path, dependencies):
-    # Hart's missed opener (crf04/statsplus#450): Edwards sits the first two
-    # games with no line, then plays two; his first game is for MIN.
-    repository = migrated_repository(tmp_path)
-    ayo = lambda m: line(DOSUNMU, "Ayo Dosunmu", "MIN", minutes=m)  # noqa: E731
+def _minnesota(repository, *lines_by_game):
+    """MIN games n1.. on 2026-10-12, 10-14, ..., one per entry of box-score lines."""
+
     store(
         repository,
-        *(_min(n, f"2026-10-{10 + 2 * n}", ayo(30)) for n in (1, 2)),
-        *(
-            _min(n, f"2026-10-{10 + 2 * n}", line(EDWARDS, "Anthony Edwards", "MIN", minutes=36), ayo(20))
-            for n in (3, 4)
-        ),
+        *(_min(n, f"2026-10-{10 + 2 * n}", *lines) for n, lines in enumerate(lines_by_game, start=1)),
         season="2026-27",
     )
+
+
+INGRAM = 43
+
+
+def test_a_missed_opener_counts_as_without_when_he_ended_last_season_on_the_team(
+    client, tmp_path, dependencies
+):
+    # Hart's shape (crf04/statsplus#450): Edwards has no line in the first two
+    # games and plays the next two; his last 2025-26 game was for MIN.
+    repository = migrated_repository(tmp_path)
+    ayo = lambda m: line(DOSUNMU, "Ayo Dosunmu", "MIN", minutes=m)  # noqa: E731
+    edwards = line(EDWARDS, "Anthony Edwards", "MIN", minutes=36)
+    _minnesota(repository, [ayo(30)], [ayo(30)], [edwards, ayo(20)], [edwards, ayo(20)])
+    logs = StoredLogs()
+    logs.add(EDWARDS, "MIN", "0022501230", "2026-04-12", season="2025-26", minutes=36)
     dependencies.rotation_service = service_for(
-        repository, Catalog((DOSUNMU, "Ayo Dosunmu", "MIN")), default_season="2026-27"
+        repository, Catalog((DOSUNMU, "Ayo Dosunmu", "MIN")), default_season="2026-27", logs=logs
     )
 
     team = _get(client, "team=MIN&without=Anthony%20Edwards").get_json()["without"]
 
     assert (team["games_without"], team["games_with"]) == (2, 2)
+
+
+def test_a_player_with_no_line_is_without_in_every_game_whose_report_lists_him(
+    client, tmp_path, dependencies
+):
+    # Ingram's shape (crf04/statsplus-backend#759): out all season with no
+    # box-score line, on every MIN report.
+    repository = migrated_repository(tmp_path)
+    ayo = lambda m: line(DOSUNMU, "Ayo Dosunmu", "MIN", minutes=m)  # noqa: E731
+    _minnesota(repository, [ayo(30)], [ayo(28)], [ayo(26)], [ayo(24)])
+    reports = InjurySnapshotRepository(repository.engine)
+    store_reports(reports, "2026-27", [f"00226000{n:02d}" for n in (1, 2, 3, 4)], (INGRAM, "MIN"))
+    dependencies.rotation_service = service_for(
+        repository,
+        Catalog((DOSUNMU, "Ayo Dosunmu", "MIN"), (INGRAM, "Brandon Ingram", "MIN")),
+        default_season="2026-27",
+        injury_reports=reports,
+    )
+
+    team = _get(client, "team=MIN&without=Brandon%20Ingram").get_json()["without"]
+    player = _get(client, "player_name=Ayo%20Dosunmu&without=Brandon%20Ingram").get_json()["without"]
+
+    assert (team["absent"], team["games_without"], team["games_with"]) == (["Brandon Ingram"], 4, 0)
+    assert (player["without"]["games"], player["without"]["minutes"]) == (4, 27.0)
+
+
+@pytest.mark.parametrize("listed", [[], [(INGRAM, "BOS")]], ids=["no-report", "listed-for-another-team"])
+def test_a_player_with_no_line_and_no_evidence_for_the_team_is_a_400(client, tmp_path, dependencies, listed):
+    repository = migrated_repository(tmp_path)
+    _minnesota(repository, [line(DOSUNMU, "Ayo Dosunmu", "MIN", minutes=30)])
+    reports = InjurySnapshotRepository(repository.engine)
+    if listed:
+        store_reports(reports, "2026-27", ["0022600001"], *listed)
+    dependencies.rotation_service = service_for(
+        repository,
+        Catalog((DOSUNMU, "Ayo Dosunmu", "MIN"), (INGRAM, "Brandon Ingram", "MIN")),
+        default_season="2026-27",
+        injury_reports=reports,
+    )
+
+    response = _get(client, "team=MIN&without=Brandon%20Ingram")
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["details"]["parameter"] == "without"
 
 
 def test_games_after_the_absent_player_moved_to_another_team_are_left_out(client, tmp_path, dependencies):
