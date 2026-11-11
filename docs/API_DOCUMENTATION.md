@@ -1527,9 +1527,10 @@ is exactly the one above.
   cannot name or place on a team is not listed.
 - A started game's history ends at its tip, as its closing set does, so its
   moves describe the closing value.
-- Provider history is every promoted generation of the provider's snapshots
-  since the first stored line for the date's games in the market
-  (`projection_observations`), replayed as the Player Pool's latest lines are:
+- Provider history is the promoted generations of the provider's snapshots
+  that hold the date's lines in the market (`projection_observations`), with
+  the first Complete generation after each, replayed as the Player Pool's
+  latest lines are:
   a Complete generation replaces the provider's offerings, and a Partial one
   withdraws each offering it observes and posts the available ones, carrying
   the rest. A provider cell posted at two lines in one generation is not a
