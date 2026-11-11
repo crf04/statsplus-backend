@@ -915,6 +915,33 @@ def test_todays_line_takes_prizepicks_first_even_when_other_providers_agree(clie
     assert (pts["line"]["value"], pts["line"]["source"]) == (30.5, "prizepicks")
 
 
+class PricedProviderPool(ProviderPool):
+    def __init__(self, lines, prices):
+        super().__init__(lines)
+        self.prices = prices
+
+    def get_pool_for_game(self, *, season, game_id):
+        pool = super().get_pool_for_game(season=season, game_id=game_id)
+        players = tuple(
+            dataclasses.replace(player, line_prices=self.prices.get(player.canonical_player_id, {}))
+            for player in pool.players
+        )
+        return PlayerPool(players, pool.team_counts, pool.freshness)
+
+
+def test_todays_line_is_never_an_unpriced_line(client, authenticate, world):
+    # Novig's 9.5 has no price, so Underdog's priced 29.5 is the line (crf04/statsplus#495).
+    world.pool = PricedProviderPool(
+        {REAVES: {"novig": {"PTS": 9.5}, "underdog": {"PTS": 29.5}}},
+        {REAVES: {"underdog": {"PTS": {"over": -112, "under": -108}}}},
+    )
+
+    scenario = _scenario(_scenarios(client, authenticate), LEBRON)
+
+    pts = _row(scenario, "sits", REAVES, "PTS")
+    assert (pts["line"]["value"], pts["line"]["source"]) == (29.5, "underdog")
+
+
 def test_an_unwarmed_split_is_a_limit_and_never_fetches_upstream(client, authenticate, world):
     asked_before = len(world.wowy.asked)
 

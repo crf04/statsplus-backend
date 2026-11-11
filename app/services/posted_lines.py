@@ -15,7 +15,7 @@ from functools import cache
 from types import SimpleNamespace
 from typing import Any
 
-from app.domain.nba_events import is_postponed_event
+from app.domain.nba_events import is_postponed_event, is_started_event
 from app.domain.slate_time import slate_date_for_instant
 from app.services.injury_listing import slate_events
 from app.services.research_season import schedule_season
@@ -30,6 +30,57 @@ LINE_PROVIDER_PREFERENCE = ("prizepicks",)
 #: Days after today searched for his next game's line when no line day is
 #: named (books post an opener's lines days ahead).
 LOOKAHEAD_DAYS = 7
+
+
+#: Providers that price the entry, never one pick: a line of theirs with no
+#: per-pick price is a line-only pick (crf04/statsplus-backend#714).
+LINE_ONLY_PROVIDERS = frozenset({"dabble", "prizepicks"})
+#: Labels of a line that is not its provider's line for the player
+#: (crf04/statsplus#495).
+UNREPORTED_LINE_LABELS = frozenset({"alternate", "unpriced"})
+
+
+def line_labels(
+    lines: Mapping[str, Mapping[str, float]],
+    line_prices: Mapping[str, Mapping[str, Any]],
+    priced_other_lines: Mapping[str, Any],
+) -> dict[str, dict[str, str]]:
+    """Each line with no per-pick price, labelled (crf04/statsplus#495).
+
+    ``line-only`` for a provider that prices only the entry, ``alternate``
+    when the provider priced a different line in the poll that posted this
+    one, else ``unpriced``.  A priced line has no label.
+    """
+
+    labels: dict[str, dict[str, str]] = {}
+    for provider, markets in sorted(lines.items()):
+        for market in sorted(markets):
+            if market in line_prices.get(provider, {}):
+                continue
+            if provider in LINE_ONLY_PROVIDERS:
+                label = "line-only"
+            elif market in priced_other_lines.get(provider, ()):
+                label = "alternate"
+            else:
+                label = "unpriced"
+            labels.setdefault(provider, {})[market] = label
+    return labels
+
+
+def reported_lines(
+    lines: Mapping[str, Mapping[str, float]], labels: Mapping[str, Mapping[str, str]]
+) -> dict[str, dict[str, float]]:
+    """``lines`` without the alternate and unpriced ones, which are never a provider's line."""
+
+    kept = {
+        provider: {
+            market: value
+            for market, value in markets.items()
+            if labels.get(provider, {}).get(market) not in UNREPORTED_LINE_LABELS
+        }
+        for provider, markets in lines.items()
+    }
+    return {provider: markets for provider, markets in kept.items() if markets}
 
 
 def _provider_order(lines: Mapping[str, Mapping[str, float]]) -> list[str]:
@@ -293,7 +344,8 @@ class PostedLinesReader:
                 "lines": {"PTS": {"value": closing.value, "provider": closing.book}},
                 "provider_lines": {},
                 "line_prices": {},
-                "book_lines": self._book_lines(player_id, game_id),
+                "line_labels": {},
+                "book_lines": self._book_lines(player_id, event),
             }
         return None
 
@@ -324,10 +376,12 @@ class PostedLinesReader:
         }
         if not by_provider:
             return None
-        book_lines = self._book_lines(player_id, game_id)
+        book_lines = self._book_lines(player_id, event)
+        labels = line_labels(by_provider, prices_by_provider, player.priced_other_lines)
+        reported = reported_lines(by_provider, labels)
         lines = {}
         for market in sorted({m for by_market in by_provider.values() for m in by_market}):
-            found = majority_line(by_provider, market, book_lines)
+            found = majority_line(reported, market, book_lines)
             if found is not None:
                 lines[market] = {"value": found[0], "provider": found[1]}
         return {
@@ -337,16 +391,23 @@ class PostedLinesReader:
             "lines": lines,
             "provider_lines": serialize_lines(by_provider),
             "line_prices": serialize_line_prices(prices_by_provider),
+            "line_labels": labels,
             "book_lines": book_lines,
         }
 
-    def _book_lines(self, player_id: int, game_id: str) -> dict[str, Any]:
+    def _book_lines(self, player_id: int, event: Mapping[str, Any]) -> dict[str, Any]:
         """His sportsbook lines for the game; ``{}`` when off, empty or failing."""
 
         if self.sportsbook_reader is None:
             return {}
+        game_id = str(event["nba_game_id"])
+        now = self._clock()
         try:
-            return dict(self.sportsbook_reader.book_lines(game_id).get(player_id, {}))
+            return dict(
+                self.sportsbook_reader.book_lines(
+                    game_id, now=now, started=is_started_event(event, now=now)
+                ).get(player_id, {})
+            )
         except Exception:
             logger.exception("Sportsbook book_lines read failed for game %s", game_id)
             return {}

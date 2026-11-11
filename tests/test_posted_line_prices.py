@@ -6,8 +6,10 @@ and sportsbook reader; every expected value is a literal.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
+
+import pytest
 
 from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.posted_lines import PostedLinesReader
@@ -54,10 +56,19 @@ class Catalog:
         return [EVENT]
 
 
-def _pool(lines, line_prices=None):
+def _pool(lines, line_prices=None, priced_other_lines=None):
     return PlayerPool(
         players=(
-            PoolPlayer(PLAYER, "LeBron James", LAL, ("PTS",), {}, lines, line_prices=line_prices or {}),
+            PoolPlayer(
+                PLAYER,
+                "LeBron James",
+                LAL,
+                ("PTS",),
+                {},
+                lines,
+                line_prices=line_prices or {},
+                priced_other_lines=priced_other_lines or {},
+            ),
         ),
         team_counts={LAL: 1},
         freshness={},
@@ -79,7 +90,7 @@ class Books:
     def __init__(self, by_player=None, fail=False):
         self.by_player, self.fail, self.calls = by_player or {}, fail, []
 
-    def book_lines(self, game_id):
+    def book_lines(self, game_id, *, now, started):
         self.calls.append(game_id)
         if self.fail:
             raise RuntimeError("book store down")
@@ -126,6 +137,47 @@ def test_a_live_pool_serves_every_provider_line_price_and_book_line():
     assert result["book_lines"] == {"PTS": BOOK_ENTRY}
 
 
+def test_an_alternate_or_unpriced_line_is_labelled_and_never_the_posted_line():
+    # Novig's 9.5 and Polymarket's 9.5 carry no price and outnumber Underdog's priced 19.5;
+    # Novig priced another number in the same poll.
+    pool = _pool(
+        {"novig": {"PTS": 9.5}, "polymarket": {"PTS": 9.5}, "underdog": {"PTS": 19.5}},
+        {"underdog": {"PTS": {"over": -112, "under": -112}}},
+        {"novig": ("PTS",)},
+    )
+
+    result = _read(Pools(pool))
+
+    assert result["lines"] == {"PTS": {"value": 19.5, "provider": "underdog"}}
+    assert result["provider_lines"] == {
+        "novig": {"PTS": 9.5},
+        "polymarket": {"PTS": 9.5},
+        "underdog": {"PTS": 19.5},
+    }
+    assert result["line_labels"] == {"novig": {"PTS": "alternate"}, "polymarket": {"PTS": "unpriced"}}
+
+
+def test_a_dabble_line_only_pick_is_labelled_and_still_its_line():
+    pool = _pool({"dabble": {"PTS": 20.5}, "novig": {"PTS": 9.5}})
+
+    result = _read(Pools(pool))
+
+    assert result["lines"] == {"PTS": {"value": 20.5, "provider": "dabble"}}
+    assert result["line_labels"] == {"dabble": {"PTS": "line-only"}, "novig": {"PTS": "unpriced"}}
+
+
+def test_a_market_with_only_an_unpriced_line_has_no_posted_line():
+    pool = _pool(
+        {"novig": {"PTS": 9.5}, "underdog": {"REB": 7.5}},
+        {"underdog": {"REB": {"over": -110, "under": None}}},
+    )
+
+    result = _read(Pools(pool))
+
+    assert result["lines"] == {"REB": {"value": 7.5, "provider": "underdog"}}
+    assert result["line_labels"] == {"novig": {"PTS": "unpriced"}}
+
+
 def test_the_new_fields_are_present_and_empty_without_prices_or_a_book_store():
     result = _read(Pools(_pool({"prizepicks": {"PTS": 27.5}})))
 
@@ -165,6 +217,7 @@ def test_the_closing_line_fallback_has_no_provider_lines_or_prices_but_reads_boo
         "lines": {"PTS": {"value": 24.5, "provider": "draftkings"}},
         "provider_lines": {},
         "line_prices": {},
+        "line_labels": {},
         "book_lines": {"PTS": BOOK_ENTRY},
     }
     assert books.calls == [GAME]
@@ -187,10 +240,22 @@ def test_a_book_store_failure_keeps_the_closing_line_fallback(caplog):
     assert result["book_lines"] == {}
 
 
-def test_the_built_game_service_serves_stored_sportsbook_quotes_in_book_lines(monkeypatch):
-    """Production wiring: ``build_dependencies`` hands the game-log reader the book store."""
+@pytest.mark.parametrize(
+    ("read_at", "stale"),
+    [
+        (datetime(2026, 10, 21, 22, 2, 40, tzinfo=UTC), False),
+        (datetime(2026, 10, 21, 22, 2, 41, tzinfo=UTC), True),
+        # Tipped at 02:00: a closing line is never stale.
+        (datetime(2026, 10, 22, 2, 0, tzinfo=UTC), False),
+    ],
+)
+def test_the_built_game_service_serves_stored_sportsbook_quotes_in_book_lines(monkeypatch, read_at, stale):
+    """Production wiring: ``build_dependencies`` hands the game-log reader the book store.
 
-    from datetime import UTC, datetime
+    The quote was read at 21:02:40, so it is stale (crf04/statsplus#496) a second past an hour
+    later, until the 02:00 tip.
+    """
+
     from unittest.mock import Mock
 
     from sqlalchemy import create_engine, insert
@@ -235,6 +300,7 @@ def test_the_built_game_service_serves_stored_sportsbook_quotes_in_book_lines(mo
     reader.event_catalog = Catalog()
     reader.player_pool = Pools(_pool({"prizepicks": {"PTS": 27.5}}))
     reader.settings = SETTINGS
+    reader._clock = lambda: read_at
 
     result = reader.for_player(PLAYER, DAY)
 
@@ -249,6 +315,7 @@ def test_the_built_game_service_serves_stored_sportsbook_quotes_in_book_lines(mo
                     "over": -115,
                     "under": -105,
                     "updated_at": "2026-10-21T21:02:40Z",
+                    "stale": stale,
                     "best_over": False,
                     "best_under": False,
                 }

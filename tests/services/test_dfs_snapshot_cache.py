@@ -1461,17 +1461,19 @@ def test_follower_deadline_never_abandons_the_owner_flight() -> None:
         ),
         daemon=True,
     )
+    owned = Event()
     joined = Event()
     original_submit = cache.coordinator.submit
 
     def observed_submit(key, function):
         flight, is_owner = original_submit(key, function)
-        if not is_owner:
-            joined.set()
+        (owned if is_owner else joined).set()
         return flight, is_owner
 
-    owner.start()
     cache.coordinator.submit = observed_submit  # type: ignore[method-assign]
+    owner.start()
+    # On a slow runner the follower thread could otherwise reach submit first and own the flight.
+    assert owned.wait(timeout=2)
     follower_result: dict[str, object] = {}
     follower = Thread(
         target=lambda: _capture_value(
