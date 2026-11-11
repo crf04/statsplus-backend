@@ -109,10 +109,11 @@ def test_a_past_report_is_stored_per_game_and_the_game_is_then_seen_as_stored(en
 
 def test_the_season_mentions_read_runs_on_postgres(engine):
     # The team-window evidence read (crf04/statsplus#450): one season's
-    # snapshots whose stored text names a requested id.
+    # snapshots that list a requested id, and none whose ids only contain its digits.
     repository = InjurySnapshotRepository(engine)
     store_reports(repository, "2026-27", {"0022600001": "2026-10-21"}, (1627742, "LAC"))
     store_reports(repository, "2026-27", {"0022600002": "2026-10-22"}, (1630999, "BOS"))
+    store_reports(repository, "2026-27", {"0022600003": "2026-10-23"}, (16277420, "LAC"), (21627742, "BOS"))
     store_reports(repository, SEASON, {"0022500001": "2025-10-21"}, (1627742, "LAC"))
 
     found = repository.get_season_mentions("2026-27", [1627742])
