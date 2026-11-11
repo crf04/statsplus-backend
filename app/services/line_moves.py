@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, or_, select, tuple_, union
 
 from app.domain.utc import assume_utc
 from app.models.projection_archive import (
@@ -250,7 +250,6 @@ def provider_histories(
         observation.c.line_value,
         observation.c.over_price,
         observation.c.under_price,
-        observation.c.observed_at,
     )
     cells = (
         observation.c.canonical_game_id.in_(sorted(game_ids)),
@@ -261,16 +260,24 @@ def provider_histories(
     rows = connection.execute(select(*columns).where(*cells, posting)).all()
     if not rows:
         return {}
+    generation = ProjectionMaterializationGeneration.__table__
+    snapshot = ProjectionProviderSnapshot.__table__
+    partial = (
+        select(generation.c.generation_id)
+        .select_from(generation.join(snapshot, generation.c.snapshot_id == snapshot.c.snapshot_id))
+        .where(
+            generation.c.provider.in_(providers),
+            generation.c.season == season,
+            generation.c.outcome == "advanced",
+            snapshot.c.snapshot_status == SnapshotStatus.PARTIAL.value,
+        )
+    )
+    rows += connection.execute(
+        select(*columns).where(*cells, ~posting, observation.c.generation_id.in_(partial))
+    ).all()
     generations = _generations(
-        connection, season=season, providers=providers, since=min(assume_utc(row.observed_at) for row in rows)
+        connection, season=season, held=sorted({str(row.generation_id) for row in rows})
     )
-    partial = sorted(
-        generation_id for generation_id, generation in generations.items() if not generation.complete
-    )
-    if partial:
-        rows += connection.execute(
-            select(*columns).where(*cells, ~posting, observation.c.generation_id.in_(partial))
-        ).all()
     by_cell: dict[tuple[str, str, str, int], dict[str, list[Any]]] = {}
     for row in rows:
         generation = generations.get(str(row.generation_id))
@@ -319,16 +326,20 @@ def provider_histories(
     return histories
 
 
-def _generations(
-    connection: Any, *, season: str, providers: Sequence[str], since: datetime
-) -> dict[str, _Generation]:
-    """The providers' promoted generations retrieved since ``since``, each with its newest confirming poll."""
+def _generations(connection: Any, *, season: str, held: Sequence[str]) -> dict[str, _Generation]:
+    """The promoted generations a replay of the cells reads, each with its newest confirming poll.
+
+    Those are the ones holding the cells' rows, and the first Complete
+    generation after each of them, which withdraws a cell it omits.  No other
+    generation changes a replay: a Partial one without the cell carries it,
+    and a later Complete one finds it already withdrawn.
+    """
 
     generation = ProjectionMaterializationGeneration.__table__
     snapshot = ProjectionProviderSnapshot.__table__
     poll = ProviderPoll.__table__
-    scope = (generation.c.provider.in_(providers), generation.c.season == season)
-    rows = connection.execute(
+    order = (generation.c.retrieved_at, generation.c.created_at, generation.c.generation_id)
+    described = (
         select(
             generation.c.generation_id,
             generation.c.provider,
@@ -343,18 +354,63 @@ def _generations(
                 poll, generation.c.source_poll_id == poll.c.poll_id
             )
         )
-        .where(*scope, generation.c.outcome == "advanced", generation.c.retrieved_at >= since)
+        .where(generation.c.season == season, generation.c.outcome == "advanced")
+    )
+    holding = described.where(generation.c.generation_id.in_(held)).cte("holding")
+    completes = (
+        described.add_columns(
+            *(
+                func.lag(column)
+                .over(partition_by=(generation.c.provider, generation.c.query_key), order_by=order)
+                .label(f"previous_{column.name}")
+                for column in order
+            )
+        )
+        .where(
+            snapshot.c.snapshot_status == SnapshotStatus.COMPLETE.value,
+            generation.c.provider.in_(select(holding.c.provider)),
+        )
+        .cte("completes")
+    )
+    after_held = (
+        select(holding.c.generation_id)
+        .where(
+            holding.c.provider == completes.c.provider,
+            holding.c.query_key == completes.c.query_key,
+            tuple_(holding.c.retrieved_at, holding.c.created_at, holding.c.generation_id)
+            < tuple_(completes.c.retrieved_at, completes.c.created_at, completes.c.generation_id),
+            or_(
+                completes.c.previous_generation_id.is_(None),
+                tuple_(
+                    completes.c.previous_retrieved_at,
+                    completes.c.previous_created_at,
+                    completes.c.previous_generation_id,
+                )
+                <= tuple_(holding.c.retrieved_at, holding.c.created_at, holding.c.generation_id),
+            ),
+        )
+        .exists()
+    )
+    fields = (
+        "generation_id",
+        "provider",
+        "query_key",
+        "retrieved_at",
+        "created_at",
+        "snapshot_status",
+        "completed_at",
+    )
+    rows = connection.execute(
+        union(
+            select(*(holding.c[field] for field in fields)),
+            select(*(completes.c[field] for field in fields)).where(after_held),
+        )
     ).all()
     confirmations = {
         str(row.generation_id): assume_utc(row.confirmed_at)
         for row in connection.execute(
             select(poll.c.generation_id, func.max(poll.c.retrieved_at).label("confirmed_at"))
-            .where(
-                poll.c.provider.in_(providers),
-                poll.c.season == season,
-                poll.c.completed_at >= since,
-                poll.c.generation_id.in_([str(row.generation_id) for row in rows]),
-            )
+            .where(poll.c.generation_id.in_(held))
             .group_by(poll.c.generation_id)
         )
         if row.confirmed_at is not None
