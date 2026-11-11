@@ -141,6 +141,10 @@ class LedgerGovernanceReader(Protocol):
     ) -> LedgerGovernance: ...
 
 
+class NoActiveCollectionManifest(PublicationGovernanceUnavailable):
+    """No collection manifest is open for the season yet; every other governance failure keeps the base class."""
+
+
 class ActiveManifestLedgerGovernanceReader:
     """Derive exact composition truth only from active control-plane state."""
 
@@ -606,7 +610,7 @@ class ActiveManifestLedgerGovernanceReader:
                 .limit(1)
             )
         if cutoff is None:
-            raise PublicationGovernanceUnavailable(
+            raise NoActiveCollectionManifest(
                 "active manifest and completed Event Catalog governance are required"
             )
         return self._read(
