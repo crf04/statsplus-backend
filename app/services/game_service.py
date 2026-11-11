@@ -103,6 +103,8 @@ _OPPONENT_RANK_LABELS: dict[str, str] = {
         (Path(__file__).resolve().parent.parent / "assets" / "opponent_filter_labels.json").read_text()
     ),
 }
+#: The opponent's tricode in a MATCHUP ("LAL @ HOU" -> "HOU").
+_OPPONENT_PATTERN = r"(?:vs\.|@)\s*([A-Z]{2,3})"
 # Diet facts and team windows come from the reader's decode cache, so a cache
 # hit never selects or parses their league-wide payloads.
 _DECODED_ONLY_STREAM_KEYS = frozenset(_PUBLICATION_STREAM_KEYS) - _PROJECTION_ONLY_STREAM_KEYS
@@ -606,8 +608,7 @@ class GameService:
         # None means the query had no opponent filter; an empty set is a
         # resolved-but-emptied filter and must match zero games, not all games.
         if teams_against is not None:
-            # Extract opponent team ("LAL@ HOU" -> "HOU"), then keep matches
-            opponents = df["MATCHUP"].astype(str).str.extract(r"(?:vs\.|@)\s*([A-Z]{2,3})")[0]
+            opponents = df["MATCHUP"].astype(str).str.extract(_OPPONENT_PATTERN)[0]
             df = df[opponents.isin(teams_against)]
 
         # Apply playstyle filter.  A rating-less row (no play-type facts for
@@ -750,6 +751,7 @@ class GameService:
         # one publication generation so two filters cannot disagree about which
         # season and which activation they ranked.
         resolved_teams = None
+        filter_ranks = {}
         if query.teams_against:
             rankings = self._season_rankings(
                 query.teams_against,
@@ -760,6 +762,14 @@ class GameService:
                 matching = set(self._select_rank(rankings[team_filter], query.rank_filter[index]))
                 resolved_teams = matching if resolved_teams is None else resolved_teams & matching
             resolved_teams = resolved_teams or set()
+            # Position p of a most-allowed-first ranking is rank 31 - p on the
+            # 1-30 scale: the number the filter's rank_filter range compared.
+            filter_ranks = {
+                team_filter: {
+                    tricode: 31 - position for position, tricode in enumerate(rankings[team_filter], 1)
+                }
+                for team_filter in query.teams_against
+            }
 
         filtered_logs = self.apply_filters(
             full_game_logs.copy(),
@@ -835,6 +845,12 @@ class GameService:
         filtered_logs["GAME_DATE"] = filtered_logs["GAME_DATE"].astype(str)
 
         game_log_rows = _records(filtered_logs)
+        if filter_ranks and game_log_rows:
+            opponents = filtered_logs["MATCHUP"].astype(str).str.extract(_OPPONENT_PATTERN)[0]
+            for row, opponent in zip(game_log_rows, opponents, strict=True):
+                row["teams_against_ranks"] = {
+                    team_filter: ranks[opponent] for team_filter, ranks in filter_ranks.items()
+                }
         for row, markets in zip(game_log_rows, closing_lines, strict=False):
             # ``closing_line`` keeps its #216 contract (points only) for the
             # MCP; ``closing_lines`` carries every market with a line (#429).
