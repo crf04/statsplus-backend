@@ -7,11 +7,16 @@ slow Odds API must never delay a DFS beat.  Requires ``ODDS_API_ENABLED=true``
 and ``ODDS_API_KEY`` in the environment; ``DATABASE_URL`` is read from the
 environment unless ``--database-url`` is given.  When ``SENTRY_DSN`` is set,
 Sentry is initialized as in the web app so the guard's alerts are delivered.
+
+After the odds beat, whatever its outcome, each run reads ESPN's scoreboard
+once and stores the day's game lines (crf04/statsplus#493).  That step has its
+own timeout and never changes the exit code.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -21,7 +26,7 @@ if __package__ in {None, ""}:
 
 from app.config.settings import load_settings
 from app.dependencies import build_dependencies
-from app.services import odds_collection
+from app.services import game_lines, odds_collection
 from app.utils.db import is_demo_database_url
 from app.utils.json_logging import configure_json_logging
 from app.utils.sentry_setup import init_sentry
@@ -48,23 +53,42 @@ def main(argv: list[str] | None = None) -> int:
         # Cron logs show the cycle's INFO lines (tier, calls, remaining=...),
         # in the same JSON format the web app writes.
         configure_json_logging(settings.log_level)
+        dependencies = build_dependencies(settings)
         try:
-            coordinator = odds_collection.build_odds_collection(build_dependencies(settings), settings)
-        except RuntimeError as error:
-            print(f"failed: {error}")
-            return 1
-        if coordinator is None:
-            print("no_work: ODDS_API_ENABLED is false")
-            return 0
-        result = odds_collection.run_once(coordinator)
-        print(
-            f"{result.status}: {result.reason} tier={result.tier} calls={result.calls} "
-            f"credits={result.credits} remaining={result.remaining} unresolved_events={result.unresolved_events} "
-            f"unresolved_players={result.unresolved_players}"
-        )
-        return 0 if result.status in {"complete", "partial", "no_work", "busy", "backoff"} else 1
+            return _odds_beat(dependencies, settings)
+        finally:
+            collect_game_lines(dependencies)
     finally:
         _flush_sentry()
+
+
+def _odds_beat(dependencies, settings) -> int:
+    try:
+        coordinator = odds_collection.build_odds_collection(dependencies, settings)
+    except RuntimeError as error:
+        print(f"failed: {error}")
+        return 1
+    if coordinator is None:
+        print("no_work: ODDS_API_ENABLED is false")
+        return 0
+    result = odds_collection.run_once(coordinator)
+    print(
+        f"{result.status}: {result.reason} tier={result.tier} calls={result.calls} "
+        f"credits={result.credits} remaining={result.remaining} unresolved_events={result.unresolved_events} "
+        f"unresolved_players={result.unresolved_players}"
+    )
+    return 0 if result.status in {"complete", "partial", "no_work", "busy", "backoff"} else 1
+
+
+def collect_game_lines(dependencies) -> None:
+    """Store today's ESPN game lines; a failure is printed and leaves the odds beat's exit code alone."""
+
+    try:
+        summary = game_lines.collect(dependencies.engine)
+    except Exception as error:
+        print(f"game_lines failed: {type(error).__name__}: {error}")
+        return
+    print(f"game_lines: {json.dumps(summary, sort_keys=True)}")
 
 
 if __name__ == "__main__":
