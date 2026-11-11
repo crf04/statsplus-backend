@@ -38,6 +38,7 @@ from app.services.ledger_runtime import (
     ActiveManifestLedgerGovernanceReader,
     LedgerGovernance,
     LedgerRuntime,
+    NoActiveCollectionManifest,
 )
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
@@ -136,6 +137,56 @@ def test_runtime_governance_fails_closed_without_active_manifest(tmp_path):
         ActiveManifestLedgerGovernanceReader(engine, clock=lambda: datetime(2025, 10, 1, tzinfo=UTC)).read(
             "2025-26", datetime(2025, 11, 1, tzinfo=UTC)
         )
+
+
+def test_only_a_missing_manifest_reads_as_no_active_collection_manifest(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'classified.sqlite3'}")
+    run_migrations(engine)
+    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=UTC)
+    reader = ActiveManifestLedgerGovernanceReader(engine, clock=lambda: cutoff + timedelta(minutes=30))
+    with pytest.raises(NoActiveCollectionManifest):
+        reader.read_for_collection("2025-26")
+
+    games = _canonical_league_games()
+    CanonicalGameLedgerRepository(engine).replace_games_atomic(games)
+    events = _catalog_events(games, cutoff)
+    with engine.begin() as connection:
+        connection.execute(
+            ActiveSeason.__table__.insert().values(
+                season="2025-26",
+                phase="Regular Season",
+                status="active",
+                cutoff=cutoff,
+                activated_at=cutoff,
+                activated_by="test",
+            )
+        )
+        connection.execute(
+            CatalogPublication.__table__.insert().values(**_immutable_event_catalog(events, cutoff))
+        )
+        connection.execute(
+            CollectionManifest.__table__.insert().values(
+                manifest_id="manifest",
+                season="2025-26",
+                cutoff=cutoff,
+                collect_before=cutoff + timedelta(hours=1),
+                accepted_versions="[1]",
+                scopes='["canonical_game_ledger"]',
+                checksum="manifest",
+                **_manifest_catalog_binding(events, cutoff),
+                status="active",
+                created_at=cutoff,
+            )
+        )
+        connection.execute(EventCatalogEntry.__table__.insert(), events)
+    assert reader.read_for_collection("2025-26").season == "2025-26"
+
+    with engine.begin() as connection:
+        connection.execute(update(CatalogPublication).values(payload='{"events":[]}'))
+    fresh_process = ActiveManifestLedgerGovernanceReader(engine, clock=lambda: cutoff + timedelta(minutes=30))
+    with pytest.raises(PublicationGovernanceUnavailable) as corrupt:
+        fresh_process.read_for_collection("2025-26")
+    assert not isinstance(corrupt.value, NoActiveCollectionManifest)
 
 
 def test_l15_ready_requires_the_full_canonical_team_roster():
