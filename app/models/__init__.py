@@ -120,6 +120,7 @@ from .event_mapping import (  # noqa: E402
     ProviderEventMapping,
 )
 from .game_context import GameContext, GameContextTeam  # noqa: E402
+from .game_lines import GameLine  # noqa: E402
 from .injury_snapshot import InjurySnapshot, InjurySourceSnapshot  # noqa: E402
 from .job import DataRefreshJob  # noqa: E402
 from .lineup_segments import (  # noqa: E402
@@ -158,6 +159,7 @@ from .rotation import RotationAttempt, RotationGame, RotationPlayerGame, Rotatio
 from .saved_filter_set import SavedFilterSet  # noqa: E402
 from .stats_freshness import StatsRefresh  # noqa: E402
 from .target import Target, TargetQualifier  # noqa: E402
+from .team_lineup import TeamLineup  # noqa: E402
 from .team_matchup import (  # noqa: E402
     TeamMatchupFactRow,
     TeamMatchupSurfaceObservationRow,
@@ -207,6 +209,7 @@ __all__ = [
     "EventMappingRejection",
     "GameContext",
     "GameContextTeam",
+    "GameLine",
     "GovernedNotApplicable",
     "InjurySnapshot",
     "InjurySourceSnapshot",
@@ -256,6 +259,7 @@ __all__ = [
     "StatsRefresh",
     "Target",
     "TargetQualifier",
+    "TeamLineup",
     "TeamMatchupFactRow",
     "TeamMatchupSurfaceObservationRow",
     "UsageEvent",

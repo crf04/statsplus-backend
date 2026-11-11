@@ -20,6 +20,18 @@ from scripts import collect_odds, projection_collection_service
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def _no_game_lines(monkeypatch):
+    # The ESPN game-line step has its own tests (tests/test_collect_odds_game_lines.py).
+    monkeypatch.setattr(collect_odds, "collect_game_lines", lambda _dependencies: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_lineups(monkeypatch):
+    # The NBA.com lineups step has its own tests (tests/test_collect_odds_lineups.py).
+    monkeypatch.setattr(collect_odds, "collect_lineups", lambda _dependencies: None)
+
+
 def test_the_projection_collector_loop_no_longer_references_odds():
     source = (ROOT / "scripts" / "projection_collection_service.py").read_text()
 

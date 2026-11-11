@@ -64,7 +64,7 @@ from app.domain.team_window import TeamWindow
 from app.errors import InvalidInputError
 from app.services.posted_lines import line_labels, posted_line, reported_lines
 from app.services.research_season import previous_nba_season, schedule_season, season_scoped
-from app.services.rotation_service import classify_games, rotation_split
+from app.services.rotation_service import rotation_split, split_games
 from app.services.team_membership import TeamMembership, appearances
 
 #: Statuses that get a scenario; Probable and Available get none.
@@ -351,7 +351,7 @@ class _RotationReads:
         if season not in self._memo:
             lines = self.request.rotation_lines(self.rotations, self.team, season)
             windows = {self.injured_id: self.windows[season]} if lines else {}
-            without, played = classify_games(lines, windows)
+            without, played, _ = split_games(lines, {}, windows)
             self._memo[season] = (lines, without, played)
         return self._memo[season]
 

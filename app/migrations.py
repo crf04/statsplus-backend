@@ -2710,6 +2710,29 @@ def _create_game_context_tables(connection: Connection) -> None:
         model.__table__.create(connection, checkfirst=True)
 
 
+def _create_game_lines_table(connection: Connection) -> None:
+    """Create the stored per-game ESPN line table (crf04/statsplus#493).
+
+    Repeatable: ``checkfirst`` skips an existing table and never touches its
+    rows.  Nothing is backfilled: ``scripts/collect_odds.py`` stores each line
+    from the next run, and until then a game's ``game_line`` is unavailable.
+    """
+    from app.models.game_lines import GameLine
+
+    GameLine.__table__.create(connection, checkfirst=True)
+
+
+def _create_team_lineup_table(connection: Connection) -> None:
+    """Create the stored daily lineups table (crf04/statsplus#492).
+
+    Repeatable: ``checkfirst`` skips an existing table and never touches its
+    rows.  Nothing is backfilled: the odds cron's next run stores today's feed.
+    """
+    from app.models.team_lineup import TeamLineup
+
+    TeamLineup.__table__.create(connection, checkfirst=True)
+
+
 #: The CHECK constraints that enumerate the player Diet bases.
 _PLAYER_DIET_BASE_CONSTRAINTS: Final[frozenset[str]] = frozenset(
     {
@@ -3575,6 +3598,8 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(84, "084_lineup_segments", _create_lineup_segment_tables),
     Migration(85, "085_ledger_offensive_possessions", _add_ledger_offensive_possessions),
     Migration(86, "086_game_contexts", _create_game_context_tables),
+    Migration(87, "087_game_lines", _create_game_lines_table),
+    Migration(88, "088_team_lineups", _create_team_lineup_table),
 )
 
 

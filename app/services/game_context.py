@@ -30,6 +30,7 @@ from app.models.canonical_game_ledger import CanonicalGameLedgerGame, CanonicalG
 from app.models.event_catalog import EventCatalogEntry
 from app.models.game_context import GameContext, GameContextTeam
 from app.services.event_catalog_repository import EventCatalogRepository
+from app.services.game_lines import read_game_line
 from app.services.request_reads import read_connection
 
 EASTERN = ZoneInfo("America/New_York")
@@ -341,7 +342,11 @@ class GameContextRepository:
     # --- read ---------------------------------------------------------------
 
     def read(self, game_id: str, *, connection: Connection | None = None) -> dict[str, Any]:
-        """The Matchup's ``game_context`` block for ``game_id``: away team first, then home."""
+        """The Matchup's ``game_context`` block for ``game_id``: away team first, then home.
+
+        ``game_line`` is the game's stored ESPN line (crf04/statsplus#493), served
+        whether or not the team rows are stored.
+        """
 
         heads = GameContext.__table__
         teams = GameContextTeam.__table__
@@ -352,12 +357,14 @@ class GameContextRepository:
                 .mappings()
                 .all()
             )
+            game_line = read_game_line(connection, game_id)
         if head is None or len(rows) != 2:
-            return {"status": "unavailable", "computed_at": None, "teams": []}
+            return {"status": "unavailable", "computed_at": None, "teams": [], "game_line": game_line}
         return {
             "status": "available",
             "computed_at": assume_utc(head["computed_at"]).isoformat(),
             "teams": [_serialize_team(row, head["season"]) for row in rows],
+            "game_line": game_line,
         }
 
 

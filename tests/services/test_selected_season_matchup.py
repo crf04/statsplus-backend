@@ -1135,3 +1135,52 @@ def test_a_selected_past_games_fits_read_their_logs_as_of_its_tip(monkeypatch, t
     assert matchup["players"][0]["season_scoring"] == 12.0
     assert fit["season_averages"]["PTS"] == 12.0
     assert fit["last_five_games"] == [{"game_id": "0022600001", "game_date": "2026-10-24", "value": 12.0}]
+
+
+class _RosterCatalog:
+    """Every player of the 2026-27 opening week, on the team he played for."""
+
+    def __init__(self, rows):
+        self.rows = [
+            {
+                "season": NEW,
+                "player_id": row["player_id"],
+                "display_name": row["player_name"],
+                "is_active": True,
+                "is_active_for_season": True,
+                "team_id": row["team_id"],
+            }
+            for row in rows
+        ]
+
+    def get_catalog(self, season, *, active_only=False, player_ids=None):
+        return [row for row in self.rows if player_ids is None or row["player_id"] in player_ids]
+
+
+def _rotation_ids(body):
+    return sorted(row["canonical_id"] for row in body["players"] if row["player_source"] == "rotation")
+
+
+def test_a_2026_27_matchup_lists_rotation_players_from_its_own_seasons_logs_with_or_without_a_selection(
+    served, client, authenticate
+):
+    """2025-26 is still published, but eligibility reads the game's season (statsplus#459)."""
+
+    from tests.support.season_cutover import log_rows
+
+    teams = {int(_game_event()["away_team"]["id"]), BOS}
+    rows = [row for row in log_rows(NEW, THIN_GAMES) if row["team_id"] in teams]
+    served.service.athlete_catalog = _RosterCatalog(rows)
+    expected = sorted(row["player_id"] for row in rows if row["player_id"] != PLAYER_ID)
+
+    before = client.get(ROUTES["matchup"], headers=authenticate())
+    served.hold_opening_week()
+    omitted = client.get(ROUTES["matchup"], headers=authenticate()).get_json()
+    selected = client.get(f"{ROUTES['matchup']}&season={NEW}", headers=authenticate()).get_json()
+
+    assert expected
+    # Before 2026-27 holds any logs, its first games add no one, and nothing fails.
+    assert before.status_code == 200, before.get_json()
+    assert _rotation_ids(before.get_json()) == []
+    assert _rotation_ids(omitted) == expected
+    assert _rotation_ids(selected) == expected

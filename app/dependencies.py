@@ -224,6 +224,7 @@ def build_dependencies(
     from app.services.target_resolution import TargetResolutionService
     from app.services.target_season_minutes import TargetSeasonMinutesService
     from app.services.team_filter_rankings import TeamFilterRankingService
+    from app.services.team_lineups import TeamLineupRepository
     from app.services.team_matchup_query import TeamMatchupQueryService
     from app.services.team_matchup_repository import TeamMatchupRepository
     from app.services.team_service import TeamService
@@ -684,6 +685,7 @@ def build_dependencies(
         ),
         event_catalog=event_catalog_service,
         snapshot_repository=injury_snapshot_repository,
+        athlete_catalog=athlete_catalog_service,
         settings=settings,
         enabled=settings.features.injury_report_enabled,
     )
@@ -985,6 +987,7 @@ def build_dependencies(
             game_service.default_season,
             game_service,
             injury_reports=injury_snapshot_repository,
+            lineups=TeamLineupRepository(engine),
         ),
         player_season_stats_service=PlayerSeasonStatsService(PlayerSeasonStatsRepository(engine)),
         rotation_collection_service=RotationCollectionService(
