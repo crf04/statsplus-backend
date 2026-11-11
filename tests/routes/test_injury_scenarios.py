@@ -714,6 +714,18 @@ def test_a_thin_slate_season_flags_on_last_season_instead(client, authenticate, 
     ]
 
 
+def test_a_slate_season_with_under_3_games_with_him_also_flags_on_last_season(client, authenticate, world):
+    world.logs.rows[(LEBRON, CURRENT)] = world.logs.rows[(LEBRON, CURRENT)][:2]  # with him g1-g2 only
+
+    pts = _row(_scenario(_scenarios(client, authenticate), LEBRON), "sits", REAVES, "PTS")
+
+    assert [(e["season"], e["baseline"]["games"], e["without"]["games"]) for e in pts["seasons"]] == [
+        ("2026-27", 2, 6),
+        ("2025-26", 2, 2),
+    ]
+    assert pts["flag_season"] == "2025-26" and pts["flagged"] is False
+
+
 def test_a_baseline_under_150_on_floor_minutes_or_3_games_is_never_flagged(client, authenticate, world):
     """crf04/statsplus#485: Garza was flagged at -50% on 8 on-floor minutes."""
 
