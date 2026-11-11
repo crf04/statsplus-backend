@@ -6,8 +6,10 @@ and sportsbook reader; every expected value is a literal.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
+
+import pytest
 
 from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.posted_lines import PostedLinesReader
@@ -79,7 +81,7 @@ class Books:
     def __init__(self, by_player=None, fail=False):
         self.by_player, self.fail, self.calls = by_player or {}, fail, []
 
-    def book_lines(self, game_id):
+    def book_lines(self, game_id, *, now, started):
         self.calls.append(game_id)
         if self.fail:
             raise RuntimeError("book store down")
@@ -187,10 +189,22 @@ def test_a_book_store_failure_keeps_the_closing_line_fallback(caplog):
     assert result["book_lines"] == {}
 
 
-def test_the_built_game_service_serves_stored_sportsbook_quotes_in_book_lines(monkeypatch):
-    """Production wiring: ``build_dependencies`` hands the game-log reader the book store."""
+@pytest.mark.parametrize(
+    ("read_at", "stale"),
+    [
+        (datetime(2026, 10, 21, 22, 2, 40, tzinfo=UTC), False),
+        (datetime(2026, 10, 21, 22, 2, 41, tzinfo=UTC), True),
+        # Tipped at 02:00: a closing line is never stale.
+        (datetime(2026, 10, 22, 2, 0, tzinfo=UTC), False),
+    ],
+)
+def test_the_built_game_service_serves_stored_sportsbook_quotes_in_book_lines(monkeypatch, read_at, stale):
+    """Production wiring: ``build_dependencies`` hands the game-log reader the book store.
 
-    from datetime import UTC, datetime
+    The quote was read at 21:02:40, so it is stale (crf04/statsplus#496) a second past an hour
+    later, until the 02:00 tip.
+    """
+
     from unittest.mock import Mock
 
     from sqlalchemy import create_engine, insert
@@ -235,6 +249,7 @@ def test_the_built_game_service_serves_stored_sportsbook_quotes_in_book_lines(mo
     reader.event_catalog = Catalog()
     reader.player_pool = Pools(_pool({"prizepicks": {"PTS": 27.5}}))
     reader.settings = SETTINGS
+    reader._clock = lambda: read_at
 
     result = reader.for_player(PLAYER, DAY)
 
@@ -249,6 +264,7 @@ def test_the_built_game_service_serves_stored_sportsbook_quotes_in_book_lines(mo
                     "over": -115,
                     "under": -105,
                     "updated_at": "2026-10-21T21:02:40Z",
+                    "stale": stale,
                     "best_over": False,
                     "best_under": False,
                 }

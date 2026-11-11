@@ -454,6 +454,7 @@ CURRY_PTS = {
                 "over": -115,
                 "under": -105,
                 "updated_at": "2026-01-15T23:29:00Z",
+                "stale": False,
             }
         ],
     },
@@ -484,6 +485,7 @@ TATUM_PTS = {
                 "over": -128,
                 "under": 100,
                 "updated_at": "2026-01-15T23:57:00Z",
+                "stale": False,
             },
             {
                 "book": "fanduel",
@@ -491,6 +493,7 @@ TATUM_PTS = {
                 "over": -105,
                 "under": -115,
                 "updated_at": "2026-01-15T23:54:00Z",
+                "stale": False,
             },
         ],
     },
@@ -530,6 +533,7 @@ HAUSER_PTS = {
                 "over": -115,
                 "under": -105,
                 "updated_at": "2026-01-15T23:57:00Z",
+                "stale": False,
             }
         ],
     },
@@ -551,6 +555,7 @@ NAMESAKE_PTS = {
                 "over": -110,
                 "under": -110,
                 "updated_at": "2026-01-15T23:52:00Z",
+                "stale": False,
             }
         ],
     },
@@ -585,6 +590,107 @@ def test_a_sportsbook_market_carries_every_provider_and_book_per_game(board, cli
             "omitted": {"book_only_unnamed": 2},
         },
     )
+
+
+def _book_source_and_rows(client, query):
+    status, body = _get(client, query)
+    assert status == 200
+    books = [source for source in body["sources"] if source["kind"] == "sportsbook"]
+    rows = [
+        (player["name"], book["book"], book["stale"])
+        for game in body["games"]
+        for player in game.get("players", [])
+        for book in (player["book_lines"] or {"books": []})["books"]
+    ]
+    return books, rows
+
+
+def test_a_book_read_over_an_hour_before_tip_is_stale_served_and_its_row_stale(board, client):
+    # BetMGM was read at 23:57 for tomorrow's PHX @ LAL; the board reads it 60, then 61, minutes later.
+    board.service._clock = lambda: NOW + timedelta(minutes=57)
+    assert _book_source_and_rows(client, "date=2026-01-16&market=PTS") == (
+        [
+            {
+                "source": "betmgm",
+                "kind": "sportsbook",
+                "status": "fresh",
+                "retrieved_at": "2026-01-15T23:57:00Z",
+            }
+        ],
+        [("Devin Booker", "betmgm", False)],
+    )
+
+    board.service._clock = lambda: NOW + timedelta(minutes=58)
+    assert _book_source_and_rows(client, "date=2026-01-16&market=PTS") == (
+        [
+            {
+                "source": "betmgm",
+                "kind": "sportsbook",
+                "status": "stale-served",
+                "retrieved_at": "2026-01-15T23:57:00Z",
+            }
+        ],
+        [("Devin Booker", "betmgm", True)],
+    )
+
+
+def test_a_book_whose_every_quoted_game_has_started_is_closing_and_never_stale(board, client):
+    # DraftKings' closing quote for GSW @ LAL was read at 23:29; two hours later it is still a closing line.
+    board.service._clock = lambda: NOW + timedelta(hours=2)
+
+    assert _book_source_and_rows(client, f"date=2026-01-15&market=PTS&game={STARTED}") == (
+        [
+            {
+                "source": "draftkings",
+                "kind": "sportsbook",
+                "status": "closing",
+                "retrieved_at": "2026-01-15T23:29:00Z",
+            }
+        ],
+        [("Stephen Curry", "draftkings", False)],
+    )
+
+
+def test_a_book_is_judged_on_its_quotes_for_games_not_yet_started(board, client):
+    # A late DEN @ MIA game whose DraftKings quote was read at 22:20.  At 00:40 BOS @ NYK has
+    # started, so its newer 23:57 quote is a closing line and the late game's speaks for the book.
+    late = "0022500604"
+    den = TeamEvidence(canonical_id=1610612743, abbreviation="DEN")
+    mia = TeamEvidence(canonical_id=1610612748, abbreviation="MIA")
+    board.service.event_catalog.repository.publish(
+        SEASON,
+        pd.DataFrame(
+            [
+                _event(STARTED, GSW, LAL, STARTED_TIP),
+                _event(LATER, BOS, NYK, LATER_TIP),
+                _event(TOMORROW, PHX, LAL, NOW + timedelta(days=1)),
+                _event(late, den, mia, NOW + timedelta(hours=4)),
+            ]
+        ),
+        NOW,
+    )
+    SportsbookQuoteStore(board.engine).record_poll(
+        odds_event_id="odds-late",
+        game_id=late,
+        started_at=NOW - timedelta(minutes=100),
+        completed_at=NOW - timedelta(minutes=100),
+        cost=1,
+        remaining=100,
+        is_closing=False,
+        quotes=[_quote(HAUSER, "draftkings", 9.5, -115, -105, stamp=NOW - timedelta(minutes=100))],
+    )
+    board.service._clock = lambda: NOW + timedelta(minutes=40)
+
+    books, _rows = _book_source_and_rows(client, "date=2026-01-15&sources=draftkings")
+
+    assert books == [
+        {
+            "source": "draftkings",
+            "kind": "sportsbook",
+            "status": "stale-served",
+            "retrieved_at": "2026-01-15T22:20:00Z",
+        }
+    ]
 
 
 def test_a_player_only_a_book_quotes_has_book_columns_and_a_catalog_name(board, client):

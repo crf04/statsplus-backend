@@ -76,7 +76,7 @@ def test_change_only_history_and_book_lines_round_trip_on_postgres(engine):
     assert poll(T0 + timedelta(hours=2), moved).history_rows == 1
     assert poll(T0 + timedelta(hours=3), moved, closing=True).history_rows == 2
 
-    entry = reader.book_lines("0022600001")[2544]["PTS"]
+    entry = reader.book_lines("0022600001", now=T0 + timedelta(hours=4), started=True)[2544]["PTS"]
     assert entry["closing"] is True
     assert [
         (b["book"], b["line"], b["over"], b["under"], b["best_over"], b["best_under"]) for b in entry["books"]
@@ -151,7 +151,7 @@ def test_a_write_ahead_poll_takes_its_quotes_at_its_own_time_on_postgres(engine)
         1,
         None,
     )
-    entry = reader.book_lines("0022600001")[2544]["PTS"]
+    entry = reader.book_lines("0022600001", now=T0 + timedelta(hours=4), started=True)[2544]["PTS"]
     assert (entry["closing"], entry["as_of"]) == (True, "2026-10-21T21:00:02Z")
 
 

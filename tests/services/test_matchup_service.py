@@ -1888,7 +1888,7 @@ def test_book_lines_are_read_once_per_matchup_and_never_for_a_snapshot_compositi
         def __init__(self):
             self.calls = []
 
-        def book_lines(self, game_id, *, connection=None):
+        def book_lines(self, game_id, *, now, started, connection=None):
             self.calls.append(game_id)
             return {2544: {"PTS": {"as_of": "2026-01-15T11:00:00Z", "closing": False, "books": []}}}
 

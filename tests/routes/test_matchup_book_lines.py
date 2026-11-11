@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from app.config.settings import OddsApiSettings
 from app.dependencies import build_dependencies
@@ -89,6 +89,7 @@ def test_current_player_rows_carry_book_lines_with_best_price_flags(projection_r
                     "over": -115,
                     "under": -105,
                     "updated_at": "2026-01-15T11:58:20Z",
+                    "stale": False,
                     "best_over": False,
                     "best_under": True,
                 },
@@ -98,6 +99,7 @@ def test_current_player_rows_carry_book_lines_with_best_price_flags(projection_r
                     "over": -110,
                     "under": -110,
                     "updated_at": "2026-01-15T11:58:20Z",
+                    "stale": False,
                     "best_over": True,
                     "best_under": False,
                 },
@@ -107,6 +109,7 @@ def test_current_player_rows_carry_book_lines_with_best_price_flags(projection_r
                     "over": 100,
                     "under": -125,
                     "updated_at": "2026-01-15T11:58:20Z",
+                    "stale": False,
                     "best_over": False,
                     "best_under": False,
                 },
@@ -122,12 +125,38 @@ def test_current_player_rows_carry_book_lines_with_best_price_flags(projection_r
                     "over": -105,
                     "under": -115,
                     "updated_at": "2026-01-15T11:58:20Z",
+                    "stale": False,
                     "best_over": False,
                     "best_under": False,
                 },
             ],
         },
     }
+
+
+def test_a_book_read_over_an_hour_before_tip_is_stale_and_never_best(projection_route_context):
+    # FanDuel's -105 Over and -105 Under beat DraftKings, but FanDuel was read 61 minutes ago.
+    context = projection_route_context
+    _post_dfs_line(context)
+    _seed(
+        context,
+        [
+            _quote("draftkings", 27.5, -115, -110, stamp=NOW),
+            _quote("betmgm", 27.5, -120, -108, stamp=NOW),
+            _quote("fanduel", 27.5, -105, -105, stamp=NOW - timedelta(minutes=61)),
+        ],
+    )
+
+    _, row = _lebron(context.client.get(f"/api/games/matchup?game_id={GAME_ID}"))
+
+    assert [
+        (book["book"], book["updated_at"], book["stale"], book["best_over"], book["best_under"])
+        for book in row["book_lines"]["PTS"]["books"]
+    ] == [
+        ("betmgm", "2026-01-15T12:00:00Z", False, False, True),
+        ("draftkings", "2026-01-15T12:00:00Z", False, True, False),
+        ("fanduel", "2026-01-15T10:59:00Z", True, False, False),
+    ]
 
 
 def test_books_never_enter_provenance_or_posted_markets(projection_route_context):
@@ -189,7 +218,7 @@ def test_a_store_failure_never_fails_the_matchup(projection_route_context, caplo
     _post_dfs_line(context)
 
     class Broken:
-        def book_lines(self, game_id, *, connection=None):
+        def book_lines(self, game_id, *, now, started, connection=None):
             raise RuntimeError("sportsbook store unavailable")
 
     service = context.client.application.extensions["dependencies"].matchup_service

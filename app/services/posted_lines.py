@@ -15,7 +15,7 @@ from functools import cache
 from types import SimpleNamespace
 from typing import Any
 
-from app.domain.nba_events import is_postponed_event
+from app.domain.nba_events import is_postponed_event, is_started_event
 from app.domain.slate_time import slate_date_for_instant
 from app.services.injury_listing import slate_events
 from app.services.research_season import schedule_season
@@ -293,7 +293,7 @@ class PostedLinesReader:
                 "lines": {"PTS": {"value": closing.value, "provider": closing.book}},
                 "provider_lines": {},
                 "line_prices": {},
-                "book_lines": self._book_lines(player_id, game_id),
+                "book_lines": self._book_lines(player_id, event),
             }
         return None
 
@@ -324,7 +324,7 @@ class PostedLinesReader:
         }
         if not by_provider:
             return None
-        book_lines = self._book_lines(player_id, game_id)
+        book_lines = self._book_lines(player_id, event)
         lines = {}
         for market in sorted({m for by_market in by_provider.values() for m in by_market}):
             found = majority_line(by_provider, market, book_lines)
@@ -340,13 +340,19 @@ class PostedLinesReader:
             "book_lines": book_lines,
         }
 
-    def _book_lines(self, player_id: int, game_id: str) -> dict[str, Any]:
+    def _book_lines(self, player_id: int, event: Mapping[str, Any]) -> dict[str, Any]:
         """His sportsbook lines for the game; ``{}`` when off, empty or failing."""
 
         if self.sportsbook_reader is None:
             return {}
+        game_id = str(event["nba_game_id"])
+        now = self._clock()
         try:
-            return dict(self.sportsbook_reader.book_lines(game_id).get(player_id, {}))
+            return dict(
+                self.sportsbook_reader.book_lines(
+                    game_id, now=now, started=is_started_event(event, now=now)
+                ).get(player_id, {})
+            )
         except Exception:
             logger.exception("Sportsbook book_lines read failed for game %s", game_id)
             return {}

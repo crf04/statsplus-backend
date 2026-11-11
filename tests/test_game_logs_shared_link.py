@@ -65,7 +65,7 @@ UNPRICED = {
 
 
 class Sportsbooks:
-    def book_lines(self, game_id):
+    def book_lines(self, game_id, *, now, started):
         return {LEBRON: BOOKS} if game_id == "0022600012" else {}
 
 

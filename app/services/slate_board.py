@@ -27,7 +27,7 @@ from app.services.player_pool import PlayerPool
 from app.services.publication_snapshot_calls import call_with_read_scope
 from app.services.request_reads import request_read_scope
 from app.services.research_season import schedule_season
-from app.services.sportsbook_quotes import build_market_entry
+from app.services.sportsbook_quotes import build_market_entry, is_stale_read, quote_updated_at
 
 #: The report statuses a board row names; ``Available`` and no entry are ``null``.
 BOARD_INJURY_STATUSES = frozenset({"Out", "Doubtful", "Questionable", "Probable"})
@@ -57,8 +57,8 @@ class _Posting:
     line_prices: Mapping[str, Mapping[str, int | None]]
     book_rows: tuple[Any, ...]
 
-    def row(self) -> dict[str, Any]:
-        entry = build_market_entry(self.book_rows)
+    def row(self, *, now: datetime, started: bool) -> dict[str, Any]:
+        entry = build_market_entry(self.book_rows, now=now, started=started)
         return {
             "player_id": self.player_id,
             "name": self.name,
@@ -73,7 +73,7 @@ class _Posting:
                     "as_of": entry["as_of"],
                     "closing": entry["closing"],
                     "books": [
-                        {key: book[key] for key in ("book", "line", "over", "under", "updated_at")}
+                        {key: book[key] for key in ("book", "line", "over", "under", "updated_at", "stale")}
                         for book in entry["books"]
                     ],
                 }
@@ -169,11 +169,13 @@ class SlateBoardService:
                 athletes=lambda player_ids: self._athletes(season, player_ids, connection),
             )
         now = assume_utc(self._clock())
+        games = [self._game(event, now) for event in events]
+        started = frozenset(game["game_id"] for game in games if game["status"] != "scheduled")
         board: dict[str, Any] = {
             "date": slate_date.isoformat(),
             "season": season,
-            "games": [self._game(event, now) for event in events],
-            "sources": self._sources(pool, quotes, sources),
+            "games": games,
+            "sources": self._sources(pool, quotes, sources, now=now, started=started),
         }
         if market is None:
             board["markets"] = [
@@ -196,7 +198,7 @@ class SlateBoardService:
         found, unnamed = postings.of(market)
         found.sort(key=lambda posting: (posting.team, posting.name, posting.player_id))
         for posting in found:
-            rows_by_game[posting.game_id].append(posting.row())
+            rows_by_game[posting.game_id].append(posting.row(now=now, started=posting.game_id in started))
         for game in board["games"]:
             game["players"] = rows_by_game[game["game_id"]]
         board["players_total"] = len(found)
@@ -263,9 +265,19 @@ class SlateBoardService:
 
     @staticmethod
     def _sources(
-        pool: PlayerPool, quotes: Iterable[Any], sources: frozenset[str] | None
+        pool: PlayerPool,
+        quotes: Iterable[Any],
+        sources: frozenset[str] | None,
+        *,
+        now: datetime,
+        started: frozenset[str],
     ) -> list[dict[str, Any]]:
-        """Each provider's pool freshness, then each quoting book's newest update."""
+        """Each provider's pool freshness, then each quoting book's newest update.
+
+        A book is judged on its quotes for the games that have not started:
+        ``stale-served`` when the newest of them is stale, else ``fresh``.  A
+        book whose every quoted game has started is ``closing``.
+        """
 
         listed = [
             {
@@ -280,13 +292,22 @@ class SlateBoardService:
             if sources is None or provider in sources
         ]
         newest: dict[str, datetime] = {}
+        pending: dict[str, datetime] = {}
         for row in quotes:
-            updated = assume_utc(row.market_last_update or row.observed_at)
+            updated = quote_updated_at(row)
             newest[row.book] = max(newest.get(row.book, updated), updated)
-        listed.extend(
-            {"source": book, "kind": "sportsbook", "status": "fresh", "retrieved_at": _iso_z(updated)}
-            for book, updated in sorted(newest.items())
-        )
+            if str(row.canonical_game_id) not in started:
+                pending[row.book] = max(pending.get(row.book, updated), updated)
+        for book in sorted(newest):
+            if book in pending:
+                updated = pending[book]
+                stale = is_stale_read(updated, now=now, started=False)
+                status = "stale-served" if stale else "fresh"
+            else:
+                updated, status = newest[book], "closing"
+            listed.append(
+                {"source": book, "kind": "sportsbook", "status": status, "retrieved_at": _iso_z(updated)}
+            )
         return listed
 
 
