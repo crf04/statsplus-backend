@@ -1019,6 +1019,68 @@ fields do not change that order.
   minutes were read, or `null` when it could not be read (then every row has
   `null` minutes in both seasons).
 
+#### One player's statuses over a date range
+
+```http
+GET /api/injuries?player=<name or player id>&from_date=YYYY-MM-DD[&to_date=YYYY-MM-DD]
+```
+
+Lists one player's stored statuses by game, oldest first (crf04/statsplus#494),
+so a reader can see why he missed a past game. `player` is a canonical player
+id or a full name matched against the season's Athlete Catalog (case,
+punctuation and diacritics ignored, no fuzzy match). `from_date` is required;
+`to_date` defaults to today's US Eastern date, or the last day of
+`from_date`'s season (September 30) when that is earlier; with no `to_date`, a
+`from_date` after today is `400 invalid_input` with
+`details.parameters: ["from_date"]`. Both are US Eastern
+game dates and must fall in one season (October 1 to September 30): a range
+that ends before it starts or crosses seasons, which includes any range longer
+than a season, is `400 invalid_input` with `details.parameters: ["to_date"]`.
+`player` cannot be combined with `date` or `team`, and `from_date` or
+`to_date` without `player` is rejected; `details.parameters` names the
+offending parameters. A name no catalog athlete has is `400 invalid_input`
+with `details.parameters: ["player"]`; a name two catalog athletes share is
+`400 invalid_input` with `details.candidates` (`player_id`, `name`, `team`,
+sorted by `player_id`), the shape `/api/injury_scenarios` uses for
+`teammate`: ask again by `player_id`.
+
+```json
+{
+  "player": {"player_id": 1628402, "name": "Isaiah Jackson", "team": "LAC"},
+  "season": "2026-27",
+  "from_date": "2026-11-01",
+  "to_date": "2026-11-09",
+  "report_coverage": [{"team": "LAC", "team_games": 4, "games_with_report": 3}],
+  "statuses": [
+    {
+      "game_date": "2026-11-08",
+      "game_id": "0022600150",
+      "matchup": "LAC @ DEN",
+      "team": "LAC",
+      "status": "Out",
+      "reason": "Right ankle sprain",
+      "report_time": "2026-11-08T17:30:00-05:00"
+    }
+  ]
+}
+```
+
+- `player.team` is his Athlete Catalog team for the season, or `null`.
+- `statuses` has one row per game and team whose stored report lists him, in
+  game-date order. A game whose stored report does not list him has no row:
+  he was not on that report. `game_date` is the game's US Eastern date;
+  `matchup` is `TEAM @ HOME` away and `TEAM vs. AWAY` at home; `status`,
+  `reason` and `report_time` mean what they mean in the date listing.
+- When the stored report lists him twice for one game, the later
+  `report_time` is the row. A report row printed for the same teams' game on
+  another day does not describe this one.
+- A report row whose name matched no single catalog player (`player_id` null
+  in the date listing) is never taken for him, even when the name is his.
+- `report_coverage` has one entry per team: each team a row lists him for,
+  plus his catalog team. `team_games` is that team's stored games in the
+  range and `games_with_report` how many of them have a stored report. For a
+  traded player both teams appear, each over the whole range.
+
 #### Scheduled refresh
 
 `scripts/injury_refresh.py` stores the report for every game still to tip on
@@ -3189,6 +3251,32 @@ generation the response reads, and no filter changes them. A metric the
 publication lacks has no entry, and the object is `{}` when the season cannot
 be ranked.
 
+Filter ranks (crf04/statsplus#498): when the request has `teams_against[]`
+filters, every `game_logs[]` row carries `teams_against_ranks`, an object keyed
+by each `teams_against[]` value exactly as the request named it (a Team Filter
+token such as `OPP_AST`, or a Defense Sheet row such as
+`sheet:assist_locations:Arc3Assists`). Each value is that game's opponent's
+rank on the filter's ranking, 1-30 with 30 = allows the most: the number the
+filter compared against its `rank_filter[]` entry. It is a whole-season rank
+from the same Season publication the filter read, not the rank on the game's
+date. Ranking position p (1 = the highest value) is rank `31 - p`, so tied
+teams hold distinct ranks in tricode order, and a tied team's number can
+differ from its shared `opponent_ranks` rank. Without `teams_against[]` the
+rows carry no `teams_against_ranks`.
+
+```json
+{
+  "game_logs": [
+    {
+      "GAME_DATE": "2026-11-08",
+      "MATCHUP": "ORL vs. NYK",
+      "AST": 9,
+      "teams_against_ranks": { "sheet:assist_locations:Arc3Assists": 27, "OPP_PTS": 22 }
+    }
+  ]
+}
+```
+
 Every successful response also carries the shared
 [`provenance`](#response-provenance) block naming the Publications it read.
 
@@ -3768,9 +3856,21 @@ the split, so read currency from these fields instead.
 PBPStats rounds. `usage` is StatsPlus usage: 100 · (FGA + 0.44·FTA + TOV) /
 (team on-floor FGA + player-less heaves + 0.44·FTA + TOV). Free throws count
 for the lineup on the floor at the foul; from 2026-27 a heave counts as its
-shooter's missed FGA and 3PA. Every other season, and every season before
-2025-26, keeps the PBPStats path above unchanged, and the warm skips covered
-seasons. The nightly rotation job writes a game's segments with its stints;
+shooter's missed FGA and 3PA. Each player's `totals` and `per36` also carry
+`fg2a`, two-point attempts (`fga - fg3a`; crf04/statsplus#500), last and with
+the same rounding, `0.0` per 36 for a player with minutes and none; a split
+from PBPStats has no `fg2a`. Made field goals and made free throws are not in
+the segments, so neither source has them:
+
+```json
+"totals": {"pts": 55, "reb": 15, "ast": 5, "fg3m": 5, "fga": 46, "fg3a": 15,
+           "tov": 11, "fta": 14, "fg2a": 31},
+"per36": {"pts": 26.76, "reb": 7.3, "ast": 2.43, "fg3m": 2.43, "fga": 22.38,
+          "fg3a": 7.3, "tov": 5.35, "fta": 6.81, "fg2a": 15.08}
+```
+
+Every other season, and every season before 2025-26, keeps the PBPStats path
+above unchanged, and the warm skips covered seasons. The nightly rotation job writes a game's segments with its stints;
 `python scripts/lineup_segment_backfill.py YYYY-YY --database-url ...` fills a
 season (resumable, about one LiveData request a second) and records its
 coverage once every completed game is stored or rejected.
@@ -3783,6 +3883,7 @@ GET /api/games/rotation?team=<tricode>[&last_n=5][&season=YYYY-YY]
 GET /api/games/rotation?game_id=<NBA game id>
 GET /api/games/rotation?player_name=<name>&without=<name>[&without=<name>][&season=YYYY-YY]
 GET /api/games/rotation?team=<tricode>&without=<name>[&without=<name>][&season=YYYY-YY]
+GET /api/games/rotation?(player_name=<name>|team=<tricode>)&with=<name>[&with=<name>][&without=<name>][&season=YYYY-YY]
 Authorization: Bearer <firebase-id-token>
 ```
 
@@ -3800,8 +3901,9 @@ The backend computes every average and recent-versus-season comparison.
 | `last_n` | No | Whole number 1-20, default 5. Counts his current team's games inside his team window |
 | `season` | No | `YYYY-YY`. Default: the current season, or the latest season with rotation data when the current one has none |
 | `without` | No | Repeatable (crf04/statsplus#239). A player name; with `player_name` or `team`, switches to the [without split](#rotation-without-a-player). Rejected with `game_id` and with `last_n` |
+| `with` | No | Repeatable (crf04/statsplus#499). A player name; with `player_name` or `team`, switches to the [with split](#rotation-with-a-player), alone or beside `without`. Rejected with `game_id` and with `last_n` |
 
-Exactly one of `player_name`, `team` and `game_id` is required, each parameter except `without` may appear
+Exactly one of `player_name`, `team` and `game_id` is required, each parameter except `with` and `without` may appear
 once, and an unknown parameter is rejected. Every rejected request is
 `400 invalid_input` whose `details.parameters` lists the offending names (a
 tricode that is not an NBA team lists nothing but the message names the
@@ -3827,7 +3929,7 @@ The player and team views carry `team_games_counted: true`
 team's games inside his team window and the averages are per game played. A
 response without the field comes from a backend whose `games` counted only the
 games whose box score lists him, averaged over those games.
-The `without` split and the one-game view never carry it: they have no
+The `without` and `with` splits and the one-game view never carry it: they have no
 `recent` or `season_summary`.
 In the team view each player's `recent` is the same rule applied to that team,
 while `games` lists the team's own last `last_n` games. *Played* is minutes above 0, *started* is the box-score starter
@@ -3849,7 +3951,8 @@ Player view:
              "minutes_by_period": {"Q1": 7.0, "Q2": 5.9, "Q3": 7.2, "Q4": 7.8, "OT": 0.0}},
   "games": [
     {"game_date": "2026-04-12", "matchup": "DET @ CHA", "started": true, "minutes": 33.1, "closed": true,
-     "on_box_score": true, "minutes_by_period": {"Q1": 9.4, "Q2": 5.0, "Q3": 9.6, "Q4": 9.1, "OT": 0.0},
+     "on_box_score": true, "injury_status": null, "injury_reason": null,
+     "minutes_by_period": {"Q1": 9.4, "Q2": 5.0, "Q3": 9.6, "Q4": 9.1, "OT": 0.0},
      "stints": [{"in": {"period": 1, "clock": "12:00"}, "out": {"period": 1, "clock": "2:36"}, "minutes": 9.4}]}
   ]
 }
@@ -3858,6 +3961,12 @@ Player view:
 `games` lists the `recent` games newest first, DNPs and missed games included
 (`minutes: 0.0`, `stints: []`, `started: false`). Each game's `on_box_score` is
 `false` for a missed game (no box-score line for him) and `true` otherwise.
+`injury_status` and `injury_reason` (crf04/statsplus#494) are a missed game's
+status and reason from that game's stored official injury report when it lists
+him for his team (`reason` is `""` when the report gives none), and `null`
+when it does not list him, no report is stored, or the reports cannot be read
+(the rest of the answer is unchanged). They are `null` on every game whose box
+score lists him. The `game_date` of a report row must match the game's.
 `matchup` is `TEAM @ HOME` for an away game and `TEAM vs. AWAY` for a home
 game. In the summaries `games` is the team games counted, `played` the games he
 played, and `starts` and `closed` are counts; `minutes`, `stints` and
@@ -3992,7 +4101,7 @@ has its stats too (crf04/statsplus#484). The game set is unchanged.
   but no game-log row exists. They are excluded from the averages.
 - `stats` is `null` for a side where he has no game-log row in any game.
 
-`game_logs=true` (only with `without`; `true` or `false`, anything else is a
+`game_logs=true` (only with `without` or `with`; `true` or `false`, anything else is a
 `400` naming `game_logs`) adds `game_logs` to each side, beside `stats`: the
 side's games, newest first, each with `game_date`, `started`, `minutes` (the
 rotation's, a DNP as 0) and `box`, the game-log row in the same keys as
@@ -4059,6 +4168,66 @@ under 3 (a player traded in can have fewer without games than the team). Every
                           "stats": {"played": 2, "minutes": 12.0, "PTS": 4.5, "REB": 3.0, "AST": 0.5,
                                     "3PM": 0.0, "PRA": 8.0, "FGA": 3.5, "missing_logs": 0}},
                  "minutes_change": 8.4, "insufficient": false}]
+  }
+}
+```
+
+#### Rotation with a player
+
+`with` (crf04/statsplus#499) reads the same team games, windows and name
+resolution as `without`, from the other side. A named player *played* a game
+inside his team window when his line shows more than 0 and *missed* it
+otherwise (no line, or a 0-minute line).
+
+- `with` alone: the *asked* games are those every `with` player played, the
+  *other* games those every one of them missed. A game where they disagree is
+  *mixed* and on neither side. `with=X` is `without=X` with the sides swapped.
+- `with` and `without` together: the asked games are those every `with` player
+  played and every `without` player missed; every other game inside every
+  named player's window is an other game, so `games_mixed` is 0.
+
+A game outside any named player's window is on neither side and not counted. A
+`with` player who has not played for the team resolves on membership evidence
+as a `without` player does, and leaves the asked side empty. Name errors are the
+`without` errors with `details.parameter: "with"`; `with` with `game_id` or
+`last_n` is a `400` whose `details.parameter` is `"with"`. A player named in
+both `with` and `without` (case, punctuation and diacritics ignored) is a `400`
+whose `details.parameters` is `["with", "without"]`. A request with `with`
+answers `split` in place of `without`; a request with `without` alone answers
+the `without` document above, unchanged.
+
+`split` has `with` and `without` (the resolved names in request order, `[]` for
+a list not given), `games_asked`, `games_other` and `games_mixed` (stored team
+games), and the sides `asked` and `other`, each exactly a `without` side (counts,
+`minutes_per_game_played`, `stats`, `game_logs` on request).
+`minutes_change` is asked minus other per-game minutes, from exact values
+(`null` when a side has no games). `insufficient` is true when the asked side
+has fewer than 3 games: the subject's own asked games in the player view, the
+team's `games_asked` at the top of the team view and each player's own in
+`players`. The player view lists the asked games in `games`, newest first. The
+team view's `starters` are the players who started an asked game (`starts_asked`,
+`starts_other`, by `starts_asked` high to low, then name) and `players` every
+player with a line in an asked game; named players are in neither list.
+
+```json
+{
+  "season": "2025-26",
+  "team": "DET",
+  "split": {
+    "with": ["Jalen Duren"],
+    "without": ["Cade Cunningham"],
+    "games_asked": 2,
+    "games_other": 4,
+    "games_mixed": 0,
+    "insufficient": true,
+    "starters": [{"name": "Ausar Thompson", "starts_asked": 2, "starts_other": 2},
+                 {"name": "Isaiah Stewart", "starts_asked": 1, "starts_other": 2}],
+    "players": [{"name": "Ausar Thompson",
+                 "asked": {"games": 2, "played": 2, "starts": 2, "minutes": 22.0,
+                           "minutes_per_game_played": 22.0, "closed": 0, "stats": null},
+                 "other": {"games": 4, "played": 3, "starts": 2, "minutes": 21.0,
+                           "minutes_per_game_played": 28.0, "closed": 2, "stats": null},
+                 "minutes_change": 1.0, "insufficient": true}]
   }
 }
 ```
