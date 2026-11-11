@@ -108,6 +108,7 @@ def test_team_rotation_lists_starters_and_minute_changes(client, seeded):
     assert response.get_json() == {
         "season": "2025-26",
         "last_n": 1,
+        "team_games_counted": True,
         "team": "DET",
         "games": [{"game_date": "2026-01-04", "matchup": "DET @ BOS", "starters": ["Unit One", "Unit Two"]}],
         "players": [
@@ -352,6 +353,7 @@ def test_game_rotation_serves_both_teams_in_order_with_exact_clocks(client, over
     assert response.status_code == 200
     body = response.get_json()
     assert "provenance" not in body
+    assert "team_games_counted" not in body
     assert body["game"] == {
         "game_id": GAME,
         "game_date": "2026-02-03",

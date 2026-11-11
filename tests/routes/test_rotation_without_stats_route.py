@@ -19,10 +19,13 @@ g7    2026-01-07  0      25     26 / 26,20,5,8,3,14       (no line)
 Cameo has 0-minute lines in g2 and g3 only, and no game logs.
 """
 
+from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pandas as pd
 import pytest
 
+from app.services.database_first_activation import ReadSeason
 from app.services.game_service import GameService
 from tests.support.rotation_world import (
     SEASON,
@@ -397,3 +400,78 @@ def test_game_logs_needs_without_and_a_boolean(client, detroit, query):
     response = client.get(f"{ROTATION}?{query}")
     assert response.status_code == 400
     assert "game_logs" in response.get_json()["error"]["details"]["parameters"]
+
+
+class PublishedSeasonReader:
+    """A reader whose Published Season is ``SEASON``: a later season serves only a reader scoped to it."""
+
+    captures_published_season = True
+
+    def __init__(self, selected=None):
+        self.selected_season = selected
+
+    def for_season(self, season):
+        return PublishedSeasonReader(season)
+
+    def snapshot(self, keys, season=None, **keywords):
+        requested = season.requested if isinstance(season, ReadSeason) else season
+        served = requested is None or requested <= SEASON or requested == self.selected_season
+        return SimpleNamespace(served=served)
+
+
+class PublishedOnlyLogs(StoredLogs):
+    """Stored logs served only under a snapshot that serves the season, as the real source reads."""
+
+    def get_players_logs(self, player_ids, season, *, publication_snapshot=None):
+        frames = self.get_players_logs_by_id(player_ids, season, publication_snapshot=publication_snapshot)
+        if publication_snapshot.served:
+            return frames
+        return {player_id: pd.DataFrame(columns=["GAME_ID"]) for player_id in frames}
+
+
+@pytest.mark.parametrize("season", [SEASON, "2026-27"])
+def test_without_stats_read_a_season_after_the_published_one(
+    client, tmp_path, dependencies, runtime_settings, season
+):
+    """crf04/statsplus#484: 2026-27, after the Published Season, read as no game logs."""
+
+    logs = PublishedOnlyLogs()
+    repository = migrated_repository(tmp_path)
+    store(
+        repository,
+        *(
+            game(
+                f"00226000{n:02d}",
+                f"2026-11-0{n}",
+                "NYK",
+                "BOS",
+                [
+                    line(CADE, "Josh Hart", "NYK", minutes=hart),
+                    line(AUSAR, "Jalen Brunson", "NYK", minutes=brunson),
+                ],
+            )
+            for n, hart, brunson in ((1, 30, 34), (4, 0, 38), (7, 0, 36))
+        ),
+        season=season,
+    )
+    for n, minutes, pts in ((1, 34, 22), (4, 38, 31), (7, 36, 27)):
+        logs.add(AUSAR, "NYK", f"00226000{n:02d}", f"2026-11-0{n}", season=season, minutes=minutes, pts=pts)
+    catalog = Catalog((CADE, "Josh Hart", "NYK"), (AUSAR, "Jalen Brunson", "NYK"))
+    games = GameService(
+        None,
+        Mock(),
+        settings=runtime_settings,
+        game_logs_source=logs,
+        athlete_catalog=catalog,
+        publication_reader=PublishedSeasonReader(),
+    )
+    dependencies.rotation_service = service_for(repository, catalog, logs=games)
+
+    body = _get(client, f"team=NYK&without=Josh%20Hart&season={season}&game_logs=true")
+
+    [brunson] = body["players"]
+    # 11-04 and 11-07: (31 + 27) / 2 points, (38 + 36) / 2 log minutes.
+    assert (brunson["without"]["stats"]["played"], brunson["without"]["stats"]["PTS"]) == (2, 29.0)
+    assert brunson["without"]["stats"]["minutes"] == 37.0
+    assert [g["box"]["PTS"] for g in brunson["without"]["game_logs"]] == [27.0, 31.0]
+    assert brunson["with"]["stats"]["PTS"] == 22.0

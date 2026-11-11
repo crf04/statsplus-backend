@@ -958,27 +958,32 @@ malformed date or an unknown team is `400 invalid_input`. While
 
 A date with no stored report (no games, or none collected) is
 `"injuries": []`. Entries are ordered by team, then status severity (Out,
-Doubtful, Questionable, Probable, Available), then player name.
+Doubtful, Questionable, Probable, Available), then player name; the minutes
+fields do not change that order.
 
 ```json
 {
-  "date": "2026-01-15",
+  "date": "2026-11-10",
   "team": null,
-  "minutes_published_season": "2026-27",
+  "minutes_season": "2026-27",
+  "minutes_published_season": "2025-26",
   "injuries": [
     {
-      "player": "LeBron James",
-      "player_id": 2544,
-      "team": "LAL",
-      "game_id": "0022500584",
-      "status": "Questionable",
-      "reason": "Left ankle soreness",
-      "report_time": "2026-01-15T17:00:00-05:00",
-      "retrieved_at": "2026-01-15T20:00:00+00:00",
+      "player": "Giannis Antetokounmpo",
+      "player_id": 203507,
+      "team": "MIA",
+      "game_id": "0022600150",
+      "status": "Probable",
+      "reason": "Left knee soreness",
+      "report_time": "2026-11-10T17:00:00-05:00",
+      "retrieved_at": "2026-11-10T22:30:00+00:00",
       "stale": false,
-      "average_minutes": 34.5,
-      "games_played": 44,
-      "minutes_season": "2025-26"
+      "average_minutes": 32.8,
+      "games_played": 9,
+      "minutes_season": "2026-27",
+      "prior_average_minutes": 28.9,
+      "prior_games_played": 36,
+      "prior_minutes_season": "2025-26"
     }
   ]
 }
@@ -993,22 +998,26 @@ Doubtful, Questionable, Probable, Available), then player name.
 - `retrieved_at` is when the stored report was last confirmed current.
 - `stale` is `true` when the game has not started and `retrieved_at` is more
   than 45 minutes old (one missed 30-minute refresh).
-- `average_minutes` is the player's regular-season minutes per game, `games_played`
-  the games it averages (`0` when `average_minutes` is `null`) and
-  `minutes_season` the season they come from (crf04/statsplus#230, #441). The
-  season is the published one (the one `research_season` names) when the player
-  has at least 5 regular-season games in it, else the season before it when he
-  has any games there, else `null`. Games match on `player_id` across every
-  team he played for that season. A row with no `player_id` has `null` / `0` /
-  `null`, and a season whose game logs cannot be read (`season_unavailable`)
-  gives `null` / `0` / `null` to the rows that need it; the list is still
-  returned, in the same order. A player whose stored game rows in a season are
-  corrupt gets `null` / `0` / `null` too, and never falls back to the other
-  season.
-- `minutes_published_season` (top level) is the published season the 5-game
-  rule compared against, or `null` when it could not be read (then every row has
-  `null` minutes). A row whose `minutes_season` differs from it is a prior-season
-  fallback.
+- `average_minutes` is the player's regular-season minutes per game in the
+  season of the report date's games, `games_played` the games it averages (`0`
+  when `average_minutes` is `null`) and `minutes_season` that season, or `null`
+  with no minutes (crf04/statsplus#230, #488). `prior_average_minutes`,
+  `prior_games_played` and `prior_minutes_season` are the same for the season
+  before it. There is no minimum game count: one game is an average over one
+  game. The report date's season is read before its Season Cutover, from its
+  held candidate, as an Unpublished Season is; the two seasons are never the
+  same. Games match on `player_id` across every team he played for that
+  season. A row with no `player_id` has `null` / `0` / `null` in both. A season
+  whose game logs cannot be read (`season_unavailable`) gives `null` / `0` /
+  `null` in that season's fields only; the list is still returned. A player
+  whose stored game rows in a season are corrupt gets `null` / `0` / `null` in
+  that season's fields.
+- `minutes_season` (top level) is the season of the report date's games, the
+  one every row's `minutes_season` names when it has minutes, or `null` with no
+  minutes service.
+- `minutes_published_season` (top level) is the Published Season when the
+  minutes were read, or `null` when it could not be read (then every row has
+  `null` minutes in both seasons).
 
 #### Scheduled refresh
 
@@ -1024,7 +1033,7 @@ caller of the NBA injury report; Matchup reads what it stored and never fetches.
 ### Get Injury Scenarios
 
 ```http
-GET /api/injury_scenarios?date=YYYY-MM-DD[&game_id=ID][&player=ID_OR_NAME]
+GET /api/injury_scenarios?date=YYYY-MM-DD[&game_id=ID][&player=ID_OR_NAME][&teammate=ID_OR_NAME]
 ```
 
 Authenticated (crf04/statsplus#220, #425). One scenario for each player the
@@ -1033,6 +1042,19 @@ or Out on that date; Probable and Available get none. Parameters and refusals
 are those of Get Injuries, plus the optional `game_id` and `player` (a player
 id or full name, case-insensitive) filters. Nothing is stored: every request
 rebuilds from the stored injury snapshot.
+
+An absence whose report `reason` starts `G League` (a G League or two-way
+assignment) opens no scenario unless `player` names him; the response's
+`g_league_skipped` counts those left out (crf04/statsplus#485). `teammate` (a
+player id or full name, case-insensitive) keeps only that teammate's rows,
+`replacement_starters` and `minutes_jumps` entries in every scenario. It is
+matched against the team rosters (either season of the window) of the selected
+scenarios, or, when none is selected, of every team on the report. A value that
+matches no player there is `400 invalid_input` with
+`details.parameters: ["teammate"]`; a full name two players there share is
+`400 invalid_input` with `details` `{parameter: "teammate", parameters:
+["teammate"], candidates: [{player_id, name, team}]}`, and naming one of them
+by `player_id` selects him.
 
 With `player`, a missing or expired on/off split of that scenario (on and off,
 this season and, when it joins the window, last season) is fetched from
@@ -1049,7 +1071,9 @@ request reads the cache only and makes no upstream call. Without Redis, where th
 shared, a named request does not reach PBPStats either: its rows carry `on_off_unavailable`.
 
 Each scenario has `injured` (player, player_id, team, game_id, status,
-report_time), `limits` (`stale_report`, or `player_unresolved` when the
+`reason`, report_time, and `seasons`: `[{season, missed, played}]`, the
+Slate season then last season, counting his team's games he missed and played
+by the game-log absence rule; `[]` when unresolved), `limits` (`stale_report`, or `player_unresolved` when the
 report's name matched no Athlete Catalog player, in which case there are no
 branches) and `branches`: `plays` then `sits` for Questionable or Doubtful,
 `sits` only for Out. A branch's `rows` hold one row per rotation teammate
@@ -1069,6 +1093,43 @@ that are never flagged.
   the `season_span` each was computed over. `baseline.on_floor_season_span` and
   `off_floor.season_span` name only the seasons that supplied on/off minutes.
 - `flagged`: both shifts at least +10%, or both at most -10%.
+- `flag_season` (sits, scored rows; crf04/statsplus#485): the one season the
+  flag is computed on; the flag is the `seasons` entry for that season (its
+  `shift`, `flagged` and `limits`). It is the Slate season when the teammate
+  has at least 3 games on each side in it (without him and with him),
+  otherwise last season; with no last season in the window it stays the Slate
+  season.
+- `seasons` (crf04/statsplus#485): one entry per season of the window, the
+  Slate season first, so no figure in it spans two seasons. In `plays`, each
+  is `{season, baseline: {avg, games, per36, minutes}}` (`USG`:
+  `{usage, minutes}`). In `sits`, a scored entry also has
+  `without: {avg, games}`, `off_floor: {per36, minutes}`, `line: {beat, of}`
+  (`null` without today's line), `shift` (`{full_game, on_off_per36}` or
+  `null` when not computed), `flagged` and that season's `limits`; a context
+  entry has `without` (MIN, FGA), `off_floor` (`null` for MIN) and `limits`.
+  Example (Austin Reaves PTS, LeBron James sits):
+
+  ```json
+  "flag_season": "2026-27",
+  "seasons": [
+    {"season": "2026-27", "baseline": {"avg": 20.0, "games": 5, "per36": 19.8, "minutes": 400},
+     "without": {"avg": 25.0, "games": 3}, "off_floor": {"per36": 25.2, "minutes": 200},
+     "line": {"beat": 2, "of": 3}, "shift": {"full_game": 0.25, "on_off_per36": 0.2727},
+     "flagged": true, "limits": []},
+    {"season": "2025-26", "baseline": {"avg": 20.0, "games": 2, "per36": 19.8, "minutes": 300},
+     "without": {"avg": 26.0, "games": 2}, "off_floor": {"per36": 24.75, "minutes": 80},
+     "line": {"beat": 2, "of": 2}, "shift": null, "flagged": false,
+     "limits": ["insufficient", "insufficient_baseline"]}
+  ]
+  ```
+
+  **Legacy pooled fields, removed in the next release.** On every row,
+  `baseline`, `without`, `off_floor`, `line`, `shift`, `flagged` and `limits`
+  (with their `season_span` fields) keep their earlier meaning: they sum the
+  window's seasons and flag under the earlier rule (no baseline floor, so
+  never `insufficient_baseline`). A row can be flagged there and not in its
+  `flag_season` entry, or the reverse. Read the flag from `flag_season` and
+  `seasons`.
 - `on_off_sources` and `on_off_games_missing` (crf04/statsplus#410): the
   sorted, distinct `source` values (`pbpstats`, `statsplus`) of the on/off
   splits the row's numbers summed (the on-floor split, plus the off-floor one
@@ -1080,8 +1141,11 @@ that are never flagged.
   `excluded_games`, the teammate's games for this team in the seasons read
   that are on neither side because the two were not teammates then (before
   the injured player joined, or before either player's last team change).
-- `limits`: `insufficient` (under 3 games without or under 150 off-floor
-  minutes; never flagged), `no_line`, `stale_report`, `no_baseline`, and the
+- `limits` (pooled, on the row; one season's, on a `seasons` entry):
+  `insufficient` (under 3 games without or under 150 off-floor minutes; never
+  flagged), `insufficient_baseline` (`seasons` entries only: under 3 games with
+  him or under 150 on-floor minutes; never flagged), `no_line` and
+  `stale_report` (row only), `no_baseline`, and the
   on/off limits `on_off_not_warmed` (no cached split; a request without
   `player` never calls PBPStats, the scheduled warm fills the cache, and
   naming the injured player fetches it), `on_off_unavailable` (no cache, or
@@ -1090,7 +1154,7 @@ that are never flagged.
   player changed teams in that season, so its whole-season totals cannot match
   the window) and `on_off_seasons_differ` (the on and off states cover
   different seasons). Any on/off limit other than `on_off_stale` blocks the
-  flag, and so does any unsliceable season in the window; the full-game numbers are still returned.
+  flag it is listed beside; the full-game numbers are still returned.
 
 The window is the current season plus last season, each read scoped to its
 season (`season_scoped`), so a current season after the Published Season counts
@@ -1098,29 +1162,37 @@ its games as a selected season does. It starts after the later of
 the two players' last appearance for a different team, and last season also
 needs a game for this team by the injured player. Without a team change the
 `without` games are those `GET /api/games/game_logs?players_off[]=` returns.
-Teammates come from the game-log team roster, minus players the Athlete
-Catalog places on another team (a player it lacks, or an unreadable catalog,
-falls back to the game logs); totals are summed across the
-window's seasons before per-36 is derived.
+Teammates are the players with a game for the team in the Slate season, minus
+players the Athlete Catalog has since placed on another team; before the
+team's first game of the Slate season the catalog decides among last season's
+roster (an unreadable or empty catalog leaves that roster as the game logs
+have it). Teammates listed Out on the same report get no rows
+(crf04/statsplus#485). Pooled totals are summed across the window's seasons
+before per-36 is derived.
 
 Rotation context (crf04/statsplus#239, from the stored [rotations](#get-rotation);
 context only, it never changes which rows are flagged). Every row of a
 teammate carries `rotation`, in both branches: the split of
 [Rotation without a player](#rotation-without-a-player) for that teammate with
 the injured player absent, over the same window, plus `seasons` (the span of
-seasons that supplied games) and `missing_games` (his game-log `without` games
-that have no stored rotation). Seasons with no stored rotations contribute
+seasons that supplied games), `missing_games` (his game-log `without` games
+that have no stored rotation) and `by_season` (crf04/statsplus#485): the same
+split for each season that supplied games, Slate season first, each with its
+`season` and `missing_games`. Each side carries `minutes_per_game_played`
+beside `minutes`. Seasons with no stored rotations contribute
 nothing; `rotation` is `null` when no stored game in the window gives the
 teammate a line. A scenario also has:
 
-- `rotation_starts`: `{starts, games}`, the injured player's own starts over the
-  stored games he played (after his own last team change), so "started in his
-  place" is only claimed for a regular starter; `{0, 0}` with no stored games.
+- `rotation_starts`: `{starts, games, by_season}`, the injured player's own
+  starts over the stored games he played (after his own last team change), so
+  "started in his place" is only claimed for a regular starter; `{0, 0}` with
+  no stored games. `by_season` is `[{season, starts, games}]`, Slate season
+  first.
 - `replacement_starters`: teammates in the window whose start rate is higher
   without him than with him (a side with no games counts as rate 0) and who
   started at least one without game, by `starts_without` high to low, then name.
   Each has `name`, `starts_without`, `games_without`, `starts_with`,
-  `games_with`. A teammate whose split is insufficient is never listed.
+  `games_with`, and `by_season` with those counts per season. A teammate whose split is insufficient is never listed.
 - `minutes_jumps`: teammates in the window who are not in the 15+ MPG set, whose
   split is sufficient (3 or more without games) and whose `minutes_change` is
   6.0 or more, by `minutes_change` high to low. Each has `name` and `rotation`;
@@ -3601,7 +3673,21 @@ first, `[]` when none:
 ```
 
 `game_date` is the Eastern date and `matchup` is `AWAY @ HOME`, both from the
-Event Catalog. `minutes` round half up from the segments' seconds, as
+Event Catalog. Five more fields say which games the split covers
+(crf04/statsplus-backend#761): `team_games`, the team-season's completed
+regular-season games in the Event Catalog; `games_included`, how many of them
+have stored segments (`team_games` minus the `games_missing`); `games_through`,
+the Eastern date of the newest included game; `split_games`, the games in which
+the asked lineup state occurred; and `last_split_game_date`, the Eastern date of
+the newest of those. Each date is `null` when there is no such game. `cached_at`
+is a write time, not a cache: a game rewritten later moves it without changing
+the split, so read currency from these fields instead.
+
+```json
+"team_games": 10, "games_included": 9, "games_through": "2026-11-08",
+"split_games": 7, "last_split_game_date": "2026-11-06",
+"games_missing": [{"game_id": "0022600142", "game_date": "2026-10-28", "matchup": "OKC @ DAL"}]
+``` `minutes` round half up from the segments' seconds, as
 PBPStats rounds. `usage` is StatsPlus usage: 100 · (FGA + 0.44·FTA + TOV) /
 (team on-floor FGA + player-less heaves + 0.44·FTA + TOV). Free throws count
 for the lineup on the floor at the foul; from 2026-27 a heave counts as its
@@ -3634,7 +3720,7 @@ The backend computes every average and recent-versus-season comparison.
 | `player_team` | No | Tricode; only with `player_name`, keeps only the namesake on that current catalog team |
 | `team` | One selector | Tricode; the team view |
 | `game_id` | One selector | The 10-digit NBA game id the Slate returns (for example `0022501171`); the game view. Rejects `last_n` and `season` |
-| `last_n` | No | Whole number 1-20, default 5. Counts the player's games on his current team's box scores |
+| `last_n` | No | Whole number 1-20, default 5. Counts his current team's games inside his team window |
 | `season` | No | `YYYY-YY`. Default: the current season, or the latest season with rotation data when the current one has none |
 | `without` | No | Repeatable (crf04/statsplus#239). A player name; with `player_name` or `team`, switches to the [without split](#rotation-without-a-player). Rejected with `game_id` and with `last_n` |
 
@@ -3648,11 +3734,24 @@ rotation data in the season (after any `player_team`) is also
 as in the Unscheduled Matchup; namesakes without rotation data never make a
 name ambiguous.
 
-*Recent* is the player's last `last_n` stored regular-season games for his
-current team (the team of his latest stored game) whose box score lists him.
-A game he sat out (DNP or box-score inactive) is a 0-minute game; a team game he
-is not listed for, such as one before a trade, is not counted. *Season*
-is all of the player's own stored games in the season (every team he played for).
+A player's *team window* for a team runs from his first stored game for it in
+the season until his first later game for another team, open-ended if he never
+moves (crf04/statsplus#449). *Recent* is the last `last_n` stored
+regular-season games of his current team (the team of his latest stored game)
+inside his window there; *Season* is every stored game of each team he played
+for inside his window for it (crf04/statsplus#483). A team game in the window
+counts whether or not its box score lists him: a DNP or box-score inactive line
+is a 0-minute game, and a game with no line for him (2026-27 LiveData box
+scores list only active players) is a *missed* game, also 0 minutes. A game
+before his first game for the team, such as one before a trade, is outside his
+window and left out.
+The player and team views carry `team_games_counted: true`
+(crf04/statsplus#483): `recent.games` and `season_summary.games` count the
+team's games inside his team window and the averages are per game played. A
+response without the field comes from a backend whose `games` counted only the
+games whose box score lists him, averaged over those games.
+The `without` split and the one-game view never carry it: they have no
+`recent` or `season_summary`.
 In the team view each player's `recent` is the same rule applied to that team,
 while `games` lists the team's own last `last_n` games. *Played* is minutes above 0, *started* is the box-score starter
 flag, and *closed* is on court at the end of the fourth period. Minutes are
@@ -3665,6 +3764,7 @@ Player view:
 {
   "season": "2025-26",
   "last_n": 5,
+  "team_games_counted": true,
   "player": {"name": "Ausar Thompson", "team": "DET"},
   "recent": {"games": 5, "played": 5, "starts": 5, "minutes": 31.2, "stints": 3.4, "closed": 4,
              "minutes_by_period": {"Q1": 8.1, "Q2": 6.0, "Q3": 8.4, "Q4": 8.7, "OT": 0.0}},
@@ -3672,17 +3772,20 @@ Player view:
              "minutes_by_period": {"Q1": 7.0, "Q2": 5.9, "Q3": 7.2, "Q4": 7.8, "OT": 0.0}},
   "games": [
     {"game_date": "2026-04-12", "matchup": "DET @ CHA", "started": true, "minutes": 33.1, "closed": true,
-     "minutes_by_period": {"Q1": 9.4, "Q2": 5.0, "Q3": 9.6, "Q4": 9.1, "OT": 0.0},
+     "on_box_score": true, "minutes_by_period": {"Q1": 9.4, "Q2": 5.0, "Q3": 9.6, "Q4": 9.1, "OT": 0.0},
      "stints": [{"in": {"period": 1, "clock": "12:00"}, "out": {"period": 1, "clock": "2:36"}, "minutes": 9.4}]}
   ]
 }
 ```
 
-`games` lists the `recent` games newest first, DNPs included (`minutes: 0.0`,
-`stints: []`, `started: false`). `matchup` is `TEAM @ HOME` for an away game and
-`TEAM vs. AWAY` for a home game. `minutes`, `stints` and `minutes_by_period` in
-the summaries are per-game averages over all the games counted (DNPs as 0);
-`played`, `starts` and `closed` are counts. A stint that continues across a
+`games` lists the `recent` games newest first, DNPs and missed games included
+(`minutes: 0.0`, `stints: []`, `started: false`). Each game's `on_box_score` is
+`false` for a missed game (no box-score line for him) and `true` otherwise.
+`matchup` is `TEAM @ HOME` for an away game and `TEAM vs. AWAY` for a home
+game. In the summaries `games` is the team games counted, `played` the games he
+played, and `starts` and `closed` are counts; `minutes`, `stints` and
+`minutes_by_period` are averages over the games he played (`null` when he
+played none). A stint that continues across a
 period break is one stint (`out` in a later period than `in`); a change made at
 the start of a period ends the earlier stint at the end of the previous period.
 
@@ -3690,7 +3793,7 @@ Team view:
 
 ```json
 {
-  "season": "2025-26", "last_n": 5, "team": "DET",
+  "season": "2025-26", "last_n": 5, "team_games_counted": true, "team": "DET",
   "games": [{"game_date": "2026-04-12", "matchup": "DET @ CHA", "starters": ["Cade Cunningham", "..."]}],
   "players": [
     {"name": "Ausar Thompson",
@@ -3702,11 +3805,19 @@ Team view:
 ```
 
 `players` is everyone on the team's box score (active, DNP or inactive) in at
-least one of the team's last `last_n` games, so players who left earlier drop
-out, sorted by
-`abs(minutes_change)` descending and then by name. `minutes_change` is
-`recent.minutes - season_summary.minutes` computed from the unrounded averages,
-then rounded to one decimal. `starters` are sorted by name.
+least one of the team's last `last_n` games, plus each player with a stored game
+for the team who missed all of them inside his open team window (`recent.played:
+0`, his counts the player view's). Such a player is left out only when the
+season's Athlete Catalog says he left: its `team_id` names another team, or its
+`roster_status` is `inactive` or `historical` (off every NBA roster) or
+`tombstone` (cut from the team's roster). A missing
+catalog row or a `null` `team_id` is unknown, and he stays. Players whose window
+closed before the team's last `last_n` games drop out.
+They are sorted by `abs(minutes_change)` descending, then by name, with a `null`
+`minutes_change` last. `minutes_change` is `recent.minutes -
+season_summary.minutes` (both per game played) computed from the unrounded
+averages, then rounded to one decimal; `null` when either side has no game
+played. `starters` are sorted by name.
 
 Game view (crf04/statsplus#233): every box-score player of one stored game, both
 teams, with the stints the player view returns.
@@ -3767,7 +3878,8 @@ invalid_input` with `details.parameter: "without"`; an ambiguous one adds
 
 Each side has `games`, `played`, `starts`, `minutes` (per game, DNPs as 0,
 rounded half-up to 0.1 from exact centiseconds; `null` for a side with no
-games) and `closed`. `minutes_change` is without minus with per-game minutes
+games), `minutes_per_game_played` (the same minutes over `played` games only;
+`null` when he played none, crf04/statsplus#485) and `closed`. `minutes_change` is without minus with per-game minutes
 from exact values, rounded once (`null` when a side has no games). A split with
 fewer than 3 without games is returned with `insufficient: true`.
 
@@ -3775,7 +3887,9 @@ Each side also carries `stats` (crf04/statsplus#252): the subject's box-score
 averages over the side's games in which he has a stored game-log row for the
 team, matched on NBA `game_id`. The logs are read through the season's
 publication snapshot (the reads `GET /api/games/game_logs` uses), once per
-request for every subject of the response. The game set is unchanged.
+request for every subject of the response, scoped to the response's `season`,
+so a season after the Published Season (2026-27 while 2025-26 is published)
+has its stats too (crf04/statsplus#484). The game set is unchanged.
 
 - `played`: side games with a game-log row for him. A DNP has none, so it is
   left out of `stats` while the rotation `minutes` beside it still counts it as 0.

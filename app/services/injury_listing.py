@@ -61,14 +61,20 @@ def _player_id(value: Any) -> int | None:
         return None
 
 
-def _minutes_fields(value: Any, minutes: Mapping[int, Any]) -> dict[str, Any]:
-    found = minutes.get(_player_id(value))
+def _minutes_fields(value: Any, minutes: Any | None) -> dict[str, Any]:
+    player_id = _player_id(value)
+    current = None if minutes is None else minutes.current.get(player_id)
+    prior = None if minutes is None else minutes.prior.get(player_id)
+    return {**_season_fields("", current), **_season_fields("prior_", prior)}
+
+
+def _season_fields(prefix: str, found: Any | None) -> dict[str, Any]:
     if found is None:
-        return {"average_minutes": None, "games_played": 0, "minutes_season": None}
+        return {f"{prefix}average_minutes": None, f"{prefix}games_played": 0, f"{prefix}minutes_season": None}
     return {
-        "average_minutes": found.average_minutes,
-        "games_played": found.games_played,
-        "minutes_season": found.season,
+        f"{prefix}average_minutes": found.average_minutes,
+        f"{prefix}games_played": found.games_played,
+        f"{prefix}minutes_season": found.season,
     }
 
 
@@ -128,8 +134,7 @@ class StoredInjuryListing:
         season = schedule_season(self.settings, self.event_catalog, slate_date)
         stored = self._stored(events, season, strict=True)
         now = assume_utc(self._clock())
-        minutes = self._minutes(stored, tricode)
-        minutes_by_player = {} if minutes is None else minutes.by_player
+        minutes = self._minutes(stored, tricode, season)
         injuries: list[dict[str, Any]] = []
         for event in events:
             game_id = str(event["nba_game_id"])
@@ -150,7 +155,7 @@ class StoredInjuryListing:
                     "report_time": _report_time(entry),
                     "retrieved_at": retrieved_at.isoformat(),
                     "stale": stale,
-                    **_minutes_fields(entry.get("canonical_player_id"), minutes_by_player),
+                    **_minutes_fields(entry.get("canonical_player_id"), minutes),
                 }
                 for entry in snapshot.normalized_entries
                 if tricode is None or entry.get("tricode") == tricode
@@ -168,14 +173,15 @@ class StoredInjuryListing:
         return {
             "date": slate_date.isoformat(),
             "team": tricode,
+            "minutes_season": None if minutes is None else minutes.season,
             "minutes_published_season": None if minutes is None else minutes.published_season,
             "injuries": injuries,
         }
 
     # -- shared ------------------------------------------------------------
 
-    def _minutes(self, stored: Mapping[str, Any], tricode: str | None) -> Any | None:
-        """Minutes of every listed player, read once for the whole list."""
+    def _minutes(self, stored: Mapping[str, Any], tricode: str | None, season: str) -> Any | None:
+        """Minutes of every listed player in ``season`` and the one before, read once for the list."""
 
         if self.minutes is None:
             return None
@@ -186,7 +192,7 @@ class StoredInjuryListing:
             if (tricode is None or entry.get("tricode") == tricode)
             and (player_id := _player_id(entry.get("canonical_player_id"))) is not None
         }
-        return self.minutes.minutes(player_ids)
+        return self.minutes.minutes(player_ids, season)
 
     def _events(self, slate_date: date) -> list[Mapping[str, Any]]:
         return slate_events(self.event_catalog, self.settings, slate_date)

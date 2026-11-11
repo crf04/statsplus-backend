@@ -11,12 +11,14 @@ from datetime import UTC, datetime
 from threading import Barrier, BrokenBarrierError
 
 import pytest
-from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy import create_engine, event, insert, inspect, text
 
 from app.migrations import downgrade_lineup_segments, run_migrations
+from app.models.event_catalog import EventCatalogEntry
 from app.services.lineup_segment_repository import LineupSegmentRepository, write_game
 from app.services.lineup_segments import COUNTS, GameSegments, Segment
 from scripts.on_off_parity import parity, within_tolerance
+from tests.services.test_on_off_segments import _event
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_migrations]
 
@@ -122,6 +124,37 @@ def test_naming_no_player_sums_every_segment_of_the_team_on_postgres(engine):
         (15, 12000),
     ]
     assert split.written_at == datetime(2026, 11, 2, tzinfo=UTC)
+
+
+def test_a_split_counts_the_team_games_it_covers_on_postgres(engine):
+    with engine.begin() as connection:
+        write_game(
+            connection, "2025-26", _two_team_game("0022500001", 1, 2), datetime(2026, 11, 1, tzinfo=UTC)
+        )
+        write_game(
+            connection, "2025-26", _two_team_game("0022500002", 2, 1), datetime(2026, 11, 2, tzinfo=UTC)
+        )
+        connection.execute(
+            insert(EventCatalogEntry.__table__),
+            [
+                _event("0022500001", datetime(2025, 10, 22, 23, 0, tzinfo=UTC), home=("A", 1), away=("B", 2)),
+                _event("0022500002", datetime(2025, 10, 24, 23, 0, tzinfo=UTC), home=("B", 2), away=("A", 1)),
+                _event("0022500003", datetime(2025, 10, 26, 23, 0, tzinfo=UTC), home=("A", 1), away=("B", 2)),
+            ],
+        )
+    repository = LineupSegmentRepository(engine)
+    repository.record_coverage("2025-26", datetime(2026, 11, 3, tzinfo=UTC))
+
+    split = repository.read_split("2025-26", 1, (11,), ())
+
+    assert (
+        split.team_games,
+        split.games_included,
+        split.games_through,
+        split.split_games,
+        split.last_split_game_date,
+    ) == (3, 2, "2025-10-24", 2, "2025-10-24")
+    assert [game["game_id"] for game in split.games_missing] == ["0022500003"]
 
 
 def test_writers_of_a_home_and_away_game_and_its_return_game_both_store(engine):
