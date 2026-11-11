@@ -180,6 +180,21 @@ def normalize_rows(rows: Iterable[WowyPlayerRow]) -> list[dict[str, Any]]:
     return players
 
 
+def _with_fg2a(player: Mapping[str, Any]) -> dict[str, Any]:
+    """A segments-served player with two-point attempts, FGA minus 3PA.
+
+    Not in ``_player_payload``: PBP Stats entries keep their shape, so their
+    cached copies stay current under ``ENTRY_SCHEMA``.
+    """
+
+    fg2a = player["totals"]["fga"] - player["totals"]["fg3a"]
+    return {
+        **player,
+        "totals": {**player["totals"], "fg2a": fg2a},
+        "per36": {**player["per36"], "fg2a": _per36(fg2a, player["minutes"])},
+    }
+
+
 def segment_row(sums: Mapping[str, Any]) -> WowyPlayerRow:
     """One player's summed segments as the row a PBP Stats split returns."""
 
@@ -401,7 +416,9 @@ class OnOffService:
             **self._envelope(request, source=SEGMENTS_SOURCE),
             "cached_at": None if split.written_at is None else split.written_at.astimezone(UTC).isoformat(),
             "stale": False,
-            "players": normalize_rows(segment_row(sums) for sums in split.rows),
+            "players": [
+                _with_fg2a(player) for player in normalize_rows(segment_row(sums) for sums in split.rows)
+            ],
             "games_missing": list(split.games_missing),
             "team_games": split.team_games,
             "games_included": split.games_included,
