@@ -1,4 +1,4 @@
-"""Postgres checks for the stored daily lineups (crf04/statsplus#492): migration 087,
+"""Postgres checks for the stored daily lineups (crf04/statsplus#492): migration 088,
 a rerun that leaves the same rows, and the team read across the Eastern day."""
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def engine():
     engine.dispose()
 
 
-def test_migration_087_reruns_and_a_second_collection_leaves_the_same_rows_on_postgres(engine):
+def test_migration_088_reruns_and_a_second_collection_leaves_the_same_rows_on_postgres(engine):
     assert "team_lineups" in inspect(engine).get_table_names()
     assert run_migrations(engine).applied == ()
     schedule(engine, "0022600216", "2026-11-11T04:00:00+00:00", OKC, POR, season="2026-27")

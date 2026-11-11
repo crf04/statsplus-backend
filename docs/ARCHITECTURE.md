@@ -561,7 +561,11 @@ market without both joins cannot affect a slate count. Pool membership is the
 union by canonical player ID, with deterministic Market Categories and
 per-provider provenance retained on each internal `PoolPlayer`.
 
-The Player Pool never synthesizes players. It persists the governed canonical
+The Player Pool never synthesizes players. A scheduled Matchup lists
+Rotation Players beside it (crf04/statsplus#459): players with no line who
+played 10 or more minutes for their team in one of its last 5 games, read from
+the stored game logs and the active Athlete Catalog. They never enter the
+pool, its counts, or anything targetable. The pool persists the governed canonical
 pool result for each season and exact Slate game set in the application
 database; raw provider labels and identities do not enter this store. A
 snapshot at most 15 minutes old is reused with its original provider
@@ -4963,7 +4967,6 @@ books), `app/services/odds_identity.py` (event and player resolution),
 
 ```text
 beat (every 5 min, its own Railway cron service: scripts/collect_odds.py)
-  → first, the daily lineups step (crf04/statsplus#492; never fails the beat)
   → lease row "odds" in projection_collection_leases (own fence)
   → GET /events for the next 36h (free) → EventResolver → canonical game
   → plan_cycle: tier + due calls from poll history and odds_api_quota_state
@@ -4971,6 +4974,8 @@ beat (every 5 min, its own Railway cron service: scripts/collect_odds.py)
   → roster-scoped AthleteResolver (provider "oddsapi", ids "name:<folded>")
   → one transaction: odds_api_polls + sportsbook_prop_quotes (history, only on
     change, plus every closing snapshot) + sportsbook_prop_latest
+  → then, whatever the beat's outcome and each in its own guard: ESPN game
+    lines (crf04/statsplus#493), then NBA.com daily lineups (crf04/statsplus#492)
 Matchup read (only when ODDS_API_ENABLED): MatchupService._book_lines →
   SportsbookQuoteReader (savepoint)
 Board read (only when ODDS_API_ENABLED): SlateBoardService →
@@ -5757,8 +5762,8 @@ is the lineup's state; until confirmation each starter is also listed as a
 bench row, which the parser drops. `timestamp` is Eastern wall time.
 
 `collect_team_lineups` (`app/services/team_lineups.py`) reads today's
-document and, in one transaction, replaces the `team_lineups` row (migration
-087, `app/models/team_lineup.py`) of every team it lists, keyed by game and
+document and, in one transaction (one DELETE, one INSERT), replaces the
+`team_lineups` row (migration 088, `app/models/team_lineup.py`) of every team it lists, keyed by game and
 team, with the document's Eastern date. A rerun leaves the same rows. One
 request, no retry (the next run is the retry): it runs on a daemon thread
 that is abandoned after ten seconds however slowly the server answers
@@ -5767,8 +5772,9 @@ Postgres the transaction sets a five-second `lock_timeout` and
 `statement_timeout`, so a locked table fails the step instead of holding the
 odds beat. It never raises; an unpublished day, a failed request, a malformed document or a
 database error is reported in its result and changes no row.
-`scripts/collect_odds.py` runs it before every odds beat (the `*/5 * * * *`
-odds cron, whatever `ODDS_API_ENABLED` says), so a lineup confirmed about 30
+`scripts/collect_odds.py` runs it after every odds beat and after the game
+lines step, each in its own guard (the `*/5 * * * *` odds cron, whatever
+`ODDS_API_ENABLED` says), so a lineup confirmed about 30
 minutes before tip is stored within about five minutes. Staging runs no
 collectors, so staging stores no lineups.
 
@@ -5793,8 +5799,33 @@ schedule, so a rerun reports every game `unchanged`. It calls no provider.
 `scripts/game_context_refresh.py` runs it nightly in the `ledger-refresh`
 service after the ledger and rotation steps, and by hand for an earlier season.
 `MatchupService` reads the two rows per game as `game_context`, on the
-request's own connection, and computes nothing. A later game-lines table
-(spread, total, team totals) is meant to join `game_contexts` by `game_id`.
+request's own connection, and computes nothing.
+
+### Stored game lines (crf04/statsplus#493)
+
+`game_lines` (migration 087, `app/models/game_lines.py`) holds one row per Event
+Catalog game: the home team's spread, the total, the sportsbook ESPN names, the
+ESPN event id and `read_at`. `game_lines.collect` (`app/services/game_lines.py`)
+reads ESPN's scoreboard
+(`site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=`) once
+for the current Eastern date, with a 5 s connect and 10 s read timeout and a
+15 s deadline on the whole read (the request runs on a daemon thread the step
+stops waiting for), and takes `competitions[0].odds[0]` of every game whose
+state is `pre`. A line is stored only when both `spread` and `overUnder` are
+finite numbers, the total is positive, and `details` ("NY -15.5", or
+"EVEN"/"PK" with a zero spread) does not contradict the spread. ESPN's
+abbreviations are mapped to NBA tricodes (NY, GS, SA, NO, UTAH, WSH, PHO) and
+each line is matched to the single non-postponed Event Catalog game on the same
+Eastern date between the same two teams, either way round; anything else is
+reported `unmatched`. A matched row is inserted or rewritten with the new
+`read_at` in one upsert that keeps a stored row read at the same time or later
+(counted `stale`), so overlapping runs that finish out of order never move a
+line back; a started game, or one ESPN shows no line for, is not written, so it
+keeps its last pre-tip line. `scripts/collect_odds.py` runs it after every odds
+beat in the `odds-collector` cron (every five minutes); a failure prints
+`game_lines failed: ...` and never changes the exit code. The Matchup reads the
+row as `game_context.game_line` and never calls ESPN; the favourite and implied
+totals are computed from the stored spread and total on read.
 
 ### Player tracking (crf04/statsplus#349)
 

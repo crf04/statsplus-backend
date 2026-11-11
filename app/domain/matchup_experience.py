@@ -18,6 +18,10 @@ PLAYER_POOL_SOURCE = "player_pool"
 #: come from the current-season Athlete Catalog rather than a pool or a game.
 UNSCHEDULED_MODE = "unscheduled"
 ATHLETE_CATALOG_SOURCE = "athlete_catalog"
+#: A scheduled Matchup's player with no line in CourtAI's books, listed for
+#: his recent minutes (crf04/statsplus#459). Never the experience's source:
+#: the pool still names the Participants and the targetable counts.
+ROTATION_SOURCE = "rotation"
 
 
 def is_historical_matchup(event: Mapping[str, Any], pool_players: Sized) -> bool:
@@ -46,6 +50,7 @@ __all__ = [
     "GAME_LOG_SOURCE",
     "HISTORICAL_MODE",
     "PLAYER_POOL_SOURCE",
+    "ROTATION_SOURCE",
     "UNSCHEDULED_MODE",
     "experience_mode",
     "is_historical_matchup",

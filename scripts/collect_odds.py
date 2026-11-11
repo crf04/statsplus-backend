@@ -8,10 +8,12 @@ and ``ODDS_API_KEY`` in the environment; ``DATABASE_URL`` is read from the
 environment unless ``--database-url`` is given.  When ``SENTRY_DSN`` is set,
 Sentry is initialized as in the web app so the guard's alerts are delivered.
 
-Before the beat it stores NBA.com's daily lineups (crf04/statsplus#492): one
-request abandoned after ten seconds and five-second database timeouts, whatever
-``ODDS_API_ENABLED`` says.  That step reports its own failures and never
-changes the exit status.
+After the odds beat, whatever its outcome, each run takes two side steps in
+this order, each in its own guard so one failing never skips the other or
+changes the exit code: it reads ESPN's scoreboard once and stores the day's
+game lines (crf04/statsplus#493), then stores NBA.com's daily lineups
+(crf04/statsplus#492; one request abandoned after ten seconds, five-second
+database timeouts).
 """
 
 from __future__ import annotations
@@ -27,8 +29,7 @@ if __package__ in {None, ""}:
 
 from app.config.settings import load_settings
 from app.dependencies import build_dependencies
-from app.services import odds_collection
-from app.services.team_lineups import collect_team_lineups
+from app.services import game_lines, odds_collection, team_lineups
 from app.utils.db import is_demo_database_url
 from app.utils.json_logging import configure_json_logging
 from app.utils.sentry_setup import init_sentry
@@ -56,24 +57,53 @@ def main(argv: list[str] | None = None) -> int:
         # in the same JSON format the web app writes.
         configure_json_logging(settings.log_level)
         dependencies = build_dependencies(settings)
-        print(f"lineups: {json.dumps(collect_team_lineups(dependencies.engine), sort_keys=True)}")
         try:
-            coordinator = odds_collection.build_odds_collection(dependencies, settings)
-        except RuntimeError as error:
-            print(f"failed: {error}")
-            return 1
-        if coordinator is None:
-            print("no_work: ODDS_API_ENABLED is false")
-            return 0
-        result = odds_collection.run_once(coordinator)
-        print(
-            f"{result.status}: {result.reason} tier={result.tier} calls={result.calls} "
-            f"credits={result.credits} remaining={result.remaining} unresolved_events={result.unresolved_events} "
-            f"unresolved_players={result.unresolved_players}"
-        )
-        return 0 if result.status in {"complete", "partial", "no_work", "busy", "backoff"} else 1
+            return _odds_beat(dependencies, settings)
+        finally:
+            collect_game_lines(dependencies)
+            collect_lineups(dependencies)
     finally:
         _flush_sentry()
+
+
+def _odds_beat(dependencies, settings) -> int:
+    try:
+        coordinator = odds_collection.build_odds_collection(dependencies, settings)
+    except RuntimeError as error:
+        print(f"failed: {error}")
+        return 1
+    if coordinator is None:
+        print("no_work: ODDS_API_ENABLED is false")
+        return 0
+    result = odds_collection.run_once(coordinator)
+    print(
+        f"{result.status}: {result.reason} tier={result.tier} calls={result.calls} "
+        f"credits={result.credits} remaining={result.remaining} unresolved_events={result.unresolved_events} "
+        f"unresolved_players={result.unresolved_players}"
+    )
+    return 0 if result.status in {"complete", "partial", "no_work", "busy", "backoff"} else 1
+
+
+def collect_game_lines(dependencies) -> None:
+    """Store today's ESPN game lines; a failure is printed and leaves the odds beat's exit code alone."""
+
+    try:
+        summary = game_lines.collect(dependencies.engine)
+    except Exception as error:
+        print(f"game_lines failed: {type(error).__name__}: {error}")
+        return
+    print(f"game_lines: {json.dumps(summary, sort_keys=True)}")
+
+
+def collect_lineups(dependencies) -> None:
+    """Store today's NBA.com lineups; a failure is printed and leaves the odds beat's exit code alone."""
+
+    try:
+        summary = team_lineups.collect_team_lineups(dependencies.engine)
+    except Exception as error:
+        print(f"lineups failed: {type(error).__name__}: {error}")
+        return
+    print(f"lineups: {json.dumps(summary, sort_keys=True)}")
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
-from sqlalchemy import and_, delete, insert, or_, select, text
+from sqlalchemy import and_, delete, insert, or_, select, text, tuple_
 from sqlalchemy.engine import Engine
 
 from app.domain.nba_events import is_postponed_event
@@ -50,13 +50,13 @@ def collect_team_lineups(
                 # A locked table must not hold up the odds beat that runs next.
                 connection.execute(text(f"SET LOCAL lock_timeout = '{DATABASE_TIMEOUT}'"))
                 connection.execute(text(f"SET LOCAL statement_timeout = '{DATABASE_TIMEOUT}'"))
-            for lineup in lineups:
-                key = and_(
-                    TeamLineup.game_id == lineup.game_id,
-                    TeamLineup.team_id == lineup.team_id,
-                )
-                connection.execute(delete(TeamLineup.__table__).where(key))
             if lineups:
+                keys = [(lineup.game_id, lineup.team_id) for lineup in lineups]
+                connection.execute(
+                    delete(TeamLineup.__table__).where(
+                        tuple_(TeamLineup.game_id, TeamLineup.team_id).in_(keys)
+                    )
+                )
                 connection.execute(
                     insert(TeamLineup.__table__),
                     [

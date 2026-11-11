@@ -79,8 +79,9 @@ def test_a_date_with_no_game_answers_no_game(client, seeded):
     assert response.get_json()["lineup"]["status"] == "no_game"
 
 
-def test_the_team_view_with_without_carries_the_lineup_too(client, seeded):
-    response = client.get(f"{ROTATION}?team=OKC&without=Unit%20One")
+@pytest.mark.parametrize("split", ["without=Unit%20One", "with=Unit%20One"])
+def test_the_split_team_views_carry_the_lineup_too(client, seeded, split):
+    response = client.get(f"{ROTATION}?team=OKC&{split}")
 
     assert response.status_code == 200
     assert response.get_json()["lineup"]["status"] == "posted"
@@ -103,7 +104,13 @@ def test_a_bad_or_misplaced_date_is_refused(client, seeded, query):
     assert response.get_json()["error"]["details"] == {"parameters": ["date"]}
 
 
-NO_HISTORY_EXITS = ["", "&without=Unit%20One", "&season=2027-28", "&last_n=3&season=2026-27"]
+NO_HISTORY_EXITS = [
+    "",
+    "&without=Unit%20One",
+    "&with=Unit%20One",
+    "&season=2027-28",
+    "&last_n=3&season=2026-27",
+]
 
 
 @pytest.mark.parametrize("extra", NO_HISTORY_EXITS)

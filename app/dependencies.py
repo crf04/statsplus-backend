@@ -685,6 +685,7 @@ def build_dependencies(
         ),
         event_catalog=event_catalog_service,
         snapshot_repository=injury_snapshot_repository,
+        athlete_catalog=athlete_catalog_service,
         settings=settings,
         enabled=settings.features.injury_report_enabled,
     )

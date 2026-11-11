@@ -18,13 +18,18 @@ from app.utils import sentry_setup
 from scripts import collect_odds, projection_collection_service
 
 ROOT = Path(__file__).resolve().parents[1]
-RECORDED_LINEUPS = ROOT / "tests" / "fixtures" / "nba_daily_lineups" / "00_daily_lineups_20261110.json"
 
 
 @pytest.fixture(autouse=True)
-def _no_lineups_request(monkeypatch):
-    """Every beat here stores lineups through a stub; the lineups tests put the real step back."""
-    monkeypatch.setattr(collect_odds, "collect_team_lineups", lambda _engine: {"state": "stubbed"})
+def _no_game_lines(monkeypatch):
+    # The ESPN game-line step has its own tests (tests/test_collect_odds_game_lines.py).
+    monkeypatch.setattr(collect_odds, "collect_game_lines", lambda _dependencies: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_lineups(monkeypatch):
+    # The NBA.com lineups step has its own tests (tests/test_collect_odds_lineups.py).
+    monkeypatch.setattr(collect_odds, "collect_lineups", lambda _dependencies: None)
 
 
 def test_the_projection_collector_loop_no_longer_references_odds():
@@ -50,25 +55,23 @@ def test_the_script_reads_the_database_url_from_the_environment(monkeypatch, cap
     seen = {}
     settings = SimpleNamespace(odds_api=OddsApiSettings(), log_level="INFO")
     monkeypatch.setattr(collect_odds, "load_settings", lambda **kw: seen.update(kw) or settings)
-    monkeypatch.setattr(collect_odds, "build_dependencies", lambda _s: SimpleNamespace(engine=None))
+    monkeypatch.setattr(collect_odds, "build_dependencies", lambda _s: object())
 
     assert collect_odds.main([]) == 0
 
     assert seen == {"overrides": {"DATABASE_URL": "postgresql://odds.example/statsplus"}}
-    assert capsys.readouterr().out == 'lineups: {"state": "stubbed"}\nno_work: ODDS_API_ENABLED is false\n'
+    assert capsys.readouterr().out == "no_work: ODDS_API_ENABLED is false\n"
 
 
 def test_enabled_without_a_key_exits_nonzero_and_says_so(monkeypatch, capsys):
     settings = SimpleNamespace(odds_api=OddsApiSettings(enabled=True), log_level="INFO")
     monkeypatch.setattr(collect_odds, "load_settings", lambda **_kw: settings)
-    monkeypatch.setattr(collect_odds, "build_dependencies", lambda _s: SimpleNamespace(engine=None))
+    monkeypatch.setattr(collect_odds, "build_dependencies", lambda _s: object())
 
     code = collect_odds.main(["--database-url", "postgresql://collector.example/statsplus"])
 
     assert code == 1
-    assert capsys.readouterr().out == (
-        'lineups: {"state": "stubbed"}\nfailed: ODDS_API_ENABLED is true but ODDS_API_KEY is not set\n'
-    )
+    assert capsys.readouterr().out == "failed: ODDS_API_ENABLED is true but ODDS_API_KEY is not set\n"
 
 
 def test_sentry_is_initialized_so_the_guard_alerts_are_delivered(monkeypatch):
@@ -101,7 +104,7 @@ def test_sentry_is_initialized_so_the_guard_alerts_are_delivered(monkeypatch):
     )
     monkeypatch.setattr(odds_collection, "build_odds_collection", lambda deps, cfg: coordinator)
     monkeypatch.setattr(collect_odds, "load_settings", lambda **_kw: SimpleNamespace(log_level="INFO"))
-    monkeypatch.setattr(collect_odds, "build_dependencies", lambda _s: SimpleNamespace(engine=None))
+    monkeypatch.setattr(collect_odds, "build_dependencies", lambda _s: object())
     try:
         assert collect_odds.main(["--database-url", "postgresql://x.example/db"]) == 0
     finally:
@@ -135,7 +138,7 @@ def test_cron_logs_show_the_cycle_line_and_the_summary_carries_remaining_credits
     )
     monkeypatch.setattr(odds_collection, "build_odds_collection", lambda d, c: coordinator)
     monkeypatch.setattr(collect_odds, "load_settings", lambda **_kw: SimpleNamespace(log_level="INFO"))
-    monkeypatch.setattr(collect_odds, "build_dependencies", lambda _s: SimpleNamespace(engine=None))
+    monkeypatch.setattr(collect_odds, "build_dependencies", lambda _s: object())
     try:
         assert collect_odds.main(["--database-url", "postgresql://x.example/db"]) == 0
     finally:
@@ -267,54 +270,3 @@ def test_production_wiring_serves_a_recorded_prizepicks_line_for_ninety_minutes(
     assert lines_after(60) == [{"PTS": 27.5}]
     assert lines_after(90) == [{"PTS": 27.5}]
     assert lines_after(91) == []
-
-
-def _disabled_beat(monkeypatch, engine, fetch):
-    from app.providers import nba_daily_lineups
-    from app.services import team_lineups
-
-    settings = SimpleNamespace(odds_api=OddsApiSettings(), log_level="INFO")
-    monkeypatch.setattr(collect_odds, "load_settings", lambda **_kw: settings)
-    monkeypatch.setattr(collect_odds, "build_dependencies", lambda _s: SimpleNamespace(engine=engine))
-    monkeypatch.setattr(collect_odds, "collect_team_lineups", team_lineups.collect_team_lineups)
-    monkeypatch.setattr(nba_daily_lineups, "fetch_daily_lineups", fetch)
-
-
-def _lineups_line(line):
-    assert line.startswith("lineups: ")
-    reported = json.loads(line.removeprefix("lineups: "))
-    reported.pop("date")
-    return reported
-
-
-def test_the_beat_stores_todays_lineups_even_with_odds_disabled(monkeypatch, capsys, tmp_path):
-    from sqlalchemy import create_engine, func, select
-
-    from app.migrations import run_migrations
-    from app.models.team_lineup import TeamLineup
-
-    engine = create_engine(f"sqlite:///{tmp_path / 'lineups.sqlite3'}")
-    run_migrations(engine)
-    _disabled_beat(monkeypatch, engine, lambda _day: json.loads(RECORDED_LINEUPS.read_text()))
-
-    assert collect_odds.main(["--database-url", "postgresql://x.example/db"]) == 0
-
-    lines = capsys.readouterr().out.splitlines()
-    assert _lineups_line(lines[0]) == {"state": "stored", "teams": 12}
-    assert lines[1] == "no_work: ODDS_API_ENABLED is false"
-    with engine.connect() as connection:
-        assert connection.execute(select(func.count()).select_from(TeamLineup.__table__)).scalar() == 12
-
-
-def test_a_lineups_failure_leaves_the_beat_and_its_exit_status_alone(monkeypatch, capsys):
-    def unreachable(_day):
-        raise ConnectionError("stats.nba.com unreachable")
-
-    _disabled_beat(monkeypatch, None, unreachable)
-
-    assert collect_odds.main(["--database-url", "postgresql://x.example/db"]) == 0
-
-    # The JSON log lines go to stdout too; the step's warning is one of them.
-    lines = [line for line in capsys.readouterr().out.splitlines() if not line.startswith('{"level"')]
-    assert _lineups_line(lines[0]) == {"state": "failed", "error": "ConnectionError"}
-    assert lines[1] == "no_work: ODDS_API_ENABLED is false"
