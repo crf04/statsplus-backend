@@ -2545,6 +2545,8 @@ class SegmentSplits:
                     "fg3a": row.fg3a,
                     "tov": row.tov,
                     "fta": row.fta,
+                    "fgm": None,
+                    "ftm": None,
                     "team_fga": 400,
                     "team_fta": 0,
                     "team_tov": 0,

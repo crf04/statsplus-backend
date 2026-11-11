@@ -41,6 +41,7 @@ from app.domain.nba_teams import (
     canonical_nba_team_abbreviation,
 )
 from app.errors import InvalidInputError, ProviderUnavailableError
+from app.services.lineup_segments import MAKES
 from app.services.nba_stats_adapter import validate_canonical_season
 from app.services.pbp_stats_adapter import WowyPlayerRow
 from app.utils.redis_breaker import RedisCircuitBreaker
@@ -180,18 +181,26 @@ def normalize_rows(rows: Iterable[WowyPlayerRow]) -> list[dict[str, Any]]:
     return players
 
 
-def _with_fg2a(player: Mapping[str, Any]) -> dict[str, Any]:
-    """A segments-served player with two-point attempts, FGA minus 3PA.
+def _with_segment_counts(player: Mapping[str, Any], sums: Mapping[str, Any] | None) -> dict[str, Any]:
+    """A segments-served player with two-point attempts (FGA minus 3PA) and,
+    given his ``sums`` with makes, made field goals, twos and free throws.
 
     Not in ``_player_payload``: PBP Stats entries keep their shape, so their
     cached copies stay current under ``ENTRY_SCHEMA``.
     """
 
-    fg2a = player["totals"]["fga"] - player["totals"]["fg3a"]
+    extra = {"fg2a": player["totals"]["fga"] - player["totals"]["fg3a"]}
+    if sums is not None:
+        extra["fgm"] = int(sums["fgm"])
+        extra["fg2m"] = extra["fgm"] - player["totals"]["fg3m"]
+        extra["ftm"] = int(sums["ftm"])
     return {
         **player,
-        "totals": {**player["totals"], "fg2a": fg2a},
-        "per36": {**player["per36"], "fg2a": _per36(fg2a, player["minutes"])},
+        "totals": {**player["totals"], **extra},
+        "per36": {
+            **player["per36"],
+            **{key: _per36(value, player["minutes"]) for key, value in extra.items()},
+        },
     }
 
 
@@ -411,13 +420,18 @@ class OnOffService:
         )
         if split is None:
             return None
+        # Makes only when every player's sums have them: a split holding a
+        # segment collected before migration 089 reports none, never a part.
+        sums = {int(row["player_id"]): row for row in split.rows}
+        makes = all(row[key] is not None for row in split.rows for key in MAKES)
         return {
             "status": "ok",
             **self._envelope(request, source=SEGMENTS_SOURCE),
             "cached_at": None if split.written_at is None else split.written_at.astimezone(UTC).isoformat(),
             "stale": False,
             "players": [
-                _with_fg2a(player) for player in normalize_rows(segment_row(sums) for sums in split.rows)
+                _with_segment_counts(player, sums[player["player_id"]] if makes else None)
+                for player in normalize_rows(segment_row(row) for row in split.rows)
             ],
             "games_missing": list(split.games_missing),
             "team_games": split.team_games,

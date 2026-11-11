@@ -1220,7 +1220,7 @@ def test_the_asked_state_and_the_full_season_carry_two_point_attempts(covered, p
     )
     for body in (asked, season):
         assert [list(player["per36"]) for player in body["players"]] == [
-            ["pts", "reb", "ast", "fg3m", "fga", "fg3a", "tov", "fta", "fg2a"]
+            ["pts", "reb", "ast", "fg3m", "fga", "fg3a", "tov", "fta", "fg2a", "fgm", "fg2m", "ftm"]
         ] * len(body["players"])
         assert list(body["players"][0]["totals"]) == list(body["players"][0]["per36"])
 
@@ -1289,6 +1289,9 @@ def test_two_point_attempts_are_zero_without_one_and_round_from_the_totals(provi
                 "tov": 0.0,
                 "fta": 0.0,
                 "fg2a": 0.0,
+                "fgm": 0.0,
+                "fg2m": 0.0,
+                "ftm": 0.0,
             },
         ),
         # 3 * 36 / 7 is 15.43, not 25.71 - 10.29 from the rounded rates.
@@ -1305,6 +1308,9 @@ def test_two_point_attempts_are_zero_without_one_and_round_from_the_totals(provi
                 "tov": 0.0,
                 "fta": 0.0,
                 "fg2a": 15.43,
+                "fgm": 0.0,
+                "fg2m": 0.0,
+                "ftm": 0.0,
             },
         ),
     ]
