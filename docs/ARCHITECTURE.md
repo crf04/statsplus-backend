@@ -4974,6 +4974,12 @@ beat (every 5 min, its own Railway cron service: scripts/collect_odds.py)
   → roster-scoped AthleteResolver (provider "oddsapi", ids "name:<folded>")
   → one transaction: odds_api_polls + sportsbook_prop_quotes (history, only on
     change, plus every closing snapshot) + sportsbook_prop_latest
+  → then, whatever the beat's outcome (an exception included), each in its own
+    guard (thread start included) and each abandoned after SIDE_STEP_SECONDS
+    (30 s) on a daemon thread, whose database work then ends within 5 s:
+    ESPN game lines (crf04/statsplus#493), then NBA.com daily lineups
+    (crf04/statsplus#492). One failing or hanging never skips the other or
+    changes the exit code; together they add at most about a minute to a run.
 Matchup read (only when ODDS_API_ENABLED): MatchupService._book_lines →
   SportsbookQuoteReader (savepoint)
 Board read (only when ODDS_API_ENABLED): SlateBoardService →
@@ -5749,6 +5755,39 @@ service and is also the season backfill. `RotationService` serves
 `GET /api/games/rotation`, computing every average and comparison from the
 stored centiseconds.
 
+### Daily lineups from NBA.com (crf04/statsplus#492)
+
+NBA.com's daily lineups feed is one static document per US Eastern day
+(`stats.nba.com/js/data/leaders/00_daily_lineups_YYYYMMDD.json`, sent with
+`nba_api`'s `STATS_HEADERS`; a day not published yet redirects to `/error/`).
+`app/providers/nba_daily_lineups.py` fetches and parses it: a starter is a row
+whose `position` is set, and its `lineupStatus` (`Expected`, then `Confirmed`)
+is the lineup's state; until confirmation each starter is also listed as a
+bench row, which the parser drops. `timestamp` is Eastern wall time.
+
+`collect_team_lineups` (`app/services/team_lineups.py`) reads today's
+document and, in one transaction (one DELETE, one INSERT), replaces the
+`team_lineups` row (migration 088, `app/models/team_lineup.py`) of every team it lists, keyed by game and
+team, with the document's Eastern date. A rerun leaves the same rows. One
+request, no retry (the next run is the retry): it runs on a daemon thread
+that is abandoned after ten seconds however slowly the server answers
+(five-second socket reads inside), and on
+Postgres the transaction sets a five-second `lock_timeout` and
+`statement_timeout` (`bound_postgres_transaction`, shared with the game-lines
+step), so a locked table fails the step instead of holding the odds beat. It never raises; an unpublished day, a failed request, a malformed document or a
+database error is reported in its result and changes no row.
+`scripts/collect_odds.py` runs it after every odds beat and after the game
+lines step, each in its own guard and each bounded at 30 s (the `*/5 * * * *`
+odds cron, whatever `ODDS_API_ENABLED` says), so a lineup confirmed about 30
+minutes before tip is stored within about five minutes. Staging runs no
+collectors, so staging stores no lineups.
+
+`TeamLineupRepository.read` serves the rotation team view's `lineup`: the
+team's first non-postponed Event Catalog game on the asked Eastern day (or from
+today on), and its stored row only when the row's date is that game's Eastern
+date, so a moved game is not served an old lineup. The request never fetches
+the feed.
+
 ### Stored game context (crf04/statsplus#466)
 
 `game_contexts` heads one Event Catalog game and `game_context_teams` holds one
@@ -5786,7 +5825,10 @@ reported `unmatched`. A matched row is inserted or rewritten with the new
 `read_at` in one upsert that keeps a stored row read at the same time or later
 (counted `stale`), so overlapping runs that finish out of order never move a
 line back; a started game, or one ESPN shows no line for, is not written, so it
-keeps its last pre-tip line. `scripts/collect_odds.py` runs it after every odds
+keeps its last pre-tip line. On Postgres its transaction sets a five-second
+`lock_timeout` and `statement_timeout` (`bound_postgres_transaction`), so a
+locked table fails the step and no abandoned transaction outlives its run by
+more than five seconds. `scripts/collect_odds.py` runs it after every odds
 beat in the `odds-collector` cron (every five minutes); a failure prints
 `game_lines failed: ...` and never changes the exit code. The Matchup reads the
 row as `game_context.game_line` and never calls ESPN; the favourite and implied

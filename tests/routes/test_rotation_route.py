@@ -181,7 +181,7 @@ def test_a_namesake_with_data_makes_the_name_ambiguous(client, seeded):
         ("", ["player_name", "team", "game_id"]),
         ("player_name=Unit%20One&team=DET", ["player_name", "team"]),
         ("team=DET&player_team=DET", ["player_team"]),
-        ("team=DET&date=2026-01-01", ["date"]),
+        ("team=DET&date=2026-01-32", ["date"]),
         ("team=DET&team=BOS", ["team"]),
         ("team=DETROIT", ["team"]),
         ("player_name=%20", ["player_name"]),
