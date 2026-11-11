@@ -21,11 +21,11 @@ from __future__ import annotations
 
 from bisect import bisect_left
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select, tuple_, union
+from sqlalchemy import and_, func, literal, or_, select, tuple_, union, union_all
 
 from app.domain.utc import assume_utc
 from app.models.projection_archive import (
@@ -132,8 +132,6 @@ class _Generation:
     order: tuple[datetime, datetime, str]
     complete: bool
     polled_at: datetime
-    #: The newest poll that confirmed this generation, its own included.
-    confirmed_at: datetime
 
 
 def _lines(rows: Iterable[Any]) -> list[Any]:
@@ -276,7 +274,10 @@ def provider_histories(
         select(*columns).where(*cells, ~posting, observation.c.generation_id.in_(partial))
     ).all()
     generations = _generations(
-        connection, season=season, held=sorted({str(row.generation_id) for row in rows})
+        connection,
+        season=season,
+        held=sorted({str(row.generation_id) for row in rows}),
+        fences=fences.values(),
     )
     by_cell: dict[tuple[str, str, str, int], dict[str, list[Any]]] = {}
     for row in rows:
@@ -291,6 +292,7 @@ def provider_histories(
     # Each scope's generations a game reads: those polled by its tip, if it started.
     sequences: dict[tuple[str, str, str], _Sequence] = {}
     histories: dict[CellKey, CellHistory] = {}
+    last_posted: dict[CellKey, _Generation] = {}
     for (provider, query_key, game_id, player_id), cell_rows in by_cell.items():
         if (provider, query_key, game_id) not in sequences:
             fence = fences.get(game_id)
@@ -315,7 +317,7 @@ def provider_histories(
             sightings=sightings,
             posted_at_start=sequence.replay(events, cell_rows, sequence.before_day)[0],
             posted_now=posted_now,
-            last_seen_at=sequence.generations[last].confirmed_at,
+            last_seen_at=sequence.generations[last].order[0],
             name=newest.canonical_player_name,
             team_id=newest.canonical_team_id,
         )
@@ -323,74 +325,33 @@ def provider_histories(
         previous = histories.get((provider, game_id, player_id))
         if previous is None or previous.last_seen_at < history.last_seen_at:
             histories[(provider, game_id, player_id)] = history
+            last_posted[(provider, game_id, player_id)] = sequence.generations[last]
+    pulled = {key: last_posted[key] for key, history in histories.items() if not history.posted_now}
+    confirmations = _confirmations(connection, season=season, generations=set(pulled.values()))
+    for key, generation in pulled.items():
+        histories[key] = replace(
+            histories[key], last_seen_at=confirmations.get(generation.generation_id, generation.order[0])
+        )
     return histories
 
 
-def _generations(connection: Any, *, season: str, held: Sequence[str]) -> dict[str, _Generation]:
-    """The promoted generations a replay of the cells reads, each with its newest confirming poll.
+def _generations(
+    connection: Any, *, season: str, held: Sequence[str], fences: Iterable[datetime]
+) -> dict[str, _Generation]:
+    """The promoted generations a replay of the cells reads.
 
     Those are the ones holding the cells' rows, and the first Complete
-    generation after each of them, which withdraws a cell it omits.  No other
-    generation changes a replay: a Partial one without the cell carries it,
-    and a later Complete one finds it already withdrawn.
+    generation after each of them, which withdraws a cell it omits; a started
+    game replays only generations polled by its tip, so the first Complete
+    after each is found again among those.  No other generation changes a
+    replay: a Partial one without the cell carries it, and a later Complete
+    one finds it already withdrawn.
     """
 
     generation = ProjectionMaterializationGeneration.__table__
     snapshot = ProjectionProviderSnapshot.__table__
     poll = ProviderPoll.__table__
     order = (generation.c.retrieved_at, generation.c.created_at, generation.c.generation_id)
-    described = (
-        select(
-            generation.c.generation_id,
-            generation.c.provider,
-            generation.c.query_key,
-            generation.c.retrieved_at,
-            generation.c.created_at,
-            snapshot.c.snapshot_status,
-            poll.c.completed_at,
-        )
-        .select_from(
-            generation.join(snapshot, generation.c.snapshot_id == snapshot.c.snapshot_id).join(
-                poll, generation.c.source_poll_id == poll.c.poll_id
-            )
-        )
-        .where(generation.c.season == season, generation.c.outcome == "advanced")
-    )
-    holding = described.where(generation.c.generation_id.in_(held)).cte("holding")
-    completes = (
-        described.add_columns(
-            *(
-                func.lag(column)
-                .over(partition_by=(generation.c.provider, generation.c.query_key), order_by=order)
-                .label(f"previous_{column.name}")
-                for column in order
-            )
-        )
-        .where(
-            snapshot.c.snapshot_status == SnapshotStatus.COMPLETE.value,
-            generation.c.provider.in_(select(holding.c.provider)),
-        )
-        .cte("completes")
-    )
-    after_held = (
-        select(holding.c.generation_id)
-        .where(
-            holding.c.provider == completes.c.provider,
-            holding.c.query_key == completes.c.query_key,
-            tuple_(holding.c.retrieved_at, holding.c.created_at, holding.c.generation_id)
-            < tuple_(completes.c.retrieved_at, completes.c.created_at, completes.c.generation_id),
-            or_(
-                completes.c.previous_generation_id.is_(None),
-                tuple_(
-                    completes.c.previous_retrieved_at,
-                    completes.c.previous_created_at,
-                    completes.c.previous_generation_id,
-                )
-                <= tuple_(holding.c.retrieved_at, holding.c.created_at, holding.c.generation_id),
-            ),
-        )
-        .exists()
-    )
     fields = (
         "generation_id",
         "provider",
@@ -400,21 +361,56 @@ def _generations(connection: Any, *, season: str, held: Sequence[str]) -> dict[s
         "snapshot_status",
         "completed_at",
     )
-    rows = connection.execute(
-        union(
-            select(*(holding.c[field] for field in fields)),
-            select(*(completes.c[field] for field in fields)).where(after_held),
+    described = (
+        select(
+            *(generation.c[field] for field in fields[:5]), snapshot.c.snapshot_status, poll.c.completed_at
         )
-    ).all()
-    confirmations = {
-        str(row.generation_id): assume_utc(row.confirmed_at)
-        for row in connection.execute(
-            select(poll.c.generation_id, func.max(poll.c.retrieved_at).label("confirmed_at"))
-            .where(poll.c.generation_id.in_(held))
-            .group_by(poll.c.generation_id)
+        .select_from(
+            generation.join(snapshot, generation.c.snapshot_id == snapshot.c.snapshot_id).join(
+                poll, generation.c.source_poll_id == poll.c.poll_id
+            )
         )
-        if row.confirmed_at is not None
-    }
+        .where(generation.c.season == season, generation.c.outcome == "advanced")
+    )
+    holding = described.where(generation.c.generation_id.in_(held)).cte("holding")
+    selects = [select(*(holding.c[field] for field in fields))]
+    for index, fence in enumerate([None, *sorted(set(fences))]):
+        completes = (
+            described.add_columns(
+                *(
+                    func.lag(column)
+                    .over(partition_by=(generation.c.provider, generation.c.query_key), order_by=order)
+                    .label(f"previous_{column.name}")
+                    for column in order
+                )
+            )
+            .where(
+                snapshot.c.snapshot_status == SnapshotStatus.COMPLETE.value,
+                generation.c.provider.in_(select(holding.c.provider)),
+                *(() if fence is None else (poll.c.completed_at <= fence,)),
+            )
+            .cte(f"completes_{index}")
+        )
+        held_before = (
+            select(holding.c.generation_id)
+            .where(
+                holding.c.provider == completes.c.provider,
+                holding.c.query_key == completes.c.query_key,
+                tuple_(holding.c.retrieved_at, holding.c.created_at, holding.c.generation_id)
+                < tuple_(completes.c.retrieved_at, completes.c.created_at, completes.c.generation_id),
+                or_(
+                    completes.c.previous_generation_id.is_(None),
+                    tuple_(
+                        completes.c.previous_retrieved_at,
+                        completes.c.previous_created_at,
+                        completes.c.previous_generation_id,
+                    )
+                    <= tuple_(holding.c.retrieved_at, holding.c.created_at, holding.c.generation_id),
+                ),
+            )
+            .exists()
+        )
+        selects.append(select(*(completes.c[field] for field in fields)).where(held_before))
     return {
         str(row.generation_id): _Generation(
             generation_id=str(row.generation_id),
@@ -422,9 +418,63 @@ def _generations(connection: Any, *, season: str, held: Sequence[str]) -> dict[s
             order=(assume_utc(row.retrieved_at), assume_utc(row.created_at), str(row.generation_id)),
             complete=row.snapshot_status == SnapshotStatus.COMPLETE.value,
             polled_at=assume_utc(row.completed_at),
-            confirmed_at=confirmations.get(str(row.generation_id), assume_utc(row.retrieved_at)),
         )
-        for row in rows
+        for row in connection.execute(union(*selects)).all()
+    }
+
+
+#: Past any poll: a run no other generation's poll has ended yet.
+_END_OF_TIME = datetime(9999, 12, 31, tzinfo=UTC)
+
+
+def _confirmations(
+    connection: Any, *, season: str, generations: Iterable[_Generation]
+) -> dict[str, datetime]:
+    """Each generation's newest confirming poll: the last of the run of its scope's polls that name it.
+
+    Both bounds go through the polls' scope index (provider, season, query,
+    completion time): the run starts at the generation's own poll and ends at
+    the scope's next poll that names another generation.
+    """
+
+    poll = ProviderPoll.__table__
+    confirming, later = poll.alias("confirming"), poll.alias("later")
+    selects = []
+    for generation in sorted(generations, key=lambda generation: generation.generation_id):
+        provider, query_key = generation.scope
+
+        def scope(table: Any, provider: str = provider, query_key: str = query_key) -> tuple[Any, ...]:
+            return (table.c.provider == provider, table.c.season == season, table.c.query_key == query_key)
+
+        run_end = (
+            select(later.c.completed_at)
+            .where(
+                *scope(later),
+                later.c.completed_at > generation.polled_at,
+                later.c.generation_id.is_not(None),
+                later.c.generation_id != generation.generation_id,
+            )
+            .order_by(later.c.completed_at)
+            .limit(1)
+            .scalar_subquery()
+        )
+        selects.append(
+            select(
+                literal(generation.generation_id).label("generation_id"),
+                func.max(confirming.c.retrieved_at).label("confirmed_at"),
+            ).where(
+                *scope(confirming),
+                confirming.c.generation_id == generation.generation_id,
+                confirming.c.completed_at >= generation.polled_at,
+                confirming.c.completed_at < func.coalesce(run_end, _END_OF_TIME),
+            )
+        )
+    if not selects:
+        return {}
+    return {
+        str(row.generation_id): assume_utc(row.confirmed_at)
+        for row in connection.execute(union_all(*selects)).all()
+        if row.confirmed_at is not None
     }
 
 

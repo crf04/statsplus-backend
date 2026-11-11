@@ -103,5 +103,43 @@ def test_the_read_returns_only_the_generations_the_requested_cells_need(tmp_path
     assert histories[("underdog", LATER, TATUM[0])].posted_now is False
     assert after == histories
     # Lines: PrizePicks' one and Underdog's two.  Generations: PrizePicks' one, Underdog's two
-    # and the Complete board that pulled Tatum.  Confirmations: the three that posted him.
-    assert (rows, rows_after) == (10, 10)
+    # and the Complete board that pulled Tatum.  Confirmations: the last board that posted the
+    # pulled line.
+    assert (rows, rows_after) == (8, 8)
+
+
+def test_a_withdrawal_polled_before_the_tip_counts_though_an_earlier_board_finished_after_it(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'fence.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    posted = DAY_START + timedelta(hours=10)
+    tip = posted + timedelta(hours=3)
+    archive.ingest_complete_snapshot(
+        _snapshot("underdog", (_market(catalog, "underdog", TATUM, "points", "28.5"),), posted),
+        query=QUERY,
+        accepted_at=posted,
+    )
+    # Both boards omit Tatum.  The first was retrieved earlier but its poll finished after the tip,
+    # so the closing replay skips it; the second, polled before the tip, withdraws him.
+    for retrieved, finished, line in (
+        (posted + timedelta(hours=1), tip + timedelta(hours=1), "6.5"),
+        (posted + timedelta(hours=2), posted + timedelta(hours=2), "7.5"),
+    ):
+        board = (_market(catalog, "underdog", OTHER, "rebounds", line),)
+        archive.ingest_complete_snapshot(
+            _snapshot("underdog", board, retrieved), query=QUERY, accepted_at=finished
+        )
+
+    with engine.connect() as connection:
+        histories = provider_histories(
+            connection,
+            season=SEASON,
+            game_ids=[LATER],
+            statistic_ids=["points"],
+            providers=["underdog"],
+            fences={LATER: tip},
+            day_start=DAY_START,
+        )
+
+    assert histories[("underdog", LATER, TATUM[0])].posted_now is False
