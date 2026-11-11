@@ -3369,11 +3369,13 @@ to a `label` and `ranks`, each team tricode's whole-season rank in that metric
 per 48, 1-30 with 30 = allows the most. The ranks are the Matchup Defense
 Sheet's Traditional row ranks, so tied teams share a rank exactly as the Sheet
 shows them. The line types are `PTS` (Points Allowed), `REB`, `AST`, `FGM`,
-`FGA`, `FG3M`, `FG3A`, `FTM`, `FTA`, `STL`, `BLK`, `TOV` and `STKS` (Steals +
-Blocks, ranked as the Opposing Team Profile ranks it). The label is the
-metric's opponent-filter label, or `FG Made Allowed`, `FG Attempts Allowed`
-or `FT Made Allowed` where no Team Filter offers the metric. Combos and
-`FD_PTS` have no entry. The ranks come from the same Season publication
+`FGA`, `FG3M`, `FG3A`, `FTM`, `FTA`, `STL`, `BLK`, `TOV`, `STKS` (Steals +
+Blocks, ranked as the Opposing Team Profile ranks it), and the combos `PR`,
+`PA`, `RA` and `PRA`, each ranked by the sum of its stats allowed per 48
+(crf04/statsplus#505). The label is the metric's opponent-filter label, or
+`FG Made Allowed`, `FG Attempts Allowed` or `FT Made Allowed` where no Team
+Filter offers the metric. A combo's label names its stats, as in `Rebounds +
+Assists Allowed`. `FD_PTS` has no entry. The ranks come from the same Season publication
 generation the response reads, and no filter changes them. A metric the
 publication lacks has no entry, and the object is `{}` when the season cannot
 be ranked.
