@@ -51,6 +51,7 @@ UNPRICED = {
     "matchup": "LAL vs GSW",
     "lines": {"PTS": {"value": 27.5, "provider": "prizepicks"}},
     "provider_lines": {"prizepicks": {"PTS": 27.5}, "underdog": {"PTS": 27.5}},
+    "line_labels": {"prizepicks": {"PTS": "line-only"}},
     "book_lines": {
         "PTS": {
             "as_of": "2026-10-21T21:04:11Z",
@@ -65,7 +66,7 @@ UNPRICED = {
 
 
 class Sportsbooks:
-    def book_lines(self, game_id):
+    def book_lines(self, game_id, *, now, started):
         return {LEBRON: BOOKS} if game_id == "0022600012" else {}
 
 

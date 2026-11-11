@@ -551,6 +551,31 @@ def test_season_complete_snapshot_names_its_reason_in_surface_availability():
     }
 
 
+def test_matchup_player_rows_label_each_unpriced_line():
+    # Novig's 9.5 has no price and its poll priced another number; Polymarket's 9.5 has none.
+    pool = PlayerPool(
+        players=(
+            PoolPlayer(
+                2544,
+                "LeBron James",
+                LAL,
+                ("PTS",),
+                {"novig": ("PTS",), "polymarket": ("PTS",), "underdog": ("PTS",)},
+                lines={"novig": {"PTS": 9.5}, "polymarket": {"PTS": 9.5}, "underdog": {"PTS": 28.0}},
+                line_prices={"underdog": {"PTS": {"over": -112, "under": None}}},
+                priced_other_lines={"novig": ("PTS",)},
+            ),
+        ),
+        team_counts={LAL: 1},
+        freshness={"status": "fresh", "retrieved_at": RETRIEVED_AT.isoformat(), "providers": {}},
+    )
+
+    player = _service(pool=pool).get_matchup(game_id=GAME_ID)["players"][0]
+
+    assert player["lines"] == {"novig": {"PTS": 9.5}, "polymarket": {"PTS": 9.5}, "underdog": {"PTS": 28.0}}
+    assert player["line_labels"] == {"novig": {"PTS": "alternate"}, "polymarket": {"PTS": "unpriced"}}
+
+
 def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence_is_partial():
     player = _service().get_matchup(game_id=GAME_ID)["players"][0]
 
@@ -572,6 +597,7 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
             "underdog": {"PTS": 28.0},
         },
         "line_prices": {"underdog": {"PTS": {"over": -112, "under": None}}},
+        "line_labels": {"prizepicks": {"PTS": "line-only"}},
         "season_scoring": 25.4,
         # The fake summary has a points rate but no rows behind it.
         "last_five_games": [],
@@ -1889,7 +1915,7 @@ def test_book_lines_are_read_once_per_matchup_and_never_for_a_snapshot_compositi
         def __init__(self):
             self.calls = []
 
-        def book_lines(self, game_id, *, connection=None):
+        def book_lines(self, game_id, *, now, started, connection=None):
             self.calls.append(game_id)
             return {2544: {"PTS": {"as_of": "2026-01-15T11:00:00Z", "closing": False, "books": []}}}
 

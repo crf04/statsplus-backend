@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import create_engine, text
 
 from app.config.settings import NBASeasonSettings, RuntimeSettings
@@ -33,6 +34,7 @@ from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_diet import PlayerDietResult, StoredPlayerDietFact
 from app.services.player_game_log_repository import PlayerGameLogRecord, PlayerGameLogRepository
 from app.services.player_pool import PlayerPool, PoolPlayer
+from app.services.sportsbook_quotes import ResolvedQuote, SportsbookQuoteReader, SportsbookQuoteStore
 from app.services.statistic_catalog import StatisticCatalog
 from app.services.stats_freshness_repository import StatsFreshness
 from tests.services.test_matchup_service import (
@@ -235,7 +237,7 @@ BOOK_QUOTE = {"PTS": {"as_of": "2026-01-15T11:00:00Z", "closing": False, "books"
 
 
 class Books:
-    def book_lines(self, game_id, *, connection=None):
+    def book_lines(self, game_id, *, now, started, connection=None):
         return {ROTATION: BOOK_QUOTE}
 
 
@@ -343,6 +345,7 @@ def assert_rotation_scenario(served):
         "provenance": {},
         "lines": {},
         "line_prices": {},
+        "line_labels": {},
         "book_lines": BOOK_QUOTE,
         "season_averages": {},
         "season_scoring": 5.0,
@@ -380,6 +383,7 @@ _LINE_FIELDS = (
     "provenance",
     "lines",
     "line_prices",
+    "line_labels",
     "book_lines",
     "season_averages",
     "season_scoring",
@@ -532,3 +536,40 @@ def test_a_playoffs_log_on_the_legacy_table_never_admits_a_rotation_player(tmp_p
 
     assert ROTATION not in [row["canonical_id"] for row in payload["players"]]
     assert QUESTIONABLE in [row["canonical_id"] for row in payload["players"]]
+
+
+@pytest.mark.parametrize("on_engine", [True, False])
+def test_a_rotation_players_books_are_judged_stale_and_he_gets_no_line_label(tmp_path, on_engine):
+    """No line, so no label is invented; his book quotes are judged like anyone's (crf04/statsplus#495, #496).
+
+    With an engine, as in production, the books are read on the request's connection."""
+
+    served = _sqlite_world(tmp_path)
+    SportsbookQuoteStore(served.engine).record_poll(
+        odds_event_id="odds-rotation",
+        game_id=GAME_ID,
+        started_at=NOW,
+        completed_at=NOW,
+        cost=1,
+        remaining=100,
+        is_closing=False,
+        quotes=[
+            ResolvedQuote(ROTATION, "PTS", "draftkings", 6.5, -115, -110, NOW),
+            ResolvedQuote(ROTATION, "PTS", "betmgm", 6.5, -120, -105, NOW),
+            ResolvedQuote(ROTATION, "PTS", "fanduel", 6.5, 110, 105, NOW - timedelta(minutes=61)),
+        ],
+    )
+    service = served.service()
+    if on_engine:
+        service._engine = served.engine
+    service.sportsbook_reader = SportsbookQuoteReader(served.engine)
+
+    rotation = next(
+        row for row in service.get_matchup(game_id=GAME_ID)["players"] if row["canonical_id"] == ROTATION
+    )
+
+    assert (rotation["player_source"], rotation["lines"], rotation["line_labels"]) == ("rotation", {}, {})
+    assert [
+        (book["book"], book["stale"], book["best_over"], book["best_under"])
+        for book in rotation["book_lines"]["PTS"]["books"]
+    ] == [("betmgm", False, False, True), ("draftkings", False, True, False), ("fanduel", True, False, False)]

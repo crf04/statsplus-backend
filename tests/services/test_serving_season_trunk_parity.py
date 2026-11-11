@@ -142,6 +142,8 @@ def _without_serving_season_keys(responses: dict) -> dict:
     for player in stripped["matchup"]["players"]:
         player.pop("last_five_games", None)
         player.pop("season_averages", None)
+        # Added after the trunk golden was recorded (crf04/statsplus#495).
+        player.pop("line_labels", None)
         for window in (window for windows in player["scores"].values() for window in windows.values()):
             window["missing_inputs"] = [
                 name for name in window["missing_inputs"] if name != "team_defense:traditional"

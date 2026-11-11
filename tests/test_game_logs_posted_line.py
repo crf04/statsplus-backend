@@ -184,7 +184,7 @@ def test_prizepicks_breaks_a_tie_between_provider_lines_in_every_market(dependen
     pools = Pools(
         {
             "0022600012": {
-                "draftkings": {"PTS": 26.5, "REB": 7.5},
+                "dabble": {"PTS": 26.5, "REB": 7.5},
                 "prizepicks": {"PTS": 27.5},
             }
         }
@@ -200,17 +200,24 @@ def test_prizepicks_breaks_a_tie_between_provider_lines_in_every_market(dependen
         "matchup": "LAL vs GSW",
         "lines": {
             "PTS": {"value": 27.5, "provider": "prizepicks"},
-            "REB": {"value": 7.5, "provider": "draftkings"},
+            "REB": {"value": 7.5, "provider": "dabble"},
         },
-        "provider_lines": {"draftkings": {"PTS": 26.5, "REB": 7.5}, "prizepicks": {"PTS": 27.5}},
+        "provider_lines": {"dabble": {"PTS": 26.5, "REB": 7.5}, "prizepicks": {"PTS": 27.5}},
         "line_prices": {},
+        "line_labels": {
+            "dabble": {"PTS": "line-only", "REB": "line-only"},
+            "prizepicks": {"PTS": "line-only"},
+        },
         "book_lines": {},
     }
 
 
 def test_only_another_provider_posted_and_away_games_read_from_his_side(dependencies, client, engine):
     away = _event("0022600012", "2026-10-22T02:00:00+00:00", "GSW", "LAL")
-    pools = Pools({"0022600012": {"underdog": {"PTS": 28.5}}})
+    pools = Pools(
+        {"0022600012": {"underdog": {"PTS": 28.5}}},
+        prices={"0022600012": {"underdog": {"PTS": {"over": -112, "under": -112}}}},
+    )
     _serve(dependencies, engine, catalog=Catalog(away), pools=pools)
 
     assert client.get(URL).get_json()["posted_line"] == {
@@ -219,7 +226,8 @@ def test_only_another_provider_posted_and_away_games_read_from_his_side(dependen
         "matchup": "LAL @ GSW",
         "lines": {"PTS": {"value": 28.5, "provider": "underdog"}},
         "provider_lines": {"underdog": {"PTS": 28.5}},
-        "line_prices": {},
+        "line_prices": {"underdog": {"PTS": {"over": -112, "under": -112}}},
+        "line_labels": {},
         "book_lines": {},
     }
 
@@ -236,6 +244,7 @@ def test_his_next_games_line_when_his_team_is_not_playing_today(dependencies, cl
         "lines": {"PTS": {"value": 27.5, "provider": "prizepicks"}},
         "provider_lines": {"prizepicks": {"PTS": 27.5}},
         "line_prices": {},
+        "line_labels": {"prizepicks": {"PTS": "line-only"}},
         "book_lines": {},
     }
 
@@ -279,6 +288,7 @@ def test_his_next_games_line_two_days_ahead(dependencies, client, engine):
         "lines": {"PTS": {"value": 26.5, "provider": "prizepicks"}},
         "provider_lines": {"prizepicks": {"PTS": 26.5}},
         "line_prices": {},
+        "line_labels": {"prizepicks": {"PTS": "line-only"}},
         "book_lines": {},
     }
 
@@ -330,6 +340,7 @@ def test_after_a_summer_trade_his_team_is_the_catalogs_for_the_new_season(depend
         "lines": {"PTS": {"value": 22.5, "provider": "prizepicks"}},
         "provider_lines": {"prizepicks": {"PTS": 22.5}},
         "line_prices": {},
+        "line_labels": {"prizepicks": {"PTS": "line-only"}},
         "book_lines": {},
     }
 
@@ -403,6 +414,7 @@ def test_a_named_future_day_reads_that_days_pool_line(dependencies, client, engi
         "lines": {"PTS": {"value": 29.5, "provider": "prizepicks"}},
         "provider_lines": {"prizepicks": {"PTS": 29.5}},
         "line_prices": {},
+        "line_labels": {"prizepicks": {"PTS": "line-only"}},
         "book_lines": {},
     }
 
@@ -417,6 +429,7 @@ def test_a_named_past_day_with_no_pool_uses_the_stored_closing_line(dependencies
         "lines": {"PTS": {"value": 24.5, "provider": "draftkings"}},
         "provider_lines": {},
         "line_prices": {},
+        "line_labels": {},
         "book_lines": {},
     }
 
@@ -536,6 +549,7 @@ def test_a_past_day_reads_the_stored_closing_pool_long_after_the_live_windows(
         },
         "provider_lines": {"prizepicks": {"PTS": 27.5, "REB": 7.5}},
         "line_prices": {},
+        "line_labels": {"prizepicks": {"PTS": "line-only", "REB": "line-only"}},
         "book_lines": {},
     }
 
@@ -543,7 +557,11 @@ def test_a_past_day_reads_the_stored_closing_pool_long_after_the_live_windows(
 def test_the_alphabetically_first_provider_breaks_a_tie_when_prizepicks_is_absent(
     dependencies, client, engine
 ):
-    pools = Pools({"0022600012": {"underdog": {"PTS": 30.5}, "bovada": {"PTS": 29.5}}})
+    even = {"over": -110, "under": -110}
+    pools = Pools(
+        {"0022600012": {"underdog": {"PTS": 30.5}, "bovada": {"PTS": 29.5}}},
+        prices={"0022600012": {"underdog": {"PTS": even}, "bovada": {"PTS": even}}},
+    )
     _serve(dependencies, engine, catalog=Catalog(TONIGHT), pools=pools)
 
     lines = client.get(URL).get_json()["posted_line"]["lines"]

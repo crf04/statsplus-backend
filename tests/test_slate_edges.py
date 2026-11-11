@@ -1323,11 +1323,12 @@ def test_the_edges_and_their_matchups_write_what_the_previous_release_wrote():
         # v12/v8 (statsplus#466): every Matchup carries its stored game_context;
         # v13/v10 (statsplus#459): rows may be Rotation Players;
         # v14 (statsplus#493): every Matchup's game_context carries its stored game_line.
-        "matchup:composed:v14:d224a279f072a43eea8f594a250c1197c0e5cf53237e9a81a64740250939d8b5": (
-            "6319622a4476f2688c3c7c632ed7768f4df865c563c0a77becdcbd315e4732b6"
+        # v15 (statsplus#495): every Matchup player row carries ``line_labels``.
+        "matchup:composed:v15:2c09ce1289c8d668759495f7fc22418c210e19ccf005ceab4f3ea3b4d38ee685": (
+            "41af3e65fb97fc0415b45ad1d966f841aa4111f8193abf8e4d9f4afcfca875d8"
         ),
-        "matchup:composed:v14:958469890bfc578ee11146d706c50c971b768005fb08a3983729bafe2a09a975": (
-            "bb8c59d79c8aac7fbe9fd66f7a9437f8ba74be2ae5b397d84ee5a306bfb4b325"
+        "matchup:composed:v15:e95a06604d407b796294cc229c969c82a50dc71a0e8fa2974e36477ceb003ed2": (
+            "3a1db1f93113eba50cbb2d95c86484f58729f2842b4cd4b6b39af61c5fb6a4ec"
         ),
         # v9 (statsplus#470): each game carries ``leaders``.
         "slate:edges:v10:aa411456db22b7f601373770889ae6752ad8943bb0d67a099a57beede6a8e482": (

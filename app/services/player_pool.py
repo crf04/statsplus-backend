@@ -93,6 +93,10 @@ class PoolPlayer:
     #: Markets omitted from ``line_prices`` because one provider stated two
     #: different price pairs, kept so combining pools never revives one.
     price_conflicts: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    #: Each provider's markets whose line in ``lines`` has no price while the
+    #: poll that posted it priced a different line for him in the same game
+    #: (crf04/statsplus#495).
+    priced_other_lines: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

@@ -159,7 +159,7 @@ def test_book_lines_carry_the_combo_markets_a_book_posts(world):
     )
     world.coordinator(FakeClient(odds=body)).run()
 
-    lines = SportsbookQuoteReader(world.engine).book_lines(GAME_ID)[LEBRON]
+    lines = SportsbookQuoteReader(world.engine).book_lines(GAME_ID, now=world.clock[0], started=False)[LEBRON]
     assert {
         category: [(b["book"], b["line"], b["over"], b["under"]) for b in lines[category]["books"]]
         for category in ("PR", "PA", "RA")
@@ -208,7 +208,7 @@ def test_the_closing_poll_is_taken_in_the_last_ten_minutes_and_marked(world):
     (poll,) = _rows(world, OddsApiPoll)
     assert poll["is_closing"] is True
     assert all(row["is_closing"] for row in _rows(world, SportsbookPropLatest))
-    book_lines = SportsbookQuoteReader(world.engine).book_lines(GAME_ID)
+    book_lines = SportsbookQuoteReader(world.engine).book_lines(GAME_ID, now=world.clock[0], started=False)
     assert book_lines[LEBRON]["PTS"]["closing"] is True
 
     world.clock[0] = TIP - timedelta(minutes=4)
@@ -337,7 +337,7 @@ def test_the_closing_call_may_spend_the_reserve_but_never_to_zero(world):
 
 
 def _latest_over(world, book="draftkings"):
-    lines = SportsbookQuoteReader(world.engine).book_lines(GAME_ID)
+    lines = SportsbookQuoteReader(world.engine).book_lines(GAME_ID, now=world.clock[0], started=False)
     entry = lines.get(LEBRON, {}).get("PTS")
     if entry is None:
         return None
@@ -474,7 +474,7 @@ def test_a_snapshot_whose_every_quote_is_omitted_removes_the_stale_line(world):
     world.clock[0] = NOW + timedelta(hours=1)
     coordinator.run()
 
-    assert SportsbookQuoteReader(world.engine).book_lines(GAME_ID) == {}
+    assert SportsbookQuoteReader(world.engine).book_lines(GAME_ID, now=world.clock[0], started=False) == {}
     (state,) = [p for p in _rows(world, OddsApiPoll)][-1:]
     assert (state["outcome"], state["quote_count"]) == ("complete", 0)
 
