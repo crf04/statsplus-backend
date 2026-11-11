@@ -958,27 +958,32 @@ malformed date or an unknown team is `400 invalid_input`. While
 
 A date with no stored report (no games, or none collected) is
 `"injuries": []`. Entries are ordered by team, then status severity (Out,
-Doubtful, Questionable, Probable, Available), then player name.
+Doubtful, Questionable, Probable, Available), then player name; the minutes
+fields do not change that order.
 
 ```json
 {
-  "date": "2026-01-15",
+  "date": "2026-11-10",
   "team": null,
-  "minutes_published_season": "2026-27",
+  "minutes_season": "2026-27",
+  "minutes_published_season": "2025-26",
   "injuries": [
     {
-      "player": "LeBron James",
-      "player_id": 2544,
-      "team": "LAL",
-      "game_id": "0022500584",
-      "status": "Questionable",
-      "reason": "Left ankle soreness",
-      "report_time": "2026-01-15T17:00:00-05:00",
-      "retrieved_at": "2026-01-15T20:00:00+00:00",
+      "player": "Giannis Antetokounmpo",
+      "player_id": 203507,
+      "team": "MIA",
+      "game_id": "0022600150",
+      "status": "Probable",
+      "reason": "Left knee soreness",
+      "report_time": "2026-11-10T17:00:00-05:00",
+      "retrieved_at": "2026-11-10T22:30:00+00:00",
       "stale": false,
-      "average_minutes": 34.5,
-      "games_played": 44,
-      "minutes_season": "2025-26"
+      "average_minutes": 32.8,
+      "games_played": 9,
+      "minutes_season": "2026-27",
+      "prior_average_minutes": 28.9,
+      "prior_games_played": 36,
+      "prior_minutes_season": "2025-26"
     }
   ]
 }
@@ -993,22 +998,26 @@ Doubtful, Questionable, Probable, Available), then player name.
 - `retrieved_at` is when the stored report was last confirmed current.
 - `stale` is `true` when the game has not started and `retrieved_at` is more
   than 45 minutes old (one missed 30-minute refresh).
-- `average_minutes` is the player's regular-season minutes per game, `games_played`
-  the games it averages (`0` when `average_minutes` is `null`) and
-  `minutes_season` the season they come from (crf04/statsplus#230, #441). The
-  season is the published one (the one `research_season` names) when the player
-  has at least 5 regular-season games in it, else the season before it when he
-  has any games there, else `null`. Games match on `player_id` across every
-  team he played for that season. A row with no `player_id` has `null` / `0` /
-  `null`, and a season whose game logs cannot be read (`season_unavailable`)
-  gives `null` / `0` / `null` to the rows that need it; the list is still
-  returned, in the same order. A player whose stored game rows in a season are
-  corrupt gets `null` / `0` / `null` too, and never falls back to the other
-  season.
-- `minutes_published_season` (top level) is the published season the 5-game
-  rule compared against, or `null` when it could not be read (then every row has
-  `null` minutes). A row whose `minutes_season` differs from it is a prior-season
-  fallback.
+- `average_minutes` is the player's regular-season minutes per game in the
+  season of the report date's games, `games_played` the games it averages (`0`
+  when `average_minutes` is `null`) and `minutes_season` that season, or `null`
+  with no minutes (crf04/statsplus#230, #488). `prior_average_minutes`,
+  `prior_games_played` and `prior_minutes_season` are the same for the season
+  before it. There is no minimum game count: one game is an average over one
+  game. The report date's season is read before its Season Cutover, from its
+  held candidate, as an Unpublished Season is; the two seasons are never the
+  same. Games match on `player_id` across every team he played for that
+  season. A row with no `player_id` has `null` / `0` / `null` in both. A season
+  whose game logs cannot be read (`season_unavailable`) gives `null` / `0` /
+  `null` in that season's fields only; the list is still returned. A player
+  whose stored game rows in a season are corrupt gets `null` / `0` / `null` in
+  that season's fields.
+- `minutes_season` (top level) is the season of the report date's games, the
+  one every row's `minutes_season` names when it has minutes, or `null` with no
+  minutes service.
+- `minutes_published_season` (top level) is the Published Season when the
+  minutes were read, or `null` when it could not be read (then every row has
+  `null` minutes in both seasons).
 
 #### Scheduled refresh
 
@@ -3593,7 +3602,21 @@ first, `[]` when none:
 ```
 
 `game_date` is the Eastern date and `matchup` is `AWAY @ HOME`, both from the
-Event Catalog. `minutes` round half up from the segments' seconds, as
+Event Catalog. Five more fields say which games the split covers
+(crf04/statsplus-backend#761): `team_games`, the team-season's completed
+regular-season games in the Event Catalog; `games_included`, how many of them
+have stored segments (`team_games` minus the `games_missing`); `games_through`,
+the Eastern date of the newest included game; `split_games`, the games in which
+the asked lineup state occurred; and `last_split_game_date`, the Eastern date of
+the newest of those. Each date is `null` when there is no such game. `cached_at`
+is a write time, not a cache: a game rewritten later moves it without changing
+the split, so read currency from these fields instead.
+
+```json
+"team_games": 10, "games_included": 9, "games_through": "2026-11-08",
+"split_games": 7, "last_split_game_date": "2026-11-06",
+"games_missing": [{"game_id": "0022600142", "game_date": "2026-10-28", "matchup": "OKC @ DAL"}]
+``` `minutes` round half up from the segments' seconds, as
 PBPStats rounds. `usage` is StatsPlus usage: 100 · (FGA + 0.44·FTA + TOV) /
 (team on-floor FGA + player-less heaves + 0.44·FTA + TOV). Free throws count
 for the lineup on the floor at the foul; from 2026-27 a heave counts as its

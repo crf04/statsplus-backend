@@ -150,14 +150,18 @@ class BacktestSeasons:
             season, reason = requested, SEASON_REASON_REQUESTED
         else:
             raise InvalidInputError(f"season must be {BACKTEST_SEASONS[0]} or {BACKTEST_SEASONS[1]}.")
+        return BacktestSeason(season, reason, published, BacktestSeasons.mode(season, published, live))
+
+    @staticmethod
+    def mode(season: str, published: str, live: Any) -> BacktestMode:
+        """Where ``season``'s Publications are read from, given a live capture in ``published``."""
+
         live_season = _live_season(live, published)
         if season == published:
-            mode = BacktestMode.PUBLISHED if season == live_season else BacktestMode.PUBLISHED_LOGS_RETAINED
-        elif season == next_season(published) != live_season:
-            mode = BacktestMode.UNPUBLISHED
-        else:
-            mode = BacktestMode.RETAINED
-        return BacktestSeason(season, reason, published, mode)
+            return BacktestMode.PUBLISHED if season == live_season else BacktestMode.PUBLISHED_LOGS_RETAINED
+        if season == next_season(published) != live_season:
+            return BacktestMode.UNPUBLISHED
+        return BacktestMode.RETAINED
 
     def _game_log_capture(self, season: Any, session: Any | None) -> Any:
         """Capture the game logs and, pointer-only, the Diets' seasons."""
