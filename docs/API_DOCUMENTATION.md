@@ -1019,6 +1019,68 @@ fields do not change that order.
   minutes were read, or `null` when it could not be read (then every row has
   `null` minutes in both seasons).
 
+#### One player's statuses over a date range
+
+```http
+GET /api/injuries?player=<name or player id>&from_date=YYYY-MM-DD[&to_date=YYYY-MM-DD]
+```
+
+Lists one player's stored statuses by game, oldest first (crf04/statsplus#494),
+so a reader can see why he missed a past game. `player` is a canonical player
+id or a full name matched against the season's Athlete Catalog (case,
+punctuation and diacritics ignored, no fuzzy match). `from_date` is required;
+`to_date` defaults to today's US Eastern date, or the last day of
+`from_date`'s season (September 30) when that is earlier; with no `to_date`, a
+`from_date` after today is `400 invalid_input` with
+`details.parameters: ["from_date"]`. Both are US Eastern
+game dates and must fall in one season (October 1 to September 30): a range
+that ends before it starts or crosses seasons, which includes any range longer
+than a season, is `400 invalid_input` with `details.parameters: ["to_date"]`.
+`player` cannot be combined with `date` or `team`, and `from_date` or
+`to_date` without `player` is rejected; `details.parameters` names the
+offending parameters. A name no catalog athlete has is `400 invalid_input`
+with `details.parameters: ["player"]`; a name two catalog athletes share is
+`400 invalid_input` with `details.candidates` (`player_id`, `name`, `team`,
+sorted by `player_id`), the shape `/api/injury_scenarios` uses for
+`teammate`: ask again by `player_id`.
+
+```json
+{
+  "player": {"player_id": 1628402, "name": "Isaiah Jackson", "team": "LAC"},
+  "season": "2026-27",
+  "from_date": "2026-11-01",
+  "to_date": "2026-11-09",
+  "report_coverage": [{"team": "LAC", "team_games": 4, "games_with_report": 3}],
+  "statuses": [
+    {
+      "game_date": "2026-11-08",
+      "game_id": "0022600150",
+      "matchup": "LAC @ DEN",
+      "team": "LAC",
+      "status": "Out",
+      "reason": "Right ankle sprain",
+      "report_time": "2026-11-08T17:30:00-05:00"
+    }
+  ]
+}
+```
+
+- `player.team` is his Athlete Catalog team for the season, or `null`.
+- `statuses` has one row per game and team whose stored report lists him, in
+  game-date order. A game whose stored report does not list him has no row:
+  he was not on that report. `game_date` is the game's US Eastern date;
+  `matchup` is `TEAM @ HOME` away and `TEAM vs. AWAY` at home; `status`,
+  `reason` and `report_time` mean what they mean in the date listing.
+- When the stored report lists him twice for one game, the later
+  `report_time` is the row. A report row printed for the same teams' game on
+  another day does not describe this one.
+- A report row whose name matched no single catalog player (`player_id` null
+  in the date listing) is never taken for him, even when the name is his.
+- `report_coverage` has one entry per team: each team a row lists him for,
+  plus his catalog team. `team_games` is that team's stored games in the
+  range and `games_with_report` how many of them have a stored report. For a
+  traded player both teams appear, each over the whole range.
+
 #### Scheduled refresh
 
 `scripts/injury_refresh.py` stores the report for every game still to tip on
@@ -3814,7 +3876,8 @@ Player view:
              "minutes_by_period": {"Q1": 7.0, "Q2": 5.9, "Q3": 7.2, "Q4": 7.8, "OT": 0.0}},
   "games": [
     {"game_date": "2026-04-12", "matchup": "DET @ CHA", "started": true, "minutes": 33.1, "closed": true,
-     "on_box_score": true, "minutes_by_period": {"Q1": 9.4, "Q2": 5.0, "Q3": 9.6, "Q4": 9.1, "OT": 0.0},
+     "on_box_score": true, "injury_status": null, "injury_reason": null,
+     "minutes_by_period": {"Q1": 9.4, "Q2": 5.0, "Q3": 9.6, "Q4": 9.1, "OT": 0.0},
      "stints": [{"in": {"period": 1, "clock": "12:00"}, "out": {"period": 1, "clock": "2:36"}, "minutes": 9.4}]}
   ]
 }
@@ -3823,6 +3886,12 @@ Player view:
 `games` lists the `recent` games newest first, DNPs and missed games included
 (`minutes: 0.0`, `stints: []`, `started: false`). Each game's `on_box_score` is
 `false` for a missed game (no box-score line for him) and `true` otherwise.
+`injury_status` and `injury_reason` (crf04/statsplus#494) are a missed game's
+status and reason from that game's stored official injury report when it lists
+him for his team (`reason` is `""` when the report gives none), and `null`
+when it does not list him, no report is stored, or the reports cannot be read
+(the rest of the answer is unchanged). They are `null` on every game whose box
+score lists him. The `game_date` of a report row must match the game's.
 `matchup` is `TEAM @ HOME` for an away game and `TEAM vs. AWAY` for a home
 game. In the summaries `games` is the team games counted, `played` the games he
 played, and `starts` and `closed` are counts; `minutes`, `stints` and

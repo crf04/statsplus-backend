@@ -1,8 +1,13 @@
 """The stored-rotation read: player and team documents (crf04/statsplus#223)."""
 
+from datetime import UTC, datetime
+
 import pytest
+from sqlalchemy.exc import OperationalError
 
 from app.errors import InvalidInputError, ResourceNotFoundError
+from app.services.injury_snapshot_repository import InjurySnapshotScope
+from tests.support.injury_reports import injury_reports
 from tests.support.rotation_world import (
     Catalog,
     game,
@@ -253,6 +258,8 @@ def test_player_view_lists_recent_games_newest_first_with_stints_and_matchups(tm
         "minutes": 33.0,
         "closed": True,
         "on_box_score": True,
+        "injury_status": None,
+        "injury_reason": None,
         "minutes_by_period": {"Q1": 9.0, "Q2": 6.0, "Q3": 9.0, "Q4": 9.0, "OT": 0.0},
         "stints": [
             {"in": {"period": 1, "clock": "12:00"}, "out": {"period": 1, "clock": "3:00"}, "minutes": 9.0},
@@ -273,6 +280,8 @@ def test_player_view_lists_recent_games_newest_first_with_stints_and_matchups(tm
         "minutes": 0.0,
         "closed": False,
         "on_box_score": True,
+        "injury_status": None,
+        "injury_reason": None,
         "minutes_by_period": {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0, "OT": 0.0},
         "stints": [],
     }
@@ -582,7 +591,7 @@ BONA, MAXEY, GONE = 1641737, 1630178, 1630999
 CURRENT = "2026-27"
 
 
-def _phi_world(tmp_path, catalog=None):
+def _phi_world(tmp_path, catalog=None, injury_reports=None):
     repository = migrated_repository(tmp_path)
     dates = ("11-08", "11-06", "11-04", "11-02", "10-31", "10-29", "10-27", "10-25")
     bona = {"11-04": 24, "11-02": 20, "10-31": 28, "10-29": 0}
@@ -617,7 +626,7 @@ def _phi_world(tmp_path, catalog=None):
         (MAXEY, "Tyrese Maxey", "PHI"),
         (GONE, "Gone Gary", "NYK"),
     )
-    return service_for(repository, catalog, default_season=CURRENT)
+    return service_for(repository, catalog, default_season=CURRENT, injury_reports=injury_reports)
 
 
 def test_recent_counts_the_team_games_he_missed_and_averages_minutes_over_games_played(tmp_path):
@@ -640,6 +649,8 @@ def test_recent_counts_the_team_games_he_missed_and_averages_minutes_over_games_
         "minutes": 0.0,
         "closed": False,
         "on_box_score": False,
+        "injury_status": None,
+        "injury_reason": None,
         "minutes_by_period": {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0, "OT": 0.0},
         "stints": [],
     }
@@ -780,3 +791,119 @@ def test_team_view_keeps_a_player_on_the_recent_box_score_whatever_the_catalog_s
     wider = [p["name"] for p in service.get_team_rotation(team="PHI", last_n=5, season=None)["players"]]
 
     assert sorted(wider) == ["Adem Bona", "Tyrese Maxey"]
+
+
+def _report(reports, game_id, day, *listed):
+    """One stored report for ``game_id``, listing ``(player_id, tricode, status, reason)`` rows."""
+
+    reports.store_backfilled_report(
+        source="nba_official",
+        raw_payload=[],
+        source_entries=[],
+        retrieved_at=datetime(2026, 11, 10, tzinfo=UTC),
+        games=[
+            (
+                InjurySnapshotScope(CURRENT, game_id),
+                [
+                    {
+                        "canonical_player_id": player_id,
+                        "tricode": team,
+                        "canonical_status": status,
+                        "raw_status": status,
+                        "reason": reason,
+                        "source_player_name": f"Player {player_id}",
+                        "game_date": day,
+                    }
+                    for player_id, team, status, reason in listed
+                ],
+                0,
+            )
+        ],
+    )
+
+
+def _report_fields(document):
+    return [
+        (g["game_date"], g["on_box_score"], g["injury_status"], g["injury_reason"]) for g in document["games"]
+    ]
+
+
+def test_a_missed_game_carries_the_status_and_reason_its_stored_report_lists_him_with(tmp_path):
+    reports = injury_reports(tmp_path)
+    # 11-08 lists him Out; 11-06 lists only Maxey; 11-04 (played) lists him Questionable.
+    _report(reports, "0022600100", "2026-11-08", (BONA, "PHI", "Out", "Left ankle sprain"))
+    _report(reports, "0022600101", "2026-11-06", (MAXEY, "PHI", "Out", "Rest"))
+    _report(reports, "0022600102", "2026-11-04", (BONA, "PHI", "Questionable", "Left ankle sprain"))
+    service = _phi_world(tmp_path, injury_reports=reports)
+
+    document = service.get_player_rotation(player_name="Adem Bona", player_team=None, last_n=5, season=None)
+
+    assert _report_fields(document) == [
+        ("2026-11-08", False, "Out", "Left ankle sprain"),
+        ("2026-11-06", False, None, None),
+        ("2026-11-04", True, None, None),
+        ("2026-11-02", True, None, None),
+        ("2026-10-31", True, None, None),
+    ]
+
+
+def test_a_listing_for_another_team_is_not_his_status_that_game(tmp_path):
+    reports = injury_reports(tmp_path)
+    _report(reports, "0022600100", "2026-11-08", (BONA, "BOS", "Out", "Not With Team"))
+    service = _phi_world(tmp_path, injury_reports=reports)
+
+    document = service.get_player_rotation(player_name="Adem Bona", player_team=None, last_n=1, season=None)
+
+    assert _report_fields(document) == [("2026-11-08", False, None, None)]
+
+
+def test_a_missed_game_reads_a_row_printed_for_another_day_as_not_listed(tmp_path):
+    reports = injury_reports(tmp_path)
+    _report(reports, "0022600101", "2026-11-08", (BONA, "PHI", "Out", "Left ankle sprain"))
+    service = _phi_world(tmp_path, injury_reports=reports)
+
+    document = service.get_player_rotation(player_name="Adem Bona", player_team=None, last_n=2, season=None)
+
+    assert _report_fields(document) == [
+        ("2026-11-08", False, None, None),
+        ("2026-11-06", False, None, None),
+    ]
+
+
+def test_the_reports_are_read_once_per_request(tmp_path, monkeypatch):
+    reports = injury_reports(tmp_path)
+    _report(reports, "0022600100", "2026-11-08", (BONA, "PHI", "Out", "Left ankle sprain"))
+    _report(reports, "0022600101", "2026-11-06", (BONA, "PHI", "Out", "Left ankle sprain"))
+    read, reads = reports.get_season_mentions, []
+    monkeypatch.setattr(
+        reports, "get_season_mentions", lambda *args, **kwargs: reads.append(args) or read(*args, **kwargs)
+    )
+    service = _phi_world(tmp_path, injury_reports=reports)
+
+    document = service.get_player_rotation(player_name="Adem Bona", player_team=None, last_n=5, season=None)
+
+    assert [g["injury_status"] for g in document["games"][:2]] == ["Out", "Out"]
+    assert len(reads) == 1
+
+
+@pytest.mark.parametrize(
+    "failure", [OperationalError("SELECT 1", {}, Exception("down")), ValueError("bad JSON")]
+)
+def test_an_unreadable_report_answers_as_without_reports_with_null_statuses(tmp_path, monkeypatch, failure):
+    reports = injury_reports(tmp_path)
+    _report(reports, "0022600100", "2026-11-08", (BONA, "PHI", "Out", "Left ankle sprain"))
+
+    def unreadable(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(reports, "get_season_mentions", unreadable)
+    service = _phi_world(tmp_path, injury_reports=reports)
+    (tmp_path / "plain").mkdir()
+    plain = _phi_world(tmp_path / "plain")
+
+    document = service.get_player_rotation(player_name="Adem Bona", player_team=None, last_n=5, season=None)
+
+    assert document == plain.get_player_rotation(
+        player_name="Adem Bona", player_team=None, last_n=5, season=None
+    )
+    assert [g["injury_status"] for g in document["games"]] == [None] * 5
