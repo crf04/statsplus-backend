@@ -848,7 +848,7 @@ class RotationService:
             athlete["player_id"]
             for athlete in self.athlete_catalog.get_catalog(season, active_only=False)
             if athlete.get("team_id") not in (None, team_id)
-            or athlete.get("roster_status") in ("inactive", "historical")
+            or athlete.get("roster_status") in ("inactive", "historical", "tombstone")
         }
 
 

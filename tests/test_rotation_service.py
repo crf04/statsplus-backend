@@ -754,6 +754,8 @@ def test_team_view_keeps_a_player_who_missed_them_all_when_the_catalog_is_silent
         pytest.param((BONA, "Adem Bona", "NYK"), id="another team"),
         pytest.param((BONA, "Adem Bona", "PHI", "inactive"), id="off every roster"),
         pytest.param((BONA, "Adem Bona", None, "inactive"), id="off every roster, no team"),
+        pytest.param((BONA, "Adem Bona", "PHI", "historical"), id="no longer in the league"),
+        pytest.param((BONA, "Adem Bona", "PHI", "tombstone"), id="cut from the roster"),
     ],
 )
 def test_team_view_drops_a_player_who_missed_them_all_when_the_catalog_says_he_left(tmp_path, bona):

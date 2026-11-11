@@ -353,6 +353,7 @@ def test_game_rotation_serves_both_teams_in_order_with_exact_clocks(client, over
     assert response.status_code == 200
     body = response.get_json()
     assert "provenance" not in body
+    assert "team_games_counted" not in body
     assert body["game"] == {
         "game_id": GAME,
         "game_date": "2026-02-03",

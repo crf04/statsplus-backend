@@ -3655,6 +3655,8 @@ The player and team views carry `team_games_counted: true`
 team's games inside his team window and the averages are per game played. A
 response without the field comes from a backend whose `games` counted only the
 games whose box score lists him, averaged over those games.
+The `without` split and the one-game view never carry it: they have no
+`recent` or `season_summary`.
 In the team view each player's `recent` is the same rule applied to that team,
 while `games` lists the team's own last `last_n` games. *Played* is minutes above 0, *started* is the box-score starter
 flag, and *closed* is on court at the end of the fourth period. Minutes are
@@ -3712,7 +3714,8 @@ least one of the team's last `last_n` games, plus each player with a stored game
 for the team who missed all of them inside his open team window (`recent.played:
 0`, his counts the player view's). Such a player is left out only when the
 season's Athlete Catalog says he left: its `team_id` names another team, or its
-`roster_status` is `inactive` or `historical` (off every NBA roster). A missing
+`roster_status` is `inactive` or `historical` (off every NBA roster) or
+`tombstone` (cut from the team's roster). A missing
 catalog row or a `null` `team_id` is unknown, and he stays. Players whose window
 closed before the team's last `last_n` games drop out.
 They are sorted by `abs(minutes_change)` descending, then by name, with a `null`
