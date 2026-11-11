@@ -1,24 +1,20 @@
-"""The moves read stays scoped to the requested cells (crf04/statsplus#491)."""
+"""The book history read covers only the requested cells (crf04/statsplus#491)."""
 
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import create_engine
 
 from app.migrations import run_migrations
-from app.providers.dfs import MarketStatus, MarketThreshold
-from app.services.line_moves import provider_histories
-from app.services.projection_archive import ProjectionArchive
-from app.services.statistic_catalog import StatisticCatalog
-from tests.routes.test_games_board import BOS, LATER, QUERY, SEASON, TATUM, _market, _snapshot
-from tests.routes.test_games_board_moves import _partial
+from app.services.line_moves import book_histories
+from app.services.sportsbook_quotes import ResolvedQuote, SportsbookQuoteStore
 
-#: In another game: none of its lines is a requested cell.
-OTHER = (999999, "Other Player", BOS, "0022500999")
-OPENED = datetime(2025, 12, 18, 20, tzinfo=UTC)
-DAY_START = datetime(2026, 1, 15, 5, tzinfo=UTC)
+GAME = "0022500602"
+#: Earlier games of the season: none of their rows is a requested cell.
+EARLIER = [f"00225{number:05d}" for number in range(100, 160)]
+TATUM = 1628369
+START = datetime(2026, 1, 15, 3, tzinfo=UTC)
 
 
 class _CountingConnection:
@@ -39,107 +35,59 @@ class _Rows(list):
         return list(self)
 
 
+def _poll(store, game_id, at, quotes):
+    store.record_poll(
+        odds_event_id=f"odds-{game_id}",
+        game_id=game_id,
+        started_at=at,
+        completed_at=at,
+        cost=1,
+        remaining=100,
+        is_closing=False,
+        quotes=quotes,
+    )
+
+
 def _read(engine):
     with engine.connect() as connection:
         counting = _CountingConnection(connection)
-        histories = provider_histories(
-            counting,
-            season=SEASON,
-            game_ids=[LATER],
-            statistic_ids=["points"],
-            providers=["prizepicks", "underdog"],
-            fences={},
-            day_start=DAY_START,
+        histories = book_histories(
+            counting, game_ids=[GAME], market="PTS", books=["draftkings", "fanduel"], posted=()
         )
-    return histories, sum(counting.rows)
+    return histories, counting.rows
 
 
-def test_the_read_returns_only_the_generations_the_requested_cells_need(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path / 'bound.sqlite3'}")
+def test_the_read_returns_only_the_requested_games_market_and_books(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'books.sqlite3'}")
     run_migrations(engine)
-    catalog = StatisticCatalog.load_default()
-    archive = ProjectionArchive(engine, catalog)
-    tatum = _market(catalog, "prizepicks", TATUM, "points", "28.5")
-    # Before Tatum's line opens: no requested cell is in it.
-    archive.ingest_snapshot(
-        _partial(
-            "prizepicks",
-            (_market(catalog, "prizepicks", OTHER, "rebounds", "4.5"),),
-            OPENED - timedelta(days=9),
-        ),
-        query=QUERY,
-        accepted_at=OPENED - timedelta(days=9),
-    )
-    # PrizePicks carries Tatum's line from December 18; Underdog posts it twice, then pulls it.
-    archive.ingest_snapshot(_partial("prizepicks", (tatum,), OPENED), query=QUERY, accepted_at=OPENED)
-    underdog_tatum = _market(catalog, "underdog", TATUM, "points", "27.5")
-    underdog_other = _market(catalog, "underdog", OTHER, "rebounds", "6.5")
-    pulled_at = DAY_START + timedelta(hours=10)
-    for at, markets in (
-        (DAY_START + timedelta(hours=8), (underdog_tatum, underdog_other)),
-        (
-            DAY_START + timedelta(hours=9),
-            (replace(underdog_tatum, threshold=MarketThreshold("28.5", "count")), underdog_other),
-        ),
-        # The pulling board lists Tatum suspended: a Complete board's untargetable rows are not read.
-        (pulled_at, (underdog_other, replace(underdog_tatum, status=MarketStatus.SUSPENDED))),
-    ):
-        archive.ingest_complete_snapshot(_snapshot("underdog", markets, at), query=QUERY, accepted_at=at)
+    store = SportsbookQuoteStore(engine)
+    for step, line in enumerate((27.5, 28.5)):
+        at = START + timedelta(hours=step)
+        _poll(
+            store,
+            GAME,
+            at,
+            [
+                ResolvedQuote(TATUM, "PTS", "draftkings", line, -110, -110, at),
+                # Another market and a book not asked for: neither is read.
+                ResolvedQuote(TATUM, "3PM", "draftkings", 3.5 + step, -120, 100, at),
+                ResolvedQuote(TATUM, "PTS", "betmgm", line, -115, -105, at),
+            ],
+        )
     histories, rows = _read(engine)
 
-    # Then weeks of generations that hold no requested cell: Partials elsewhere, and Complete
-    # Underdog boards after the one that pulled Tatum.
-    for step in range(1, 30):
-        at = OPENED + timedelta(hours=12 * step)
-        other = _market(catalog, "prizepicks", OTHER, "rebounds", str(4.5 + step))
-        archive.ingest_snapshot(_partial("prizepicks", (other,), at), query=QUERY, accepted_at=at)
-    for step in range(1, 30):
-        at = pulled_at + timedelta(minutes=step)
-        board = (_market(catalog, "underdog", OTHER, "rebounds", str(6.5 + step)),)
-        archive.ingest_complete_snapshot(_snapshot("underdog", board, at), query=QUERY, accepted_at=at)
+    # A season of other games' lines, every one of them a change.
+    for index, game_id in enumerate(EARLIER):
+        for step in range(5):
+            at = START - timedelta(days=index + 1, hours=step)
+            _poll(
+                store, game_id, at, [ResolvedQuote(TATUM, "PTS", "draftkings", 20.5 + step, -110, -110, at)]
+            )
     after, rows_after = _read(engine)
 
-    assert histories[("prizepicks", LATER, TATUM[0])].posted_now is True
-    assert histories[("underdog", LATER, TATUM[0])].posted_now is False
     assert after == histories
-    # Lines: PrizePicks' one and Underdog's two.  Generations: PrizePicks' one, Underdog's two
-    # and the Complete board that pulled Tatum.  Confirmations: the last board that posted the
-    # pulled line.
-    assert (rows, rows_after) == (8, 8)
-
-
-def test_a_withdrawal_polled_before_the_tip_counts_though_an_earlier_board_finished_after_it(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path / 'fence.sqlite3'}")
-    run_migrations(engine)
-    catalog = StatisticCatalog.load_default()
-    archive = ProjectionArchive(engine, catalog)
-    posted = DAY_START + timedelta(hours=10)
-    tip = posted + timedelta(hours=3)
-    archive.ingest_complete_snapshot(
-        _snapshot("underdog", (_market(catalog, "underdog", TATUM, "points", "28.5"),), posted),
-        query=QUERY,
-        accepted_at=posted,
-    )
-    # Both boards omit Tatum.  The first was retrieved earlier but its poll finished after the tip,
-    # so the closing replay skips it; the second, polled before the tip, withdraws him.
-    for retrieved, finished, line in (
-        (posted + timedelta(hours=1), tip + timedelta(hours=1), "6.5"),
-        (posted + timedelta(hours=2), posted + timedelta(hours=2), "7.5"),
-    ):
-        board = (_market(catalog, "underdog", OTHER, "rebounds", line),)
-        archive.ingest_complete_snapshot(
-            _snapshot("underdog", board, retrieved), query=QUERY, accepted_at=finished
-        )
-
-    with engine.connect() as connection:
-        histories = provider_histories(
-            connection,
-            season=SEASON,
-            game_ids=[LATER],
-            statistic_ids=["points"],
-            providers=["underdog"],
-            fences={LATER: tip},
-            day_start=DAY_START,
-        )
-
-    assert histories[("underdog", LATER, TATUM[0])].posted_now is False
+    assert [sighting.value for sighting in histories[("draftkings", GAME, TATUM)].sightings] == [
+        (27.5, -110, -110),
+        (28.5, -110, -110),
+    ]
+    assert (rows, rows_after) == ([2], [2])
