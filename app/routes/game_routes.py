@@ -90,8 +90,9 @@ _UNSCHEDULED_PARAMETERS = frozenset({*_UNSCHEDULED_SELECTORS, "player_team", "op
 _TRICODE = re.compile(r"[A-Za-z]{3}\Z")
 _ROTATION_SELECTORS = ("player_name", "team", "game_id")
 _ROTATION_PARAMETERS = frozenset(
-    {*_ROTATION_SELECTORS, "player_team", "last_n", "season", "without", "game_logs"}
+    {*_ROTATION_SELECTORS, "player_team", "last_n", "season", "with", "without", "game_logs"}
 )
+_ROTATION_NAME_LISTS = ("with", "without")
 _ROTATION_DEFAULT_LAST_N = 5
 _ROTATION_MAX_LAST_N = 20
 _LAST_N = re.compile(r"[0-9]{1,2}\Z")
@@ -798,7 +799,7 @@ def _invalid_rotation(*parameters: str) -> InvalidInputError:
     return InvalidInputError(
         f"The rotation parameters are invalid: {names}.",
         public_details={
-            **({"parameter": "without"} if "without" in parameters else {}),
+            **next(({"parameter": name} for name in ("without", "with") if name in parameters), {}),
             "parameters": list(parameters),
         },
     )
@@ -818,18 +819,20 @@ def get_rotation():
     if "player_team" in request.args and selector != "player_name":
         raise _invalid_rotation("player_team")
     for name in request.args:
-        if name != "without" and len(request.args.getlist(name)) != 1:
+        if name not in _ROTATION_NAME_LISTS and len(request.args.getlist(name)) != 1:
             raise _invalid_rotation(name)
+    with_ = request.args.getlist("with")
     without = request.args.getlist("without")
-    if without and selector == "game_id":
-        raise _invalid_rotation("without")
-    if without and "last_n" in request.args:
-        raise _invalid_rotation("last_n", "without")
-    if any(not name.strip() for name in without):
-        raise _invalid_rotation("without")
+    for name, names in (("with", with_), ("without", without)):
+        if names and selector == "game_id":
+            raise _invalid_rotation(name)
+        if names and "last_n" in request.args:
+            raise _invalid_rotation("last_n", name)
+        if any(not typed.strip() for typed in names):
+            raise _invalid_rotation(name)
     game_logs = False
     if "game_logs" in request.args:
-        if not without or request.args["game_logs"] not in ("true", "false"):
+        if not (with_ or without) or request.args["game_logs"] not in ("true", "false"):
             raise _invalid_rotation("game_logs")
         game_logs = request.args["game_logs"] == "true"
     if selector == "game_id":
@@ -858,7 +861,12 @@ def get_rotation():
             raise _invalid_rotation("team")
         return jsonify(
             rotation_service.get_team_rotation(
-                team=value.upper(), last_n=last_n, season=season, without=without, game_logs=game_logs
+                team=value.upper(),
+                last_n=last_n,
+                season=season,
+                with_=with_,
+                without=without,
+                game_logs=game_logs,
             )
         )
     if not value.strip():
@@ -874,6 +882,7 @@ def get_rotation():
             player_team=player_team,
             last_n=last_n,
             season=season,
+            with_=with_,
             without=without,
             game_logs=game_logs,
         )
