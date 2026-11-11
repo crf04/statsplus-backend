@@ -116,9 +116,13 @@ def _side_step(name: str, run) -> None:
         except Exception as error:
             outcome["error"] = error
 
-    worker = threading.Thread(target=target, name=name, daemon=True)
-    worker.start()
-    worker.join(SIDE_STEP_SECONDS)
+    try:
+        worker = threading.Thread(target=target, name=name, daemon=True)
+        worker.start()
+        worker.join(SIDE_STEP_SECONDS)
+    except Exception as error:
+        print(f"{name} failed: {type(error).__name__}: {error}")
+        return
     if worker.is_alive():
         print(f"{name} failed: TimeoutError: still running after {SIDE_STEP_SECONDS} s")
     elif "error" in outcome:

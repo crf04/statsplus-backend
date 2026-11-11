@@ -158,3 +158,29 @@ def test_an_odds_beat_that_raises_still_runs_both_steps_and_keeps_its_exception(
         run_script(monkeypatch, None)
 
     assert calls == ["game_lines", "lineups"]
+
+
+@pytest.mark.parametrize("odds_api, code", [(DISABLED, 0), (WITHOUT_KEY, 1)])
+@pytest.mark.parametrize("unstartable", ["game_lines", "lineups"])
+def test_a_side_step_whose_thread_cannot_start_is_reported_and_the_rest_runs(
+    monkeypatch, capsys, unstartable, odds_api, code
+):
+    real_thread = threading.Thread
+
+    class Unstartable(real_thread):
+        def start(self):
+            if self.name == unstartable:
+                raise RuntimeError("can't start new thread")
+            super().start()
+
+    monkeypatch.setattr(threading, "Thread", Unstartable)
+    monkeypatch.setattr(game_lines, "collect", lambda _engine: {"inserted": 0})
+    monkeypatch.setattr(team_lineups, "collect_team_lineups", lambda _engine: {"state": "stored", "teams": 0})
+
+    assert run_script(monkeypatch, None, odds_api) == code
+
+    failed = f"{unstartable} failed: RuntimeError: can't start new thread"
+    assert printed(capsys)[1:] == [
+        failed if unstartable == "game_lines" else 'game_lines: {"inserted": 0}',
+        failed if unstartable == "lineups" else 'lineups: {"state": "stored", "teams": 0}',
+    ]

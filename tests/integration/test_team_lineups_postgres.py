@@ -134,3 +134,139 @@ def test_lineups_are_stored_while_the_game_lines_table_is_locked_on_postgres(eng
     assert out[2].startswith("lineups: ") and '"state": "stored"' in out[2]
     with engine.connect() as connection:
         assert connection.execute(select(TeamLineup.__table__)).first() is not None
+
+
+#: The cron's own ``main()`` in a fresh process: Sentry on (offline), the real
+#: Postgres engine, recorded ESPN and NBA.com documents, odds off or keyless
+#: (argv[2]) and, when argv[3] is set, a shorter side-step bound.  Its last line
+#: is the time from ``main()`` to the end of shutdown, which joins non-daemon
+#: threads before exit handlers run.
+CRON_PROCESS = """
+import atexit, functools, json, sys, time
+from types import SimpleNamespace
+from sentry_sdk.transport import Transport
+from sqlalchemy import create_engine
+from app.config.settings import OddsApiSettings
+from app.providers import nba_daily_lineups
+from app.services import game_lines
+from app.utils import sentry_setup
+from scripts import collect_odds
+
+class Offline(Transport):
+    def capture_envelope(self, envelope):
+        pass
+
+url, odds, bound = sys.argv[1], sys.argv[2], sys.argv[3]
+scoreboard = json.load(open("tests/fixtures/espn/scoreboard_2026-11-10.json"))
+lineups = json.load(open("tests/fixtures/nba_daily_lineups/00_daily_lineups_20261110.json"))
+game_lines.collect = functools.partial(game_lines.collect, fetch=lambda _day: scoreboard)
+nba_daily_lineups.fetch_daily_lineups = lambda _day: lineups
+if bound:
+    collect_odds.SIDE_STEP_SECONDS = float(bound)
+collect_odds.init_sentry = lambda: sentry_setup.init_sentry(transport=Offline())
+settings = SimpleNamespace(odds_api=OddsApiSettings(enabled=odds == "keyless"), log_level="INFO")
+collect_odds.load_settings = lambda **_kw: settings
+collect_odds.build_dependencies = lambda _settings: SimpleNamespace(engine=create_engine(url))
+started = time.monotonic()
+atexit.register(lambda: print(f"shutdown after {time.monotonic() - started:.1f}", flush=True))
+raise SystemExit(collect_odds.main(["--database-url", url]))
+"""
+
+
+def _cron_run(url, odds, bound=""):
+    import os
+    import subprocess
+    import sys
+
+    return subprocess.run(
+        [sys.executable, "-c", CRON_PROCESS, url, odds, bound],
+        env={**os.environ, "SENTRY_DSN": "https://public@o0.ingest.sentry.io/1"},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def _waiting_on_a_lock(engine, holder_pid):
+    with engine.connect() as connection:
+        return connection.execute(
+            text(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+                "AND wait_event_type = 'Lock' AND pid <> :holder"
+            ),
+            {"holder": holder_pid},
+        ).scalar()
+
+
+def _printed(finished):
+    return [line for line in finished.stdout.splitlines() if not line.startswith('{"level"')]
+
+
+@pytest.mark.parametrize("odds, code", [("off", 0), ("keyless", 1)])
+def test_with_game_lines_locked_the_step_fails_on_its_database_timeout_and_leaves_no_session(
+    engine, odds, code
+):
+    url = engine.url.render_as_string(hide_password=False)
+    with engine.connect() as holder:
+        holder.execute(text("LOCK TABLE game_lines IN ACCESS EXCLUSIVE MODE"))
+        holder_pid = holder.execute(text("SELECT pg_backend_pid()")).scalar()
+
+        finished = _cron_run(url, odds)
+        left_waiting = _waiting_on_a_lock(engine, holder_pid)
+        holder.rollback()
+
+    assert finished.returncode == code, finished.stdout + finished.stderr
+    *out, shutdown = _printed(finished)
+    # lock_timeout and statement_timeout are equal, so either may cancel the statement.
+    assert out[1].startswith("game_lines failed: OperationalError: ") and "timeout" in out[1]
+    (lineups,) = [line for line in out if line.startswith("lineups")]
+    assert '"state": "stored"' in lineups
+    assert float(shutdown.split()[-1]) < 15
+    assert left_waiting == 0
+    with engine.connect() as connection:
+        assert len(connection.execute(select(TeamLineup.__table__)).all()) == 12
+
+
+@pytest.mark.parametrize("odds, code", [("off", 0), ("keyless", 1)])
+def test_a_step_abandoned_at_its_bound_lets_the_process_exit_and_its_session_ends(engine, odds, code):
+    import time
+
+    url = engine.url.render_as_string(hide_password=False)
+    with engine.connect() as holder:
+        holder.execute(text("LOCK TABLE game_lines IN ACCESS EXCLUSIVE MODE"))
+        holder_pid = holder.execute(text("SELECT pg_backend_pid()")).scalar()
+
+        finished = _cron_run(url, odds, bound="0.5")
+        exited = time.monotonic()
+        while _waiting_on_a_lock(engine, holder_pid) and time.monotonic() - exited < 10:
+            time.sleep(0.2)
+        session_ended_after = time.monotonic() - exited
+        holder.rollback()
+
+    assert finished.returncode == code, finished.stdout + finished.stderr
+    *out, shutdown = _printed(finished)
+    assert out[1] == "game_lines failed: TimeoutError: still running after 0.5 s"
+    # A shutdown that waited for the abandoned step would take its 5 s lock timeout.
+    assert shutdown.startswith("shutdown after ") and float(shutdown.split()[-1]) < 3
+    assert session_ended_after < 7
+
+
+def test_a_bounded_transaction_cancels_a_slow_statement_and_caps_lock_waits_on_postgres(engine):
+    import time
+
+    from sqlalchemy.exc import OperationalError
+
+    from app.utils.db import bound_postgres_transaction
+
+    started = time.monotonic()
+    with pytest.raises(OperationalError, match="statement timeout"), engine.begin() as connection:
+        bound_postgres_transaction(connection)
+        assert connection.execute(text("SHOW lock_timeout")).scalar() == "5s"
+        assert connection.execute(text("SHOW statement_timeout")).scalar() == "5s"
+        connection.execute(text("SELECT pg_sleep(10)"))
+    assert time.monotonic() - started < 7
+    with engine.connect() as connection:
+        with connection.begin():
+            bound_postgres_transaction(connection)
+        assert connection.execute(text("SHOW statement_timeout")).scalar() == "0"
+        assert connection.execute(text("SHOW lock_timeout")).scalar() == "0"

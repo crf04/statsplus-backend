@@ -4975,7 +4975,8 @@ beat (every 5 min, its own Railway cron service: scripts/collect_odds.py)
   → one transaction: odds_api_polls + sportsbook_prop_quotes (history, only on
     change, plus every closing snapshot) + sportsbook_prop_latest
   → then, whatever the beat's outcome (an exception included), each in its own
-    guard and each abandoned after SIDE_STEP_SECONDS (30 s) on a daemon thread:
+    guard (thread start included) and each abandoned after SIDE_STEP_SECONDS
+    (30 s) on a daemon thread, whose database work then ends within 5 s:
     ESPN game lines (crf04/statsplus#493), then NBA.com daily lineups
     (crf04/statsplus#492). One failing or hanging never skips the other or
     changes the exit code; together they add at most about a minute to a run.
@@ -5772,8 +5773,8 @@ request, no retry (the next run is the retry): it runs on a daemon thread
 that is abandoned after ten seconds however slowly the server answers
 (five-second socket reads inside), and on
 Postgres the transaction sets a five-second `lock_timeout` and
-`statement_timeout`, so a locked table fails the step instead of holding the
-odds beat. It never raises; an unpublished day, a failed request, a malformed document or a
+`statement_timeout` (`bound_postgres_transaction`, shared with the game-lines
+step), so a locked table fails the step instead of holding the odds beat. It never raises; an unpublished day, a failed request, a malformed document or a
 database error is reported in its result and changes no row.
 `scripts/collect_odds.py` runs it after every odds beat and after the game
 lines step, each in its own guard and each bounded at 30 s (the `*/5 * * * *`
@@ -5824,7 +5825,10 @@ reported `unmatched`. A matched row is inserted or rewritten with the new
 `read_at` in one upsert that keeps a stored row read at the same time or later
 (counted `stale`), so overlapping runs that finish out of order never move a
 line back; a started game, or one ESPN shows no line for, is not written, so it
-keeps its last pre-tip line. `scripts/collect_odds.py` runs it after every odds
+keeps its last pre-tip line. On Postgres its transaction sets a five-second
+`lock_timeout` and `statement_timeout` (`bound_postgres_transaction`), so a
+locked table fails the step and no abandoned transaction outlives its run by
+more than five seconds. `scripts/collect_odds.py` runs it after every odds
 beat in the `odds-collector` cron (every five minutes); a failure prints
 `game_lines failed: ...` and never changes the exit code. The Matchup reads the
 row as `game_context.game_line` and never calls ESPN; the favourite and implied

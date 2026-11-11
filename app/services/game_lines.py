@@ -34,6 +34,7 @@ from app.domain.utc import assume_utc
 from app.models.event_catalog import EventCatalogEntry
 from app.models.game_lines import GameLine
 from app.services.event_catalog_repository import EventCatalogRepository
+from app.utils.db import bound_postgres_transaction
 
 SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
 #: Connect and per-read timeouts, in seconds.
@@ -186,6 +187,7 @@ def collect(
     inserted = updated = unchanged = stale = 0
     unmatched = []
     with engine.begin() as connection:
+        bound_postgres_transaction(connection)
         games = _catalog_games(connection, {posted.game_date for posted in lines})
         stored = {
             row["game_id"]: row

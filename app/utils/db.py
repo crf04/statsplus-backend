@@ -16,8 +16,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Final
 
-from sqlalchemy import create_engine, event
-from sqlalchemy.engine import Engine, make_url
+from sqlalchemy import create_engine, event, text
+from sqlalchemy.engine import Connection, Engine, make_url
 from sqlalchemy.exc import ArgumentError, InvalidatePoolError
 
 from app.config.settings import DatabaseSettings, RuntimeSettings, get_runtime_settings
@@ -103,6 +103,24 @@ def is_demo_database_url(database_url: str) -> bool:
         return False
 
     return Path(database_path).expanduser().resolve() == DEMO_DATABASE_PATH.resolve()
+
+
+#: The lock wait and statement limit of a cron side step's write transaction.
+SIDE_STEP_DATABASE_TIMEOUT: Final = "5s"
+
+
+def bound_postgres_transaction(connection: Connection) -> None:
+    """Cap this transaction's lock waits and statements on PostgreSQL (``SET LOCAL``).
+
+    A cron side step abandoned at its wall-clock bound leaves its session
+    behind when the process exits; with these limits a blocked statement ends
+    on its own within ``SIDE_STEP_DATABASE_TIMEOUT`` and the server rolls the
+    transaction back, so no lock outlives the run by more than that.
+    """
+
+    if connection.dialect.name == "postgresql":
+        connection.execute(text(f"SET LOCAL lock_timeout = '{SIDE_STEP_DATABASE_TIMEOUT}'"))
+        connection.execute(text(f"SET LOCAL statement_timeout = '{SIDE_STEP_DATABASE_TIMEOUT}'"))
 
 
 #: True while the current thread's work may run statements past the web limit.
