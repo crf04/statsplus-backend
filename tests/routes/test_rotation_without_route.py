@@ -119,12 +119,14 @@ def test_player_without_one_player_counts_dnp_subject_as_zero_minutes(client, de
         "player": {"name": "Ausar Thompson", "team": "DET"},
         "without": {
             "absent": ["Cade Cunningham"],
-            # g0, g2, g3, g4 (DNP, 0 minutes), g5: 25+20+36+0+24 = 105 over 5 games.
+            # g0, g2, g3, g4 (DNP, 0 minutes), g5: 25+20+36+0+24 = 105 over 5 games,
+            # 105 over the 4 he played.
             "without": {
                 "games": 5,
                 "played": 4,
                 "starts": 4,
                 "minutes": 21.0,
+                "minutes_per_game_played": 26.3,
                 "closed": 1,
                 "minutes_by_period": {"Q1": 1.8, "Q2": 1.8, "Q3": 1.8, "Q4": 1.8, "OT": 0.0},
                 "stints": 0.4,
@@ -136,6 +138,7 @@ def test_player_without_one_player_counts_dnp_subject_as_zero_minutes(client, de
                 "played": 2,
                 "starts": 1,
                 "minutes": 24.0,
+                "minutes_per_game_played": 24.0,
                 "closed": 1,
                 "minutes_by_period": {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0, "OT": 0.0},
                 "stints": 0.0,
@@ -237,8 +240,24 @@ def test_team_without_lists_starters_and_minute_changes(client, detroit):
     ]
     assert without["players"][0] == {
         "name": "Isaiah Stewart",
-        "without": {"games": 5, "played": 5, "starts": 3, "minutes": 20.4, "closed": 1, "stats": None},
-        "with": {"games": 2, "played": 2, "starts": 0, "minutes": 12.0, "closed": 0, "stats": None},
+        "without": {
+            "games": 5,
+            "played": 5,
+            "starts": 3,
+            "minutes": 20.4,
+            "minutes_per_game_played": 20.4,
+            "closed": 1,
+            "stats": None,
+        },
+        "with": {
+            "games": 2,
+            "played": 2,
+            "starts": 0,
+            "minutes": 12.0,
+            "minutes_per_game_played": 12.0,
+            "closed": 0,
+            "stats": None,
+        },
         "minutes_change": 8.4,
         "insufficient": False,
     }

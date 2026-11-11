@@ -38,6 +38,16 @@ Each kind of evidence is compared with its own "with him" figure: the
 full-game split with the teammate's average in games the injured player
 played, the on/off split with the teammate's per-36 while the injured player
 is on the floor (``on[]``).  The "plays" branch reports those baselines only.
+
+Seasons
+-------
+Every sample is also reported per season (``seasons``), and a flag is computed
+on one season only (crf04/statsplus#485): the Slate season when the teammate
+has ``MIN_GAMES_WITHOUT`` games on each side in it, otherwise last season.
+That flag is the ``seasons`` entry for ``flag_season``.  For one release the
+row's own figures, ``shift``, ``flagged`` and ``limits`` stay pooled across the
+window's seasons under the old rule, so a reader that predates the change
+prints what it printed before.
 """
 
 from __future__ import annotations
@@ -51,6 +61,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.domain.team_window import TeamWindow
+from app.errors import InvalidInputError
 from app.services.posted_lines import posted_line
 from app.services.research_season import previous_nba_season, schedule_season, season_scoped
 from app.services.rotation_service import classify_games, rotation_split
@@ -60,9 +71,15 @@ from app.services.team_membership import TeamMembership, appearances
 SCENARIO_STATUSES = ("Out", "Doubtful", "Questionable")
 #: Statuses with both a "plays" and a "sits" branch.
 UNCERTAIN_STATUSES = frozenset({"Doubtful", "Questionable"})
+#: A report reason with this prefix is a G League or two-way assignment, not an
+#: injury: it opens no scenario unless the request names the player.
+G_LEAGUE_REASON = "G League"
 
 MIN_GAMES_WITHOUT = 3
 MIN_OFF_FLOOR_MINUTES = 150
+#: A season's baseline (with him) needs this much to flag (crf04/statsplus#485).
+MIN_GAMES_WITH = 3
+MIN_ON_FLOOR_MINUTES = 150
 ROTATION_MINUTES_PER_GAME = 15.0
 #: A teammate under the rotation line is a minutes jump at this change or more.
 MINUTES_JUMP = 6.0
@@ -368,6 +385,7 @@ class InjuryScenarioService:
         game_id: str | None = None,
         player: str | None = None,
         *,
+        teammate: str | None = None,
         user_id: str | None = None,
     ) -> dict[str, Any]:
         listing = self.injuries.list_injuries(requested_date, None)
@@ -375,48 +393,112 @@ class InjuryScenarioService:
         season = schedule_season(self.settings, self.event_catalog, slate_date)
         wanted = str(player).strip().casefold() if player else None
         selected = []
+        g_league_skipped = 0
         for row in listing["injuries"]:
             if row["status"] not in SCENARIO_STATUSES:
                 continue
             if game_id and row["game_id"] != game_id:
                 continue
-            if wanted and wanted not in (str(row["player_id"]), row["player"].casefold()):
+            if wanted:
+                if wanted not in (str(row["player_id"]), row["player"].casefold()):
+                    continue
+            elif row["reason"].startswith(G_LEAGUE_REASON):
+                g_league_skipped += 1
                 continue
             selected.append(row)
+        listed_out: dict[str, set[int]] = {}
+        for row in listing["injuries"]:
+            if row["status"] == "Out" and row["player_id"] is not None:
+                listed_out.setdefault(row["team"], set()).add(int(row["player_id"]))
         reads = _RequestReads(self, fetch_on_off=bool(wanted), user_id=user_id)
         self._prefetch(selected, season, reads)
         self._windows(selected, season, reads)
+        teammate_ids = None
+        if teammate:
+            # With no scenario selected, the name is still checked, against every team on the report.
+            on_report = selected or listing["injuries"]
+            teammate_ids = self._teammate_ids(teammate, on_report, season, reads)
         return {
             "date": listing["date"],
-            "scenarios": [self._scenario(row, season, reads) for row in selected],
+            "g_league_skipped": g_league_skipped,
+            "scenarios": [
+                self._scenario(row, season, reads, listed_out.get(row["team"], set()), teammate_ids)
+                for row in selected
+            ],
         }
 
+    @staticmethod
+    def _teammate_ids(
+        teammate: str, rows: Sequence[Mapping[str, Any]], season: str, reads: _RequestReads
+    ) -> set[int]:
+        """The id ``teammate`` (an id or full name, case-insensitive) names on the rows' team rosters."""
+
+        wanted = str(teammate).strip().casefold()
+        teams = sorted({row["team"] for row in rows})
+        found: dict[int, dict[str, Any]] = {}
+        for s in (previous_nba_season(season), season):
+            roster = {pid: team for team in teams for pid in reads.roster(NBA_TEAM_TRICODE_TO_ID[team], s)}
+            reads.load_logs(roster, s)
+            for pid, team in roster.items():
+                name = _Logs(reads.logs(pid, s)).name() or ""
+                if wanted in (str(pid), name.casefold()):
+                    found[pid] = {"player_id": pid, "name": name, "team": team}
+        if not found:
+            raise InvalidInputError(
+                "The injury scenarios teammate is not on a listed player's team.",
+                public_details={"parameters": ["teammate"]},
+            )
+        if len(found) > 1:
+            raise InvalidInputError(
+                "The injury scenarios teammate matches more than one player; name him by player_id.",
+                public_details={
+                    "parameter": "teammate",
+                    "parameters": ["teammate"],
+                    "candidates": [found[pid] for pid in sorted(found)],
+                },
+            )
+        return set(found)
+
     def _prefetch(self, rows: Sequence[Mapping[str, Any]], season: str, reads: _RequestReads) -> None:
-        """Read every log the request needs: one batch per season, whatever the scenarios."""
+        """Read every log the request needs: one batch per season, whatever the scenarios.
+
+        Both seasons' whole team rosters, so each season's team games are known.
+        """
 
         seasons = [previous_nba_season(season), season]
         wanted: set[int] = set()
         for row in rows:
             if row["player_id"] is None:
                 continue
-            injured_id = int(row["player_id"])
-            wanted.add(injured_id)
-            wanted |= self._roster(injured_id, row["team"], seasons, season, reads)
+            wanted.add(int(row["player_id"]))
+            for s in seasons:
+                wanted |= reads.roster(NBA_TEAM_TRICODE_TO_ID[row["team"]], s)
         for s in seasons:
             reads.load_logs(wanted, s)
 
     def _roster(
-        self, injured_id: int, team: str, seasons: Sequence[str], season: str, reads: _RequestReads
+        self, injured_id: int, team: str, season: str, reads: _RequestReads, listed_out: set[int]
     ) -> set[int]:
-        """The teammates a scenario considers: the team's rosters, less those the catalog places elsewhere."""
+        """The teammates a scenario considers (crf04/statsplus#485).
+
+        Once the team has played in the Slate season, those with a game for it
+        in that season, less any the Athlete Catalog has since placed on
+        another team.  Before its first game the catalog decides among last
+        season's roster (an unreadable or empty catalog leaves the roster as
+        the game logs have it).  Teammates listed Out on the same report are
+        left out.
+        """
 
         team_id = NBA_TEAM_TRICODE_TO_ID[team]
-        roster: set[int] = set()
-        for s in seasons:
-            roster |= reads.roster(team_id, s)
-        roster.discard(injured_id)
         current_team = reads.catalog_teams(season)
-        return {pid for pid in roster if current_team.get(pid) in (None, team_id)}
+        roster = reads.roster(team_id, season)
+        if roster:
+            roster = {pid for pid in roster if current_team.get(pid) in (None, team_id)}
+        else:
+            roster = reads.roster(team_id, previous_nba_season(season))
+            if current_team:
+                roster = {pid for pid in roster if current_team.get(pid) == team_id}
+        return roster - {injured_id} - listed_out
 
     def prior_season_eligible(self, row: Mapping[str, Any], prior_season: str) -> bool:
         """Whether the listed player's last season can join his window.
@@ -432,7 +514,14 @@ class InjuryScenarioService:
 
     # -- one injured player ----------------------------------------------------
 
-    def _scenario(self, row: Mapping[str, Any], season: str, reads: _RequestReads) -> dict[str, Any]:
+    def _scenario(
+        self,
+        row: Mapping[str, Any],
+        season: str,
+        reads: _RequestReads,
+        listed_out: set[int],
+        teammate_ids: set[int] | None = None,
+    ) -> dict[str, Any]:
         limits = ["stale_report"] if row["stale"] else []
         scenario: dict[str, Any] = {
             "injured": {
@@ -441,7 +530,9 @@ class InjuryScenarioService:
                 "team": row["team"],
                 "game_id": row["game_id"],
                 "status": row["status"],
+                "reason": row["reason"],
                 "report_time": row["report_time"],
+                "seasons": [],
             },
             "branches": [],
             "limits": limits,
@@ -454,7 +545,12 @@ class InjuryScenarioService:
             return scenario
         branches = ["plays", "sits"] if row["status"] in UNCERTAIN_STATUSES else ["sits"]
         injured_id = int(row["player_id"])
-        evidence, rotation_starts = self._teammates(injured_id, row["team"], season, row["game_id"], reads)
+        scenario["injured"]["seasons"] = self._injured_seasons(injured_id, row["team"], season, reads)
+        evidence, rotation_starts = self._teammates(
+            injured_id, row["team"], season, row["game_id"], reads, listed_out
+        )
+        if teammate_ids is not None:
+            evidence = [teammate for teammate in evidence if teammate.teammate_id in teammate_ids]
         for branch in branches:
             scenario["branches"].append(
                 {
@@ -473,14 +569,20 @@ class InjuryScenarioService:
         return scenario
 
     def _teammates(
-        self, injured_id: int, team: str, season: str, game_id: str, request: _RequestReads
+        self,
+        injured_id: int,
+        team: str,
+        season: str,
+        game_id: str,
+        request: _RequestReads,
+        listed_out: set[int],
     ) -> tuple[list[_Teammate], dict[str, int]]:
         """Every teammate in the pair window (rotation or not) and the injured player's starts."""
 
         seasons = [previous_nba_season(season), season]  # chronological
         injured_logs = {s: _Logs(request.logs(injured_id, s)) for s in seasons}
         reads = _OnOffReads(self.on_off, team, injured_id, request)
-        roster = self._roster(injured_id, team, seasons, season, request)
+        roster = self._roster(injured_id, team, season, request, listed_out)
         windows = {s: request.windows[s][injured_id][team] for s in seasons}
         rotation_reads = _RotationReads(self.rotations, team, injured_id, request, windows)
         pool_lines = self._pool_lines(season, game_id)
@@ -505,7 +607,7 @@ class InjuryScenarioService:
     def _windows(self, rows: Sequence[Mapping[str, Any]], season: str, request: _RequestReads) -> None:
         """Every listed player's team window per season, with one evidence read per season for all of them.
 
-        Each is judged on his team's stored rotation games and its roster's log games.
+        Each is judged on his team's stored rotation games and its season roster's log games.
         """
 
         seasons = [previous_nba_season(season), season]
@@ -516,25 +618,53 @@ class InjuryScenarioService:
                 if row["player_id"] is None:
                     continue
                 injured_id, team = int(row["player_id"]), row["team"]
-                roster = self._roster(injured_id, team, seasons, season, request)
                 judged[injured_id] = (
                     appearances(request.logs(injured_id, s)),
-                    {team: self._team_days(team, s, roster, request)},
+                    {team: self._team_days(team, s, request)},
                 )
             request.windows[s] = membership.windows(s, judged)
 
-    def _team_days(self, team: str, season: str, roster: Iterable[int], request: _RequestReads) -> set[Any]:
-        """The days of the team's stored rotation games and its roster's log games."""
+    def _team_days(self, team: str, season: str, request: _RequestReads) -> set[Any]:
+        """The days of the team's stored rotation games and its season roster's log games."""
 
         days = {
             next(iter(by_player.values()))["game_date"]
             for by_player in request.rotation_lines(self.rotations, team, season).values()
         }
-        for teammate_id in roster:
+        for teammate_id in request.roster(NBA_TEAM_TRICODE_TO_ID[team], season):
             rows = _Logs(request.logs(teammate_id, season)).team_rows(team)
             if rows is not None:
                 days.update(pd.to_datetime(rows["GAME_DATE"]).dt.date)
         return days
+
+    def _injured_seasons(
+        self, injured_id: int, team: str, season: str, request: _RequestReads
+    ) -> list[dict[str, Any]]:
+        """His team's games he missed and played, per season, the Slate season first.
+
+        A team game is one any of that season's team roster played for it; the
+        game-log absence rule (his team window) sorts it.
+        """
+
+        team_id = NBA_TEAM_TRICODE_TO_ID[team]
+        counts = []
+        for s in (season, previous_nba_season(season)):
+            frames = [
+                rows
+                for pid in sorted(request.roster(team_id, s))
+                if (rows := _Logs(request.logs(pid, s)).team_rows(team)) is not None
+            ]
+            missed: set[str] = set()
+            played: set[str] = set()
+            if frames:
+                team_games = pd.concat(frames).drop_duplicates("GAME_ID")
+                missed, played = self.games.games_without_and_with_player(
+                    team_games,
+                    _Logs(request.logs(injured_id, s)).absent_frame(),
+                    {team: request.windows[s][injured_id][team]},
+                )
+            counts.append({"season": s, "missed": len(missed), "played": len(played)})
+        return counts
 
     @staticmethod
     def _rotation_starts(
@@ -542,8 +672,8 @@ class InjuryScenarioService:
         seasons: Sequence[str],
         injured_logs: Mapping[str, _Logs],
         rotation_reads: _RotationReads,
-    ) -> dict[str, int]:
-        """His starts over his own with games, after his own last team change."""
+    ) -> dict[str, Any]:
+        """His starts over his own with games, after his own last team change, in all and per season."""
 
         others = [
             rows
@@ -551,15 +681,19 @@ class InjuryScenarioService:
             if rows is not None
         ]
         after = _as_date(max((rows["GAME_DATE"].max() for rows in others), default=None))
-        starts = games = 0
-        for s in seasons:
+        by_season = []
+        for s in reversed(seasons):
             lines, _, played = rotation_reads.season(s)
-            for game_id in played:
-                line = lines[game_id][rotation_reads.injured_id]
-                if after is None or line["game_date"] > after:
-                    games += 1
-                    starts += bool(line["started"])
-        return {"starts": starts, "games": games}
+            mine = [lines[game_id][rotation_reads.injured_id] for game_id in played]
+            counted = [line for line in mine if after is None or line["game_date"] > after]
+            by_season.append(
+                {"season": s, "starts": sum(bool(line["started"]) for line in counted), "games": len(counted)}
+            )
+        return {
+            "starts": sum(entry["starts"] for entry in by_season),
+            "games": sum(entry["games"] for entry in by_season),
+            "by_season": by_season,
+        }
 
     def _teammate(
         self,
@@ -615,6 +749,7 @@ class InjuryScenarioService:
             window=window,
             reads=reads,
             lines=pool_lines.get(teammate_id, {}),
+            slate_season=seasons[-1],
             in_rotation=in_rotation,
             pair_window=pair_window,
             rotation=self._rotation_split(teammate_id, window, _as_date(last_other), rotation_reads),
@@ -627,15 +762,21 @@ class InjuryScenarioService:
         after: Any,
         rotation_reads: _RotationReads,
     ) -> dict[str, Any] | None:
-        """His stored rotation split with the injured player absent, over the pair window."""
+        """His stored rotation split with the injured player absent, over the pair window.
+
+        ``by_season`` holds the split of each season that supplied games, the
+        Slate season (the newest) first.
+        """
 
         without_lines: list[Mapping[str, Any]] = []
         with_lines: list[Mapping[str, Any]] = []
         contributing: list[str] = []
+        by_season: list[dict[str, Any]] = []
         missing = 0
         for w in window:
             lines, without_ids, with_ids = rotation_reads.season(w.season)
-            missing += sum(1 for game_id in w.without if game_id not in lines)
+            season_missing = sum(1 for game_id in w.without if game_id not in lines)
+            missing += season_missing
             mine = (
                 [lines[g][teammate_id] for g in ids if teammate_id in lines[g]]
                 for ids in (without_ids, with_ids)
@@ -645,6 +786,14 @@ class InjuryScenarioService:
             )
             if season_without or season_with:
                 contributing.append(w.season)
+                by_season.insert(
+                    0,
+                    {
+                        "season": w.season,
+                        **rotation_split(season_without, season_with),
+                        "missing_games": season_missing,
+                    },
+                )
             without_lines += season_without
             with_lines += season_with
         if not without_lines and not with_lines:
@@ -653,6 +802,7 @@ class InjuryScenarioService:
             **rotation_split(without_lines, with_lines),
             "seasons": _season_span(contributing),
             "missing_games": missing,
+            "by_season": by_season,
         }
 
     # -- reads ---------------------------------------------------------------
@@ -747,6 +897,16 @@ def _replacement_starters(teammates: Sequence[_Teammate]) -> list[dict[str, Any]
                 "games_without": without["games"],
                 "starts_with": played["starts"],
                 "games_with": played["games"],
+                "by_season": [
+                    {
+                        "season": entry["season"],
+                        "starts_without": entry["without"]["starts"],
+                        "games_without": entry["without"]["games"],
+                        "starts_with": entry["with"]["starts"],
+                        "games_with": entry["with"]["games"],
+                    }
+                    for entry in split["by_season"]
+                ],
             }
         )
     found.sort(key=lambda entry: (-entry["starts_without"], entry["name"]))
@@ -823,6 +983,47 @@ class _Floor:
             self._usage_possessions += entry["possessions"]
 
 
+class _Evidence:
+    """A teammate's full-game and on/off samples over some of his window's seasons."""
+
+    def __init__(self, teammate: _Teammate, window: Sequence[_WindowSeason]) -> None:
+        self.window = list(window)
+        self.with_games, self.with_spans = teammate._games(self.window, True)
+        self.without_games, self.without_spans = teammate._games(self.window, False)
+        self.on_floor = teammate._floor(self.window, "on")
+        self.off_floor = teammate._floor(self.window, "off")
+
+    def values(self, column: str | None, with_player: bool) -> list[float]:
+        games = self.with_games if with_player else self.without_games
+        return games[column].tolist() if column in games else []
+
+    def on_off_limits(self) -> tuple[list[str], bool]:
+        """Limits the on/off evidence carries and whether it is complete.
+
+        Complete means both states cover exactly the seasons whose totals can
+        be sliced to the window, so the two per-36 rates are comparable.
+        """
+
+        needed = [w.season for w in self.window if w.sliceable]
+        on, off = self.on_floor, self.off_floor
+        limits: list[str] = []
+        if len(needed) != len(self.window):
+            limits.append("on_off_unsliceable")
+        issues = on.issues | off.issues
+        if "unavailable" in issues:
+            limits.append("on_off_unavailable")
+        if "not_warmed" in issues:
+            limits.append("on_off_not_warmed")
+        if on.stale or off.stale:
+            limits.append("on_off_stale")
+        if on.covered != off.covered:
+            limits.append("on_off_seasons_differ")
+        # Any unsliceable season blocks the flag: the full-game evidence would
+        # span games the on/off totals do not.
+        complete = bool(needed) and len(needed) == len(self.window) and on.covered == off.covered == needed
+        return limits, complete
+
+
 class _Teammate:
     """One rotation teammate's evidence, rendered per branch."""
 
@@ -834,6 +1035,7 @@ class _Teammate:
         window: list[_WindowSeason],
         reads: _OnOffReads,
         lines: Mapping[str, Mapping[str, float]],
+        slate_season: str,
         in_rotation: bool = True,
         pair_window: dict[str, Any] | None = None,
         rotation: dict[str, Any] | None = None,
@@ -848,12 +1050,14 @@ class _Teammate:
         self.window = window
         self.reads = reads
         self.lines = lines
+        self.slate_season = slate_season
 
     # -- full-game evidence -------------------------------------------------
 
-    def _games(self, with_player: bool) -> tuple[pd.DataFrame, list[str]]:
+    @staticmethod
+    def _games(window: Sequence[_WindowSeason], with_player: bool) -> tuple[pd.DataFrame, list[str]]:
         frames, spans = [], []
-        for w in self.window:
+        for w in window:
             ids = w.rows["GAME_ID"].astype(str)
             chosen = w.rows[ids.isin(w.played if with_player else w.without)]
             if not chosen.empty:
@@ -865,130 +1069,98 @@ class _Teammate:
 
     # -- on/off evidence ----------------------------------------------------
 
-    def _floor(self, side: str) -> _Floor:
+    def _floor(self, window: Sequence[_WindowSeason], side: str) -> _Floor:
         floor = _Floor()
-        for w in self.window:
+        for w in window:
             if w.sliceable:
                 floor.add(w.season, self.reads.get(w.season, side), self.teammate_id)
         return floor
 
-    def _on_off_limits(self, on: _Floor, off: _Floor) -> tuple[list[str], bool]:
-        """Limits the on/off evidence carries and whether it is complete.
+    # -- the season a flag is computed on (crf04/statsplus#485) ----------------
 
-        Complete means both states cover exactly the seasons whose totals can
-        be sliced to the window, so the two per-36 rates are comparable.
-        """
+    def flag_season(self) -> str:
+        """The Slate season when it has ``MIN_GAMES_WITHOUT`` games on each side, otherwise last season."""
 
-        needed = [w.season for w in self.window if w.sliceable]
-        limits: list[str] = []
-        if len(needed) != len(self.window):
-            limits.append("on_off_unsliceable")
-        issues = on.issues | off.issues
-        if "unavailable" in issues:
-            limits.append("on_off_unavailable")
-        if "not_warmed" in issues:
-            limits.append("on_off_not_warmed")
-        if on.stale or off.stale:
-            limits.append("on_off_stale")
-        if on.covered != off.covered:
-            limits.append("on_off_seasons_differ")
-        # Any unsliceable season in the window blocks the flag: the full-game
-        # evidence would span games the on/off totals do not.
-        complete = bool(needed) and len(needed) == len(self.window) and on.covered == off.covered == needed
-        return limits, complete
+        current = next((w for w in self.window if w.season == self.slate_season), None)
+        if current is not None and min(len(current.without), len(current.played)) >= MIN_GAMES_WITHOUT:
+            return self.slate_season
+        return next((w.season for w in self.window if w.season != self.slate_season), self.slate_season)
+
+    def _by_season(self) -> list[_Evidence]:
+        """One evidence per window season, the Slate season first."""
+
+        ordered = sorted(self.window, key=lambda w: w.season != self.slate_season)
+        return [_Evidence(self, [w]) for w in ordered]
 
     # -- rendering ------------------------------------------------------------
 
     def rows(self, branch: str, stale_report: bool) -> list[dict[str, Any]]:
-        with_games, with_spans = self._games(True)
-        without_games, without_spans = self._games(False)
-        on_floor, off_floor = self._floor("on"), self._floor("off")
+        pooled = _Evidence(self, self.window)
+        seasons = self._by_season()
+        flag_season = self.flag_season()
         rendered = [
-            self._scored(
-                market,
-                branch,
-                with_games,
-                with_spans,
-                without_games,
-                without_spans,
-                on_floor,
-                off_floor,
-                stale_report,
-            )
+            self._scored(market, branch, pooled, seasons, flag_season, stale_report)
             for market in SCORED_MARKETS
         ]
-        rendered += [
-            self._context(
-                market, branch, with_games, with_spans, without_games, without_spans, on_floor, off_floor
-            )
-            for market in CONTEXT_MARKETS
-        ]
+        rendered += [self._context(market, branch, pooled, seasons) for market in CONTEXT_MARKETS]
         for rendered_row in rendered:
             rendered_row["rotation"] = self.rotation
             rendered_row["pair_window"] = self.pair_window
         return rendered
 
-    def _baseline(self, column, keys, with_games, with_spans, on_floor) -> dict[str, Any]:
+    @staticmethod
+    def _baseline(column, keys, evidence: _Evidence) -> dict[str, Any]:
         return {
-            "avg": _round(_raw_mean(with_games[column].tolist())) if column in with_games else None,
-            "games": len(with_games),
-            "per36": _round(on_floor.per36(keys)) if keys else None,
-            "minutes": on_floor.minutes,
-            "season_span": _season_span(with_spans),
-            "on_floor_season_span": on_floor.span,
+            "avg": _round(_raw_mean(evidence.values(column, True))),
+            "games": len(evidence.with_games),
+            "per36": _round(evidence.on_floor.per36(keys)) if keys else None,
+            "minutes": evidence.on_floor.minutes,
         }
 
     def _scored(
         self,
-        market,
-        branch,
-        with_games,
-        with_spans,
-        without_games,
-        without_spans,
-        on_floor,
-        off_floor,
-        stale_report,
+        market: str,
+        branch: str,
+        pooled: _Evidence,
+        seasons: Sequence[_Evidence],
+        flag_season: str,
+        stale_report: bool,
     ) -> dict[str, Any]:
         column, keys = SCORED_MARKETS[market]
+        on_floor, off_floor = pooled.on_floor, pooled.off_floor
         row: dict[str, Any] = {
             "player": self.name,
             "player_id": self.teammate_id,
             "market": market,
             "kind": "scored",
-            "baseline": self._baseline(column, keys, with_games, with_spans, on_floor),
+            "baseline": {
+                **self._baseline(column, keys, pooled),
+                "season_span": _season_span(pooled.with_spans),
+                "on_floor_season_span": on_floor.span,
+            },
             "flagged": False,
             "limits": [],
             **_on_off_provenance(on_floor),
         }
         if branch == "plays":
+            row["seasons"] = [
+                {"season": e.window[0].season, "baseline": self._baseline(column, keys, e)} for e in seasons
+            ]
             return row
         row.update(_on_off_provenance(on_floor, off_floor))
-        values = without_games[column].tolist() if column in without_games else []
-        without_avg = _raw_mean(values)
-        with_avg = _raw_mean(with_games[column].tolist()) if column in with_games else None
-        off_per36 = off_floor.per36(keys)
+        values = pooled.values(column, False)
         row["without"] = {
-            "avg": _round(without_avg),
-            "games": len(without_games),
-            "season_span": _season_span(without_spans),
+            "avg": _round(_raw_mean(values)),
+            "games": len(pooled.without_games),
+            "season_span": _season_span(pooled.without_spans),
         }
         row["off_floor"] = {
-            "per36": _round(off_per36),
+            "per36": _round(off_floor.per36(keys)),
             "minutes": off_floor.minutes,
             "season_span": off_floor.span,
         }
-        limits = row["limits"]
-        on_off_limits, complete = self._on_off_limits(on_floor, off_floor)
-        enough_games = len(without_games) >= MIN_GAMES_WITHOUT
-        short_minutes = bool(off_floor.covered) and off_floor.minutes < MIN_OFF_FLOOR_MINUTES
-        insufficient = not enough_games or short_minutes
-        if insufficient:
-            limits.append("insufficient")
-        limits.extend(on_off_limits)
         posted = posted_line(self.lines, market)
         if posted is None:
-            limits.append("no_line")
             row["line"] = None
         else:
             value, source = posted
@@ -998,72 +1170,153 @@ class _Teammate:
                 "beat": sum(1 for stat in values if stat > value),
                 "of": len(values),
             }
+        row["seasons"] = [self._season_scored(column, keys, e, posted) for e in seasons]
+        row["flag_season"] = flag_season
+        limits, shift, flagged = self._judge(column, keys, pooled, baseline_floor=False)
+        row["limits"] = [limit for limit in limits if limit != "no_baseline"]
+        if posted is None:
+            row["limits"].append("no_line")
         if stale_report:
-            limits.append("stale_report")
-        if insufficient or not complete:
-            return row
-        full_shift = _shift(without_avg, with_avg)
-        on_off_shift = _shift(off_per36, on_floor.per36(keys))
-        if full_shift is None or on_off_shift is None:
-            limits.append("no_baseline")
-        row["shift"] = {
-            "full_game": _round(full_shift, 4),
-            "on_off_per36": _round(on_off_shift, 4),
-            "season_span": {
-                "full_game": row["without"]["season_span"],
-                "on_off": off_floor.span,
-            },
-        }
-        row["flagged"] = _agree(full_shift, on_off_shift)
+            row["limits"].append("stale_report")
+        if "no_baseline" in limits:
+            row["limits"].append("no_baseline")
+        if shift is not None:
+            row["shift"] = {
+                **shift,
+                "season_span": {"full_game": row["without"]["season_span"], "on_off": off_floor.span},
+            }
+        row["flagged"] = flagged
         return row
 
+    def _season_scored(self, column, keys, evidence: _Evidence, posted) -> dict[str, Any]:
+        """One season's samples, and whether they alone would flag the market."""
+
+        values = evidence.values(column, False)
+        off_floor = evidence.off_floor
+        limits, shift, flagged = self._judge(column, keys, evidence, baseline_floor=True)
+        return {
+            "season": evidence.window[0].season,
+            "baseline": self._baseline(column, keys, evidence),
+            "without": {"avg": _round(_raw_mean(values)), "games": len(evidence.without_games)},
+            "off_floor": {"per36": _round(off_floor.per36(keys)), "minutes": off_floor.minutes},
+            "line": None
+            if posted is None
+            else {"beat": sum(1 for stat in values if stat > posted[0]), "of": len(values)},
+            "shift": shift,
+            "flagged": flagged,
+            "limits": limits,
+        }
+
+    @staticmethod
+    def _judge(
+        column, keys, evidence: _Evidence, *, baseline_floor: bool
+    ) -> tuple[list[str], dict[str, float | None] | None, bool]:
+        """The limits, shift and flag of one sample.
+
+        The per-season rule (crf04/statsplus#485) also needs a baseline of
+        ``MIN_GAMES_WITH`` games and ``MIN_ON_FLOOR_MINUTES``; the pooled row
+        keeps the rule it had before, for one release.
+        """
+
+        on_floor, off_floor = evidence.on_floor, evidence.off_floor
+        limits: list[str] = []
+        on_off_limits, complete = evidence.on_off_limits()
+        insufficient = len(evidence.without_games) < MIN_GAMES_WITHOUT or (
+            bool(off_floor.covered) and off_floor.minutes < MIN_OFF_FLOOR_MINUTES
+        )
+        thin_baseline = baseline_floor and (
+            len(evidence.with_games) < MIN_GAMES_WITH
+            or (bool(on_floor.covered) and on_floor.minutes < MIN_ON_FLOOR_MINUTES)
+        )
+        if insufficient:
+            limits.append("insufficient")
+        if thin_baseline:
+            limits.append("insufficient_baseline")
+        limits.extend(on_off_limits)
+        if insufficient or thin_baseline or not complete:
+            return limits, None, False
+        full_shift = _shift(
+            _raw_mean(evidence.values(column, False)), _raw_mean(evidence.values(column, True))
+        )
+        on_off_shift = _shift(off_floor.per36(keys), on_floor.per36(keys))
+        if full_shift is None or on_off_shift is None:
+            limits.append("no_baseline")
+        shift = {"full_game": _round(full_shift, 4), "on_off_per36": _round(on_off_shift, 4)}
+        return limits, shift, _agree(full_shift, on_off_shift)
+
     def _context(
-        self,
-        market,
-        branch,
-        with_games,
-        with_spans,
-        without_games,
-        without_spans,
-        on_floor,
-        off_floor,
+        self, market: str, branch: str, pooled: _Evidence, seasons: Sequence[_Evidence]
     ) -> dict[str, Any]:
-        column = {"MIN": "MIN", "FGA": "FGA"}.get(market)
-        keys = ("fga",) if market == "FGA" else ()
-        if market == "USG":
-            baseline = {"usage": on_floor.usage, "minutes": on_floor.minutes, "season_span": on_floor.span}
-        else:
-            baseline = self._baseline(column, keys, with_games, with_spans, on_floor)
+        on_floor = pooled.on_floor
         row: dict[str, Any] = {
             "player": self.name,
             "player_id": self.teammate_id,
             "market": market,
             "kind": "context",
-            "baseline": baseline,
+            "baseline": self._context_baseline(market, pooled, spans=True),
             "flagged": False,
             "limits": [],
             **_on_off_provenance(on_floor),
         }
         if branch == "plays":
+            row["seasons"] = [
+                {"season": e.window[0].season, "baseline": self._context_baseline(market, e)} for e in seasons
+            ]
             return row
-        if column is not None:
-            row["without"] = {
-                "avg": _round(_raw_mean(without_games[column].tolist())) if column in without_games else None,
-                "games": len(without_games),
-                "season_span": _season_span(without_spans),
+        without = self._context_without(market, pooled)
+        if without is not None:
+            row["without"] = {**without, "season_span": _season_span(pooled.without_spans)}
+        off = self._context_off_floor(market, pooled)
+        row["off_floor"] = off
+        if off is not None:
+            off["season_span"] = pooled.off_floor.span
+            row["limits"], _ = pooled.on_off_limits()
+            row.update(_on_off_provenance(on_floor, pooled.off_floor))
+        row["seasons"] = []
+        for e in seasons:
+            entry: dict[str, Any] = {
+                "season": e.window[0].season,
+                "baseline": self._context_baseline(market, e),
             }
-        row["off_floor"] = (
-            {"usage": off_floor.usage}
-            if market == "USG"
-            else {"per36": _round(off_floor.per36(keys))}
-            if keys
-            else None
-        )
-        if row["off_floor"] is not None:
-            row["off_floor"].update({"minutes": off_floor.minutes, "season_span": off_floor.span})
-            row["limits"], _ = self._on_off_limits(on_floor, off_floor)
-            row.update(_on_off_provenance(on_floor, off_floor))
+            if without is not None:
+                entry["without"] = self._context_without(market, e)
+            entry["off_floor"] = self._context_off_floor(market, e)
+            entry["limits"] = e.on_off_limits()[0] if off is not None else []
+            row["seasons"].append(entry)
         return row
+
+    def _context_baseline(self, market: str, evidence: _Evidence, *, spans: bool = False) -> dict[str, Any]:
+        on_floor = evidence.on_floor
+        if market == "USG":
+            baseline = {"usage": on_floor.usage, "minutes": on_floor.minutes}
+            if spans:
+                baseline["season_span"] = on_floor.span
+            return baseline
+        column = {"MIN": "MIN", "FGA": "FGA"}[market]
+        keys = ("fga",) if market == "FGA" else ()
+        baseline = self._baseline(column, keys, evidence)
+        if spans:
+            baseline.update(
+                {"season_span": _season_span(evidence.with_spans), "on_floor_season_span": on_floor.span}
+            )
+        return baseline
+
+    @staticmethod
+    def _context_without(market: str, evidence: _Evidence) -> dict[str, Any] | None:
+        column = {"MIN": "MIN", "FGA": "FGA"}.get(market)
+        if column is None:
+            return None
+        values = evidence.values(column, False)
+        return {"avg": _round(_raw_mean(values)), "games": len(evidence.without_games)}
+
+    @staticmethod
+    def _context_off_floor(market: str, evidence: _Evidence) -> dict[str, Any] | None:
+        off_floor = evidence.off_floor
+        if market == "USG":
+            return {"usage": off_floor.usage, "minutes": off_floor.minutes}
+        if market == "FGA":
+            return {"per36": _round(off_floor.per36(("fga",))), "minutes": off_floor.minutes}
+        return None
 
 
 __all__ = ["SCENARIO_STATUSES", "InjuryScenarioService"]
