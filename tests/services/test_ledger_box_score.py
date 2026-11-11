@@ -311,6 +311,12 @@ UNUSABLE_BOX_SCORES = {
     "made shots exceed attempts": lambda box: _box_player(box, PETERSON)["statistics"].update(
         fieldGoalsAttempted=1
     ),
+    "made threes exceed attempts": lambda box: _box_player(box, PETERSON)["statistics"].update(
+        threePointersAttempted=1
+    ),
+    "made free throws exceed attempts": lambda box: _box_player(box, PETERSON)["statistics"].update(
+        freeThrowsAttempted=1
+    ),
     "points disagree with the shots": lambda box: _box_player(box, PETERSON)["statistics"].update(points=15),
     "rebounds disagree with their split": lambda box: _box_player(box, PETERSON)["statistics"].update(
         reboundsTotal=5
@@ -341,6 +347,8 @@ def test_a_box_score_that_is_not_a_whole_reference_leaves_the_game_as_its_provid
 
 INCONSISTENT_ROWS = (
     "made shots exceed attempts",
+    "made threes exceed attempts",
+    "made free throws exceed attempts",
     "points disagree with the shots",
     "rebounds disagree with their split",
 )
@@ -932,6 +940,22 @@ def test_a_box_score_request_is_made_once_and_never_retried(monkeypatch):
     with pytest.raises(requests.Timeout):
         provider.fetch_game_box_score(GAME_ID, timeout=10, finish_within=60)
     assert attempts == [10]
+
+
+def test_a_skipped_box_score_check_takes_no_pacing_slot(monkeypatch):
+    from nba_api.stats.library.http import NBAStatsHTTP
+
+    calls, sleeps = [], []
+    monkeypatch.setattr(NBAStatsHTTP, "send_api_request", _send_recording(calls))
+    provider = NBATrackingProvider(pace_seconds=0.6, sleep=sleeps.append, monotonic=lambda: 100.0)
+
+    provider.fetch_game_box_score(GAME_ID, timeout=10, finish_within=60)
+    with pytest.raises(ProviderResponseError, match="could not answer in the time left"):
+        provider.fetch_game_box_score("0022600028", timeout=10, finish_within=10.5)
+    provider.fetch_game_box_score("0022600028", timeout=10, finish_within=10.75)
+
+    assert [game_id for _endpoint, game_id, _headers, _timeout in calls] == [GAME_ID, "0022600028"]
+    assert sleeps == [pytest.approx(0.6)]
 
 
 def test_a_slow_box_score_request_does_not_hold_up_the_next_games_request(monkeypatch):
