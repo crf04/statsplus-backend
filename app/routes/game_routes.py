@@ -97,7 +97,7 @@ _ROTATION_DEFAULT_LAST_N = 5
 _ROTATION_MAX_LAST_N = 20
 _LAST_N = re.compile(r"[0-9]{1,2}\Z")
 _NBA_GAME_ID = re.compile(r"[0-9]{10}\Z")
-_BOARD_PARAMETERS = frozenset({"date", "season", "market", "game", "team", "sources"})
+_BOARD_PARAMETERS = frozenset({"date", "season", "market", "game", "team", "sources", "moves"})
 #: One player's stored statuses over a date range (crf04/statsplus#494).
 _INJURY_HISTORY_PARAMETERS = frozenset({"player", "from_date", "to_date"})
 
@@ -218,6 +218,9 @@ def get_board():
         )
         if not sources or not sources <= BOARD_SOURCES:
             raise _invalid_board("sources")
+    moves = request.args.get("moves", "false")
+    if moves not in ("true", "false"):
+        raise _invalid_board("moves")
     return jsonify(
         slate_board_service.get_board(
             slate_date=slate_date,
@@ -226,6 +229,7 @@ def get_board():
             game_id=game_id,
             team=team,
             sources=sources,
+            moves=moves == "true",
         )
     )
 

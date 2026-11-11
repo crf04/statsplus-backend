@@ -7,10 +7,13 @@ import os
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.dialects import postgresql
 
 from app.migrations import run_migrations
 from app.providers.dfs import NBAMarketQuery
+from app.providers.odds_api import BOOK_ALLOWLIST
 from app.providers.registry import dfs_provider_names
+from app.services.line_moves import book_histories
 from app.services.projection_archive import LatestProjectionPlayerPoolReader, ProjectionArchiveReadScope
 from tests.routes.test_games_board import (
     CURRY,
@@ -27,6 +30,7 @@ from tests.routes.test_games_board import (
     _get,
     seed_board,
 )
+from tests.routes.test_games_board_moves import PULLED, TATUM_MOVES, _rows, seed_moves
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_migrations]
 
@@ -230,3 +234,93 @@ def test_a_failed_injury_read_leaves_the_rest_of_the_board(board, client):
     assert status == 200
     assert _tatum(body) == (27.5, {"draftkings": 27.5, "fanduel": 28.5}, None)
     assert {row["injury_status"] for game in body["games"] for row in game["players"]} == {None}
+
+
+def test_line_moves_on_postgres(dependencies, client):
+    url = os.getenv("TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("TEST_DATABASE_URL is not set; skipping Postgres integration tests")
+    engine = create_engine(url, pool_size=4)
+    with engine.begin() as connection:
+        connection.execute(text("DROP SCHEMA public CASCADE"))
+        connection.execute(text("CREATE SCHEMA public"))
+    run_migrations(engine)
+    seed_moves(engine, dependencies)
+
+    status, body = _get(client, "date=2026-01-15&market=PTS&moves=true")
+
+    engine.dispose()
+    assert status == 200
+    assert _rows(body)["Jayson Tatum"]["moves"] == TATUM_MOVES
+    assert body["pulled"] == PULLED
+
+
+def test_the_book_history_read_scans_only_the_requested_games(dependencies):
+    """However long the season's history, the read walks the series index for the slate's games."""
+
+    url = os.getenv("TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("TEST_DATABASE_URL is not set; skipping Postgres integration tests")
+    engine = create_engine(url, pool_size=4)
+    with engine.begin() as connection:
+        connection.execute(text("DROP SCHEMA public CASCADE"))
+        connection.execute(text("CREATE SCHEMA public"))
+    run_migrations(engine)
+    seed_moves(engine, dependencies)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO sportsbook_prop_quotes (poll_id, canonical_game_id, canonical_player_id, "
+                "market_category, book, line, over_price, under_price, observed_at, is_closing) "
+                "SELECT 1, '00225' || lpad((n % 400)::text, 5, '0'), 1628369, 'PTS', 'draftkings', 20.5, "
+                "-110, -110, now() - n * interval '1 hour', false FROM generate_series(1, 4000) AS n"
+            )
+        )
+        connection.execute(text("ANALYZE sportsbook_prop_quotes"))
+    statements = []
+
+    class Capturing:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def execute(self, statement):
+            statements.append(statement)
+            return self.connection.execute(statement)
+
+    with engine.connect() as connection:
+        book_histories(
+            Capturing(connection),
+            game_ids=[LATER],
+            market="PTS",
+            books=sorted(BOOK_ALLOWLIST),
+            posted=(),
+        )
+        compiled = statements[0].compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+        connection.execute(text("SET enable_seqscan = off"))
+        (plan,) = connection.execute(text(f"EXPLAIN (ANALYZE, FORMAT JSON) {compiled}")).scalar_one()
+    engine.dispose()
+
+    def scans(node):
+        yield node
+        for child in node.get("Plans", ()):
+            yield from scans(child)
+
+    read = [node for node in scans(plan["Plan"]) if node["Node Type"].endswith("Scan")]
+    indexed = [node for node in read if "Index Name" in node]
+    assert "Seq Scan" not in {node["Node Type"] for node in read}
+    assert {node["Index Name"] for node in indexed} == {"ix_sportsbook_prop_quotes_series"}
+    # The index itself narrows to the slate game and the market: no row is read and then discarded.
+    assert all(
+        "canonical_game_id" in node["Index Cond"] and "market_category" in node["Index Cond"]
+        for node in indexed
+    )
+    assert (
+        sum(
+            node.get("Rows Removed by Filter", 0) + node.get("Rows Removed by Index Recheck", 0)
+            for node in read
+        )
+        == 0
+    )
+    # The slate game's fifteen PTS rows (Tatum 4, White 4, Hauser 2, Brown 4, Brunson 1), none of
+    # the 4,000 rows of other games.
+    assert max(node["Actual Rows"] for node in read) == 15

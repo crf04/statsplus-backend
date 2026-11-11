@@ -1419,7 +1419,7 @@ DFS provider and writes nothing.
 ### Get Board
 
 ```http
-GET /api/games/board?date=YYYY-MM-DD[&season=YYYY-YY][&market=CODE][&game=<nba_game_id>][&team=ABBR][&sources=a,b,...]
+GET /api/games/board?date=YYYY-MM-DD[&season=YYYY-YY][&market=CODE][&game=<nba_game_id>][&team=ABBR][&sources=a,b,...][&moves=true]
 Authorization: Bearer <firebase-id-token>
 ```
 
@@ -1442,6 +1442,8 @@ on one repeatable-read snapshot. It composes no Matchup and calls no provider.
   `fanduel`, `betmgm`, `williamhill_us`, `betrivers`, `fanatics`). It narrows the
   rows, each row's `lines`, `line_prices` and `book_lines.books`, the index's
   counts, and the top-level `sources` list.
+- `moves` is `true` or `false` (the default). `true` needs `market`; see
+  [Line moves](#line-moves).
 - An unknown market, a malformed value, a repeated parameter (other than
   `sources`) or any other parameter is `400 invalid_input` with
   `details.parameters` naming it. A date with no games is `200` with
@@ -1527,6 +1529,64 @@ filters) and `"omitted": {"book_only_unnamed": 1}`, and gives each game its
   `freshness.pool.providers` vocabulary: `fresh`, `stale-served`, `missing`,
   and `closing` when every game read has started), then each book quoting a
   game read, `fresh` with its newest update. Times are UTC with a `Z` suffix.
+
+#### Line moves
+
+With `moves=true` (crf04/statsplus#491), each row adds `moves` and the board
+adds `moves_sources` and `pulled`. Every other field is unchanged, and without
+`moves` the response is exactly the one above. Only the sportsbooks have line
+history: the DFS and prediction-market providers have none yet.
+
+```json
+"moves": {
+  "draftkings": {
+    "open": {"line": 27.5, "over": -110, "under": -110, "seen_at": "2026-01-15T03:00:00Z"},
+    "previous": {"line": 28.5, "over": -115, "under": -105, "changed_at": "2026-01-15T23:57:00Z"},
+    "unchanged": false
+  },
+  "fanduel": {
+    "open": {"line": 28.5, "over": -105, "under": -115, "seen_at": "2026-01-15T03:00:00Z"},
+    "previous": null,
+    "unchanged": true
+  }
+}
+```
+
+```json
+"moves_sources": ["betmgm", "betrivers", "draftkings", "fanatics", "fanduel", "williamhill_us"],
+"pulled": {
+  "draftkings": [
+    {"game_id": "0022500602", "player_id": 1630573, "name": "Sam Hauser", "team": "BOS",
+     "line": 9.5, "over": -120, "under": 100, "seen_at": "2026-01-15T15:00:00Z"}
+  ]
+}
+```
+
+- `moves_sources` names the sources with line history: the books `sources`
+  keeps. A provider in `lines` never has a `moves` key, so a row whose only
+  cells are providers' has `"moves": {}`.
+- "Today" is the date's US Eastern day, from 00:00 ET. A value is a line with
+  its Over and Under prices (`null` for a side with no price).
+- `moves` has one key per book in the row's `book_lines.books`, by name. `open`
+  is the value in force at 00:00 ET, or the first value for a line first
+  posted later that day; its `seen_at` is when that value was stored, the
+  evening before for a book's opening line. `previous` is the value before the
+  current one, with `changed_at` the time the current value replaced it, or
+  `null` when the value never changed today. `unchanged` is `true` exactly
+  when `previous` is `null`. A book re-posting the same line and prices, after
+  a pull or not, is not a move; a change to either price is. A line that moved
+  and moved back is `unchanged: false` with the intermediate value as
+  `previous`.
+- `pulled` lists, per book, each player and market the book posted today and
+  no longer posts, in game, team, name and player ID order, with its last value
+  and `seen_at`, when that value was stored. When the book pulled it is not
+  stored: a pull writes no history row. A book with nothing pulled is absent.
+  `game`, `team` and `sources` narrow it as they narrow rows, and a player the
+  catalog cannot name or place on a team is not listed.
+- Book history is `sportsbook_prop_quotes`: a row per change of a book's line or
+  price, first post, re-post after a pull, and closing; it is never pruned, so
+  any date is served. The extra read is one statement on the board's snapshot,
+  through the table's series index for the date's games and the market.
 
 The board is not a research action and records no usage event.
 
