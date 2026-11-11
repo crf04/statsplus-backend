@@ -4,12 +4,16 @@ only when every row carries them, and the backfill that fills stored games."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from app.services import lineup_segments
 from app.services.lineup_segment_repository import LineupSegmentRepository, write_game
 from app.services.lineup_segments import COUNTS, GameSegments, Segment, derive_segments
+from scripts import lineup_segment_backfill
 from scripts.lineup_segment_backfill import fill_makes
 from tests.services.test_on_off import FakeProvider
 from tests.services.test_on_off_segments import (
@@ -214,6 +218,19 @@ def test_a_split_with_any_segment_lacking_makes_omits_them_for_every_player(mixe
     assert next(p for p in full["players"] if p["player_id"] == 1)["totals"]["fg3m"] == 1
 
 
+def test_a_lineup_seen_in_a_filled_and_an_unfilled_game_serves_no_makes_rather_than_a_part(mixed):
+    shooter = {"pts": 8, "fgm": 3, "fg3m": 1, "fga": 4, "fg3a": 2, "ftm": 1, "fta": 2}
+    _write(mixed, "0022500003", (1, 2, 3, 4, 5), {1: shooter})
+    _forget_makes(mixed, ["0022500003"])
+
+    body = _service(FakeProvider(), mixed).get("BOS", "2025-26", on=[1])
+
+    shooter_row = next(player for player in body["players"] if player["player_id"] == 1)
+    assert (shooter_row["minutes"], shooter_row["totals"]["pts"]) == (24, 16)
+    assert list(shooter_row["totals"]) == ["pts", "reb", "ast", "fg3m", "fga", "fg3a", "tov", "fta", "fg2a"]
+    assert list(shooter_row["per36"]) == list(shooter_row["totals"])
+
+
 def test_the_rotation_job_stores_makes_so_brown_has_them_asked_and_for_the_season(tmp_path, bos_games):
     engine = _engine(tmp_path)
     stored = sorted(bos_games)[:2]
@@ -286,13 +303,17 @@ def test_the_fill_is_bounded_resumable_and_ends_with_the_rows_a_fresh_collection
     assert _dump(engine) == fresh
 
 
-def test_a_game_whose_stored_counts_changed_is_reported_and_left_as_it_was(tmp_path, bos_games):
+@pytest.mark.parametrize(
+    "column",
+    ["pts", "fga", "fg3m", "fta", "reb", "ast", "fg3a", "tov", "duration_cs", "team_fga", "off_poss"],
+)
+def test_a_game_whose_stored_counts_changed_is_reported_and_left_as_it_was(tmp_path, bos_games, column):
     engine, game_ids, fresh = _stored(tmp_path, bos_games)
     with engine.begin() as connection:
-        # A scoring correction since the game was stored: one basket is now worth one more point.
+        # A scoring correction since the game was stored, say: one stored value is one higher.
         connection.execute(
             text(
-                "UPDATE lineup_segment_players SET pts = pts + 1"
+                f"UPDATE lineup_segment_players SET {column} = {column} + 1"
                 f" WHERE game_id = '{game_ids[1]}' AND player_id = {BROWN} AND seg = 0"
             )
         )
@@ -304,13 +325,95 @@ def test_a_game_whose_stored_counts_changed_is_reported_and_left_as_it_was(tmp_p
     assert result["mismatched"] == [
         {
             "game_id": game_ids[1],
-            "reason": f"stored counts differ for team {BOS} segment 0 player {BROWN}: pts",
+            "reason": f"stored counts differ for team {BOS} segment 0 player {BROWN}: {column}",
         }
     ]
     assert [row for row in _dump(engine)["lineup_segment_players"] if row[0] == game_ids[1]] == before
     assert [row for row in _dump(engine)["lineup_segment_players"] if row[0] != game_ids[1]] == [
         row for row in fresh["lineup_segment_players"] if row[0] != game_ids[1]
     ]
+
+
+@pytest.mark.parametrize("change", ["extra", "missing"])
+def test_a_game_whose_stored_rows_differ_from_the_derivation_is_reported_and_left(
+    tmp_path, bos_games, change
+):
+    engine, game_ids, _fresh = _stored(tmp_path, bos_games)
+    game = f"game_id = '{game_ids[0]}'"
+    with engine.begin() as connection:
+        stored = connection.execute(
+            text(f"SELECT COUNT(*) FROM lineup_segment_players WHERE {game}")
+        ).scalar()
+        if change == "extra":
+            connection.execute(
+                text(
+                    "INSERT INTO lineup_segment_players SELECT game_id, team_id, seg, 1, season, written_at,"
+                    " lineup_mask, duration_cs, pts, reb, ast, fg3m, fga, fg3a, tov, fta, team_fga, team_fta,"
+                    " team_tov, team_heaves, off_poss, fgm, ftm FROM lineup_segment_players"
+                    f" WHERE {game} AND player_id = {BROWN} AND seg = 0"
+                )
+            )
+        else:
+            connection.execute(
+                text(f"DELETE FROM lineup_segment_players WHERE {game} AND player_id = {BROWN} AND seg = 0")
+            )
+    before = _dump(engine)
+    now = stored + 1 if change == "extra" else stored - 1
+
+    result = _fill(engine, bos_games, max_games=1)
+
+    assert result["mismatched"] == [
+        {
+            "game_id": game_ids[0],
+            "reason": f"stored segments differ: {now} player rows stored, {stored} derived",
+        }
+    ]
+    assert _dump(engine) == before
+
+
+def test_a_fill_that_fails_partway_through_a_game_writes_none_of_its_rows(tmp_path, bos_games):
+    engine, game_ids, _fresh = _stored(tmp_path, bos_games)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TRIGGER fail_after_five BEFORE UPDATE OF fgm ON lineup_segment_players"
+                " WHEN (SELECT COUNT(*) FROM lineup_segment_players"
+                " WHERE game_id = NEW.game_id AND fgm IS NOT NULL) >= 5"
+                " BEGIN SELECT RAISE(ABORT, 'disk full'); END"
+            )
+        )
+    documents = bos_games[game_ids[0]]
+
+    with pytest.raises(IntegrityError, match="disk full"):
+        LineupSegmentRepository(engine).fill_makes(
+            derive_segments(documents["box"], documents["pbp"], "2025-26")
+        )
+
+    with engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT COUNT(fgm), COUNT(ftm) FROM lineup_segment_players")
+        ).one() == (0, 0)
+
+
+@pytest.mark.parametrize(
+    ("failed", "mismatched", "code"),
+    [
+        ([], [], 0),
+        ([{"game_id": "0022500001", "error": "timeout"}], [], 1),
+        ([], [{"game_id": "0022500001"}], 1),
+    ],
+)
+def test_the_makes_run_exits_1_when_a_game_failed_or_was_mismatched(
+    tmp_path, monkeypatch, capsys, failed, mismatched, code
+):
+    result = {"season": "2025-26", "filled": 3, "failed": failed, "mismatched": mismatched, "remaining": 0}
+    monkeypatch.setattr(lineup_segment_backfill, "fill_makes", lambda *args, **kwargs: result)
+
+    exit_code = lineup_segment_backfill.main(
+        ["2025-26", "--makes", "--database-url", f"sqlite:///{tmp_path / 'run.db'}"]
+    )
+
+    assert (exit_code, json.loads(capsys.readouterr().out.splitlines()[-1])) == (code, result)
 
 
 def test_a_game_whose_new_counts_break_the_points_identity_is_reported_and_left(

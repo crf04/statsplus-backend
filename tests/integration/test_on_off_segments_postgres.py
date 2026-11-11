@@ -5,6 +5,7 @@ concurrent writers of one team-season."""
 from __future__ import annotations
 
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -12,11 +13,12 @@ from threading import Barrier, BrokenBarrierError
 
 import pytest
 from sqlalchemy import create_engine, event, insert, inspect, text
+from sqlalchemy.exc import InternalError
 
 from app.migrations import downgrade_lineup_segments, run_migrations
 from app.models.event_catalog import EventCatalogEntry
 from app.services.lineup_segment_repository import LineupSegmentRepository, write_game
-from app.services.lineup_segments import COUNTS, GameSegments, Segment
+from app.services.lineup_segments import COUNTS, GameSegments, Segment, derive_segments
 from scripts.lineup_segment_backfill import fill_makes
 from scripts.on_off_parity import load_games, parity, within_tolerance
 from tests.services.test_on_off_segments import BOS, BROWN, FakeLiveData, _collection, _dump, _event
@@ -257,3 +259,76 @@ def test_the_makes_fill_ends_with_the_rows_a_fresh_collection_writes_on_postgres
             text(f"UPDATE lineup_segment_players SET fgm = NULL, ftm = NULL WHERE game_id = '{game_ids[1]}'")
         )
     assert brown() == (None, None)
+
+
+def test_a_fill_waits_for_a_concurrent_rewrite_and_then_checks_what_it_committed_on_postgres(engine):
+    games = load_games("bos_2025_26")
+    game_id = sorted(games)[0]
+    _collection(engine, games).collect("2025-26", game_ids=[game_id])
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE lineup_segment_players SET fgm = NULL, ftm = NULL"))
+        team_id, seg, player_id = connection.execute(
+            text(
+                "SELECT team_id, seg, player_id FROM lineup_segment_players ORDER BY team_id, seg, player_id"
+            )
+        ).first()
+    derived = derive_segments(games[game_id]["box"], games[game_id]["pbp"], "2025-26")
+    rewrite = engine.connect()
+    transaction = rewrite.begin()
+    rewrite.execute(
+        text(
+            "UPDATE lineup_segment_players SET pts = pts + 1"
+            " WHERE team_id = :team AND seg = :seg AND player_id = :player"
+        ),
+        {"team": team_id, "seg": seg, "player": player_id},
+    )
+    with ThreadPoolExecutor(1) as pool:
+        filling = pool.submit(LineupSegmentRepository(engine).fill_makes, derived)
+        waiting = 0
+        for _ in range(200):
+            with engine.connect() as connection:
+                waiting = connection.execute(
+                    text("SELECT COUNT(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'")
+                ).scalar()
+            if waiting:
+                break
+            time.sleep(0.05)
+        transaction.commit()
+        rewrite.close()
+        reason = filling.result(timeout=30)
+
+    assert waiting == 1
+    assert reason == f"stored counts differ for team {team_id} segment {seg} player {player_id}: pts"
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT COUNT(fgm) FROM lineup_segment_players")).scalar() == 0
+
+
+def test_a_fill_that_fails_partway_through_a_game_writes_none_of_its_rows_on_postgres(engine):
+    games = load_games("bos_2025_26")
+    game_id = sorted(games)[0]
+    _collection(engine, games).collect("2025-26", game_ids=[game_id])
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE lineup_segment_players SET fgm = NULL, ftm = NULL"))
+        connection.execute(
+            text(
+                "CREATE FUNCTION fail_after_five() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN"
+                " IF (SELECT COUNT(*) FROM lineup_segment_players"
+                " WHERE game_id = NEW.game_id AND fgm IS NOT NULL) >= 5"
+                " THEN RAISE EXCEPTION 'disk full'; END IF; RETURN NEW; END $$"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE TRIGGER fail_after_five BEFORE UPDATE OF fgm ON lineup_segment_players"
+                " FOR EACH ROW EXECUTE FUNCTION fail_after_five()"
+            )
+        )
+    derived = derive_segments(games[game_id]["box"], games[game_id]["pbp"], "2025-26")
+
+    with pytest.raises(InternalError, match="disk full"):
+        LineupSegmentRepository(engine).fill_makes(derived)
+
+    with engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT COUNT(fgm), COUNT(ftm) FROM lineup_segment_players")
+        ).one() == (0, 0)
