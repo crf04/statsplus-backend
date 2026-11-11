@@ -3178,6 +3178,32 @@ generation the response reads, and no filter changes them. A metric the
 publication lacks has no entry, and the object is `{}` when the season cannot
 be ranked.
 
+Filter ranks (crf04/statsplus#498): when the request has `teams_against[]`
+filters, every `game_logs[]` row carries `teams_against_ranks`, an object keyed
+by each `teams_against[]` value exactly as the request named it (a Team Filter
+token such as `OPP_AST`, or a Defense Sheet row such as
+`sheet:assist_locations:Arc3Assists`). Each value is that game's opponent's
+rank on the filter's ranking, 1-30 with 30 = allows the most: the number the
+filter compared against its `rank_filter[]` entry. It is a whole-season rank
+from the same Season publication the filter read, not the rank on the game's
+date. Ranking position p (1 = the highest value) is rank `31 - p`, so tied
+teams hold distinct ranks in tricode order, and a tied team's number can
+differ from its shared `opponent_ranks` rank. Without `teams_against[]` the
+rows carry no `teams_against_ranks`.
+
+```json
+{
+  "game_logs": [
+    {
+      "GAME_DATE": "2026-11-08",
+      "MATCHUP": "ORL vs. NYK",
+      "AST": 9,
+      "teams_against_ranks": { "sheet:assist_locations:Arc3Assists": 27, "OPP_PTS": 22 }
+    }
+  ]
+}
+```
+
 Every successful response also carries the shared
 [`provenance`](#response-provenance) block naming the Publications it read.
 
