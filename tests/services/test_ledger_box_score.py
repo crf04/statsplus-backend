@@ -27,6 +27,8 @@ from app.services.ledger_derivations import (
     materialize_assist_location_window,
     materialize_rebound_type_window,
 )
+from app.services.ledger_materialization import LedgerMaterializationService
+from app.services.ledger_parity import LedgerParityArtifactRepository
 from app.utils.telemetry import ProviderResponseError
 from scripts import ledger_box_score_differences
 from tests.services.test_ledger_backfill import _Recorder
@@ -310,6 +312,9 @@ UNUSABLE_BOX_SCORES = {
         fieldGoalsAttempted=1
     ),
     "points disagree with the shots": lambda box: _box_player(box, PETERSON)["statistics"].update(points=15),
+    "rebounds disagree with their split": lambda box: _box_player(box, PETERSON)["statistics"].update(
+        reboundsTotal=5
+    ),
     "a player the ledger has is missing": lambda box: box["awayTeam"].update(
         players=[player for player in box["awayTeam"]["players"] if player["personId"] != PETERSON]
     ),
@@ -371,6 +376,87 @@ def test_a_partial_box_score_resolves_no_open_difference(tmp_path, capsys):
         ("Brice Sensabaugh", "FG3A"),
         ("Darryn Peterson", "AST"),
     ]
+
+
+def test_a_recheck_whose_rebounds_disagree_with_their_split_changes_and_resolves_nothing(tmp_path, capsys):
+    engine = _engine(tmp_path)
+    box_scores = _BoxScores(_official())
+    ledger, _control = _controlled_ledger(engine, box_scores)
+    ledger.refresh()
+    stored, listed = ledger.game().checksum, _listed(engine, capsys)
+
+    box_scores.document = _official(assists=6, reboundsTotal=5)
+    ledger.now = CUTOFF + timedelta(hours=25)
+    result = ledger.refresh()
+
+    assert (result.games_replaced, result.box_score_differences, result.unreconciled_game_ids) == (
+        0,
+        0,
+        (GAME_ID,),
+    )
+    assert (ledger.game().checksum, ledger.player(PETERSON).assists) == (stored, 5)
+    assert [(item["player_name"], item["stat"]) for item in listed] == [
+        ("Brice Sensabaugh", "AST"),
+        ("Brice Sensabaugh", "FG3A"),
+        ("Darryn Peterson", "AST"),
+    ]
+    assert _listed(engine, capsys) == listed
+
+
+def test_the_ledger_requests_each_box_score_with_its_timeout(tmp_path, monkeypatch):
+    from nba_api.stats.library.http import STATS_HEADERS, NBAStatsHTTP
+
+    calls = []
+    monkeypatch.setattr(NBAStatsHTTP, "send_api_request", _send_recording(calls))
+    ledger = _Ledger(_engine(tmp_path), NBATrackingProvider(pace_seconds=0.6, sleep=lambda _seconds: None))
+
+    result = ledger.refresh()
+
+    assert calls == [("boxscoretraditionalv3", GAME_ID, STATS_HEADERS, 10.0)]
+    assert (result.box_score_differences, ledger.player(PETERSON).assists) == (3, 5)
+
+
+@pytest.mark.parametrize(
+    ("seconds_left", "requested"),
+    [(15.5, (GAME_ID, "0022600169")), (15.25, (GAME_ID,))],
+    ids=["pacing, timeout and margin fit", "pacing does not fit"],
+)
+def test_a_box_score_check_starts_only_when_its_pacing_wait_and_timeout_end_before_the_deadline(
+    tmp_path, monkeypatch, seconds_left, requested
+):
+    """The second game's check waits 0.5 s for pacing, may then take its 10 s timeout, and keeps a 5 s margin."""
+
+    from nba_api.stats.library.http import NBAStatsHTTP
+
+    second_game = "0022600169"
+    ledger = _Ledger(_engine(tmp_path), None, game_ids=(GAME_ID, second_game))
+    ledger.service.box_score_provider = NBATrackingProvider(
+        pace_seconds=0.75,
+        sleep=lambda seconds: setattr(ledger, "now", ledger.now + timedelta(seconds=seconds)),
+        monotonic=lambda: (ledger.now - COLLECT_BEFORE).total_seconds(),
+    )
+    ledger.now = COLLECT_BEFORE - timedelta(seconds=seconds_left + 0.25)
+    sent = []
+
+    def send(_http, parameters, timeout=None, **_kwargs):
+        sent.append(parameters["GameID"])
+        if parameters["GameID"] == GAME_ID:
+            ledger.now += timedelta(seconds=0.25)
+            return type("Response", (), {"get_dict": staticmethod(_official)})()
+        ledger.now += timedelta(seconds=timeout)
+        raise requests.Timeout("stats.nba.com did not answer")
+
+    monkeypatch.setattr(NBAStatsHTTP, "send_api_request", send)
+
+    result = ledger.refresh()
+
+    assert tuple(sent) == requested
+    assert (result.complete, result.failed_game_ids, result.unreconciled_game_ids) == (
+        True,
+        (),
+        (second_game,),
+    )
+    assert [ledger.player(PETERSON, game_id).assists for game_id in (GAME_ID, second_game)] == [5, 6]
 
 
 @pytest.mark.parametrize("seconds_left", [60, 5])
@@ -511,6 +597,73 @@ def _season_windows(game):
     )
 
 
+def _composed(ledger):
+    """Every ledger stream of a league that replays the ledger's game for 15 rounds."""
+
+    game = ledger.game()
+    teams = sorted(NBA_TEAM_IDS)
+    games = (
+        game,
+        *(
+            replace(
+                relabelled,
+                source_observation_id=relabelled.game_id,
+                participant_ids_by_team=tuple(
+                    (home if team_id == game.home_team_id else away, players)
+                    for team_id, players in game.participant_ids_by_team
+                ),
+            ).with_checksum()
+            for round_number in range(15)
+            for pair, (home, away) in enumerate(zip(teams[::2], teams[1::2], strict=True))
+            for relabelled in (_relabelled(game, f"00998{round_number:02d}{pair:03d}", home, away),)
+        ),
+    )
+    ledger.repository.replace_games_atomic(games[1:])
+    return LedgerMaterializationService(
+        ledger.repository,
+        parity_repository=LedgerParityArtifactRepository(ledger.engine),
+        parity_reader=None,
+        clock=lambda: CUTOFF,
+    ).compose(
+        games,
+        season=SEASON,
+        as_of=date(2026, 11, 3),
+        expected_game_ids=frozenset(item.game_id for item in games),
+        expected_l15_game_ids={
+            team_id: frozenset(
+                sorted(
+                    (item.game_id for item in games if team_id in {item.home_team_id, item.away_team_id}),
+                    reverse=True,
+                )[:15]
+            )
+            for team_id in NBA_TEAM_IDS
+        },
+        team_ids=NBA_TEAM_IDS,
+        require_assist_locations=True,
+    )
+
+
+def _peterson_slices(rows):
+    return {row["slice_key"]: row["volume"] for row in rows if row["player_id"] == PETERSON}
+
+
+PETERSON_ASSIST_SLICES = {
+    "Arc3Assists": 4.0,
+    "Corner3Assists": 0.0,
+    "AtRimAssists": 2.0,
+    "ShortMidRangeAssists": 0.0,
+    "LongMidRangeAssists": 0.0,
+}
+PETERSON_REBOUND_SLICES = {
+    "DefTwoPtRebounds": 2.0,
+    "DefThreePtRebounds": 2.0,
+    "FTDefRebounds": 0.0,
+    "OffTwoPtRebounds": 0.0,
+    "OffThreePtRebounds": 0.0,
+    "FTOffRebounds": 0.0,
+}
+
+
 def test_a_corrected_game_keeps_the_assist_location_and_rebound_type_bases_available(tmp_path):
     corrected = _Ledger(_engine(tmp_path), _BoxScores(_official(reboundsDefensive=5, reboundsTotal=5)))
     provider = _Ledger(
@@ -522,19 +675,48 @@ def test_a_corrected_game_keeps_the_assist_location_and_rebound_type_bases_avail
 
     assists, rebounds = _season_windows(corrected.game())
     provider_assists, provider_rebounds = _season_windows(provider.game())
+    facts = derive_assist_location_facts((corrected.game(),))
+    assist_diet = derive_player_assist_diet_rows((corrected.game(),))
+    rebound_diet = derive_player_rebound_type_diet_rows((corrected.game(),))
+    composed = _composed(corrected)
 
     assert (assists.complete, rebounds.complete) == (True, True)
     assert [team.counts for team in assists.teams] == [team.counts for team in provider_assists.teams]
     assert [team.counts for team in rebounds.teams] == [team.counts for team in provider_rebounds.teams]
-    assert derive_assist_location_facts((corrected.game(),)) == derive_assist_location_facts(
-        (provider.game(),)
-    )
-    assert derive_player_assist_diet_rows((corrected.game(),)) == derive_player_assist_diet_rows(
-        (provider.game(),)
-    )
-    assert derive_player_rebound_type_diet_rows((corrected.game(),)) == derive_player_rebound_type_diet_rows(
-        (provider.game(),)
-    )
+    assert [(fact.assists, *_assist_locations(fact)) for fact in facts if fact.player_id == PETERSON] == [
+        (6, 2, 4, 4, 0, 2, 0, 0)
+    ]
+    assert _peterson_slices(assist_diet) == PETERSON_ASSIST_SLICES
+    assert _peterson_slices(rebound_diet) == PETERSON_REBOUND_SLICES
+    assert facts == derive_assist_location_facts((provider.game(),))
+    assert assist_diet == derive_player_assist_diet_rows((provider.game(),))
+    assert rebound_diet == derive_player_rebound_type_diet_rows((provider.game(),))
+    assert [
+        window.complete
+        for window in (
+            composed.season_window,
+            composed.l15_window,
+            composed.assist_location_season,
+            composed.assist_location_l15,
+            composed.rebound_type_season,
+            composed.rebound_type_l15,
+        )
+    ] == [True] * 6
+    assert _peterson_slices(composed.player_assist_diet["rows"]) == {
+        "Arc3Assists": 904.0,
+        "Corner3Assists": 0.0,
+        "AtRimAssists": 452.0,
+        "ShortMidRangeAssists": 0.0,
+        "LongMidRangeAssists": 0.0,
+    }
+    assert _peterson_slices(composed.player_rebound_diet["rows"]) == {
+        "DefTwoPtRebounds": 452.0,
+        "DefThreePtRebounds": 452.0,
+        "FTDefRebounds": 0.0,
+        "OffTwoPtRebounds": 0.0,
+        "OffThreePtRebounds": 0.0,
+        "FTOffRebounds": 0.0,
+    }
 
 
 NO_REFERENCE_RECHECKS = {
@@ -665,6 +847,28 @@ def assert_the_command_lists_open_differences_until_the_provider_agrees(engine, 
         ("Brice Sensabaugh", "FG3A"),
     ]
     assert (result.box_score_differences, result.open_box_score_differences) == (2, 2)
+
+
+def test_the_listing_and_the_run_summary_leave_out_other_seasons(tmp_path, capsys):
+    engine = _engine(tmp_path)
+    ledger, control = _controlled_ledger(engine, _BoxScores(_official()))
+    control.reconcile_box_score_differences(
+        season="2027-28",
+        game_id="0022700001",
+        differences=(_difference(PETERSON, "Darryn Peterson", "PTS", 20, 21),),
+    )
+
+    result = ledger.refresh()
+
+    assert result.open_box_score_differences == 3
+    assert [(item["season"], item["stat"]) for item in _listed(engine, capsys, "--season", SEASON)] == [
+        (SEASON, "AST"),
+        (SEASON, "FG3A"),
+        (SEASON, "AST"),
+    ]
+    assert [(item["season"], item["stat"]) for item in _listed(engine, capsys, "--season", "2027-28")] == [
+        ("2027-28", "PTS")
+    ]
 
 
 def _send_recording(calls, now=None, gates=None):
