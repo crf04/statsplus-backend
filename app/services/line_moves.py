@@ -22,7 +22,7 @@ from __future__ import annotations
 from bisect import bisect_left
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_, func, or_, select
@@ -42,6 +42,10 @@ from app.providers.dfs import SnapshotStatus
 Value = tuple[float, int | None, int | None]
 #: One source's cell: source, game, player.
 CellKey = tuple[str, str, int]
+#: How far before the date's 00:00 ET a provider's history is read: books and
+#: DFS apps open a slate's lines the evening before.  A line a Partial-only
+#: provider (PrizePicks) has carried since before then has no history.
+HISTORY_REACH = timedelta(days=1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,20 +194,16 @@ class _Sequence:
         A Complete generation replaces the provider's offerings; a Partial one
         withdraws each reference it observes and posts the targetable ones,
         carrying the rest.  Returns whether the cell was posted afterwards and
-        the position of the last generation it was posted in.
+        the position of the last generation that posted it; one that carried it
+        did not see it.
         """
 
         live: set[str] = set()
         last = None
         applied = -1
         for position in [*(event for event in events if event < end), end]:
-            if live:
-                cleared = self.next_complete[applied + 1]
-                if cleared < position:
-                    live = set()
-                    last = cleared - 1
-                else:
-                    last = position - 1
+            if live and self.next_complete[applied + 1] < position:
+                live = set()
             if position == end:
                 break
             generation_rows = rows[self.generations[position].generation_id]
@@ -212,7 +212,7 @@ class _Sequence:
                 live = posted
             else:
                 live = (live - {row.market_reference for row in generation_rows}) | posted
-            if live:
+            if posted:
                 last = position
             applied = position
         return bool(live), last
@@ -241,7 +241,9 @@ def provider_histories(
     providers = sorted(set(providers))
     if not game_ids or not statistic_ids or not providers:
         return {}
-    generations = _generations(connection, season=season, providers=providers)
+    generations = _generations(
+        connection, season=season, providers=providers, since=day_start - HISTORY_REACH
+    )
     partial = sorted(
         generation_id for generation_id, generation in generations.items() if not generation.complete
     )
@@ -315,8 +317,10 @@ def provider_histories(
     return histories
 
 
-def _generations(connection: Any, *, season: str, providers: Sequence[str]) -> dict[str, _Generation]:
-    """The providers' promoted generations kept for the season: three days, since retention prunes older ones."""
+def _generations(
+    connection: Any, *, season: str, providers: Sequence[str], since: datetime
+) -> dict[str, _Generation]:
+    """The providers' promoted generations retrieved since ``since``, each with its newest confirming poll."""
 
     generation = ProjectionMaterializationGeneration.__table__
     snapshot = ProjectionProviderSnapshot.__table__
@@ -337,13 +341,18 @@ def _generations(connection: Any, *, season: str, providers: Sequence[str]) -> d
                 poll, generation.c.source_poll_id == poll.c.poll_id
             )
         )
-        .where(*scope, generation.c.outcome == "advanced")
+        .where(*scope, generation.c.outcome == "advanced", generation.c.retrieved_at >= since)
     ).all()
     confirmations = {
         str(row.generation_id): assume_utc(row.confirmed_at)
         for row in connection.execute(
             select(poll.c.generation_id, func.max(poll.c.retrieved_at).label("confirmed_at"))
-            .where(poll.c.provider.in_(providers), poll.c.season == season, poll.c.generation_id.is_not(None))
+            .where(
+                poll.c.provider.in_(providers),
+                poll.c.season == season,
+                poll.c.completed_at >= since,
+                poll.c.generation_id.in_([str(row.generation_id) for row in rows]),
+            )
             .group_by(poll.c.generation_id)
         )
         if row.confirmed_at is not None

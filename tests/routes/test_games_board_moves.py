@@ -58,6 +58,8 @@ from tests.routes.test_games_board import (
 )
 
 PRITCHARD = (1630202, "Payton Pritchard", BOS, LATER)
+#: Two days before the slate: older than the history the moves read.
+EARLY = datetime(2026, 1, 13, 20, 0, tzinfo=UTC)
 #: 18:00 ET the day before: the slate's lines open.
 T0 = datetime(2026, 1, 14, 23, 0, tzinfo=UTC)
 #: 20:00 ET the day before: Dabble pulls Hauser before the slate's day begins.
@@ -69,6 +71,8 @@ T1B = datetime(2026, 1, 15, 15, 5, tzinfo=UTC)
 T2 = datetime(2026, 1, 15, 18, 0, tzinfo=UTC)
 #: PrizePicks' first Partial snapshot, inside its live window at NOW.
 T2B = datetime(2026, 1, 15, 23, 50, tzinfo=UTC)
+#: A PrizePicks Partial that omits White: his line is carried, not seen.
+T2C = datetime(2026, 1, 15, 23, 52, tzinfo=UTC)
 #: After GSW @ LAL tipped: its closing set ignores this poll.
 T3 = datetime(2026, 1, 15, 23, 55, tzinfo=UTC)
 #: The books' night poll, 22:00 ET the day before.
@@ -149,6 +153,7 @@ def seed_moves(engine, dependencies):
         (PRITCHARD, "12.5", (-118, -108)),
     ]
     for at, lines in (
+        (EARLY, [(LEBRON, "24.5", (-115, -111))]),
         (T0, [*opening, (HAUSER, "9.5", (-115, -105))]),
         (T0B, opening),
         (T1, morning),
@@ -165,9 +170,23 @@ def seed_moves(engine, dependencies):
     )
     archive.ingest_complete_snapshot(_dabble(catalog, T3, evening), query=QUERY, accepted_at=T3)
     # PrizePicks writes Partial snapshots: an omitted line is carried, a suspended one withdrawn.
+    # Tatum's 28.5 is posted under two market ids; suspending one leaves him posted.
     tatum = _market(catalog, "prizepicks", TATUM, "points", "28.5")
+    tatum_again = replace(tatum, market_id="prizepicks-tatum-again")
     white = _market(catalog, "prizepicks", WHITE, "points", "15.5")
-    for at, markets in ((T2B, (tatum, white)), (T3, (replace(white, status=MarketStatus.SUSPENDED),))):
+    # Pritchard's two ids are withdrawn one Partial apiece: the first withdrawal does not see him.
+    pritchard = _market(catalog, "prizepicks", PRITCHARD, "points", "12.5")
+    pritchard_again = replace(pritchard, market_id="prizepicks-pritchard-again")
+    for at, markets in (
+        (T2B, (tatum, tatum_again, white, pritchard, pritchard_again)),
+        (T2C, (tatum, replace(pritchard, status=MarketStatus.SUSPENDED))),
+        (
+            T3,
+            tuple(
+                replace(market, status=MarketStatus.SUSPENDED) for market in (tatum, white, pritchard_again)
+            ),
+        ),
+    ):
         archive.ingest_snapshot(
             replace(
                 _snapshot("prizepicks", markets, at),
@@ -333,6 +352,7 @@ def test_a_cell_that_never_moved_says_so_even_when_reposted(moves_board, client)
     _status, body = _get(client, "date=2026-01-15&market=PTS&moves=true")
 
     rows = _rows(body)
+    # Dabble also posted LeBron's 24.5 two days before; history reaches one day before 00:00 ET.
     assert rows["LeBron James"]["moves"] == {
         "dabble": {
             "open": _value(24.5, -115, -111, seen_at="2026-01-14T23:00:00Z"),
@@ -383,7 +403,15 @@ PULLED = {
             "team": "BOS",
             **_value(15.5, None, None),
             "last_seen_at": "2026-01-15T23:50:00Z",
-        }
+        },
+        {
+            "game_id": LATER,
+            "player_id": PRITCHARD[0],
+            "name": "Payton Pritchard",
+            "team": "BOS",
+            **_value(12.5, None, None),
+            "last_seen_at": "2026-01-15T23:50:00Z",
+        },
     ],
     "draftkings": [
         {
