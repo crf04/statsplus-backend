@@ -5769,15 +5769,19 @@ Catalog game: the home team's spread, the total, the sportsbook ESPN names, the
 ESPN event id and `read_at`. `game_lines.collect` (`app/services/game_lines.py`)
 reads ESPN's scoreboard
 (`site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=`) once
-for the current Eastern date, with a 5 s connect and 10 s read timeout, and
-takes `competitions[0].odds[0]` of every game whose state is `pre`. A line is
-stored only when both `spread` and `overUnder` are finite numbers and
-`details` ("NY -15.5", "EVEN") does not contradict the spread. ESPN's
+for the current Eastern date, with a 5 s connect and 10 s read timeout and a
+15 s deadline on the whole read (the request runs on a daemon thread the step
+stops waiting for), and takes `competitions[0].odds[0]` of every game whose
+state is `pre`. A line is stored only when both `spread` and `overUnder` are
+finite numbers, the total is positive, and `details` ("NY -15.5", or
+"EVEN"/"PK" with a zero spread) does not contradict the spread. ESPN's
 abbreviations are mapped to NBA tricodes (NY, GS, SA, NO, UTAH, WSH, PHO) and
 each line is matched to the single non-postponed Event Catalog game on the same
 Eastern date between the same two teams, either way round; anything else is
 reported `unmatched`. A matched row is inserted or rewritten with the new
-`read_at`; a started game, or one ESPN shows no line for, is not written, so it
+`read_at` in one upsert that keeps a stored row read at the same time or later
+(counted `stale`), so overlapping runs that finish out of order never move a
+line back; a started game, or one ESPN shows no line for, is not written, so it
 keeps its last pre-tip line. `scripts/collect_odds.py` runs it after every odds
 beat in the `odds-collector` cron (every five minutes); a failure prints
 `game_lines failed: ...` and never changes the exit code. The Matchup reads the

@@ -84,6 +84,7 @@ def test_the_fixture_lines_are_stored_for_their_event_catalog_games(tmp_path):
         "inserted": 6,
         "updated": 0,
         "unchanged": 0,
+        "stale": 0,
         "unmatched": [],
     }
     assert line(engine, NYK_GAME) == {
@@ -186,12 +187,8 @@ def test_after_tip_the_last_line_read_before_it_is_kept(tmp_path, state):
     payload = scoreboard()
     event = espn_event(payload, "NY")
     event["status"]["type"]["state"] = state
-    # ESPN shows a live line in play and none once the game is over.
-    event["competitions"][0]["odds"] = (
-        [{**event["competitions"][0]["odds"][0], "details": "NY -30.5", "spread": -30.5, "overUnder": 240.5}]
-        if state == "in"
-        else [{**event["competitions"][0]["odds"][0], "details": None, "spread": None, "overUnder": None}]
-    )
+    # A whole, consistent line that differs from the stored one: it is still not written.
+    event["competitions"][0]["odds"][0].update(details="NY -30.5", spread=-30.5, overUnder=240.5)
 
     summary = run(engine, payload, AFTER_TIP)
 
@@ -331,6 +328,7 @@ def test_a_spread_that_contradicts_the_favourite_espn_names_is_not_stored(tmp_pa
         {"spread": float("nan"), "overUnder": 222.5},
         {"spread": -15.5, "overUnder": True},
         {"spread": -15.5, "overUnder": 0},
+        {"spread": -15.5, "overUnder": float("inf")},
     ],
 )
 def test_an_incomplete_or_malformed_line_is_not_stored(tmp_path, odds):
@@ -363,3 +361,64 @@ def test_a_malformed_event_is_skipped_and_the_others_are_stored(tmp_path, broken
 
     assert (summary["lines"], summary["inserted"]) == (5, 5)
     assert line(engine, NYK_GAME)["status"] == "unavailable"
+
+
+def test_a_finished_game_with_no_odds_keeps_its_last_line(tmp_path):
+    engine = world(tmp_path)
+    run(engine, scoreboard(), BEFORE_TIP)
+    before = line(engine, NYK_GAME)
+    payload = scoreboard()
+    event = espn_event(payload, "NY")
+    event["status"]["type"]["state"] = "post"
+    event["competitions"][0]["odds"][0].update(details=None, spread=None, overUnder=None)
+
+    run(engine, payload, AFTER_TIP)
+
+    assert line(engine, NYK_GAME) == before
+
+
+@pytest.mark.parametrize("details", ["EVEN", "PK"])
+def test_a_pickem_display_with_a_nonzero_spread_is_not_stored(tmp_path, details):
+    engine = world(tmp_path)
+    payload = scoreboard()
+    espn_event(payload, "NY")["competitions"][0]["odds"][0]["details"] = details
+
+    assert run(engine, payload, BEFORE_TIP)["lines"] == 5
+    assert line(engine, NYK_GAME)["status"] == "unavailable"
+
+
+def test_an_overlapping_run_that_read_earlier_never_replaces_a_later_line(tmp_path):
+    engine = world(tmp_path)
+    payload = scoreboard()
+    espn_event(payload, "NY")["competitions"][0]["odds"][0].update(
+        details="NY -14", spread=-14.0, overUnder=224.0
+    )
+    run(engine, payload, LATER)
+
+    # A run that read at 22:00 finishes after the 23:55 run.
+    summary = run(engine, scoreboard(), BEFORE_TIP)
+
+    assert (summary["inserted"], summary["updated"], summary["unchanged"], summary["stale"]) == (0, 0, 0, 6)
+    stored = line(engine, NYK_GAME)
+    assert (stored["spread"], stored["total"], stored["read_at"]) == (
+        -14.0,
+        224.0,
+        "2026-11-10T23:55:00+00:00",
+    )
+
+
+def test_an_event_dated_another_eastern_day_does_not_take_this_days_game(tmp_path):
+    engine = world(tmp_path)
+    payload = scoreboard()
+    # The same two teams again the next Eastern day, inside the catalog window this run reads.
+    rematch = copy.deepcopy(espn_event(payload, "NY"))
+    rematch["id"] = "401909999"
+    rematch["date"] = "2026-11-12T00:30Z"
+    rematch["competitions"][0]["odds"][0].update(details="NY -2.5", spread=-2.5, overUnder=230.5)
+    payload["events"].append(rematch)
+
+    summary = run(engine, payload, BEFORE_TIP)
+
+    assert summary["unmatched"] == ["401909999 MIL@NYK"]
+    stored = line(engine, NYK_GAME)
+    assert (stored["spread"], stored["total"]) == (-15.5, 222.5)

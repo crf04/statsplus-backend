@@ -15,6 +15,7 @@ Event Catalog game on the same Eastern date between the same two teams.
 from __future__ import annotations
 
 import math
+import threading
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -22,7 +23,9 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import requests
-from sqlalchemy import insert, select, update
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection, Engine
 
 from app.domain.nba_events import is_postponed_event
@@ -33,12 +36,15 @@ from app.models.game_lines import GameLine
 from app.services.event_catalog_repository import EventCatalogRepository
 
 SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
-#: Connect and read timeouts, in seconds.
+#: Connect and per-read timeouts, in seconds.
 TIMEOUT_SECONDS = (5.0, 10.0)
+#: The whole read, body included.
+DEADLINE_SECONDS = 15.0
 SOURCE = "espn_scoreboard"
 EASTERN = ZoneInfo("America/New_York")
 ESPN_TRICODES = {**NBA_TEAM_ABBREVIATION_DIALECTS, "UTAH": "UTA", "WSH": "WAS"}
 LINE_FIELDS = ("espn_event_id", "home_spread", "total", "provider")
+PICKEM_DETAILS = frozenset({"EVEN", "PK", "PICK"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,9 +65,33 @@ class PostedLine:
 
 
 def fetch_scoreboard(day: date) -> Mapping[str, Any]:
-    response = requests.get(SCOREBOARD_URL, params={"dates": day.strftime("%Y%m%d")}, timeout=TIMEOUT_SECONDS)
-    response.raise_for_status()
-    return response.json()
+    """The scoreboard of ``day``, abandoned once reading it passes ``DEADLINE_SECONDS``.
+
+    The per-read timeout alone would let a body that trickles in keep the host
+    script waiting indefinitely, so the read runs on a daemon thread that is
+    left behind, and dies with the process, when the deadline passes.
+    """
+
+    outcome: dict[str, Any] = {}
+
+    def read() -> None:
+        try:
+            response = requests.get(
+                SCOREBOARD_URL, params={"dates": day.strftime("%Y%m%d")}, timeout=TIMEOUT_SECONDS
+            )
+            response.raise_for_status()
+            outcome["payload"] = response.json()
+        except Exception as error:
+            outcome["error"] = error
+
+    reader = threading.Thread(target=read, name="espn-scoreboard", daemon=True)
+    reader.start()
+    reader.join(DEADLINE_SECONDS)
+    if reader.is_alive():
+        raise TimeoutError(f"ESPN scoreboard read exceeded {DEADLINE_SECONDS} s")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["payload"]
 
 
 def parse_scoreboard(payload: Mapping[str, Any]) -> list[PostedLine]:
@@ -125,6 +155,8 @@ def _details_agree(details: Any, home_spread: float, away: str, home: str) -> bo
     """False only when ``details`` names a favourite or number the spread contradicts."""
 
     parts = str(details or "").split()
+    if len(parts) == 1 and parts[0].upper() in PICKEM_DETAILS:
+        return home_spread == 0
     if len(parts) != 2:
         return True
     favourite = ESPN_TRICODES.get(parts[0].upper(), parts[0].upper())
@@ -151,7 +183,7 @@ def collect(
     day = read_at.astimezone(EASTERN).date()
     payload = fetch(day)
     lines = parse_scoreboard(payload)
-    inserted = updated = unchanged = 0
+    inserted = updated = unchanged = stale = 0
     unmatched = []
     with engine.begin() as connection:
         games = _catalog_games(connection, {posted.game_date for posted in lines})
@@ -174,14 +206,11 @@ def collect(
                 continue
             row = _row(matches[0], posted, read_at)
             existing = stored.get(row["game_id"])
-            if existing is None:
-                connection.execute(insert(GameLine.__table__).values(**row))
+            if not _upsert_newer(connection, row):
+                stale += 1
+            elif existing is None:
                 inserted += 1
-                continue
-            connection.execute(
-                update(GameLine.__table__).where(GameLine.game_id == row["game_id"]).values(**row)
-            )
-            if all(existing[field] == row[field] for field in LINE_FIELDS):
+            elif all(existing[field] == row[field] for field in LINE_FIELDS):
                 unchanged += 1
             else:
                 updated += 1
@@ -192,8 +221,25 @@ def collect(
         "inserted": inserted,
         "updated": updated,
         "unchanged": unchanged,
+        "stale": stale,
         "unmatched": unmatched,
     }
+
+
+def _upsert_newer(connection: Connection, row: Mapping[str, Any]) -> bool:
+    """Insert ``row`` or replace the stored line, unless the stored one was read at the same time or later.
+
+    Overlapping cron runs can finish out of order; the run that read last wins.
+    """
+
+    dialect_insert = postgresql_insert if connection.dialect.name == "postgresql" else sqlite_insert
+    statement = dialect_insert(GameLine.__table__).values(**row)
+    statement = statement.on_conflict_do_update(
+        index_elements=[GameLine.game_id],
+        set_={field: statement.excluded[field] for field in row if field != "game_id"},
+        where=GameLine.read_at < statement.excluded.read_at,
+    )
+    return connection.execute(statement).rowcount == 1
 
 
 def _catalog_games(connection: Connection, days: Iterable[date]) -> list[dict[str, Any]]:

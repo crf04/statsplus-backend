@@ -53,3 +53,19 @@ def test_migration_087_reruns_and_a_second_collection_changes_no_line_on_postgre
         assert GameContextRepository(engine).read(NYK_GAME, connection=connection)["game_line"] == line(
             engine, NYK_GAME
         )
+
+
+def test_an_earlier_read_finishing_later_keeps_the_newer_line_on_postgres(engine):
+    payload = scoreboard()
+    payload["events"][0]["competitions"][0]["odds"][0].update(details="NY -14", spread=-14.0, overUnder=224.0)
+    run(engine, payload, LATER)
+
+    summary = run(engine, scoreboard(), BEFORE_TIP)
+
+    assert (summary["inserted"], summary["updated"], summary["stale"]) == (0, 0, 6)
+    stored = line(engine, NYK_GAME)
+    assert (stored["spread"], stored["total"], stored["read_at"]) == (
+        -14.0,
+        224.0,
+        "2026-11-10T23:55:00+00:00",
+    )

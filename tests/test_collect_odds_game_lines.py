@@ -22,7 +22,7 @@ FIXTURE = Path(__file__).resolve().parent / "fixtures" / "espn" / "scoreboard_20
 def espn(monkeypatch):
     """A local scoreboard that answers with ``body`` after ``delay`` seconds."""
 
-    state = {"body": FIXTURE.read_bytes(), "delay": 0.0, "requests": []}
+    state = {"body": FIXTURE.read_bytes(), "delay": 0.0, "drip": None, "requests": []}
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
@@ -31,7 +31,14 @@ def espn(monkeypatch):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(state["body"])
+            if state["drip"] is None:
+                self.wfile.write(state["body"])
+                return
+            # One byte per interval: each read finishes inside the per-read timeout.
+            for byte in state["body"][:40]:
+                self.wfile.write(bytes([byte]))
+                self.wfile.flush()
+                time.sleep(state["drip"])
 
         def log_message(self, *_args):
             pass
@@ -41,6 +48,7 @@ def espn(monkeypatch):
     thread.start()
     monkeypatch.setattr(game_lines, "SCOREBOARD_URL", f"http://127.0.0.1:{server.server_port}/scoreboard")
     monkeypatch.setattr(game_lines, "TIMEOUT_SECONDS", (0.5, 0.5))
+    monkeypatch.setattr(game_lines, "DEADLINE_SECONDS", 1.0)
     yield state
     server.shutdown()
     server.server_close()
@@ -98,4 +106,20 @@ def test_a_scoreboard_that_is_not_json_is_reported_and_stores_nothing(tmp_path, 
 
     out = capsys.readouterr().out.splitlines()
     assert out[1].startswith("game_lines failed: ")
+    assert line(engine, NYK_GAME)["status"] == "unavailable"
+
+
+def test_a_scoreboard_that_trickles_in_is_cut_off_at_the_deadline(tmp_path, monkeypatch, capsys, espn):
+    engine = world(tmp_path)
+    espn["drip"] = 0.1
+    started = time.monotonic()
+
+    assert run_script(monkeypatch, engine, OddsApiSettings()) == 0
+
+    assert time.monotonic() - started < 2.5
+    out = capsys.readouterr().out.splitlines()
+    assert out == [
+        "no_work: ODDS_API_ENABLED is false",
+        "game_lines failed: TimeoutError: ESPN scoreboard read exceeded 1.0 s",
+    ]
     assert line(engine, NYK_GAME)["status"] == "unavailable"
