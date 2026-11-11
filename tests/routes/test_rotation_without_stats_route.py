@@ -481,7 +481,12 @@ def test_team_view_game_logs_leave_out_team_games_before_his_window(client, detr
     assert [g["game_date"] for g in _entry(body, "Ausar Thompson")["game_logs"]] == DATES[::-1]
 
 
-def test_team_view_game_logs_carry_started_and_the_away_matchup(client, tmp_path, dependencies):
+def test_team_view_game_logs_read_a_later_season_box_beside_the_rotation_line(
+    client, tmp_path, dependencies, runtime_settings
+):
+    """2026-27, after the Published Season: started, the away matchup, rotation minutes beside the box's."""
+
+    season = "2026-27"
     repository = migrated_repository(tmp_path)
     store(
         repository,
@@ -490,32 +495,70 @@ def test_team_view_game_logs_carry_started_and_the_away_matchup(client, tmp_path
             "2026-11-01",
             "BOS",
             "NYK",
-            [line(AUSAR, "Jalen Brunson", "NYK", minutes=34, started=True)],
+            [line(AUSAR, "Jalen Brunson", "NYK", minutes=21.4, started=True)],
         ),
         game("0022600002", "2026-11-03", "NYK", "BOS", [line(AUSAR, "Jalen Brunson", "NYK", minutes=12)]),
+        season=season,
     )
-    logs = StoredLogs()
-    logs.add(AUSAR, "NYK", "0022600001", "2026-11-01", minutes=34, pts=30, FG3A=9, FTA=7)
-    dependencies.rotation_service = service_for(
-        repository, Catalog((AUSAR, "Jalen Brunson", "NYK")), logs=logs
+    logs = PublishedOnlyLogs()
+    box = dict(FGM=11, FG3A=9, FTM=5, FTA=7, OREB=1, DREB=6, STL=3, BLK=2, TOV=4, PF=5, PLUS_MINUS=-8)
+    logs.add(
+        AUSAR,
+        "NYK",
+        "0022600001",
+        "2026-11-01",
+        season=season,
+        minutes=21,
+        pts=30,
+        reb=7,
+        ast=6,
+        fg3m=3,
+        fga=20,
+        **box,
     )
+    catalog = Catalog((AUSAR, "Jalen Brunson", "NYK"))
+    games = GameService(
+        None,
+        Mock(),
+        settings=runtime_settings,
+        game_logs_source=logs,
+        athlete_catalog=catalog,
+        publication_reader=PublishedSeasonReader(),
+    )
+    dependencies.rotation_service = service_for(repository, catalog, logs=games)
 
-    response = client.get(f"{ROTATION}?team=NYK&game_logs=true")
+    response = client.get(f"{ROTATION}?team=NYK&season={season}&game_logs=true")
 
     assert response.status_code == 200
     [brunson] = response.get_json()["players"]
-    assert [
-        (
-            g["game_date"],
-            g["matchup"],
-            g["started"],
-            g["minutes"],
-            g["box"] and (g["box"]["FG3A"], g["box"]["FTA"]),
-        )
-        for g in brunson["game_logs"]
-    ] == [
-        ("2026-11-03", "NYK vs. BOS", False, 12.0, None),
-        ("2026-11-01", "NYK @ BOS", True, 34.0, (9.0, 7.0)),
+    assert brunson["game_logs"] == [
+        {"game_date": "2026-11-03", "matchup": "NYK vs. BOS", "started": False, "minutes": 12.0, "box": None},
+        {
+            "game_date": "2026-11-01",
+            "matchup": "NYK @ BOS",
+            "started": True,
+            "minutes": 21.4,
+            "box": {
+                "minutes": 21.0,
+                "PTS": 30.0,
+                "REB": 7.0,
+                "AST": 6.0,
+                "3PM": 3.0,
+                "PRA": 43.0,
+                "FGA": 20.0,
+                "FGM": 11.0,
+                "FG3A": 9.0,
+                "FTM": 5.0,
+                "FTA": 7.0,
+                "OREB": 1.0,
+                "DREB": 6.0,
+                "STL": 3.0,
+                "BLK": 2.0,
+                "TOV": 4.0,
+                "PF": 5.0,
+                "PLUS_MINUS": -8.0,
+            },
+        },
     ]
 
 
