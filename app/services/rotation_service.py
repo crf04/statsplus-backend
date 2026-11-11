@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from fractions import Fraction
 from functools import cache
@@ -481,6 +482,7 @@ class RotationService:
         default_season: Callable[[], str],
         game_logs: Any,
         injury_reports: Any | None = None,
+        lineups: Any | None = None,
     ) -> None:
         self.repository = repository
         self.athlete_catalog = athlete_catalog
@@ -490,6 +492,8 @@ class RotationService:
         #: The stored injury reports: a missed game's status, and membership evidence for a ``without`` window.
         self.injury_reports = injury_reports
         self.membership = TeamMembership(injury_reports, game_logs.get_players_logs_by_id, athlete_catalog)
+        #: The stored daily lineups the team view reports as ``lineup``.
+        self.lineups = lineups
 
     # -- public reads ---------------------------------------------------
 
@@ -590,6 +594,29 @@ class RotationService:
         with_: Sequence[str] = (),
         without: Sequence[str] = (),
         game_logs: bool = False,
+        day: date | None = None,
+    ) -> dict[str, Any]:
+        """The team view; its ``lineup`` also rides on a ``no_rotation_data`` 404 (opening night)."""
+
+        try:
+            document = self._team_rotation(team, last_n, season, with_, without, game_logs)
+        except ResourceNotFoundError as error:
+            details = error.public_details or {}
+            if self.lineups is not None and details.get("reason") == "no_rotation_data":
+                error._public_details = {**details, "lineup": self.lineups.read(team, day=day)}
+            raise
+        if self.lineups is None:
+            return document
+        return {**document, "lineup": self.lineups.read(team, day=day)}
+
+    def _team_rotation(
+        self,
+        team: str,
+        last_n: int,
+        season: str | None,
+        with_: Sequence[str],
+        without: Sequence[str],
+        game_logs: bool,
     ) -> dict[str, Any]:
         self._tricode_id(team, "team")
         season = self._season(season)

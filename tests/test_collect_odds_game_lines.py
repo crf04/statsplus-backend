@@ -44,10 +44,17 @@ game_lines.DEADLINE_SECONDS = 0.5
 collect_odds.init_sentry = lambda: sentry_setup.init_sentry(transport=Offline())
 collect_odds.load_settings = lambda **_kw: SimpleNamespace(odds_api=OddsApiSettings(), log_level="INFO")
 collect_odds.build_dependencies = lambda _settings: SimpleNamespace(engine=None)
+collect_odds.collect_lineups = lambda _dependencies: None
 started = time.monotonic()
 atexit.register(lambda: print(f"shutdown after {time.monotonic() - started:.1f}", flush=True))
 raise SystemExit(collect_odds.main(["--database-url", "postgresql://odds.example/statsplus"]))
 """
+
+
+@pytest.fixture(autouse=True)
+def _no_lineups(monkeypatch):
+    # The NBA.com lineups step has its own tests (tests/test_collect_odds_lineups.py).
+    monkeypatch.setattr(collect_odds, "collect_lineups", lambda _dependencies: None)
 
 
 @pytest.fixture

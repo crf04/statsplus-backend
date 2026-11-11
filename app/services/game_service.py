@@ -77,7 +77,7 @@ _PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
 #: The Defense Sheet Traditional row behind each chart line type's
 #: ``opponent_ranks`` entry (crf04/statsplus#456), plus stocks, which the Sheet
 #: has no row for and the Opposing Team Profile ranks as steals + blocks.
-#: Combos and fantasy points have no single allowed metric.
+#: Fantasy points have no single allowed metric.
 _OPPONENT_RANK_ROWS = {
     "PTS": "OPP_PTS",
     "REB": "OPP_REB",
@@ -92,6 +92,15 @@ _OPPONENT_RANK_ROWS = {
     "BLK": "OPP_BLK",
     "TOV": "OPP_TOV",
     "STKS": "OPP_STOCKS",
+}
+#: Each combo line type's label and the Traditional per-48 metrics its rank
+#: sums, kept out of ``TEAM_FILTER_RANKINGS`` so no Team Filter offers them
+#: (crf04/statsplus#505).
+_OPPONENT_RANK_COMBOS = {
+    "PR": ("Points + Rebounds Allowed", ("points", "rebounds")),
+    "PA": ("Points + Assists Allowed", ("points", "assists")),
+    "RA": ("Rebounds + Assists Allowed", ("rebounds", "assists")),
+    "PRA": ("Points + Rebounds + Assists Allowed", ("points", "rebounds", "assists")),
 }
 #: The opponent-filter label of each row, else one worded the same way
 #: for the rows no Team Filter offers.
@@ -157,18 +166,22 @@ def _opponent_ranks(rows):
     tricodes = {row.team_id: row.team_tricode for row in rows}
     columns = {
         line_type: (
+            _OPPONENT_RANK_LABELS[row],
             table.get(_TRADITIONAL_SHEET_METRICS[row])
             if row in _TRADITIONAL_SHEET_METRICS
-            else combined_league_column(table, TEAM_FILTER_RANKINGS[row].numerator)
+            else combined_league_column(table, TEAM_FILTER_RANKINGS[row].numerator),
         )
         for line_type, row in _OPPONENT_RANK_ROWS.items()
+    } | {
+        line_type: (label, combined_league_column(table, tuple((metric, 1.0) for metric in metrics)))
+        for line_type, (label, metrics) in _OPPONENT_RANK_COMBOS.items()
     }
     return {
         line_type: {
-            "label": _OPPONENT_RANK_LABELS[_OPPONENT_RANK_ROWS[line_type]],
+            "label": label,
             "ranks": {tricodes[team_id]: rank for team_id, rank in column.ranks.items()},
         }
-        for line_type, column in columns.items()
+        for line_type, (label, column) in columns.items()
         if column is not None
     }
 

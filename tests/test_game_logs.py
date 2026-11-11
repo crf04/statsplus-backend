@@ -1177,7 +1177,7 @@ def test_game_logs_carry_each_opponents_season_rank_per_line_type_over_http(
     assert opponent_ranks["FG3M"]["label"] == "3s Allowed"
     assert opponent_ranks["FGA"]["label"] == "FG Attempts Allowed"
     assert opponent_ranks["FTM"]["label"] == "FT Made Allowed"
-    # Combos and fantasy points have no single allowed metric.
+    # Fantasy points have no single allowed metric.
     assert sorted(opponent_ranks) == [
         "AST",
         "BLK",
@@ -1187,12 +1187,72 @@ def test_game_logs_carry_each_opponents_season_rank_per_line_type_over_http(
         "FGM",
         "FTA",
         "FTM",
+        "PA",
+        "PR",
+        "PRA",
         "PTS",
+        "RA",
         "REB",
         "STKS",
         "STL",
         "TOV",
     ]
+
+
+def test_a_combo_lines_opponent_rank_ranks_the_sum_of_its_stats_allowed(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    """statsplus#505: RA ranks rebounds + assists, an order neither stat alone gives."""
+
+    import json
+    from pathlib import Path
+
+    from tests.support.publication_stubs import league, traditional_per48
+
+    points = {"MIA": 100.0, "LAL": 120.0, "CHI": 105.0}
+    rebounds = {"MIA": 10.0, "LAL": 6.0, "CHI": 2.0}
+    assists = {"MIA": 1.0, "LAL": 3.0, "CHI": 10.0}
+    rows = league(
+        lambda tricode: traditional_per48(
+            points=points.get(tricode, 110.0),
+            offensive_rebounds=1.0,
+            defensive_rebounds=rebounds.get(tricode, 4.0) - 1.0,
+            assists=assists.get(tricode, 4.0),
+        )
+    )
+    service = _traditional_ranked_service(monkeypatch, mock_db_engine, mock_redis_client, rows)
+
+    opponent_ranks = service.get_filtered_logs("LeBron James", GameLogQuery(season_filter="2024-25"))[
+        "opponent_ranks"
+    ]
+
+    ranked = {
+        line_type: (
+            opponent_ranks[line_type]["label"],
+            {
+                tricode: opponent_ranks[line_type]["ranks"][tricode]
+                for tricode in ("MIA", "LAL", "CHI", "BOS")
+            },
+        )
+        for line_type in ("REB", "AST", "RA", "PR", "PA", "PRA")
+    }
+    # BOS ties the other twenty-six unnamed teams and shares their rank.
+    assert ranked == {
+        "REB": ("Rebounds Allowed", {"MIA": 30, "LAL": 29, "CHI": 1, "BOS": 2}),
+        "AST": ("Assists Allowed", {"MIA": 1, "LAL": 2, "CHI": 30, "BOS": 3}),
+        # MIA 11, LAL 9, CHI 12, the rest 8.
+        "RA": ("Rebounds + Assists Allowed", {"MIA": 29, "LAL": 28, "CHI": 30, "BOS": 1}),
+        # MIA 110, LAL 126, CHI 107, the rest 114.
+        "PR": ("Points + Rebounds Allowed", {"MIA": 2, "LAL": 30, "CHI": 1, "BOS": 3}),
+        # MIA 101, LAL 123, CHI 115, the rest 114.
+        "PA": ("Points + Assists Allowed", {"MIA": 1, "LAL": 30, "CHI": 29, "BOS": 2}),
+        # MIA 111, LAL 129, CHI 117, the rest 118.
+        "PRA": ("Points + Rebounds + Assists Allowed", {"MIA": 1, "LAL": 30, "CHI": 2, "BOS": 3}),
+    }
+    filter_labels = json.loads(
+        (Path(__file__).resolve().parents[1] / "app" / "assets" / "opponent_filter_labels.json").read_text()
+    ).values()
+    assert not {label for label, _ranks in ranked.values() if "+" in label} & set(filter_labels)
 
 
 def test_an_opponents_points_rank_is_its_defense_sheet_points_allowed_rank(

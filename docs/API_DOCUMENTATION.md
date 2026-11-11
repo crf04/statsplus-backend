@@ -3323,11 +3323,13 @@ to a `label` and `ranks`, each team tricode's whole-season rank in that metric
 per 48, 1-30 with 30 = allows the most. The ranks are the Matchup Defense
 Sheet's Traditional row ranks, so tied teams share a rank exactly as the Sheet
 shows them. The line types are `PTS` (Points Allowed), `REB`, `AST`, `FGM`,
-`FGA`, `FG3M`, `FG3A`, `FTM`, `FTA`, `STL`, `BLK`, `TOV` and `STKS` (Steals +
-Blocks, ranked as the Opposing Team Profile ranks it). The label is the
-metric's opponent-filter label, or `FG Made Allowed`, `FG Attempts Allowed`
-or `FT Made Allowed` where no Team Filter offers the metric. Combos and
-`FD_PTS` have no entry. The ranks come from the same Season publication
+`FGA`, `FG3M`, `FG3A`, `FTM`, `FTA`, `STL`, `BLK`, `TOV`, `STKS` (Steals +
+Blocks, ranked as the Opposing Team Profile ranks it), and the combos `PR`,
+`PA`, `RA` and `PRA`, each ranked by the sum of its stats allowed per 48
+(crf04/statsplus#505). The label is the metric's opponent-filter label, or
+`FG Made Allowed`, `FG Attempts Allowed` or `FT Made Allowed` where no Team
+Filter offers the metric. A combo's label names its stats, as in `Rebounds +
+Assists Allowed`. `FD_PTS` has no entry. The ranks come from the same Season publication
 generation the response reads, and no filter changes them. A metric the
 publication lacks has no entry, and the object is `{}` when the season cannot
 be ranked.
@@ -3960,11 +3962,11 @@ coverage once every completed game is stored or rejected.
 
 ```http
 GET /api/games/rotation?player_name=<name>[&player_team=<tricode>][&last_n=5][&season=YYYY-YY]
-GET /api/games/rotation?team=<tricode>[&last_n=5][&season=YYYY-YY][&game_logs=true]
+GET /api/games/rotation?team=<tricode>[&last_n=5][&season=YYYY-YY][&date=YYYY-MM-DD][&game_logs=true]
 GET /api/games/rotation?game_id=<NBA game id>
 GET /api/games/rotation?player_name=<name>&without=<name>[&without=<name>][&season=YYYY-YY]
-GET /api/games/rotation?team=<tricode>&without=<name>[&without=<name>][&season=YYYY-YY]
-GET /api/games/rotation?(player_name=<name>|team=<tricode>)&with=<name>[&with=<name>][&without=<name>][&season=YYYY-YY]
+GET /api/games/rotation?team=<tricode>&without=<name>[&without=<name>][&season=YYYY-YY][&date=YYYY-MM-DD]
+GET /api/games/rotation?(player_name=<name>|team=<tricode>)&with=<name>[&with=<name>][&without=<name>][&season=YYYY-YY][&date=YYYY-MM-DD (team only)]
 Authorization: Bearer <firebase-id-token>
 ```
 
@@ -3984,6 +3986,7 @@ The backend computes every average and recent-versus-season comparison.
 | `without` | No | Repeatable (crf04/statsplus#239). A player name; with `player_name` or `team`, switches to the [without split](#rotation-without-a-player). Rejected with `game_id` and with `last_n` |
 | `with` | No | Repeatable (crf04/statsplus#499). A player name; with `player_name` or `team`, switches to the [with split](#rotation-with-a-player), alone or beside `without`. Rejected with `game_id` and with `last_n` |
 | `game_logs` | No | `true` or `false`, default `false`. With `team` (crf04/statsplus#504) or a split ([`game_logs`](#rotation-without-a-player)) adds per-game box scores; rejected with `game_id` and on the plain player view |
+| `date` | No | `YYYY-MM-DD`, a US Eastern day; only with `team`. Picks the game whose [lineup](#tonights-lineup) the team view reports. Default: the team's game today (US Eastern), or its next scheduled game |
 
 Exactly one of `player_name`, `team` and `game_id` is required, each parameter except `with` and `without` may appear
 once, and an unknown parameter is rejected. Every rejected request is
@@ -4120,6 +4123,54 @@ top-level `games`) inside his team window, newest first:
 
 Without `game_logs=true` the team view carries no `game_logs` and reads no
 game logs; `game_logs=false` is the same answer.
+
+#### Tonight's lineup
+
+Every team view (plain, `with` and `without` splits) carries `lineup` (crf04/statsplus#492):
+the starters and inactive players NBA.com's daily lineups feed lists for the
+team's game on `date`, or by default its game today (US Eastern) or its next
+scheduled game. It reports what the feed says and projects nothing. The
+request reads only stored rows; the five-minute odds cron stores today's feed.
+`season` does not change it.
+
+```json
+"lineup": {
+  "status": "posted",
+  "game_id": "0022600216",
+  "game_date": "2026-11-10",
+  "matchup": "OKC @ POR",
+  "feed_timestamp": "2026-11-10T22:29:43-05:00",
+  "collected_at": "2026-11-11T03:30:00+00:00",
+  "starters": [
+    {"player_id": 1628983, "name": "Shai Gilgeous-Alexander", "position": "PG", "lineup_status": "Expected"}
+  ],
+  "inactive": [{"player_id": 1631096, "name": "Chet Holmgren"}]
+}
+```
+
+- `status`: `posted` when a lineup with starters is stored for the game;
+  `not_posted` when the game exists but none is stored yet (or the feed lists
+  no starters for the team); `no_game` when the team has no game on `date`
+  (or none from today on). A postponed game counts as no game.
+- `game_id`, `game_date` (US Eastern) and `matchup` (`TEAM @ HOME` or
+  `TEAM vs. AWAY`) name the game; all three are `null` for `no_game`.
+- `starters`: the feed's starters in feed order, each with `player_id` (the NBA
+  person id), `name`, `position` (`PG`, `SG`, `SF`, `PF` or `C`) and
+  `lineup_status`, the feed's own word: `Expected` before the team confirms,
+  then `Confirmed`. The list holds as many starters as the feed names, normally
+  five; it is `[]` unless `status` is `posted`. Names come from the feed, so a
+  player missing from the Athlete Catalog is still listed.
+- `inactive`: players the feed marks inactive, `{player_id, name}`, in feed order.
+- `feed_timestamp`: the newest timestamp the feed gives the team's rows, US
+  Eastern with its offset. `collected_at`: the collection run that last read
+  the team from the feed (UTC). Both are `null` when nothing is stored. A
+  lineup changed after it was confirmed replaces the stored one at the next
+  run, so the stored lineup is at most about five minutes behind the feed.
+- A lineup stored for a game that has since moved to another date is not
+  served (`not_posted` on the new date).
+- A team view that answers `404 no_rotation_data` (a team with no stored
+  rotation in the season, such as before its first game) keeps that status;
+  its `details.lineup` carries this block.
 
 Game view (crf04/statsplus#233): every box-score player of one stored game, both
 teams, with the stints the player view returns.
