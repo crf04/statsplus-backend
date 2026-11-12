@@ -565,10 +565,12 @@ def test_an_unselected_2026_27_read_stays_empty(world):
 
 
 class _RookieCatalog:
-    """``Player 0`` played 2025-26; ``Rookie`` joins him in 2026-27."""
+    """``Player 0`` played 2025-26, renamed in 2026-27; ``Rookie`` joins him then."""
 
     def get_catalog(self, season, *, active_only=False, player_ids=None):
-        rows = [(PLAYER_ID, PLAYER_NAME)] + ([(PLAYER_ID + 1, "Rookie")] if season == NEW else [])
+        if season != NEW:
+            return [{"season": season, "player_id": PLAYER_ID, "display_name": PLAYER_NAME}]
+        rows = [(PLAYER_ID, "Player Zero"), (PLAYER_ID + 1, "Rookie")]
         return [{"season": season, "player_id": player_id, "display_name": name} for player_id, name in rows]
 
 
