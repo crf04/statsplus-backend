@@ -1,6 +1,7 @@
 import logging
 from collections import OrderedDict
 from collections.abc import Callable
+from contextlib import contextmanager
 from copy import copy
 from threading import Lock
 
@@ -16,7 +17,7 @@ from app.domain.play_type_matchup import complete_play_type_shares
 from app.domain.team_matchup_taxonomy import SHOT_TYPE_STORED_TO_DISPLAY
 from app.models.catalogs import PLAY_TYPES, SHOOTING_TYPES
 from app.services.athlete_resolver import match_catalog_athlete
-from app.services.database_first_activation import ReadSeason
+from app.services.database_first_activation import ReadSeason, SeasonUnavailable
 from app.services.player_diet import (
     PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS,
     PLAYER_DIET_PUBLICATION_STREAM_KEYS,
@@ -28,8 +29,14 @@ from app.services.publication_snapshot_calls import (
     call_with_read_scope,
 )
 from app.services.request_reads import request_read_scope
-from app.services.research_season import research_service, season_context, selected_season
-from app.services.serving_season import merge_trailing, snapshot_trailing
+from app.services.research_season import (
+    research_service,
+    season_context,
+    season_is_pinned,
+    season_scoped,
+    selected_season,
+)
+from app.services.serving_season import merge_trailing, next_season, snapshot_trailing
 from app.services.table_publisher import PublicationFence
 
 from ..errors import (
@@ -183,10 +190,31 @@ class PlayerService:
         self._zone_profile_cache_lock = Lock()
 
     def get_all_players(self):
-        return research_service(self, self.publication_reader)._get_all_players()
+        """The Published Season's players, then the next season's while it is offered.
+
+        The Log Workspace opens on the newest offered season, so a rookie
+        with only next-season games must be pickable before the cutover
+        (crf04/statsplus#512).  A player in both keeps his published name.
+        """
+
+        published = research_service(self, self.publication_reader)
+        players = published._get_all_players()
+        if not season_is_pinned(self.settings):
+            players = {**published._next_season_players(), **players}
+        return [players[player_id] for player_id in sorted(players)]
+
+    def _next_season_players(self):
+        scoped = season_scoped(self, next_season(self.settings.nba.current_season))
+        if scoped is self:
+            return {}
+        try:
+            with scoped._selected_season() as (selected, _capture):
+                return selected._get_all_players()
+        except SeasonUnavailable:
+            return {}
 
     def _get_all_players(self):
-        """The season's catalog players with any Player Diet fact.
+        """The season's catalog players with any Player Diet fact, by player id.
 
         Any base, not only play types: a traded player whose Synergy stints
         are ambiguous publishes no play types but keeps his other Diets.  The
@@ -196,17 +224,17 @@ class PlayerService:
         catalog = self.profile_reader.get_catalog(season, active_only=False)
         catalog_by_id = {int(row["player_id"]): row for row in catalog}
         if not catalog_by_id:
-            return []
+            return {}
         result = self._read_diets(
             season,
             tuple(sorted(catalog_by_id)),
             PLAYER_DIET_PUBLICATION_STREAM_KEYS | PLAYER_DIET_OPTIONAL_PUBLICATION_STREAM_KEYS,
         )
-        return [
-            catalog_by_id[player_id]["display_name"]
-            for player_id in sorted(catalog_by_id)
+        return {
+            player_id: row["display_name"]
+            for player_id, row in catalog_by_id.items()
             if result.players.get(player_id)
-        ]
+        }
 
     #: An explicit selection's game-log capture, the ``(connection, session)``
     #: of its one REPEATABLE READ scope, and every capture its reads took; set
@@ -234,6 +262,18 @@ class PlayerService:
         that commits after the capture cannot empty a later projection read.
         """
 
+        with self._selected_season() as (scoped, capture):
+            data = scoped._get_player_profile(player_name, category, opp_team)
+        return {
+            "data": data,
+            "season_context": season_context(self.publication_reader, capture, lambda: capture.season),
+            "trailing": merge_trailing(snapshot_trailing(taken) for taken in scoped._selected_snapshots),
+        }
+
+    @contextmanager
+    def _selected_season(self):
+        """A copy reading the selected season in one REPEATABLE READ scope, with its game-log capture."""
+
         with request_read_scope(self.engine, repeatable_read=True) as scope:
             capture = self.publication_reader.snapshot(
                 ("player_game_logs",),
@@ -248,12 +288,7 @@ class PlayerService:
             scoped.settings = self.settings.model_copy(
                 update={"nba": self.settings.nba.model_copy(update={"current_season": capture.season})}
             )
-            data = scoped._get_player_profile(player_name, category, opp_team)
-        return {
-            "data": data,
-            "season_context": season_context(self.publication_reader, capture, lambda: capture.season),
-            "trailing": merge_trailing(snapshot_trailing(taken) for taken in scoped._selected_snapshots),
-        }
+            yield scoped, capture
 
     def _publication_snapshot(self, stream_keys, season, **keyword):
         """One capture of ``stream_keys``; a selection's joins its scope and decides ``season`` there."""

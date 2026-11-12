@@ -18,6 +18,7 @@ from datetime import date, timedelta
 import pytest
 from sqlalchemy import select, text
 
+from app.config.settings import NBASeasonSettings
 from app.models.collection_control import (
     CatalogPublication,
     CollectionManifest,
@@ -26,6 +27,7 @@ from app.models.collection_control import (
 )
 from app.models.game_logs import GameLogQuery
 from app.services.database_first_activation import ReadSeason, SeasonMode, SeasonUnavailable
+from app.services.player_service import PlayerProfileReader, PlayerService
 from app.services.research_season import season_scoped
 from app.services.serving_season import trailing
 from tests.services.test_serving_season_matchup import _log_payload
@@ -45,7 +47,14 @@ from tests.support.season_cutover import (
     provenance,
     team_defense_waits_for_ten_games,
 )
-from tests.support.selected_season import PLAY_TYPE_DEFENSE, PLAYER_NAME, PLAYER_SYNERGY, SelectedWorld
+from tests.support.selected_season import (
+    PLAY_TYPE_DEFENSE,
+    PLAYER_ID,
+    PLAYER_NAME,
+    PLAYER_SYNERGY,
+    SelectedWorld,
+    settings,
+)
 from tests.test_game_log_preview import FakeRedis
 
 KEYS = (PLAYER_LOGS, SEASON_STREAM, L15_STREAM)
@@ -550,6 +559,47 @@ def test_an_unselected_2026_27_read_stays_empty(world):
 
     assert body["game_logs"] == []
     assert "season_context" not in body
+
+
+# --- /api/players (crf04/statsplus#512) -------------------------------------
+
+
+class _RookieCatalog:
+    """``Player 0`` played 2025-26; ``Rookie`` joins him in 2026-27."""
+
+    def get_catalog(self, season, *, active_only=False, player_ids=None):
+        rows = [(PLAYER_ID, PLAYER_NAME)] + ([(PLAYER_ID + 1, "Rookie")] if season == NEW else [])
+        return [{"season": season, "player_id": player_id, "display_name": name} for player_id, name in rows]
+
+
+def _player_list(world, runtime=None):
+    return PlayerService(
+        world.engine,
+        profile_reader=PlayerProfileReader(_RookieCatalog(), world.service.player_diets),
+        settings=runtime or settings(),
+        publication_reader=world.reader,
+    ).get_all_players()
+
+
+def test_the_player_list_adds_2026_27_players_only_while_2026_27_is_offered(world):
+    world.publish_play_types()
+
+    assert _player_list(world) == [PLAYER_NAME]
+
+    world.hold_opening_week()
+    world.compose_new_play_types(PLAYER_SYNERGY, THIN_GAMES, cutoff=THIN_CUTOFF, provenance=THIN_PROVENANCE)
+
+    assert _player_list(world) == [PLAYER_NAME, "Rookie"]
+
+
+def test_a_pinned_player_list_reads_only_the_pinned_season(world):
+    world.publish_play_types()
+    world.hold_opening_week()
+    world.compose_new_play_types(PLAYER_SYNERGY, THIN_GAMES, cutoff=THIN_CUTOFF, provenance=THIN_PROVENANCE)
+    unpinned = settings()
+    pinned = unpinned.model_copy(update={"nba": NBASeasonSettings(current_season=OLD)})
+
+    assert _player_list(world, pinned) == [PLAYER_NAME]
 
 
 # --- /api/games/seasons -----------------------------------------------------
