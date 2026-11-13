@@ -1342,8 +1342,11 @@ DFS provider and writes nothing.
   player whose `season_scoring` is at least 8 contributes at most one row: his
   season cell with the largest `|value|` across those markets (ties: that
   market order), each market's cell read by the rule above from
-  `scores.<market>.season`. Rows are ordered as `effects` are and the first five
-  kept. STL, BLK and their sum STKS are left out because they always score the
+  `scores.<market>.season`. A market with a volume floor (crf04/statsplus#514)
+  is a candidate only when the Matchup row's `season_per_game` reaches it:
+  `3PM` and `FG3A` need 2.0 `FG3A`, `FG2M` and `FG2A` 3.0 `FG2A`, `AST` 2.0
+  `AST`, and `REB` 3.0 `REB` per game; an unknown rate clears none. Rows are
+  ordered as `effects` are and the first five kept. STL, BLK and their sum STKS are left out because they always score the
   opponent's team rate, so every player on a team carries the same value; TOV,
   FTA and FTM are left out because they fall back to the team rate for about
   half the teams early in a season.
@@ -1953,6 +1956,7 @@ Each stored pool player has this shape:
     }
   ],
   "season_averages": { "FGA": 18.6, "PTS": 25.4 },
+  "season_per_game": { "AST": 7.9, "FG3A": 6.1, "FGA": 18.6, "PTS": 25.4, "REB": 7.2 },
   "last_10_minutes": [35.0, 36.0],
   "diet_shares": {
     "play_types": [
@@ -2120,6 +2124,7 @@ Rotation Player row has the pool row's shape with:
 | `book_lines` | his sportsbook quotes, as a pool row's |
 | `scores` | every scoreable category, as a pool row's |
 | `season_averages` | `{}` |
+| `season_per_game` | every market his season rate counts, as a pool row's |
 | `last_five_games` | his last five games, each with `stats: {}` |
 | `season_scoring`, `last_10_minutes`, `diet_shares`, `diet_thin`, `injury_badge_ref` | as a pool row's |
 
@@ -2171,6 +2176,13 @@ entry, rounded as `season_scoring` is, so `season_averages.PTS` equals
 or no minutes) they are `[]` and `{}`. A Historical Matchup serves `[]` and
 `{}`: its evidence includes the focal game and the games after it. Older
 backends omit both fields.
+
+`season_per_game` (crf04/statsplus#514) is additive and always present: the
+same season per-game rate for every Statistic Catalog market the rate counts,
+posted or not, so it holds `season_averages` and the markets no provider
+posts. It is `{}` exactly when `season_averages` is for want of a rate, and in
+a Historical Matchup. The Slate edges' `leaders` read their volume floors from
+it.
 
 `book_lines` (#377, crf04/statsplus#185) is additive and always present: sportsbook
 player-prop lines from The Odds API, keyed by category (a subset of `PTS`,

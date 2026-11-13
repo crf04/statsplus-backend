@@ -489,9 +489,14 @@ def _windows(**markets):
     }
 
 
-def _leader_player(cid, name, scoring=20.0, **markets):
+#: Enough of every floored stat to clear its leader volume floor.
+VOLUME = {"FG3A": 5.0, "FG2A": 8.0, "AST": 4.0, "REB": 6.0}
+
+
+def _leader_player(cid, name, scoring=20.0, per_game=VOLUME, **markets):
     player = _player(cid, name, scoring=scoring)
     player["scores"] = _windows(**markets)
+    player["season_per_game"] = per_game
     return player
 
 
@@ -592,6 +597,54 @@ def test_leaders_need_eight_points_a_game():
     game = _edges([_game()], {"G1": _matchup(players)})["games"][0]
 
     assert game["leaders"] == [_leader(1, "Exactly Eight", "AST", 0.03, scoring=8.0)]
+
+
+def test_a_market_leads_only_when_he_clears_its_volume_floor():
+    """A near-zero base makes a huge percentage: Poeltl's 3PM read +1282%
+    (crf04/statsplus#514)."""
+
+    players = [
+        _leader_player(
+            1,
+            "Center",
+            per_game={**VOLUME, "FG3A": 1.99},
+            FG2M=_cell(0.2),
+            **{"3PM": _cell(12.82), "FG3A": _cell(9.0)},
+        ),
+        _leader_player(
+            2,
+            "Shooter",
+            per_game={**VOLUME, "FG2A": 2.99},
+            FG2A=_cell(12.82),
+            FG2M=_cell(9.0),
+            **{"3PM": _cell(0.19)},
+        ),
+        _leader_player(3, "Finisher", per_game={**VOLUME, "AST": 1.99}, PTS=_cell(0.04), AST=_cell(0.5)),
+        _leader_player(4, "Wing", per_game={**VOLUME, "REB": 2.99}, PTS=_cell(-0.03), REB=_cell(0.5)),
+        _leader_player(5, "Exactly", per_game={"FG3A": 2.0}, PTS=_cell(0.04), **{"3PM": _cell(0.3)}),
+    ]
+
+    game = _edges([_game()], {"G1": _matchup(players)})["games"][0]
+
+    assert game["leaders"] == [
+        _leader(5, "Exactly", "3PM", 0.3),
+        # Each falls back to his largest market that clears its floor.
+        _leader(1, "Center", "FG2M", 0.2),
+        _leader(2, "Shooter", "3PM", 0.19),
+        _leader(3, "Finisher", "PTS", 0.04),
+        _leader(4, "Wing", "PTS", -0.03),
+    ]
+
+
+def test_without_a_season_rate_only_unfloored_markets_lead():
+    players = [
+        _leader_player(1, "Unknown", per_game={}, REB=_cell(0.5), AST=_cell(0.5), PRA=_cell(0.06)),
+        _leader_player(2, "Absent", per_game=None, **{"3PM": _cell(0.5)}, FGA=_cell(-0.02)),
+    ]
+
+    game = _edges([_game()], {"G1": _matchup(players)})["games"][0]
+
+    assert game["leaders"] == [_leader(1, "Unknown", "PRA", 0.06), _leader(2, "Absent", "FGA", -0.02)]
 
 
 def test_leaders_are_capped_at_five_by_absolute_value():
@@ -1262,7 +1315,7 @@ def test_a_cached_response_keeps_its_trailing_families_under_the_current_schema(
     assert (cold["trailing"], warm["trailing"]) == ([DEFENSE_TRAILING], [DEFENSE_TRAILING])
     # A body cached before ``trailing`` (schema 2) or the preview cards'
     # ``players`` (schema 3) existed is never served.
-    assert [key.split(":")[2] for key in redis_client.values] == ["v10"]
+    assert [key.split(":")[2] for key in redis_client.values] == ["v11"]
 
 
 def test_the_edges_and_their_matchups_write_what_the_previous_release_wrote():
@@ -1324,14 +1377,16 @@ def test_the_edges_and_their_matchups_write_what_the_previous_release_wrote():
         # v13/v10 (statsplus#459): rows may be Rotation Players;
         # v14 (statsplus#493): every Matchup's game_context carries its stored game_line.
         # v15 (statsplus#495): every Matchup player row carries ``line_labels``.
-        "matchup:composed:v15:2c09ce1289c8d668759495f7fc22418c210e19ccf005ceab4f3ea3b4d38ee685": (
-            "41af3e65fb97fc0415b45ad1d966f841aa4111f8193abf8e4d9f4afcfca875d8"
+        # v16 (statsplus#514): every Matchup player row carries ``season_per_game``.
+        "matchup:composed:v16:c420b60e1a80d049d0a6ae510c49c8281f10fdb5aacd85ec2cc883e17b560736": (
+            "2c228f9521978f625918005d5340703971a48e894077ec4a353e5778a9bec8e4"
         ),
-        "matchup:composed:v15:e95a06604d407b796294cc229c969c82a50dc71a0e8fa2974e36477ceb003ed2": (
-            "3a1db1f93113eba50cbb2d95c86484f58729f2842b4cd4b6b39af61c5fb6a4ec"
+        "matchup:composed:v16:b42972fc428b14a8ee110461b2c5473aed2fa7bd0e06bbc73c8c4195326ef897": (
+            "f39687ebd1395873f5fb0f39952771f3dd72dbd0ea1bcbc0896235c597d41066"
         ),
         # v9 (statsplus#470): each game carries ``leaders``.
-        "slate:edges:v10:aa411456db22b7f601373770889ae6752ad8943bb0d67a099a57beede6a8e482": (
+        # v11 (statsplus#514): leaders clear their market's volume floor.
+        "slate:edges:v11:991d20325b6d7f68f587f24d0435ac2c6617464515aa9fee4e3d5a60702109b7": (
             "3b122d82fa39ffbd2cc84f8b61fc1b1a4e3779e6ff3a4e611c4e76599e2e53ec"
         ),
     }
