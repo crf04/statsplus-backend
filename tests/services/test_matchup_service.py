@@ -3197,11 +3197,15 @@ def test_season_per_game_holds_every_market_his_season_rate_counts_posted_or_not
     logs = RecordedGameLogs(extra_per_game={"FG3A": 0.4, "FG2A": 9.25})
     current = _service(player_logs=logs).get_matchup(game_id=GAME_ID)
     historical = _historical_service(player_logs=RecordedGameLogs()).get_matchup(game_id=GAME_ID)
+    no_rate = _service(player_logs=RecordedGameLogs(season_rate=False)).get_matchup(game_id=GAME_ID)
 
     lebron = next(row for row in current["players"] if row["canonical_id"] == 2544)
     assert lebron["season_averages"] == {"PTS": 21.0}
     assert lebron["season_per_game"] == {"AST": 4.0, "FG2A": 9.25, "FG3A": 0.4, "PTS": 21.0, "REB": 5.0}
-    assert {row["season_per_game"] == {} for row in historical["players"]} == {True}
+    # A Historical row reads the completed-season rate its scores read.
+    away = next(row for row in historical["players"] if row["canonical_id"] == AWAY_PARTICIPANT)
+    assert (away["season_averages"], away["season_per_game"]) == ({}, {"AST": 4.0, "PTS": 21.0, "REB": 5.0})
+    assert {row["season_per_game"] == {} for row in no_rate["players"]} == {True}
 
 
 def _historical_rebound_scores(rebound_type_metrics):

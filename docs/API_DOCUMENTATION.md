@@ -2180,9 +2180,10 @@ backends omit both fields.
 `season_per_game` (crf04/statsplus#514) is additive and always present: the
 same season per-game rate for every Statistic Catalog market the rate counts,
 posted or not, so it holds `season_averages` and the markets no provider
-posts. It is `{}` exactly when `season_averages` is for want of a rate, and in
-a Historical Matchup. The Slate edges' `leaders` read their volume floors from
-it.
+posts. It is `{}` only without a season rate. A Historical Matchup serves the
+completed-season rate its `scores` read, focal game included, although its
+`season_averages` is `{}`. The Slate edges' `leaders` read their volume floors
+from it.
 
 `book_lines` (#377, crf04/statsplus#185) is additive and always present: sportsbook
 player-prop lines from The Odds API, keyed by category (a subset of `PTS`,
