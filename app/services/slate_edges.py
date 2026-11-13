@@ -70,9 +70,21 @@ EFFECTS_PER_GAME = 3
 #: fall back to the team rate for about half the teams early in a season).
 LEADER_MARKETS = ("PTS", "REB", "AST", "3PM", "PRA", "PR", "PA", "RA", "FGA", "FGM", "FG2A", "FG2M", "FG3A")
 LEADERS_PER_GAME = 5
+#: A leader market's volume floor: the stat his season ``season_per_game`` must
+#: reach, per game, before its percentage means anything.  A near-zero base
+#: turns a few threes into +1282% (crf04/statsplus#514).  The other markets
+#: rest on ``EFFECT_MIN_SCORING``.
+LEADER_VOLUME_FLOORS = {
+    "3PM": ("FG3A", 2.0),
+    "FG3A": ("FG3A", 2.0),
+    "FG2M": ("FG2A", 3.0),
+    "FG2A": ("FG2A", 3.0),
+    "AST": ("AST", 2.0),
+    "REB": ("REB", 3.0),
+}
 #: Bumped whenever the selection rules or the response shape change, so a
 #: stored response of the old rules is never served.
-SLATE_EDGES_CACHE_SCHEMA = 10
+SLATE_EDGES_CACHE_SCHEMA = 11
 _REASON_BASE = "play_types"
 _REASON_SLICES = 2
 
@@ -360,6 +372,7 @@ class SlateEdgesService:
                 "effects_per_game": EFFECTS_PER_GAME,
                 "leader_markets": list(LEADER_MARKETS),
                 "leaders_per_game": LEADERS_PER_GAME,
+                "leader_volume_floors": LEADER_VOLUME_FLOORS,
             },
         }
         digest = hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode("utf-8")).hexdigest()
@@ -478,7 +491,8 @@ class SlateEdgesService:
 
     def _leaders(self, matchup: Mapping[str, Any]) -> list[dict[str, Any]]:
         """Each eligible player's largest season cell across ``LEADER_MARKETS``
-        (ties: market order), ordered as ``effects`` are; the first five."""
+        whose volume floor he clears (ties: market order), ordered as
+        ``effects`` are; the first five."""
 
         best = []
         for player in matchup["players"]:
@@ -486,7 +500,12 @@ class SlateEdgesService:
             if scoring is None or scoring < EFFECT_MIN_SCORING:
                 continue
             top: tuple[str, Mapping[str, Any]] | None = None
+            per_game = player.get("season_per_game") or {}
             for market in LEADER_MARKETS:
+                if market in LEADER_VOLUME_FLOORS:
+                    stat, floor = LEADER_VOLUME_FLOORS[market]
+                    if (per_game.get(stat) or 0) < floor:
+                        continue
                 cell = self._season_cell(player, market)
                 if cell is None or cell["value"] is None:
                     continue

@@ -602,6 +602,7 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
         # The fake summary has a points rate but no rows behind it.
         "last_five_games": [],
         "season_averages": {"PTS": 25.4},
+        "season_per_game": {"PTS": 25.4},
         "last_10_minutes": [31.0, 32.0, 33.0],
         "diet_shares": {
             "play_types": [
@@ -3188,6 +3189,23 @@ def test_a_historical_score_equals_current_mode_for_the_same_evidence(market):
     historical_window = away["scores"][market]["season"]
     assert historical_window["missing_inputs"] == []
     assert historical_window == lebron["scores"][market]["season"]
+
+
+def test_season_per_game_holds_every_market_his_season_rate_counts_posted_or_not():
+    """The home ticker's volume floors read markets no book posts (crf04/statsplus#514)."""
+
+    logs = RecordedGameLogs(extra_per_game={"FG3A": 0.4, "FG2A": 9.25})
+    current = _service(player_logs=logs).get_matchup(game_id=GAME_ID)
+    historical = _historical_service(player_logs=RecordedGameLogs()).get_matchup(game_id=GAME_ID)
+    no_rate = _service(player_logs=RecordedGameLogs(season_rate=False)).get_matchup(game_id=GAME_ID)
+
+    lebron = next(row for row in current["players"] if row["canonical_id"] == 2544)
+    assert lebron["season_averages"] == {"PTS": 21.0}
+    assert lebron["season_per_game"] == {"AST": 4.0, "FG2A": 9.25, "FG3A": 0.4, "PTS": 21.0, "REB": 5.0}
+    # A Historical row reads the completed-season rate its scores read.
+    away = next(row for row in historical["players"] if row["canonical_id"] == AWAY_PARTICIPANT)
+    assert (away["season_averages"], away["season_per_game"]) == ({}, {"AST": 4.0, "PTS": 21.0, "REB": 5.0})
+    assert {row["season_per_game"] == {} for row in no_rate["players"]} == {True}
 
 
 def _historical_rebound_scores(rebound_type_metrics):

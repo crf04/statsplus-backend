@@ -2268,6 +2268,17 @@ class MatchupService:
                             if market in season_rate.per_game
                         }
                     ),
+                    # Every market the rate his scores read counts, posted or
+                    # not, so a Historical row has it too: the home ticker's
+                    # volume floors read it (crf04/statsplus#514).
+                    "season_per_game": (
+                        {}
+                        if summary is None or summary.season_rate is None
+                        else {
+                            market: self._number(value)
+                            for market, value in sorted(summary.season_rate.per_game.items())
+                        }
+                    ),
                     "last_10_minutes": (
                         [] if summary is None else [self._number(value) for value in summary.last_ten_minutes]
                     ),
