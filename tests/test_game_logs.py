@@ -485,6 +485,9 @@ class _StubRankings:
         self.calls.append((tuple(team_filters), season))
         return {team_filter: list(self.ranked) for team_filter in team_filters}
 
+    def season_rows_by_base(self, bases, season):
+        return {base: None for base in bases}
+
 
 def _make_service(monkeypatch, mock_db_engine, mock_redis_client):
     settings = RuntimeSettings(
@@ -861,6 +864,142 @@ def test_a_traditional_sheet_row_filters_game_logs_by_its_per_48_metric(
     assert matchups(["sheet:traditional:OPP_PTS"], ["-1"]) == matchups(["OPP_PTS"], ["-1"]) == ["BOS @ MIA"]
 
 
+def _free_throw_league():
+    """MIA allows the most free throws made per 48, LAL the second most and
+    CHI the fewest; points run the other way, with twenty-seven teams tied."""
+
+    from tests.support.publication_stubs import league, traditional_per48
+
+    free_throws = {"MIA": 30.0, "LAL": 25.0, "CHI": 10.0}
+    points = {"MIA": 100.0, "LAL": 105.0, "CHI": 130.0}
+    return league(
+        lambda tricode: traditional_per48(
+            free_throws_made=free_throws.get(tricode, 20.0),
+            points=points.get(tricode, 110.0),
+        )
+    )
+
+
+def test_each_game_carries_its_opponents_rank_on_every_teams_against_filter(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    """statsplus#498: the rank each filter compared, keyed as the request named it."""
+
+    service = _traditional_ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, _free_throw_league()
+    )
+    query = GameLogQuery(
+        season_filter="2024-25",
+        teams_against=["sheet:traditional:OPP_FTM", "OPP_PTS"],
+        rank_filter=["1,2", "-2"],
+    )
+
+    result = service.get_filtered_logs("LeBron James", query)
+
+    assert [(row["MATCHUP"], row["teams_against_ranks"]) for row in result["game_logs"]] == [
+        ("BOS vs. LAL", {"sheet:traditional:OPP_FTM": 29, "OPP_PTS": 2}),
+        ("BOS @ MIA", {"sheet:traditional:OPP_FTM": 30, "OPP_PTS": 1}),
+    ]
+    GameLogResponse.model_validate(result)
+
+
+def test_a_teams_against_rank_is_the_filters_position_not_the_sheets_shared_rank(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    """Tied teams hold distinct ranks in tricode order, as the filter selects them."""
+
+    service = _traditional_ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, _free_throw_league()
+    )
+    query = GameLogQuery(season_filter="2024-25", teams_against=["OPP_PTS"], rank_filter=["2,3"])
+
+    with monkeypatch.context() as patch:
+        tied = _game_logs_frame().assign(MATCHUP=["BOS vs. ATL", "BOS @ BKN", "BOS vs. CHI"])
+        patch.setattr(service, "_get_game_logs", lambda name, season: (tied, None))
+        result = service.get_filtered_logs("LeBron James", query)
+
+    assert [(row["MATCHUP"], row["teams_against_ranks"]) for row in result["game_logs"]] == [
+        ("BOS vs. ATL", {"OPP_PTS": 29}),
+        ("BOS @ BKN", {"OPP_PTS": 28}),
+    ]
+    ranks = result["opponent_ranks"]["PTS"]["ranks"]
+    assert (ranks["ATL"], ranks["BKN"]) == (3, 3)
+
+
+def test_a_ranking_missing_a_team_keeps_the_30_scale(monkeypatch, mock_db_engine, mock_redis_client):
+    """A play type CHI never faced ranks 29 teams; the top one is still 30."""
+
+    from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
+
+    others = sorted(set(NBA_TEAM_ID_TO_TRICODE.values()) - {"MIA", "LAL", "CHI"})
+    service = _ranked_service(monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", *others])
+    query = GameLogQuery(season_filter="2024-25", teams_against=["Isolation"], rank_filter=["1,2"])
+
+    result = service.get_filtered_logs("LeBron James", query)
+
+    assert [(row["MATCHUP"], row["teams_against_ranks"]) for row in result["game_logs"]] == [
+        ("BOS vs. LAL", {"Isolation": 29}),
+        ("BOS @ MIA", {"Isolation": 30}),
+    ]
+
+
+def test_a_sheet_rows_rank_reaches_each_game_over_http(
+    monkeypatch, mock_db_engine, mock_redis_client, dependencies, client
+):
+    """statsplus#498 evidence: an Arc3Assists 21-30 game prints its Arc3Assists rank."""
+
+    import app.utils.auth as auth
+    from app.services.team_filter_rankings import TeamFilterRankingService
+    from tests.support.publication_stubs import StubGovernance, StubReader, league, read
+
+    monkeypatch.setattr(auth, "get_firebase_app", lambda: None)
+    arc3 = {"LAL": 9.0, "MIA": 8.0, "CHI": 1.0}
+    streams = {
+        "traditional_opponent_season": _free_throw_league(),
+        "assist_locations_season": league(lambda tricode: {"arc3_assists": arc3.get(tricode, 3.0)}),
+    }
+    service = GameService(
+        mock_db_engine,
+        mock_redis_client,
+        settings=RuntimeSettings(environment="testing", nba=NBASeasonSettings(current_season="2024-25")),
+        team_filter_rankings=TeamFilterRankingService(
+            StubReader({stream: read(stream, rows) for stream, rows in streams.items()}),
+            governance_resolver=StubGovernance(),
+        ),
+    )
+    monkeypatch.setattr(service, "_get_game_logs", lambda name, season: (_game_logs_frame(), None))
+    dependencies.game_service = service
+
+    response = client.get(
+        "/api/games/game_logs?player_name=LeBron%20James&season_filter=2024-25"
+        "&teams_against[]=sheet:assist_locations:Arc3Assists&rank_filter[]=1,10"
+    )
+
+    assert response.status_code == 200, response.get_json()
+    body = response.get_json()
+    assert [(row["MATCHUP"], row["teams_against_ranks"]) for row in body["game_logs"]] == [
+        ("BOS vs. LAL", {"sheet:assist_locations:Arc3Assists": 30}),
+        ("BOS @ MIA", {"sheet:assist_locations:Arc3Assists": 29}),
+    ]
+    assert body["opponent_ranks"]["AST"]["label"] == "Assists Allowed"
+    assert "sheet:assist_locations:Arc3Assists" not in body["opponent_ranks"]
+
+
+def test_game_logs_without_a_teams_against_filter_carry_no_filter_ranks(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    service = _traditional_ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, _free_throw_league()
+    )
+
+    for query in (
+        GameLogQuery(season_filter="2024-25"),
+        GameLogQuery(season_filter="2024-25", opponent_tricode="MIA"),
+    ):
+        rows = service.get_filtered_logs("LeBron James", query)["game_logs"]
+        assert rows and not any("teams_against_ranks" in row for row in rows)
+
+
 def test_a_play_type_turnover_sheet_row_filters_game_logs_by_its_per_48_metric(
     monkeypatch, mock_db_engine, mock_redis_client
 ):
@@ -954,6 +1093,208 @@ def test_a_url_encoded_sheet_row_filters_game_logs_over_http(
         "BOS vs. LAL",
         "BOS @ MIA",
     ]
+
+
+def _traditional_ranked_service(monkeypatch, mock_db_engine, mock_redis_client, rows):
+    from app.services.team_filter_rankings import TeamFilterRankingService
+    from tests.support.publication_stubs import StubGovernance, StubReader, read
+
+    stream = "traditional_opponent_season"
+    service = GameService(
+        mock_db_engine,
+        mock_redis_client,
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season="2024-25"),
+        ),
+        team_filter_rankings=TeamFilterRankingService(
+            StubReader({stream: read(stream, rows)}),
+            governance_resolver=StubGovernance(),
+        ),
+    )
+    monkeypatch.setattr(service, "_get_game_logs", lambda name, season: (_game_logs_frame(), None))
+    return service
+
+
+def _opponent_rank_league():
+    """A league that orders points, rebounds and field goals made differently.
+
+    Every team not named allows the default, so twenty-seven teams tie in
+    each metric and share one rank, as the Defense Sheet shows them.
+    """
+
+    from tests.support.publication_stubs import league, traditional_per48
+
+    points = {"MIA": 130.0, "LAL": 120.0, "CHI": 90.0}
+    offensive_rebounds = {"CHI": 9.0, "LAL": 5.0, "MIA": 0.5}
+    field_goals_made = {"LAL": 50.0, "BOS": 45.0, "MIA": 30.0}
+    steals = {"MIA": 20.0, "LAL": 15.0}
+    blocks = {"CHI": 12.0}
+    return league(
+        lambda tricode: traditional_per48(
+            points=points.get(tricode, 110.0),
+            offensive_rebounds=offensive_rebounds.get(tricode, 1.0),
+            field_goals_made=field_goals_made.get(tricode, 40.0),
+            steals=steals.get(tricode, 2.0),
+            blocks=blocks.get(tricode, 2.0),
+        )
+    )
+
+
+def test_game_logs_carry_each_opponents_season_rank_per_line_type_over_http(
+    monkeypatch, mock_db_engine, mock_redis_client, dependencies, client
+):
+    """#456: 30 allows the most of the line type's metric, 1 the fewest."""
+
+    import app.utils.auth as auth
+
+    monkeypatch.setattr(auth, "get_firebase_app", lambda: None)
+    dependencies.game_service = _traditional_ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, _opponent_rank_league()
+    )
+
+    response = client.get("/api/games/game_logs?player_name=LeBron%20James&season_filter=2024-25")
+
+    assert response.status_code == 200, response.get_json()
+    opponent_ranks = response.get_json()["opponent_ranks"]
+    ranked = {
+        line_type: (
+            entry["label"],
+            {tricode: entry["ranks"][tricode] for tricode in ("MIA", "LAL", "CHI", "BOS")},
+        )
+        for line_type, entry in opponent_ranks.items()
+        if line_type in ("PTS", "REB", "FGM", "STKS")
+    }
+    # BOS ties the other twenty-six unnamed teams and shares their rank.
+    assert ranked == {
+        "PTS": ("Points Allowed", {"MIA": 30, "LAL": 29, "CHI": 1, "BOS": 2}),
+        "REB": ("Rebounds Allowed", {"MIA": 1, "LAL": 29, "CHI": 30, "BOS": 2}),
+        "FGM": ("FG Made Allowed", {"MIA": 1, "LAL": 30, "CHI": 2, "BOS": 29}),
+        # Steals + blocks: MIA 22, LAL 17, CHI 14, the rest 4.
+        "STKS": ("Steals + Blocks", {"MIA": 30, "LAL": 29, "CHI": 28, "BOS": 1}),
+    }
+    assert len(opponent_ranks["PTS"]["ranks"]) == 30
+    assert opponent_ranks["FG3M"]["label"] == "3s Allowed"
+    assert opponent_ranks["FGA"]["label"] == "FG Attempts Allowed"
+    assert opponent_ranks["FTM"]["label"] == "FT Made Allowed"
+    # Fantasy points have no single allowed metric.
+    assert sorted(opponent_ranks) == [
+        "AST",
+        "BLK",
+        "FG3A",
+        "FG3M",
+        "FGA",
+        "FGM",
+        "FTA",
+        "FTM",
+        "PA",
+        "PR",
+        "PRA",
+        "PTS",
+        "RA",
+        "REB",
+        "STKS",
+        "STL",
+        "TOV",
+    ]
+
+
+def test_a_combo_lines_opponent_rank_ranks_the_sum_of_its_stats_allowed(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    """statsplus#505: RA ranks rebounds + assists, an order neither stat alone gives."""
+
+    import json
+    from pathlib import Path
+
+    from tests.support.publication_stubs import league, traditional_per48
+
+    points = {"MIA": 100.0, "LAL": 120.0, "CHI": 105.0}
+    rebounds = {"MIA": 10.0, "LAL": 6.0, "CHI": 2.0}
+    assists = {"MIA": 1.0, "LAL": 3.0, "CHI": 10.0}
+    rows = league(
+        lambda tricode: traditional_per48(
+            points=points.get(tricode, 110.0),
+            offensive_rebounds=1.0,
+            defensive_rebounds=rebounds.get(tricode, 4.0) - 1.0,
+            assists=assists.get(tricode, 4.0),
+        )
+    )
+    service = _traditional_ranked_service(monkeypatch, mock_db_engine, mock_redis_client, rows)
+
+    opponent_ranks = service.get_filtered_logs("LeBron James", GameLogQuery(season_filter="2024-25"))[
+        "opponent_ranks"
+    ]
+
+    ranked = {
+        line_type: (
+            opponent_ranks[line_type]["label"],
+            {
+                tricode: opponent_ranks[line_type]["ranks"][tricode]
+                for tricode in ("MIA", "LAL", "CHI", "BOS")
+            },
+        )
+        for line_type in ("REB", "AST", "RA", "PR", "PA", "PRA")
+    }
+    # BOS ties the other twenty-six unnamed teams and shares their rank.
+    assert ranked == {
+        "REB": ("Rebounds Allowed", {"MIA": 30, "LAL": 29, "CHI": 1, "BOS": 2}),
+        "AST": ("Assists Allowed", {"MIA": 1, "LAL": 2, "CHI": 30, "BOS": 3}),
+        # MIA 11, LAL 9, CHI 12, the rest 8.
+        "RA": ("Rebounds + Assists Allowed", {"MIA": 29, "LAL": 28, "CHI": 30, "BOS": 1}),
+        # MIA 110, LAL 126, CHI 107, the rest 114.
+        "PR": ("Points + Rebounds Allowed", {"MIA": 2, "LAL": 30, "CHI": 1, "BOS": 3}),
+        # MIA 101, LAL 123, CHI 115, the rest 114.
+        "PA": ("Points + Assists Allowed", {"MIA": 1, "LAL": 30, "CHI": 29, "BOS": 2}),
+        # MIA 111, LAL 129, CHI 117, the rest 118.
+        "PRA": ("Points + Rebounds + Assists Allowed", {"MIA": 1, "LAL": 30, "CHI": 2, "BOS": 3}),
+    }
+    filter_labels = json.loads(
+        (Path(__file__).resolve().parents[1] / "app" / "assets" / "opponent_filter_labels.json").read_text()
+    ).values()
+    assert not {label for label, _ranks in ranked.values() if "+" in label} & set(filter_labels)
+
+
+def test_an_opponents_points_rank_is_its_defense_sheet_points_allowed_rank(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    """#456 acceptance 4: the tooltip and the Matchup's Sheet agree, ties included."""
+
+    from datetime import date
+
+    from app.services.team_matchup_query import TeamMatchupQueryService
+    from app.services.traditional_opponent_publications import normalize_traditional_opponent_window
+    from tests.support.publication_stubs import RETRIEVED_AT, SEASON
+
+    rows = _opponent_rank_league()
+    service = _traditional_ranked_service(monkeypatch, mock_db_engine, mock_redis_client, rows)
+    window = TeamMatchupQueryService._publication_base_window(
+        SEASON,
+        cutoff=date(2026, 1, 10),
+        window_games=None,
+        base="traditional",
+        rows=normalize_traditional_opponent_window(rows, stream_key="traditional_opponent_season").teams,
+        retrieved_at=RETRIEVED_AT,
+    )
+    boston = next(metric.rank for metric in window.team_metrics[1610612738] if metric.stat_key == "OPP_PTS")
+
+    result = service.get_filtered_logs("LeBron James", GameLogQuery(season_filter="2024-25"))
+
+    assert boston == 2
+    assert result["opponent_ranks"]["PTS"]["ranks"]["BOS"] == 2
+
+
+def test_game_logs_carry_no_opponent_ranks_when_the_league_is_incomplete(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    service = _traditional_ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, _opponent_rank_league()[:29]
+    )
+
+    result = service.get_filtered_logs("LeBron James", GameLogQuery(season_filter="2024-25"))
+
+    assert result["opponent_ranks"] == {}
+    assert len(result["game_logs"]) == 3
 
 
 def test_date_to_trims_the_logs_and_filtered_averages_only(monkeypatch, mock_db_engine, mock_redis_client):

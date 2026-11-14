@@ -5,6 +5,7 @@ import json
 import re
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -550,6 +551,31 @@ def test_season_complete_snapshot_names_its_reason_in_surface_availability():
     }
 
 
+def test_matchup_player_rows_label_each_unpriced_line():
+    # Novig's 9.5 has no price and its poll priced another number; Polymarket's 9.5 has none.
+    pool = PlayerPool(
+        players=(
+            PoolPlayer(
+                2544,
+                "LeBron James",
+                LAL,
+                ("PTS",),
+                {"novig": ("PTS",), "polymarket": ("PTS",), "underdog": ("PTS",)},
+                lines={"novig": {"PTS": 9.5}, "polymarket": {"PTS": 9.5}, "underdog": {"PTS": 28.0}},
+                line_prices={"underdog": {"PTS": {"over": -112, "under": None}}},
+                priced_other_lines={"novig": ("PTS",)},
+            ),
+        ),
+        team_counts={LAL: 1},
+        freshness={"status": "fresh", "retrieved_at": RETRIEVED_AT.isoformat(), "providers": {}},
+    )
+
+    player = _service(pool=pool).get_matchup(game_id=GAME_ID)["players"][0]
+
+    assert player["lines"] == {"novig": {"PTS": 9.5}, "polymarket": {"PTS": 9.5}, "underdog": {"PTS": 28.0}}
+    assert player["line_labels"] == {"novig": {"PTS": "alternate"}, "polymarket": {"PTS": "unpriced"}}
+
+
 def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence_is_partial():
     player = _service().get_matchup(game_id=GAME_ID)["players"][0]
 
@@ -571,10 +597,12 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
             "underdog": {"PTS": 28.0},
         },
         "line_prices": {"underdog": {"PTS": {"over": -112, "under": None}}},
+        "line_labels": {"prizepicks": {"PTS": "line-only"}},
         "season_scoring": 25.4,
         # The fake summary has a points rate but no rows behind it.
         "last_five_games": [],
         "season_averages": {"PTS": 25.4},
+        "season_per_game": {"PTS": 25.4},
         "last_10_minutes": [31.0, 32.0, 33.0],
         "diet_shares": {
             "play_types": [
@@ -1888,7 +1916,7 @@ def test_book_lines_are_read_once_per_matchup_and_never_for_a_snapshot_compositi
         def __init__(self):
             self.calls = []
 
-        def book_lines(self, game_id, *, connection=None):
+        def book_lines(self, game_id, *, now, started, connection=None):
             self.calls.append(game_id)
             return {2544: {"PTS": {"as_of": "2026-01-15T11:00:00Z", "closing": False, "books": []}}}
 
@@ -3163,6 +3191,23 @@ def test_a_historical_score_equals_current_mode_for_the_same_evidence(market):
     assert historical_window == lebron["scores"][market]["season"]
 
 
+def test_season_per_game_holds_every_market_his_season_rate_counts_posted_or_not():
+    """The home ticker's volume floors read markets no book posts (crf04/statsplus#514)."""
+
+    logs = RecordedGameLogs(extra_per_game={"FG3A": 0.4, "FG2A": 9.25})
+    current = _service(player_logs=logs).get_matchup(game_id=GAME_ID)
+    historical = _historical_service(player_logs=RecordedGameLogs()).get_matchup(game_id=GAME_ID)
+    no_rate = _service(player_logs=RecordedGameLogs(season_rate=False)).get_matchup(game_id=GAME_ID)
+
+    lebron = next(row for row in current["players"] if row["canonical_id"] == 2544)
+    assert lebron["season_averages"] == {"PTS": 21.0}
+    assert lebron["season_per_game"] == {"AST": 4.0, "FG2A": 9.25, "FG3A": 0.4, "PTS": 21.0, "REB": 5.0}
+    # A Historical row reads the completed-season rate its scores read.
+    away = next(row for row in historical["players"] if row["canonical_id"] == AWAY_PARTICIPANT)
+    assert (away["season_averages"], away["season_per_game"]) == ({}, {"AST": 4.0, "PTS": 21.0, "REB": 5.0})
+    assert {row["season_per_game"] == {} for row in no_rate["players"]} == {True}
+
+
 def _historical_rebound_scores(rebound_type_metrics):
     diets, season_window, _last_15_window = _parity_evidence(rebound_type_metrics)
     payload = _historical_service(
@@ -3336,6 +3381,7 @@ def test_current_matchup_declares_its_mode_and_keeps_its_existing_fields():
         "teams",
         "players",
         "injuries",
+        "game_context",
         "freshness",
         "provenance",
         "coverage",
@@ -3812,3 +3858,189 @@ def test_a_held_pool_read_on_sqlite_takes_a_games_event_and_pool_from_one_snapsh
     assert document["game"]["away_team"]["tricode"] == "LAL"
     assert document["game"]["away_team"]["targetable_player_count"] == 1
     assert len(document["players"]) == 1
+
+
+def _posted_pool(markets):
+    return PlayerPool(
+        players=(
+            PoolPlayer(
+                2544,
+                "LeBron James",
+                LAL,
+                markets,
+                {"prizepicks": markets},
+                lines={"prizepicks": {market: 10.5 for market in markets}},
+            ),
+        ),
+        team_counts={LAL: 1},
+        freshness={"status": "fresh", "retrieved_at": RETRIEVED_AT.isoformat(), "providers": {}},
+    )
+
+
+def test_a_scheduled_row_is_scored_in_every_scoreable_market_while_lines_stay_on_posted_ones():
+    """statsplus#457: CourtAI holds lines from only some books, so a market with
+    no line in its data is still scored; only lines stay posted-only."""
+
+    catalog = StatisticCatalog.load_default()
+    (player,) = _service(pool=_posted_pool(("PTS", "REB")), statistic_catalog=catalog).get_matchup(
+        game_id=GAME_ID
+    )["players"]
+    (posted_ast,) = _service(pool=_posted_pool(("AST",)), statistic_catalog=catalog).get_matchup(
+        game_id=GAME_ID
+    )["players"]
+
+    assert set(player["scores"]) == {
+        "PTS",
+        "REB",
+        "AST",
+        "3PM",
+        "PRA",
+        "PA",
+        "PR",
+        "RA",
+        "FGA",
+        "FGM",
+        "FG2A",
+        "FG2M",
+        "FG3A",
+        "FTA",
+        "FTM",
+        "STL",
+        "BLK",
+        "STKS",
+        "TOV",
+    }
+    assert all(set(score) == {"season", "last_15"} for score in player["scores"].values())
+    assert player["stat_categories"] == ["PTS", "REB"]
+    assert player["posted_markets"] == ["PTS", "REB"]
+    assert player["lines"] == {"prizepicks": {"PTS": 10.5, "REB": 10.5}}
+    # An unposted market reads exactly the score it shows once posted.
+    assert player["scores"]["AST"] == posted_ast["scores"]["AST"]
+
+
+def test_the_matchup_serves_each_teams_stored_game_context(tmp_path):
+    from sqlalchemy import text
+
+    from app.services.game_context import GameContextRepository
+    from app.services.game_lines import collect
+    from tests.support.game_context_world import final, migrated_engine, schedule
+
+    engine = migrated_engine(tmp_path)
+    # Tips 00:30 UTC on 2026-01-16: the Eastern game date is 2026-01-15.
+    schedule(engine, GAME_ID, "2026-01-16T00:30:00+00:00", (LAL, "LAL"), (BOS, "BOS"), season=SEASON)
+    schedule(engine, "0022500570", "2026-01-14T00:30:00+00:00", (BOS, "BOS"), (LAL, "LAL"), season=SEASON)
+    final(
+        engine, "0022500570", "2026-01-13", (BOS, "BOS", 112, 100.0), (LAL, "LAL", 108, 100.0), season=SEASON
+    )
+    GameContextRepository(engine, clock=lambda: NOW).refresh(SEASON)
+    # ESPN lists BOS at home, favoured by 6.5, total 228.5, before tip.
+    scoreboard = json.loads(
+        (Path(__file__).resolve().parents[1] / "fixtures/espn/scoreboard_2026-11-10.json").read_text()
+    )
+    event = scoreboard["events"][0]
+    event["date"] = "2026-01-16T00:30Z"
+    for side in event["competitions"][0]["competitors"]:
+        side["team"]["abbreviation"] = "BOS" if side["homeAway"] == "home" else "LAL"
+    event["competitions"][0]["odds"][0].update(details="BOS -6.5", spread=-6.5, overUnder=228.5)
+    collect(engine, fetch=lambda _day: {"events": [event]}, clock=lambda: NOW)
+    # The request reads the stored rows only: with the ledger and schedule gone it serves the same values.
+    with engine.begin() as connection:
+        connection.execute(text("DELETE FROM canonical_game_ledger_team_facts"))
+        connection.execute(text("DELETE FROM canonical_game_ledger_games"))
+        connection.execute(text("DELETE FROM event_catalog"))
+    service = _service()
+    service.game_context = GameContextRepository(engine)
+
+    payload = service.get_matchup(game_id=GAME_ID)
+
+    def ratings(offensive, defensive, net):
+        return {
+            "games": 1,
+            "possession_games": 1,
+            "pace": 100.0,
+            "offensive_rating": offensive,
+            "defensive_rating": defensive,
+            "net_rating": net,
+        }
+
+    assert payload["game_context"] == {
+        "status": "available",
+        "computed_at": "2026-01-15T12:00:00+00:00",
+        "teams": [
+            {
+                "team_id": LAL,
+                "tricode": "LAL",
+                "is_home": False,
+                "season": SEASON,
+                "through_game_date": "2026-01-13",
+                "rest": {"previous_game_date": "2026-01-13", "rest_days": 1, "back_to_back": False},
+                "ratings": {"season": ratings(108.0, 112.0, -4.0), "last_10": ratings(108.0, 112.0, -4.0)},
+                "last_5": [
+                    {
+                        "game_date": "2026-01-13",
+                        "opponent_tricode": "BOS",
+                        "is_home": True,
+                        "points": 108,
+                        "opponent_points": 112,
+                        "result": "L",
+                        "margin": -4,
+                    }
+                ],
+            },
+            {
+                "team_id": BOS,
+                "tricode": "BOS",
+                "is_home": True,
+                "season": SEASON,
+                "through_game_date": "2026-01-13",
+                "rest": {"previous_game_date": "2026-01-13", "rest_days": 1, "back_to_back": False},
+                "ratings": {"season": ratings(112.0, 108.0, 4.0), "last_10": ratings(112.0, 108.0, 4.0)},
+                "last_5": [
+                    {
+                        "game_date": "2026-01-13",
+                        "opponent_tricode": "LAL",
+                        "is_home": False,
+                        "points": 112,
+                        "opponent_points": 108,
+                        "result": "W",
+                        "margin": 4,
+                    }
+                ],
+            },
+        ],
+        "game_line": {
+            "status": "available",
+            "source": "espn_scoreboard",
+            "provider": "DraftKings",
+            "read_at": "2026-01-15T12:00:00+00:00",
+            "favorite_team_id": BOS,
+            "favorite_tricode": "BOS",
+            "spread": -6.5,
+            "total": 228.5,
+            "teams": [
+                {"team_id": LAL, "tricode": "LAL", "is_home": False, "spread": 6.5, "implied_total": 111.0},
+                {"team_id": BOS, "tricode": "BOS", "is_home": True, "spread": -6.5, "implied_total": 117.5},
+            ],
+        },
+    }
+
+
+def test_a_matchup_without_stored_game_context_says_it_is_unavailable():
+    payload = _service().get_matchup(game_id=GAME_ID)
+
+    assert payload["game_context"] == {
+        "status": "unavailable",
+        "computed_at": None,
+        "teams": [],
+        "game_line": {
+            "status": "unavailable",
+            "source": "espn_scoreboard",
+            "provider": None,
+            "read_at": None,
+            "favorite_team_id": None,
+            "favorite_tricode": None,
+            "spread": None,
+            "total": None,
+            "teams": [],
+        },
+    }

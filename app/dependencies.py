@@ -177,6 +177,7 @@ def build_dependencies(
         ProviderSnapshotCacheCoordinator,
     )
     from app.services.diet_baselines import DietBaselinesService
+    from app.services.game_context import GameContextRepository
     from app.services.game_service import GameService
     from app.services.injury_scenarios import InjuryScenarioService
     from app.services.injury_snapshot_repository import InjurySnapshotRepository
@@ -223,6 +224,7 @@ def build_dependencies(
     from app.services.target_resolution import TargetResolutionService
     from app.services.target_season_minutes import TargetSeasonMinutesService
     from app.services.team_filter_rankings import TeamFilterRankingService
+    from app.services.team_lineups import TeamLineupRepository
     from app.services.team_matchup_query import TeamMatchupQueryService
     from app.services.team_matchup_repository import TeamMatchupRepository
     from app.services.team_service import TeamService
@@ -519,6 +521,10 @@ def build_dependencies(
                     engine, ledger_observation_recorder
                 ),
                 observation_recorder=ledger_observation_recorder,
+                box_score_provider=NBATrackingProvider(pace_seconds=0.6),
+                open_box_score_differences=lambda season: len(
+                    collection_control.open_box_score_differences(season=season)
+                ),
                 reconciliation_sink=collection_control_reconciliation_sink(
                     collection_control, default_season=settings.nba.current_season
                 ),
@@ -679,6 +685,7 @@ def build_dependencies(
         ),
         event_catalog=event_catalog_service,
         snapshot_repository=injury_snapshot_repository,
+        athlete_catalog=athlete_catalog_service,
         settings=settings,
         enabled=settings.features.injury_report_enabled,
     )
@@ -760,6 +767,7 @@ def build_dependencies(
         # The closing-line table exists once migration 067 has run; the
         # read-only demo database never has it.
         closing_lines=closing_line_reader,
+        injury_reports=injury_snapshot_repository,
         posted_lines=(
             PostedLinesReader(
                 event_catalog=stored_schedule,
@@ -812,6 +820,9 @@ def build_dependencies(
         # flag but never the key).  Disabled, the Matchup serves ``{}`` even
         # if quotes were stored earlier.
         sportsbook_reader=sportsbook_quote_reader,
+        # The stored team context (crf04/statsplus#466); the read-only demo
+        # database has no such tables.
+        game_context=None if demo_database else GameContextRepository(engine),
     )
     from app.services.slate_board import SlateBoardService
 
@@ -971,7 +982,12 @@ def build_dependencies(
         target_preview_service=target_preview_service,
         rotation_repository=rotation_repository,
         rotation_service=RotationService(
-            rotation_repository, athlete_catalog_service, game_service.default_season, game_service
+            rotation_repository,
+            athlete_catalog_service,
+            game_service.default_season,
+            game_service,
+            injury_reports=injury_snapshot_repository,
+            lineups=TeamLineupRepository(engine),
         ),
         player_season_stats_service=PlayerSeasonStatsService(PlayerSeasonStatsRepository(engine)),
         rotation_collection_service=RotationCollectionService(

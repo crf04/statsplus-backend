@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -27,17 +27,19 @@ from app.domain.matchup_experience import (
     GAME_LOG_SOURCE,
     HISTORICAL_MODE,
     PLAYER_POOL_SOURCE,
+    ROTATION_SOURCE,
     UNSCHEDULED_MODE,
     experience_mode,
     is_historical_matchup,
     player_source,
 )
-from app.domain.nba_events import resolve_stored_event_classification
+from app.domain.nba_events import REGULAR_SEASON_TYPE, is_started_event, resolve_stored_event_classification
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE, NBA_TEAM_TRICODE_TO_ID
 from app.domain.play_type_matchup import complete_play_type_shares, play_type_matchup
 from app.domain.rebound_types import REBOUND_TYPE_WIRE_NAMES, REBOUND_TYPES_BASE
 from app.domain.team_matchup_taxonomy import (
     DEFENSE_SHEET_BASES,
+    IMPOSSIBLE_DEFENSE_SHEET_IDENTITIES,
     LEDGER_DEFENSE_SHEET_METRICS,
     SHOT_TYPE_DISPLAY_TO_STORED,
     SHOT_TYPE_SLICES,
@@ -45,8 +47,9 @@ from app.domain.team_matchup_taxonomy import (
     SHOT_ZONE_SLICES,
     THREE_POINT_SHOT_ZONES,
     TWO_POINT_SHOT_ZONES,
-    defense_sheet_display_slice,
     defense_sheet_row_key,
+    defense_sheet_row_label,
+    defense_sheet_sort_key,
 )
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import (
@@ -55,7 +58,12 @@ from app.errors import (
     ResourceNotFoundError,
 )
 from app.services.athlete_resolver import CanonicalAthlete, catalog_athlete_matches
-from app.services.database_first_activation import DatabaseFirstPublicationReader
+from app.services.database_first_activation import (
+    DatabaseFirstPublicationReader,
+    ReadSeason,
+    SeasonUnavailable,
+)
+from app.services.game_lines import unavailable_game_line
 from app.services.matchup_injuries import (
     MatchupInjuryResult,
     unavailable_injury_result,
@@ -78,7 +86,7 @@ from app.services.player_game_log_repository import (
 )
 from app.services.player_game_log_values import player_game_log_focal_line
 from app.services.player_pool import PlayerPool, PoolPlayer, PoolRead, SingleGamePlayerPoolReader
-from app.services.posted_lines import serialize_line_prices, serialize_lines
+from app.services.posted_lines import line_labels, serialize_line_prices, serialize_lines
 from app.services.publication_snapshot_calls import (
     accepts_keyword,
     call_with_read_scope,
@@ -124,13 +132,6 @@ _GOVERNED_SHOT_ZONES = frozenset(SHOT_ZONE_SLICES)
 _SHOT_TYPE_DISPLAY_SLICES = dict(SHOT_TYPE_STORED_TO_DISPLAY)
 _SHOT_TYPE_STORED_SLICES = dict(SHOT_TYPE_DISPLAY_TO_STORED)
 _GOVERNED_SHOT_TYPES = frozenset(SHOT_TYPE_SLICES)
-# No three is taken inside 10 ft, so these rows hold only stray mis-tags (a
-# 2026-27 league average of 0.006 3PA per 48) that rank teams -100% or +2900%.
-# The Defense Sheet omits them; the scores still read them, where his own
-# threes there weigh nothing (crf04/statsplus#437).
-_IMPOSSIBLE_SHEET_IDENTITIES = frozenset(
-    ("shot_types", "less_than_10_ft", stat_key) for stat_key in ("FG3A", "FG3M")
-)
 _STAT_MARKETS = {
     "PTS": ("PTS", "PA", "PR", "PRA"),
     "POSS": ("PTS",),
@@ -342,6 +343,12 @@ _TEAM_MODE_PARTICIPANTS_BASIS = {
 logger = logging.getLogger(__name__)
 
 _OWN = object()
+#: A Rotation Player (crf04/statsplus#459) played this many minutes for his
+#: team in at least one of its last ``ROTATION_RECENT_GAMES`` games.
+ROTATION_MIN_MINUTES = 10
+ROTATION_RECENT_GAMES = 5
+_GAME_LOG_STREAM_KEYS = ("player_game_logs",)
+_NO_GAME_LOGS = object()
 
 
 @dataclass
@@ -368,6 +375,9 @@ class MatchupComposeCache:
     #: The Event Catalog's refresh row per schedule season: every game of a
     #: season reports the same schedule retrieval.
     schedule_refreshes: dict[str, Mapping[str, Any]] = field(default_factory=dict)
+    #: A game season's game-log capture, when it is not the evidence season:
+    #: Rotation Players are read from it.
+    game_season_logs: dict[str, Any] = field(default_factory=dict)
 
 
 class EventCatalogReader(Protocol):
@@ -403,6 +413,16 @@ class PlayerLogReader(Protocol):
 
     def get_sync_status(self, season: str, game_id: str) -> PlayerGameLogSyncStatus | None: ...
 
+    def list_team_recent_rows(
+        self,
+        season: str,
+        team_id: int,
+        *,
+        before_date: date,
+        games: int,
+        publication_snapshot: Any | None = None,
+    ) -> Sequence[PlayerGameLogRecord]: ...
+
 
 class PlayerDietReader(Protocol):
     def get_for_players(
@@ -426,7 +446,9 @@ class TeamMatchupReader(Protocol):
 
 
 class AthleteCatalogReader(Protocol):
-    def get_catalog(self, season: str, *, active_only: bool = False) -> Sequence[Mapping[str, Any]]: ...
+    def get_catalog(
+        self, season: str, *, active_only: bool = False, player_ids: Iterable[int] | None = None
+    ) -> Sequence[Mapping[str, Any]]: ...
 
 
 class StatsFreshnessReader(Protocol):
@@ -435,8 +457,12 @@ class StatsFreshnessReader(Protocol):
 
 class SportsbookBookLinesReader(Protocol):
     def book_lines(
-        self, game_id: str, *, connection: Connection | None = None
+        self, game_id: str, *, now: datetime, started: bool, connection: Connection | None = None
     ) -> Mapping[int, Mapping[str, Any]]: ...
+
+
+class GameContextReader(Protocol):
+    def read(self, game_id: str, *, connection: Connection | None = None) -> dict[str, Any]: ...
 
 
 class MatchupInjuryReader(Protocol):
@@ -457,9 +483,10 @@ _MetricIdentity = tuple[str, str, str]
 class _Participant:
     """One rail row and the evidence that named it.
 
-    A current-slate participant is a Player Pool entry; a Historical Matchup
-    participant is one canonical game-log row, so its team identity is the
-    identity recorded for that game rather than a current roster.
+    A current-slate participant is a Player Pool entry or a Rotation Player;
+    a Historical Matchup participant is one canonical game-log row, so its
+    team identity is the identity recorded for that game rather than a
+    current roster.
     """
 
     canonical_player_id: int
@@ -472,6 +499,7 @@ class _Participant:
     focal_game_line: dict[str, Any] | None = None
     lines: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
     line_prices: Mapping[str, Mapping[str, Mapping[str, int | None]]] = field(default_factory=dict)
+    priced_other_lines: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -530,10 +558,14 @@ def slice_markets(base: str, slice_key: str, stat_key: str) -> tuple[str, ...]:
     their parts.  A shot zone's markets depend on the slice as well as the
     statistic -- only a three-point zone's makes bear on 3PM, and only a
     two-point zone's on FG2M -- so the zone cases are stated before the
-    statistic table.  Public so the mapping has
-    one definition; the Defense Sheet payload is its only caller.
+    statistic table.  A shot type's derived overall makes and attempts rows
+    (crf04/statsplus#454) are each read for their own market only.  Public so
+    the mapping has one definition; the Defense Sheet payload is its only
+    caller.
     """
 
+    if base == "shot_types" and stat_key in ("FGM", "FGA"):
+        return (stat_key,)
     if base == "shot_zones":
         if slice_key in _TWO_POINT_SHOT_ZONES:
             if stat_key == "FGA":
@@ -692,8 +724,12 @@ class MatchupService:
         engine: Engine | None = None,
         athlete_catalog: AthleteCatalogReader | None = None,
         sportsbook_reader: SportsbookBookLinesReader | None = None,
+        game_context: GameContextReader | None = None,
     ) -> None:
         self.event_catalog = event_catalog
+        # Each team's stored pace, ratings, results and rest before the game
+        # (crf04/statsplus#466); read, never computed, per request.
+        self.game_context = game_context
         # Sportsbook odds (#377) are reference data beside the DFS evidence:
         # never part of provenance, the pool, or Targets.
         self.sportsbook_reader = sportsbook_reader
@@ -1208,9 +1244,22 @@ class MatchupService:
                     source=PLAYER_POOL_SOURCE,
                     lines=player.lines,
                     line_prices=player.line_prices,
+                    priced_other_lines=player.priced_other_lines,
                 )
                 for player in pool_players
                 if player.canonical_player_id not in injury_result.out_player_ids
+            )
+            players += self._rotation_participants(
+                event,
+                team_ids,
+                pool_players,
+                injury_result.out_player_ids,
+                season=season,
+                schedule_season=schedule_season,
+                publication_snapshot=publication_snapshot,
+                connection=connection,
+                session=session,
+                compose_cache=compose_cache,
             )
             participants_section = self._pool_participants_section(pool_players)
         player_ids = tuple(player.canonical_player_id for player in players)
@@ -1313,11 +1362,19 @@ class MatchupService:
                 availability,
                 {} if historical else injury_result.badge_refs,
                 book_lines=(
-                    {} if historical or not with_book_lines else self._book_lines(game_id, connection)
+                    {}
+                    if historical or not with_book_lines
+                    else self._book_lines(
+                        game_id,
+                        connection,
+                        now=observed_at,
+                        started=is_started_event(event, now=observed_at),
+                    )
                 ),
                 historical=historical,
             ),
             "injuries": dict(injury_result.block),
+            "game_context": self._game_context(game_id, connection),
             "freshness": {
                 "schedule": schedule_freshness,
                 "pool": dict(pool.freshness),
@@ -1441,6 +1498,114 @@ class MatchupService:
             },
             retained_reads,
         )
+
+    def _rotation_participants(
+        self,
+        event: Mapping[str, Any],
+        team_ids: Sequence[int],
+        pool_players: Sequence[PoolPlayer],
+        out_player_ids: frozenset[int],
+        *,
+        season: str,
+        schedule_season: str,
+        publication_snapshot: Any,
+        connection: Connection | None,
+        session: Session | None,
+        compose_cache: MatchupComposeCache | None,
+    ) -> tuple[_Participant, ...]:
+        """The game's Rotation Players: no line, recent minutes (crf04/statsplus#459).
+
+        A player outside the pool who played ``ROTATION_MIN_MINUTES`` for his
+        team in one of its last ``ROTATION_RECENT_GAMES`` games before this
+        one, whom the active Athlete Catalog places on that team, and who is
+        not listed Out.  Only the game's own season's logs count, so a team's
+        first game adds no one and a player traded to the team counts once he
+        has played for it.
+        """
+
+        if self.athlete_catalog is None:
+            return ()
+        logs = self._game_season_logs(season, schedule_season, publication_snapshot, compose_cache, session)
+        if logs is _NO_GAME_LOGS:
+            return ()
+        listed = {int(player.canonical_player_id) for player in pool_players} | out_player_ids
+        before = self._event_date(event)
+        played = {
+            (int(row.player_id), team_id)
+            for team_id in team_ids
+            for row in call_with_read_scope(
+                self.player_logs.list_team_recent_rows,
+                schedule_season,
+                team_id,
+                before_date=before,
+                games=ROTATION_RECENT_GAMES,
+                publication_snapshot=logs,
+                connection=connection,
+            )
+            # A publication holds Regular Season rows only; the legacy table
+            # can also hold Playoffs rows.
+            if row.season_type == REGULAR_SEASON_TYPE
+            and row.minutes >= ROTATION_MIN_MINUTES
+            and int(row.player_id) not in listed
+        }
+        if not played:
+            return ()
+        catalog = call_with_read_scope(
+            self.athlete_catalog.get_catalog,
+            schedule_season,
+            active_only=True,
+            player_ids=sorted({player_id for player_id, _team_id in played}),
+            connection=connection,
+        )
+        athletes = (CanonicalAthlete.from_row(row) for row in catalog)
+        return tuple(
+            _Participant(
+                canonical_player_id=athlete.player_id,
+                name=athlete.display_name,
+                team_id=athlete.team_id,
+                tricode=str(self._event_team(event, athlete.team_id)["tricode"]),
+                market_categories=(),
+                provenance={},
+                source=ROTATION_SOURCE,
+            )
+            for athlete in athletes
+            if (athlete.player_id, athlete.team_id) in played
+        )
+
+    def _game_season_logs(
+        self,
+        season: str,
+        schedule_season: str,
+        publication_snapshot: Any,
+        compose_cache: MatchupComposeCache | None,
+        session: Session | None,
+    ) -> Any:
+        """The capture holding the game's own season's game logs.
+
+        The evidence capture when the seasons agree.  Otherwise, while the
+        game's season is still unpublished, a capture of that season alone, as
+        a request selecting it would read it, on the request's own session so
+        the capture and its projection read share one database snapshot;
+        ``_NO_GAME_LOGS`` while that season is not offered at all.
+        """
+
+        if season == schedule_season or self.publication_reader is None:
+            return publication_snapshot
+        held = None if compose_cache is None else compose_cache.game_season_logs
+        if held is not None and schedule_season in held:
+            return held[schedule_season]
+        try:
+            capture = self.publication_reader.for_season(schedule_season).snapshot(
+                _GAME_LOG_STREAM_KEYS,
+                season=ReadSeason(schedule_season, requested=schedule_season),
+                projection_only_keys=frozenset(_GAME_LOG_STREAM_KEYS),
+                session=session,
+            )
+        except SeasonUnavailable:
+            capture = _NO_GAME_LOGS
+        if held is not None:
+            held[schedule_season] = capture
+        return capture
 
     @staticmethod
     def _pool_participants_section(
@@ -2079,6 +2244,7 @@ class MatchupService:
                     },
                     "lines": serialize_lines(player.lines),
                     "line_prices": serialize_line_prices(player.line_prices),
+                    "line_labels": line_labels(player.lines, player.line_prices, player.priced_other_lines),
                     "season_scoring": (None if scoring is None else self._number(scoring)),
                     # The rate's own Evidence-season rows, so the last five
                     # and the averages describe the games season_scoring does.
@@ -2102,6 +2268,17 @@ class MatchupService:
                             if market in season_rate.per_game
                         }
                     ),
+                    # Every market the rate his scores read counts, posted or
+                    # not, so a Historical row has it too: the home ticker's
+                    # volume floors read it (crf04/statsplus#514).
+                    "season_per_game": (
+                        {}
+                        if summary is None or summary.season_rate is None
+                        else {
+                            market: self._number(value)
+                            for market, value in sorted(summary.season_rate.per_game.items())
+                        }
+                    ),
                     "last_10_minutes": (
                         [] if summary is None else [self._number(value) for value in summary.last_ten_minutes]
                     ),
@@ -2112,8 +2289,11 @@ class MatchupService:
                     "book_lines": dict((book_lines or {}).get(player.canonical_player_id, {})),
                 }
             )
+        # Pool rows lead, so a reader that cuts the list drops Rotation
+        # Players first.
         rows.sort(
             key=lambda row: (
+                row["player_source"] == ROTATION_SOURCE,
                 row["season_scoring"] is None,
                 -(row["season_scoring"] or 0),
                 row["canonical_id"],
@@ -2121,7 +2301,9 @@ class MatchupService:
         )
         return rows
 
-    def _book_lines(self, game_id: str, connection: Connection | None) -> Mapping[int, Mapping[str, Any]]:
+    def _book_lines(
+        self, game_id: str, connection: Connection | None, *, now: datetime, started: bool
+    ) -> Mapping[int, Mapping[str, Any]]:
         """Latest sportsbook lines for a game; never fails the Matchup.
 
         The read runs in a savepoint so a store error cannot poison the
@@ -2133,9 +2315,11 @@ class MatchupService:
             return {}
         try:
             if connection is None:
-                return self.sportsbook_reader.book_lines(game_id)
+                return self.sportsbook_reader.book_lines(game_id, now=now, started=started)
             with connection.begin_nested():
-                return self.sportsbook_reader.book_lines(game_id, connection=connection)
+                return self.sportsbook_reader.book_lines(
+                    game_id, now=now, started=started, connection=connection
+                )
         except Exception:
             logger.exception("Sportsbook book_lines read failed for game %s", game_id)
             return {}
@@ -2152,6 +2336,10 @@ class MatchupService:
     ) -> dict[str, Any]:
         memo: dict[tuple[str, str], dict[str, Any]] = {}
         withhold = player.source == GAME_LOG_SOURCE
+        # Every scoreable category is scored, posted or not (#457): CourtAI
+        # holds lines from only some books, so an unposted market may still be
+        # offered.
+        markets = dict.fromkeys((*player.market_categories, *self._historical_categories))
         return {
             market: {
                 window_name: self._presented_window(
@@ -2169,7 +2357,7 @@ class MatchupService:
                 )
                 for window_name, window in windows.items()
             }
-            for market in player.market_categories
+            for market in markets
         }
 
     @staticmethod
@@ -2858,14 +3046,9 @@ class MatchupService:
             for identity in metric_index.league
             if identity[0] != "shot_zones" or identity[1] in _GOVERNED_SHOT_ZONES
             if identity[0] != "shot_types" or identity[1] in _SHOT_TYPE_DISPLAY_SLICES
-            if identity not in _IMPOSSIBLE_SHEET_IDENTITIES
+            if identity not in IMPOSSIBLE_DEFENSE_SHEET_IDENTITIES
         }
-        return tuple(
-            sorted(
-                identities,
-                key=lambda value: (DEFENSE_BASES.index(value[0]), value[1], value[2]),
-            )
-        )
+        return tuple(sorted(identities, key=defense_sheet_sort_key))
 
     @classmethod
     def _league_window_value(
@@ -2954,15 +3137,19 @@ class MatchupService:
 
     @staticmethod
     def _metric_label(base: str, slice_key: str, stat_key: str) -> str:
-        display_slice = MatchupService._display_slice(base, slice_key)
-        label = display_slice.replace("_", " ").replace("-", " ")
-        if display_slice == stat_key:
-            return label
-        return f"{label} {stat_key}"
+        return defense_sheet_row_label(base, slice_key, stat_key)
 
-    @staticmethod
-    def _display_slice(base: str, slice_key: str) -> str:
-        return defense_sheet_display_slice(base, slice_key)
+    def _game_context(self, game_id: str, connection: Connection | None) -> dict[str, Any]:
+        """The game's stored team context, or the unavailable block when none is stored."""
+
+        if self.game_context is None:
+            return {
+                "status": "unavailable",
+                "computed_at": None,
+                "teams": [],
+                "game_line": unavailable_game_line(),
+            }
+        return self.game_context.read(game_id, connection=connection)
 
     @staticmethod
     def _event_team(event: Mapping[str, Any], team_id: int) -> Mapping[str, Any]:

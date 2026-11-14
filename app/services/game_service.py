@@ -15,6 +15,7 @@ strings (#9).
 import json
 import logging
 from difflib import get_close_matches
+from pathlib import Path
 from typing import ClassVar
 
 import pandas as pd
@@ -23,6 +24,7 @@ from sqlalchemy.engine import Engine
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.domain.play_type_matchup import complete_play_type_shares, play_type_matchup
+from app.domain.team_matchup_taxonomy import LEDGER_DEFENSE_SHEET_METRICS
 from app.models.game_logs import GameLogQuery, GameLogResponse
 from app.services.database_first_activation import ReadSeason
 from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS
@@ -34,13 +36,19 @@ from app.services.request_reads import request_read_scope
 from app.services.research_season import research_season, season_context
 from app.services.response_provenance import provenance_block
 from app.services.serving_season import snapshot_trailing
-from app.services.team_matchup_query import TEAM_MATCHUP_PUBLICATION_STREAM_KEYS
+from app.services.team_matchup_query import (
+    TEAM_MATCHUP_PUBLICATION_STREAM_KEYS,
+    combined_league_column,
+    publication_league_table,
+)
+from app.services.team_membership import TeamMembership, appearances
 from app.utils.cache_config import get_redis_client
 from app.utils.tables import normalize_table_name
 
 from .nba_cache import NBAGameCache
 from .team_filter_rankings import (
     TEAM_FILTER_PUBLICATION_STREAM_KEYS,
+    TEAM_FILTER_RANKINGS,
     season_stream_key,
     team_filter_ranking,
 )
@@ -53,6 +61,8 @@ logger = logging.getLogger(__name__)
 # page reads.
 _PLAY_TYPE_BASE = "play_types"
 _PLAY_TYPE_STAT_KEY = "PTS"
+_TRADITIONAL_BASE = "traditional"
+_TRADITIONAL_SHEET_METRICS = LEDGER_DEFENSE_SHEET_METRICS[_TRADITIONAL_BASE]
 _DEFAULT_PLAYSTYLE_RANGE = (0.0, 200.0)
 #: Streams only a Team Filter reads (NBA.com's Defensive Rating,
 #: crf04/statsplus#447).  A request captures one only when a filter it names
@@ -71,6 +81,46 @@ _PUBLICATION_STREAM_KEYS = tuple(
     )
 )
 _PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
+#: The Defense Sheet Traditional row behind each chart line type's
+#: ``opponent_ranks`` entry (crf04/statsplus#456), plus stocks, which the Sheet
+#: has no row for and the Opposing Team Profile ranks as steals + blocks.
+#: Fantasy points have no single allowed metric.
+_OPPONENT_RANK_ROWS = {
+    "PTS": "OPP_PTS",
+    "REB": "OPP_REB",
+    "AST": "OPP_AST",
+    "FGM": "OPP_FGM",
+    "FGA": "OPP_FGA",
+    "FG3M": "OPP_FG3M",
+    "FG3A": "OPP_FG3A",
+    "FTM": "OPP_FTM",
+    "FTA": "OPP_FTA",
+    "STL": "OPP_STL",
+    "BLK": "OPP_BLK",
+    "TOV": "OPP_TOV",
+    "STKS": "OPP_STOCKS",
+}
+#: Each combo line type's label and the Traditional per-48 metrics its rank
+#: sums, kept out of ``TEAM_FILTER_RANKINGS`` so no Team Filter offers them
+#: (crf04/statsplus#505).
+_OPPONENT_RANK_COMBOS = {
+    "PR": ("Points + Rebounds Allowed", ("points", "rebounds")),
+    "PA": ("Points + Assists Allowed", ("points", "assists")),
+    "RA": ("Rebounds + Assists Allowed", ("rebounds", "assists")),
+    "PRA": ("Points + Rebounds + Assists Allowed", ("points", "rebounds", "assists")),
+}
+#: The opponent-filter label of each row, else one worded the same way
+#: for the rows no Team Filter offers.
+_OPPONENT_RANK_LABELS: dict[str, str] = {
+    "OPP_FGM": "FG Made Allowed",
+    "OPP_FGA": "FG Attempts Allowed",
+    "OPP_FTM": "FT Made Allowed",
+    **json.loads(
+        (Path(__file__).resolve().parent.parent / "assets" / "opponent_filter_labels.json").read_text()
+    ),
+}
+#: The opponent's tricode in a MATCHUP ("LAL @ HOU" -> "HOU").
+_OPPONENT_PATTERN = r"(?:vs\.|@)\s*([A-Z]{2,3})"
 
 
 def _snapshot_stream_keys(team_filters=()) -> tuple[str, ...]:
@@ -122,6 +172,39 @@ def _records(frame: pd.DataFrame):
     return json.loads(frame.to_json(orient="records", date_format="iso"))
 
 
+def _opponent_ranks(rows):
+    """Each line type's Defense Sheet rank per opponent, ranked teams only.
+
+    The Sheet's competition rank: 30 allows the most and tied teams share a
+    rank.  A publication that predates a row's metric has no entry for it.
+    """
+
+    if rows is None:
+        return {}
+    table = publication_league_table(rows)
+    tricodes = {row.team_id: row.team_tricode for row in rows}
+    columns = {
+        line_type: (
+            _OPPONENT_RANK_LABELS[row],
+            table.get(_TRADITIONAL_SHEET_METRICS[row])
+            if row in _TRADITIONAL_SHEET_METRICS
+            else combined_league_column(table, TEAM_FILTER_RANKINGS[row].numerator),
+        )
+        for line_type, row in _OPPONENT_RANK_ROWS.items()
+    } | {
+        line_type: (label, combined_league_column(table, tuple((metric, 1.0) for metric in metrics)))
+        for line_type, (label, metrics) in _OPPONENT_RANK_COMBOS.items()
+    }
+    return {
+        line_type: {
+            "label": label,
+            "ranks": {tricodes[team_id]: rank for team_id, rank in column.ranks.items()},
+        }
+        for line_type, (label, column) in columns.items()
+        if column is not None
+    }
+
+
 class GameService:
     # Whitelist of allowed database tables to prevent SQL injection
     ALLOWED_TABLES: ClassVar = {"player_information"}
@@ -140,6 +223,7 @@ class GameService:
         game_log_seasons=None,
         closing_lines=None,
         posted_lines=None,
+        injury_reports=None,
     ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
@@ -175,6 +259,11 @@ class GameService:
         # Today's posted lines for ``posted_line`` (#238); absent against the
         # read-only demo database, which leaves it null.
         self.posted_lines = posted_lines
+
+        # Stored official injury reports, membership evidence for a
+        # ``players_off`` team window (crf04/statsplus#450); absent against the
+        # read-only demo database, which reads none.
+        self.injury_reports = injury_reports
 
         # Initialize cache
         if redis_client is None:
@@ -350,33 +439,54 @@ class GameService:
         publication_snapshot=None,
         connection=None,
     ):
-        """Find same-team games where any named player appeared."""
+        """Ids of ``player_logs``' games that are not "without" every named player."""
         season = season or self.default_season()
-        exclude_game_ids = set()
-        primary_game_team_pairs = set(
-            zip(player_logs["GAME_ID"], player_logs["TEAM_ABBREVIATION"], strict=False)
-        )
-
-        # Union same-team appearances for every player named as "off".
-        for player_name in players_off_names:
-            player_gamelogs, _ = call_with_read_scope(
+        absent = {
+            player_name: call_with_read_scope(
                 self._get_game_logs,
                 player_name,
                 season,
                 publication_snapshot=publication_snapshot,
                 connection=connection,
-            )
-            exclude_game_ids |= self._same_team_appearances(primary_game_team_pairs, player_gamelogs)
+            )[0]
+            for player_name in players_off_names
+        }
+        games = {
+            team: set(pd.to_datetime(rows["GAME_DATE"]).dt.date)
+            for team, rows in player_logs.groupby("TEAM_ABBREVIATION")
+        }
+        membership = TeamMembership(self.injury_reports, self.get_players_logs_by_id)
+        windows = membership.windows(
+            season,
+            {player_name: (appearances(logs), games) for player_name, logs in absent.items()},
+            lambda name: int(self.get_player_id(name, season)),
+        )
+        exclude_game_ids = set()
+        for player_name, player_gamelogs in absent.items():
+            without, _ = self._absence_split(player_logs, player_gamelogs, windows[player_name])
+            exclude_game_ids |= set(player_logs["GAME_ID"]) - without
 
         return exclude_game_ids
 
     @staticmethod
-    def _same_team_appearances(primary_game_team_pairs, absent_player_logs):
-        """Game ids where the named player appeared for the primary's team."""
-        appearances = set(
-            zip(absent_player_logs["GAME_ID"], absent_player_logs["TEAM_ABBREVIATION"], strict=False)
+    def _absence_split(player_logs, absent_player_logs, windows):
+        """Ids of ``player_logs``' games inside the absent player's team window: those he has no row in, then those he has.
+
+        ``windows`` holds his window for each of ``player_logs``' teams.
+        """
+        appeared = set(
+            zip(absent_player_logs["GAME_ID"], absent_player_logs["TEAM_ABBREVIATION"], strict=True)
         )
-        return {game_id for game_id, _ in primary_game_team_pairs.intersection(appearances)}
+        without, played = set(), set()
+        for game_id, team, day in zip(
+            player_logs["GAME_ID"],
+            player_logs["TEAM_ABBREVIATION"],
+            pd.to_datetime(player_logs["GAME_DATE"]).dt.date,
+            strict=True,
+        ):
+            if windows[team] is not None and windows[team].contains(day):
+                (played if (game_id, team) in appeared else without).add(game_id)
+        return without, played
 
     def get_player_logs_by_id(self, player_id, season, *, publication_snapshot=None):
         """One player's stored logs for a season, by canonical id."""
@@ -438,16 +548,19 @@ class GameService:
         )
         return {int(row.player_id) for row in rows}
 
-    def games_without_player(self, player_logs, absent_player_logs):
+    def games_without_and_with_player(self, player_logs, absent_player_logs, windows):
         """The ``players_off`` absence rule, for logs already read by id.
 
-        Same rule as ``get_games_to_exclude``: a game counts as "without" the
-        absent player when he has no game-log row for that team that day.
-        Returns the ids of ``player_logs``' games that qualify.
+        Same rule as ``get_games_to_exclude``: a game of team T counts as
+        "without" the absent player when it falls inside his team window for T
+        (crf04/statsplus#449) and he has no game-log row for T that day, and as
+        "with" him when it falls inside the window and he has one.  Returns the
+        ids of ``player_logs``' games on each side; a game outside the window is
+        on neither.  ``windows`` holds his window for each of ``player_logs``'
+        teams (``app.services.team_membership``).
         """
-        primary_pairs = set(zip(player_logs["GAME_ID"], player_logs["TEAM_ABBREVIATION"], strict=False))
-        appeared = self._same_team_appearances(primary_pairs, absent_player_logs)
-        return {str(game_id) for game_id, _ in primary_pairs} - {str(game_id) for game_id in appeared}
+        without, played = self._absence_split(player_logs, absent_player_logs, windows)
+        return {str(game_id) for game_id in without}, {str(game_id) for game_id in played}
 
     def filter_players_on_off(
         self,
@@ -527,8 +640,7 @@ class GameService:
         # None means the query had no opponent filter; an empty set is a
         # resolved-but-emptied filter and must match zero games, not all games.
         if teams_against is not None:
-            # Extract opponent team ("LAL@ HOU" -> "HOU"), then keep matches
-            opponents = df["MATCHUP"].astype(str).str.extract(r"(?:vs\.|@)\s*([A-Z]{2,3})")[0]
+            opponents = df["MATCHUP"].astype(str).str.extract(_OPPONENT_PATTERN)[0]
             df = df[opponents.isin(teams_against)]
 
         # Apply playstyle filter.  A rating-less row (no play-type facts for
@@ -673,6 +785,7 @@ class GameService:
         # one publication generation so two filters cannot disagree about which
         # season and which activation they ranked.
         resolved_teams = None
+        filter_ranks = {}
         if query.teams_against:
             rankings = self._season_rankings(
                 query.teams_against,
@@ -683,6 +796,14 @@ class GameService:
                 matching = set(self._select_rank(rankings[team_filter], query.rank_filter[index]))
                 resolved_teams = matching if resolved_teams is None else resolved_teams & matching
             resolved_teams = resolved_teams or set()
+            # Position p of a most-allowed-first ranking is rank 31 - p on the
+            # 1-30 scale: the number the filter's rank_filter range compared.
+            filter_ranks = {
+                team_filter: {
+                    tricode: 31 - position for position, tricode in enumerate(rankings[team_filter], 1)
+                }
+                for team_filter in query.teams_against
+            }
 
         filtered_logs = self.apply_filters(
             full_game_logs.copy(),
@@ -758,6 +879,12 @@ class GameService:
         filtered_logs["GAME_DATE"] = filtered_logs["GAME_DATE"].astype(str)
 
         game_log_rows = _records(filtered_logs)
+        if filter_ranks and game_log_rows:
+            opponents = filtered_logs["MATCHUP"].astype(str).str.extract(_OPPONENT_PATTERN)[0]
+            for row, opponent in zip(game_log_rows, opponents, strict=True):
+                row["teams_against_ranks"] = {
+                    team_filter: ranks[opponent] for team_filter, ranks in filter_ranks.items()
+                }
         for row, markets in zip(game_log_rows, closing_lines, strict=False):
             # ``closing_line`` keeps its #216 contract (points only) for the
             # MCP; ``closing_lines`` carries every market with a line (#429).
@@ -772,6 +899,9 @@ class GameService:
             next_game=self._get_team_name_by_id(next_team),
             player_id=player_id,
             posted_line=self._posted_line_for(player_id, player_name, query, full_game_logs),
+            opponent_ranks=self._opponent_ranks(
+                query.season_filter, publication_snapshot=publication_snapshot
+            ),
             # Every stream the capture holds feeds this response: the logs,
             # the Diets and the Season Defense Sheet behind PLAYTYPE_RTG and
             # any Team Filter ranking.
@@ -890,6 +1020,19 @@ class GameService:
             season,
             publication_snapshot=publication_snapshot,
         )
+
+    def _opponent_ranks(self, season, *, publication_snapshot=None):
+        """Rank the opponents' Traditional Season rows as the Defense Sheet does."""
+
+        if self.team_filter_rankings is None:
+            return {}
+        rows_by_base = call_with_read_scope(
+            self.team_filter_rankings.season_rows_by_base,
+            (_TRADITIONAL_BASE,),
+            season,
+            publication_snapshot=publication_snapshot,
+        )
+        return _opponent_ranks(rows_by_base[_TRADITIONAL_BASE])
 
     @staticmethod
     def _select_rank(ranked, rank_filter):

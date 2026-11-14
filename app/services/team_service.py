@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from copy import copy
+from dataclasses import asdict
 
 from nba_api.stats.static import teams
 
@@ -31,12 +32,20 @@ from app.domain.team_matchup_taxonomy import (
     SHOT_ZONE_SLICES,
     SHOT_ZONE_STATS,
     defense_sheet_row_key,
+    shot_type_derived_terms,
 )
 from app.errors import InvalidInputError
 from app.services.database_first_activation import ReadSeason
+from app.services.defense_ranks import defense_ranks, sheet_selection
 from app.services.research_season import research_service, season_context, selected_season
+from app.services.response_provenance import provenance_block
 from app.services.serving_season import snapshot_trailing
-from app.services.team_filter_rankings import TEAM_FILTER_RANKINGS, TeamFilterRanking, season_stream_key
+from app.services.team_filter_rankings import (
+    TEAM_FILTER_RANKINGS,
+    SeasonLeague,
+    TeamFilterRanking,
+    season_stream_key,
+)
 from app.services.team_matchup_query import (
     LeagueMetricColumn,
     combined_league_column,
@@ -118,18 +127,35 @@ class TeamService:
         not ready serves its previous season and ``trailing`` names it.
         """
 
-        bases = _category_bases(category)
+        scoped = self._captured(*_category_bases(category))
+        capture = scoped._selected_capture
+        return {
+            "data": scoped._get_team_stats(category, team, date),
+            "season_context": season_context(self.publication_reader, capture, lambda: capture.season),
+            "trailing": snapshot_trailing(capture),
+        }
+
+    def get_defense_ranks(self, base, metric=None):
+        """Every team's Season Defense Sheet rows of one base (crf04/statsplus#473)."""
+
+        selection = sheet_selection(base, metric)
+        scoped = (
+            research_service(self, self.publication_reader)
+            if selected_season(self.publication_reader) is None
+            else self._captured(base)
+        )
+        return asdict(defense_ranks(base, selection, scoped._season_league(base)))
+
+    def _captured(self, *bases):
+        """A copy reading one capture of the bases' Season streams; the first decides the season."""
+
         capture = self.publication_reader.snapshot(
             tuple(season_stream_key(base) for base in bases),
             season=ReadSeason(self.settings.nba.current_season),
         )
         scoped = copy(self)
         scoped._selected_capture = capture
-        return {
-            "data": scoped._get_team_stats(category, team, date),
-            "season_context": season_context(self.publication_reader, capture, lambda: capture.season),
-            "trailing": snapshot_trailing(capture),
-        }
+        return scoped
 
     def _get_team_stats(self, category, team, date=None):
         """Serve one opponent's Season profile for one panel category.
@@ -165,6 +191,13 @@ class TeamService:
         if capture is not None:
             return self.publications.season_rows_by_base(bases, capture.season, publication_snapshot=capture)
         return self.publications.season_rows_by_base(bases, self.settings.nba.current_season)
+
+    def _season_league(self, base) -> SeasonLeague:
+        capture = self._selected_capture
+        season = self.settings.nba.current_season if capture is None else capture.season
+        if self.publications is None:
+            return SeasonLeague(season, None, None, "publication_reader_unavailable", provenance_block(None))
+        return self.publications.season_league(base, season, publication_snapshot=capture)
 
 
 def _category(category):
@@ -443,8 +476,8 @@ def opponent_profile_metrics(base, table):
         for shot in SHOT_TYPE_SLICES:
             columns = [(stat, ((shot + "_" + stat, 1.0),)) for stat in SHOT_TYPE_STATS]
             columns += [
-                ("PTS", ((shot + "_FG2M", 2.0), (shot + "_FG3M", 3.0))),
-                ("FGA", ((shot + "_FG2A", 1.0), (shot + "_FG3A", 1.0))),
+                ("PTS", shot_type_derived_terms(shot, "PTS")),
+                ("FGA", shot_type_derived_terms(shot, "FGA")),
             ]
             for stat, terms in columns:
                 definition = TeamFilterRanking(base, terms)

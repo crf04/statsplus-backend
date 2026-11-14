@@ -23,6 +23,7 @@ from app.services.injury_scenarios import _OnOffReads
 from app.services.lineup_segment_repository import (
     LineupSegmentRepository,
     RosterSlotsExhausted,
+    SegmentSplit,
     mask_of,
     write_game,
 )
@@ -990,6 +991,11 @@ def test_a_covered_season_is_served_from_segments_without_pbp_stats_or_redis(cov
         "stale",
         "players",
         "games_missing",
+        "team_games",
+        "games_included",
+        "games_through",
+        "split_games",
+        "last_split_game_date",
     ]
     assert set(body["players"][0]) == {
         "player_id",
@@ -1104,10 +1110,210 @@ def test_cached_at_is_the_newest_write_among_the_games_the_split_includes(tmp_pa
     assert all_three["cached_at"] == "2026-11-03T09:00:00+00:00"
 
 
+def test_a_split_says_which_of_the_teams_games_it_covers_and_when_the_state_last_occurred(tmp_path, provider):
+    engine = _engine(tmp_path)
+    # Game 1 was rewritten last: its write time is newer than game 3's date.
+    _store_lineup(engine, "0022500001", (1, 2, 3, 4, 5), datetime(2026, 11, 3, 9, 0, tzinfo=UTC))
+    _store_lineup(engine, "0022500002", (1, 2, 3, 4, 5), datetime(2026, 10, 30, 9, 0, tzinfo=UTC))
+    _store_lineup(engine, "0022500003", (6, 7, 8, 9, 10), datetime(2026, 10, 31, 9, 0, tzinfo=UTC))
+    bos_home = {"home": ("BOS", BOS), "away": ("DEN", DEN)}
+    with engine.begin() as connection:
+        connection.execute(
+            insert(EventCatalogEntry.__table__),
+            [
+                _event("0022500001", datetime(2025, 10, 22, 23, 0, tzinfo=UTC), **bos_home),
+                _event("0022500002", datetime(2025, 10, 24, 23, 0, tzinfo=UTC), **bos_home),
+                # 00:30 UTC on 2025-11-09 is the evening of 2025-11-08 in New York.
+                _event("0022500003", datetime(2025, 11, 9, 0, 30, tzinfo=UTC), **bos_home),
+                _event("0022500004", datetime(2025, 10, 28, 23, 0, tzinfo=UTC), **bos_home),  # not stored
+            ],
+        )
+    LineupSegmentRepository(engine).record_coverage("2025-26", WRITTEN_AT)
+    service = _service(provider, engine)
+
+    together = service.get("BOS", "2025-26", on=[1])
+    never = service.get("BOS", "2025-26", on=[1, 6])
+    without = service.get("BOS", "2025-26", off=[1])
+
+    coverage = ("team_games", "games_included", "games_through", "split_games", "last_split_game_date")
+    assert [together[key] for key in coverage] == [4, 3, "2025-11-08", 2, "2025-10-24"]
+    assert [never[key] for key in coverage] == [4, 3, "2025-11-08", 0, None]
+    assert [without[key] for key in coverage] == [4, 3, "2025-11-08", 1, "2025-11-08"]
+    assert together["games_missing"] == [
+        {"game_id": "0022500004", "game_date": "2025-10-28", "matchup": "DEN @ BOS"}
+    ]
+    assert together["cached_at"] == "2026-11-03T09:00:00+00:00"
+
+
+def test_naming_no_player_is_each_players_summed_segments_for_the_team(covered, provider):
+    body = _service(provider, covered.engine).get("BOS", "2025-26")
+    with covered.engine.connect() as connection:
+        summed = dict(
+            connection.execute(
+                text(
+                    "SELECT player_id, SUM(duration_cs) FROM lineup_segment_players"
+                    f" WHERE team_id = {BOS} AND season = '2025-26' GROUP BY player_id"
+                )
+            ).all()
+        )
+
+    assert (body["status"], body["source"], body["on"], body["off"]) == ("ok", "statsplus", [], [])
+    # Brown's 446,270 centiseconds over the two stored games are 74.4 minutes.
+    assert [(player["player_id"], player["minutes"]) for player in body["players"]] == [
+        (BROWN, 74),
+        (1628401, 71),
+        (1630202, 70),
+        (1630573, 55),
+        (1629014, 52),
+        (1629674, 50),
+        (1642864, 24),
+        (1631248, 19),
+        (1641775, 19),
+        (1628449, 15),
+        (1630214, 15),
+        (1630568, 15),
+        (1642873, 1),
+    ]
+    assert {player["player_id"]: player["minutes"] for player in body["players"]} == {
+        player_id: (duration_cs + 3000) // 6000 for player_id, duration_cs in summed.items()
+    }
+    assert body["players"][0]["totals"]["pts"] == 55
+    assert body["games_missing"] == [
+        {"game_id": covered.rejected, "game_date": "2025-11-14", "matchup": "DET @ BOS"}
+    ]
+    assert provider.calls == []
+
+
 def test_an_on_player_who_never_played_for_the_team_has_an_empty_split(covered, provider):
     body = _service(provider, covered.engine).get("BOS", "2025-26", on=[203999])
 
     assert (body["status"], body["source"], body["players"]) == ("ok", "statsplus", [])
+    assert provider.calls == []
+
+
+def _brown_shooting(body):
+    player = next(player for player in body["players"] if player["player_id"] == BROWN)
+    keys = ("fga", "fg3a", "fg2a")
+    return (
+        player["minutes"],
+        {key: player["totals"][key] for key in keys},
+        {key: player["per36"][key] for key in keys},
+    )
+
+
+def test_the_asked_state_and_the_full_season_carry_two_point_attempts(covered, provider):
+    service = _service(provider, covered.engine)
+
+    asked = service.get("BOS", "2025-26", on=[1628401])
+    season = service.get("BOS", "2025-26")
+
+    # Brown's 335,870 centiseconds with 1628401 on the floor are 56 minutes.
+    assert _brown_shooting(asked) == (
+        56,
+        {"fga": 34, "fg3a": 11, "fg2a": 23},
+        {"fga": 21.86, "fg3a": 7.07, "fg2a": 14.79},
+    )
+    assert _brown_shooting(season) == (
+        74,
+        {"fga": 46, "fg3a": 15, "fg2a": 31},
+        {"fga": 22.38, "fg3a": 7.3, "fg2a": 15.08},
+    )
+    for body in (asked, season):
+        assert [list(player["per36"]) for player in body["players"]] == [
+            ["pts", "reb", "ast", "fg3m", "fga", "fg3a", "tov", "fta", "fg2a", "fgm", "fg2m", "ftm"]
+        ] * len(body["players"])
+        assert list(body["players"][0]["totals"]) == list(body["players"][0]["per36"])
+
+
+class _OneSplit:
+    """Stored segments that answer every read with ``rows``."""
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def covered(self, season):
+        return True
+
+    def read_split(self, season, team_id, on, off):
+        return SegmentSplit(
+            rows=tuple(self.rows),
+            written_at=WRITTEN_AT,
+            games_missing=(),
+            team_games=1,
+            games_included=1,
+            games_through="2025-11-01",
+            split_games=1,
+            last_split_game_date="2025-11-01",
+        )
+
+
+def _sums(player_id, duration_cs, **counts):
+    return {
+        "player_id": player_id,
+        "name": f"P{player_id}",
+        "duration_cs": duration_cs,
+        "off_poss": 10,
+        **dict.fromkeys(COUNTS, 0),
+        **dict.fromkeys(("team_fga", "team_fta", "team_tov", "team_heaves"), 1),
+        **counts,
+    }
+
+
+def test_two_point_attempts_are_zero_without_one_and_round_from_the_totals(provider):
+    service = OnOffService(
+        provider,
+        _settings(),
+        segments=_OneSplit(
+            [
+                _sums(1, 10 * 6000, fga=4, fg3a=4),
+                _sums(2, 7 * 6000, fga=5, fg3a=2),
+                _sums(3, 2999),
+            ]
+        ),
+        clock=Clock(),
+    )
+
+    players = service.get("BOS", "2025-26", off=[TATUM])["players"]
+
+    assert [(player["player_id"], player["totals"]["fg2a"], player["per36"]) for player in players] == [
+        (
+            1,
+            0,
+            {
+                "pts": 0.0,
+                "reb": 0.0,
+                "ast": 0.0,
+                "fg3m": 0.0,
+                "fga": 14.4,
+                "fg3a": 14.4,
+                "tov": 0.0,
+                "fta": 0.0,
+                "fg2a": 0.0,
+                "fgm": 0.0,
+                "fg2m": 0.0,
+                "ftm": 0.0,
+            },
+        ),
+        # 3 * 36 / 7 is 15.43, not 25.71 - 10.29 from the rounded rates.
+        (
+            2,
+            3,
+            {
+                "pts": 0.0,
+                "reb": 0.0,
+                "ast": 0.0,
+                "fg3m": 0.0,
+                "fga": 25.71,
+                "fg3a": 10.29,
+                "tov": 0.0,
+                "fta": 0.0,
+                "fg2a": 15.43,
+                "fgm": 0.0,
+                "fg2m": 0.0,
+                "ftm": 0.0,
+            },
+        ),
+    ]
     assert provider.calls == []
 
 
@@ -1128,6 +1334,7 @@ def test_an_uncovered_season_keeps_the_pbp_stats_path_byte_for_byte(tmp_path, bo
 
     assert responses[0] == responses[1]
     assert '"source": "pbpstats"' in responses[0] and "games_missing" not in responses[0]
+    assert "fg2a" not in responses[0]
     assert with_segments.calls == plain.calls == [(DEN, "2025-26", (), (203999,))]
     assert not segment_service.serves_from_segments("2025-26")
 

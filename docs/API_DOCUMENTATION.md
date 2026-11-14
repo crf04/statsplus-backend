@@ -34,7 +34,7 @@ Authentication levels:
 ## Beta sign-ups and the waitlist
 
 Every user row has `access_status`, either `active` or `waitlisted` (separate
-from `is_active`, which means deactivation). Migration 062 adds the column and
+from `is_active`, a legacy flag nothing sets since the deactivation route was removed). Migration 062 adds the column and
 backfills every existing row to `active`; it also creates the `app_settings`
 table that holds the sign-up switch. The switch defaults to open, and it lives in
 Postgres, so flipping it needs no deploy and every worker sees it on its next
@@ -813,7 +813,7 @@ is produced.
 Aggregate `retrieved_at` is the oldest usable contributor snapshot, so its age
 never understates any provider observation included in the union, with one
 declared exception: a provider that the provider registry gives its own, longer
-live window (`prizepicks`, polled hourly through The Odds API, 90 minutes
+live window (`prizepicks`, polled at most hourly through The Odds API, 90 minutes
 instead of 15) is served as `fresh` through that window and reports its own
 `retrieved_at` and status under `providers`, but does not set the aggregate
 `retrieved_at` (nor a game's `observed_at`, live or closing) while any
@@ -958,27 +958,32 @@ malformed date or an unknown team is `400 invalid_input`. While
 
 A date with no stored report (no games, or none collected) is
 `"injuries": []`. Entries are ordered by team, then status severity (Out,
-Doubtful, Questionable, Probable, Available), then player name.
+Doubtful, Questionable, Probable, Available), then player name; the minutes
+fields do not change that order.
 
 ```json
 {
-  "date": "2026-01-15",
+  "date": "2026-11-10",
   "team": null,
-  "minutes_published_season": "2026-27",
+  "minutes_season": "2026-27",
+  "minutes_published_season": "2025-26",
   "injuries": [
     {
-      "player": "LeBron James",
-      "player_id": 2544,
-      "team": "LAL",
-      "game_id": "0022500584",
-      "status": "Questionable",
-      "reason": "Left ankle soreness",
-      "report_time": "2026-01-15T17:00:00-05:00",
-      "retrieved_at": "2026-01-15T20:00:00+00:00",
+      "player": "Giannis Antetokounmpo",
+      "player_id": 203507,
+      "team": "MIA",
+      "game_id": "0022600150",
+      "status": "Probable",
+      "reason": "Left knee soreness",
+      "report_time": "2026-11-10T17:00:00-05:00",
+      "retrieved_at": "2026-11-10T22:30:00+00:00",
       "stale": false,
-      "average_minutes": 34.5,
-      "games_played": 44,
-      "minutes_season": "2025-26"
+      "average_minutes": 32.8,
+      "games_played": 9,
+      "minutes_season": "2026-27",
+      "prior_average_minutes": 28.9,
+      "prior_games_played": 36,
+      "prior_minutes_season": "2025-26"
     }
   ]
 }
@@ -993,22 +998,88 @@ Doubtful, Questionable, Probable, Available), then player name.
 - `retrieved_at` is when the stored report was last confirmed current.
 - `stale` is `true` when the game has not started and `retrieved_at` is more
   than 45 minutes old (one missed 30-minute refresh).
-- `average_minutes` is the player's regular-season minutes per game, `games_played`
-  the games it averages (`0` when `average_minutes` is `null`) and
-  `minutes_season` the season they come from (crf04/statsplus#230, #441). The
-  season is the published one (the one `research_season` names) when the player
-  has at least 5 regular-season games in it, else the season before it when he
-  has any games there, else `null`. Games match on `player_id` across every
-  team he played for that season. A row with no `player_id` has `null` / `0` /
-  `null`, and a season whose game logs cannot be read (`season_unavailable`)
-  gives `null` / `0` / `null` to the rows that need it; the list is still
-  returned, in the same order. A player whose stored game rows in a season are
-  corrupt gets `null` / `0` / `null` too, and never falls back to the other
-  season.
-- `minutes_published_season` (top level) is the published season the 5-game
-  rule compared against, or `null` when it could not be read (then every row has
-  `null` minutes). A row whose `minutes_season` differs from it is a prior-season
-  fallback.
+- `average_minutes` is the player's regular-season minutes per game in the
+  season of the report date's games, `games_played` the games it averages (`0`
+  when `average_minutes` is `null`) and `minutes_season` that season, or `null`
+  with no minutes (crf04/statsplus#230, #488). `prior_average_minutes`,
+  `prior_games_played` and `prior_minutes_season` are the same for the season
+  before it. There is no minimum game count: one game is an average over one
+  game. The report date's season is read before its Season Cutover, from its
+  held candidate, as an Unpublished Season is; the two seasons are never the
+  same. Games match on `player_id` across every team he played for that
+  season. A row with no `player_id` has `null` / `0` / `null` in both. A season
+  whose game logs cannot be read (`season_unavailable`) gives `null` / `0` /
+  `null` in that season's fields only; the list is still returned. A player
+  whose stored game rows in a season are corrupt gets `null` / `0` / `null` in
+  that season's fields.
+- `minutes_season` (top level) is the season of the report date's games, the
+  one every row's `minutes_season` names when it has minutes, or `null` with no
+  minutes service.
+- `minutes_published_season` (top level) is the Published Season when the
+  minutes were read, or `null` when it could not be read (then every row has
+  `null` minutes in both seasons).
+
+#### One player's statuses over a date range
+
+```http
+GET /api/injuries?player=<name or player id>&from_date=YYYY-MM-DD[&to_date=YYYY-MM-DD]
+```
+
+Lists one player's stored statuses by game, oldest first (crf04/statsplus#494),
+so a reader can see why he missed a past game. `player` is a canonical player
+id or a full name matched against the season's Athlete Catalog (case,
+punctuation and diacritics ignored, no fuzzy match). `from_date` is required;
+`to_date` defaults to today's US Eastern date, or the last day of
+`from_date`'s season (September 30) when that is earlier; with no `to_date`, a
+`from_date` after today is `400 invalid_input` with
+`details.parameters: ["from_date"]`. Both are US Eastern
+game dates and must fall in one season (October 1 to September 30): a range
+that ends before it starts or crosses seasons, which includes any range longer
+than a season, is `400 invalid_input` with `details.parameters: ["to_date"]`.
+`player` cannot be combined with `date` or `team`, and `from_date` or
+`to_date` without `player` is rejected; `details.parameters` names the
+offending parameters. A name no catalog athlete has is `400 invalid_input`
+with `details.parameters: ["player"]`; a name two catalog athletes share is
+`400 invalid_input` with `details.candidates` (`player_id`, `name`, `team`,
+sorted by `player_id`), the shape `/api/injury_scenarios` uses for
+`teammate`: ask again by `player_id`.
+
+```json
+{
+  "player": {"player_id": 1628402, "name": "Isaiah Jackson", "team": "LAC"},
+  "season": "2026-27",
+  "from_date": "2026-11-01",
+  "to_date": "2026-11-09",
+  "report_coverage": [{"team": "LAC", "team_games": 4, "games_with_report": 3}],
+  "statuses": [
+    {
+      "game_date": "2026-11-08",
+      "game_id": "0022600150",
+      "matchup": "LAC @ DEN",
+      "team": "LAC",
+      "status": "Out",
+      "reason": "Right ankle sprain",
+      "report_time": "2026-11-08T17:30:00-05:00"
+    }
+  ]
+}
+```
+
+- `player.team` is his Athlete Catalog team for the season, or `null`.
+- `statuses` has one row per game and team whose stored report lists him, in
+  game-date order. A game whose stored report does not list him has no row:
+  he was not on that report. `game_date` is the game's US Eastern date;
+  `matchup` is `TEAM @ HOME` away and `TEAM vs. AWAY` at home; `status`,
+  `reason` and `report_time` mean what they mean in the date listing.
+- When the stored report lists him twice for one game, the later
+  `report_time` is the row. A report row printed for the same teams' game on
+  another day does not describe this one.
+- A report row whose name matched no single catalog player (`player_id` null
+  in the date listing) is never taken for him, even when the name is his.
+- `report_coverage` has one entry per team: each team a row lists him for,
+  plus his catalog team. `team_games` is that team's stored games in the
+  range and `games_with_report` how many of them have a stored report. For a
+  traded player both teams appear, each over the whole range.
 
 #### Scheduled refresh
 
@@ -1024,7 +1095,7 @@ caller of the NBA injury report; Matchup reads what it stored and never fetches.
 ### Get Injury Scenarios
 
 ```http
-GET /api/injury_scenarios?date=YYYY-MM-DD[&game_id=ID][&player=ID_OR_NAME]
+GET /api/injury_scenarios?date=YYYY-MM-DD[&game_id=ID][&player=ID_OR_NAME][&teammate=ID_OR_NAME]
 ```
 
 Authenticated (crf04/statsplus#220, #425). One scenario for each player the
@@ -1033,6 +1104,19 @@ or Out on that date; Probable and Available get none. Parameters and refusals
 are those of Get Injuries, plus the optional `game_id` and `player` (a player
 id or full name, case-insensitive) filters. Nothing is stored: every request
 rebuilds from the stored injury snapshot.
+
+An absence whose report `reason` starts `G League` (a G League or two-way
+assignment) opens no scenario unless `player` names him; the response's
+`g_league_skipped` counts those left out (crf04/statsplus#485). `teammate` (a
+player id or full name, case-insensitive) keeps only that teammate's rows,
+`replacement_starters` and `minutes_jumps` entries in every scenario. It is
+matched against the team rosters (either season of the window) of the selected
+scenarios, or, when none is selected, of every team on the report. A value that
+matches no player there is `400 invalid_input` with
+`details.parameters: ["teammate"]`; a full name two players there share is
+`400 invalid_input` with `details` `{parameter: "teammate", parameters:
+["teammate"], candidates: [{player_id, name, team}]}`, and naming one of them
+by `player_id` selects him.
 
 With `player`, a missing or expired on/off split of that scenario (on and off,
 this season and, when it joins the window, last season) is fetched from
@@ -1049,7 +1133,10 @@ request reads the cache only and makes no upstream call. Without Redis, where th
 shared, a named request does not reach PBPStats either: its rows carry `on_off_unavailable`.
 
 Each scenario has `injured` (player, player_id, team, game_id, status,
-report_time), `limits` (`stale_report`, or `player_unresolved` when the
+`reason`, report_time, and `seasons`: `[{season, missed, played}]`, the
+Slate season then last season, counting his team's games he missed and played
+by the game-log absence rule, team window evidence included
+(crf04/statsplus#450); `[]` when unresolved), `limits` (`stale_report`, or `player_unresolved` when the
 report's name matched no Athlete Catalog player, in which case there are no
 branches) and `branches`: `plays` then `sits` for Questionable or Doubtful,
 `sits` only for Out. A branch's `rows` hold one row per rotation teammate
@@ -1060,23 +1147,70 @@ that are never flagged.
 - `baseline`: the teammate with the injured player: game-log `avg`/`games`,
   on-floor `per36`/`minutes` (on/off `on[]`), and `season_span`.
 - `without` (sits only): `avg`, `games`, `season_span` in games the injured
-  player missed, by the game-log `players_off` absence rule.
+  player missed, by the game-log `players_off` absence rule, team window
+  evidence included.
 - `off_floor` (sits only): `per36`, `minutes`, `season_span` from
   [on/off](#get-onoff-splits) with the injured player in `off[]`.
 - `line`: `value`, `source` and `beat`/`of` counted in the `without` games
-  against today's posted line, or `null`.
+  against today's posted line, or `null`. A provider line labelled `alternate`
+  or `unpriced` (crf04/statsplus#495) is never today's posted line.
 - `shift`: `full_game` and `on_off_per36`, each against its own baseline, with
   the `season_span` each was computed over. `baseline.on_floor_season_span` and
   `off_floor.season_span` name only the seasons that supplied on/off minutes.
 - `flagged`: both shifts at least +10%, or both at most -10%.
+- `flag_season` (sits, scored rows; crf04/statsplus#485): the one season the
+  flag is computed on; the flag is the `seasons` entry for that season (its
+  `shift`, `flagged` and `limits`). It is the Slate season when the teammate
+  has at least 3 games on each side in it (without him and with him),
+  otherwise last season; with no last season in the window it stays the Slate
+  season.
+- `seasons` (crf04/statsplus#485): one entry per season of the window, the
+  Slate season first, so no figure in it spans two seasons. In `plays`, each
+  is `{season, baseline: {avg, games, per36, minutes}}` (`USG`:
+  `{usage, minutes}`). In `sits`, a scored entry also has
+  `without: {avg, games}`, `off_floor: {per36, minutes}`, `line: {beat, of}`
+  (`null` without today's line), `shift` (`{full_game, on_off_per36}` or
+  `null` when not computed), `flagged` and that season's `limits`; a context
+  entry has `without` (MIN, FGA), `off_floor` (`null` for MIN) and `limits`.
+  Example (Austin Reaves PTS, LeBron James sits):
+
+  ```json
+  "flag_season": "2026-27",
+  "seasons": [
+    {"season": "2026-27", "baseline": {"avg": 20.0, "games": 5, "per36": 19.8, "minutes": 400},
+     "without": {"avg": 25.0, "games": 3}, "off_floor": {"per36": 25.2, "minutes": 200},
+     "line": {"beat": 2, "of": 3}, "shift": {"full_game": 0.25, "on_off_per36": 0.2727},
+     "flagged": true, "limits": []},
+    {"season": "2025-26", "baseline": {"avg": 20.0, "games": 2, "per36": 19.8, "minutes": 300},
+     "without": {"avg": 26.0, "games": 2}, "off_floor": {"per36": 24.75, "minutes": 80},
+     "line": {"beat": 2, "of": 2}, "shift": null, "flagged": false,
+     "limits": ["insufficient", "insufficient_baseline"]}
+  ]
+  ```
+
+  **Legacy pooled fields, removed in the next release.** On every row,
+  `baseline`, `without`, `off_floor`, `line`, `shift`, `flagged` and `limits`
+  (with their `season_span` fields) keep their earlier meaning: they sum the
+  window's seasons and flag under the earlier rule (no baseline floor, so
+  never `insufficient_baseline`). A row can be flagged there and not in its
+  `flag_season` entry, or the reverse. Read the flag from `flag_season` and
+  `seasons`.
 - `on_off_sources` and `on_off_games_missing` (crf04/statsplus#410): the
   sorted, distinct `source` values (`pbpstats`, `statsplus`) of the on/off
   splits the row's numbers summed (the on-floor split, plus the off-floor one
   in `sits` where the row has `off_floor`), and the union of their
   `games_missing` entries (`{game_id, game_date, matchup}`, oldest first;
   `[]` when none). A split with no copy adds nothing to either.
-- `limits`: `insufficient` (under 3 games without or under 150 off-floor
-  minutes; never flagged), `no_line`, `stale_report`, `no_baseline`, and the
+- `pair_window` (crf04/statsplus#467), the same on every row of a teammate in
+  both branches: `from`, the date of the first game on either side, and
+  `excluded_games`, the teammate's games for this team in the seasons read
+  that are on neither side because the two were not teammates then (before
+  the injured player joined, or before either player's last team change).
+- `limits` (pooled, on the row; one season's, on a `seasons` entry):
+  `insufficient` (under 3 games without or under 150 off-floor minutes; never
+  flagged), `insufficient_baseline` (`seasons` entries only: under 3 games with
+  him or under 150 on-floor minutes; never flagged), `no_line` and
+  `stale_report` (row only), `no_baseline`, and the
   on/off limits `on_off_not_warmed` (no cached split; a request without
   `player` never calls PBPStats, the scheduled warm fills the cache, and
   naming the injured player fetches it), `on_off_unavailable` (no cache, or
@@ -1085,35 +1219,47 @@ that are never flagged.
   player changed teams in that season, so its whole-season totals cannot match
   the window) and `on_off_seasons_differ` (the on and off states cover
   different seasons). Any on/off limit other than `on_off_stale` blocks the
-  flag, and so does any unsliceable season in the window; the full-game numbers are still returned.
+  flag it is listed beside; the full-game numbers are still returned.
 
-The window is the current season plus last season. It starts after the later of
+The window is the current season plus last season, each read scoped to its
+season (`season_scoped`), so a current season after the Published Season counts
+its games as a selected season does. It starts after the later of
 the two players' last appearance for a different team, and last season also
-needs a game for this team by the injured player. Without a team change the
+needs the injured player's team window for this team that season (a game for
+it, or the membership evidence of `players_off[]`; crf04/statsplus#450), the
+same window `injured.seasons` counts. Without a team change the
 `without` games are those `GET /api/games/game_logs?players_off[]=` returns.
-Teammates come from the game-log team roster, minus players the Athlete
-Catalog places on another team (a player it lacks, or an unreadable catalog,
-falls back to the game logs); totals are summed across the
-window's seasons before per-36 is derived.
+Teammates are the players with a game for the team in the Slate season, minus
+players the Athlete Catalog has since placed on another team; before the
+team's first game of the Slate season the catalog decides among last season's
+roster (an unreadable or empty catalog leaves that roster as the game logs
+have it). Teammates listed Out on the same report get no rows
+(crf04/statsplus#485). Pooled totals are summed across the window's seasons
+before per-36 is derived.
 
 Rotation context (crf04/statsplus#239, from the stored [rotations](#get-rotation);
 context only, it never changes which rows are flagged). Every row of a
 teammate carries `rotation`, in both branches: the split of
 [Rotation without a player](#rotation-without-a-player) for that teammate with
 the injured player absent, over the same window, plus `seasons` (the span of
-seasons that supplied games) and `missing_games` (his game-log `without` games
-that have no stored rotation). Seasons with no stored rotations contribute
+seasons that supplied games), `missing_games` (his game-log `without` games
+that have no stored rotation) and `by_season` (crf04/statsplus#485): the same
+split for each season that supplied games, Slate season first, each with its
+`season` and `missing_games`. Each side carries `minutes_per_game_played`
+beside `minutes`. Seasons with no stored rotations contribute
 nothing; `rotation` is `null` when no stored game in the window gives the
 teammate a line. A scenario also has:
 
-- `rotation_starts`: `{starts, games}`, the injured player's own starts over the
-  stored games he played (after his own last team change), so "started in his
-  place" is only claimed for a regular starter; `{0, 0}` with no stored games.
+- `rotation_starts`: `{starts, games, by_season}`, the injured player's own
+  starts over the stored games he played (after his own last team change), so
+  "started in his place" is only claimed for a regular starter; `{0, 0}` with
+  no stored games. `by_season` is `[{season, starts, games}]`, Slate season
+  first.
 - `replacement_starters`: teammates in the window whose start rate is higher
   without him than with him (a side with no games counts as rate 0) and who
   started at least one without game, by `starts_without` high to low, then name.
   Each has `name`, `starts_without`, `games_without`, `starts_with`,
-  `games_with`. A teammate whose split is insufficient is never listed.
+  `games_with`, and `by_season` with those counts per season. A teammate whose split is insufficient is never listed.
 - `minutes_jumps`: teammates in the window who are not in the 15+ MPG set, whose
   split is sufficient (3 or more without games) and whose `minutes_change` is
   6.0 or more, by `minutes_change` high to low. Each has `name` and `rotation`;
@@ -1152,6 +1298,10 @@ DFS provider and writes nothing.
         { "canonical_id": 1628970, "name": "Miles Bridges", "tricode": "CHA",
           "season_scoring": 17.1, "value": -0.0823, "thin": false }
       ],
+      "leaders": [
+        { "canonical_id": 1628970, "name": "Miles Bridges", "tricode": "CHA",
+          "season_scoring": 17.1, "market": "REB", "value": 0.1104, "thin": false }
+      ],
       "scores": [ { "canonical_id": 1628970, "value": -0.0823 } ]
     }
   ],
@@ -1181,12 +1331,28 @@ DFS provider and writes nothing.
   such score is unscored. `thin` is that cell's thin flag.
 - `scores` lists every scored player of the game's Matchup as
   `{ canonical_id, value }` with no scoring floor, in the Matchup's own player
-  order.
+  order, Rotation Players (crf04/statsplus#459) included; so do `effects` and
+  `leaders`.
 - `effects` holds up to three of those players whose `season_scoring` is at
   least 8, ordered by `|value|` descending (ties: higher `season_scoring`, then
   lower `canonical_id`). A thin player is included, flagged `thin`.
+- `leaders` (crf04/statsplus#470, the home ticker) holds up to five rows of the
+  same shape plus `market`, one of the player-level markets `PTS`, `REB`, `AST`,
+  `3PM`, `PRA`, `PR`, `PA`, `RA`, `FGA`, `FGM`, `FG2A`, `FG2M`, `FG3A`. Each
+  player whose `season_scoring` is at least 8 contributes at most one row: his
+  season cell with the largest `|value|` across those markets (ties: that
+  market order), each market's cell read by the rule above from
+  `scores.<market>.season`. A market with a volume floor (crf04/statsplus#514)
+  is a candidate only when the Matchup row's `season_per_game` reaches it:
+  `3PM` and `FG3A` need 2.0 `FG3A`, `FG2M` and `FG2A` 3.0 `FG2A`, `AST` 2.0
+  `AST`, and `REB` 3.0 `REB` per game; an unknown rate clears none. Rows are
+  ordered as `effects` are and the first five kept. STL, BLK and their sum STKS are left out because they always score the
+  opponent's team rate, so every player on a team carries the same value; TOV,
+  FTA and FTM are left out because they fall back to the team rate for about
+  half the teams early in a season.
 - `spotlight.best` is the largest positive season PTS Blend `value` across all
-  games among non-thin Blends (a single component never qualifies) whose
+  games among non-thin Blends (a single component never qualifies) of players
+  with a line (never a Matchup row whose `player_source` is `rotation`) whose
   `season_scoring` is at least 12; `spotlight.toughest` is the most negative by
   the same filter. Each is `null` when no player qualifies. `opponent` is the
   tricode of the side the player does not play for.
@@ -1200,17 +1366,17 @@ DFS provider and writes nothing.
   `percent_vs_league_average`. `reason` is `null` when neither of the pick's two
   slices has an opponent PTS reading; the pick is still the extreme.
 - A game whose Matchup cannot be read (a refused or incomplete stored read)
-  contributes `effects: []`, `scores: []` and no pick; the response is still
+  contributes `effects: []`, `leaders: []`, `scores: []` and no pick; the response is still
   `200`.
 - The per-game Matchups are composed one at a time in Slate order, from the one
   Publication snapshot, each reduced to its game's entry before the next. With
   Redis enabled (`ENABLE_CACHE`, and
   `SLATE_EDGES_CACHE_ENABLED`, default `true`) the whole response is also
-  cached under `slate:edges:v5:<sha256>`, keyed on the slate date, the
+  cached under `slate:edges:v9:<sha256>`, keyed on the slate date, the
   evidence season, the Publication generation (live pointers and retained
   history rows), each game's id, status and tip time, every Matchup score and
   Diet baseline setting (game-count and per-Base volume floors), and the
-  8/12 PPG and top-three limits, so a new publication or a game starting or finishing misses.
+  8/12 PPG, top-three and leader limits (markets and top five), so a new publication or a game starting or finishing misses.
   The key has no user: the response is the same for every caller. A stored
   injury or Player Pool change moves none of those, so a cached response can
   lag such a change by up to `SLATE_EDGES_CACHE_TTL_SECONDS` (default 300)
@@ -1259,7 +1425,7 @@ DFS provider and writes nothing.
 ### Get Board
 
 ```http
-GET /api/games/board?date=YYYY-MM-DD[&season=YYYY-YY][&market=CODE][&game=<nba_game_id>][&team=ABBR][&sources=a,b,...]
+GET /api/games/board?date=YYYY-MM-DD[&season=YYYY-YY][&market=CODE][&game=<nba_game_id>][&team=ABBR][&sources=a,b,...][&moves=true]
 Authorization: Bearer <firebase-id-token>
 ```
 
@@ -1282,6 +1448,8 @@ on one repeatable-read snapshot. It composes no Matchup and calls no provider.
   `fanduel`, `betmgm`, `williamhill_us`, `betrivers`, `fanatics`). It narrows the
   rows, each row's `lines`, `line_prices` and `book_lines.books`, the index's
   counts, and the top-level `sources` list.
+- `moves` is `true` or `false` (the default). `true` needs `market`; see
+  [Line moves](#line-moves).
 - An unknown market, a malformed value, a repeated parameter (other than
   `sources`) or any other parameter is `400 invalid_input` with
   `details.parameters` naming it. A date with no games is `200` with
@@ -1299,7 +1467,8 @@ Index (no `market`):
   "sources": [
     {"source": "dabble", "kind": "provider", "status": "fresh", "retrieved_at": "2026-01-15T23:58:00Z"},
     {"source": "prizepicks", "kind": "provider", "status": "stale-served", "retrieved_at": "2026-01-15T23:40:00Z"},
-    {"source": "draftkings", "kind": "sportsbook", "status": "fresh", "retrieved_at": "2026-01-15T23:57:00Z"}
+    {"source": "draftkings", "kind": "sportsbook", "status": "fresh", "retrieved_at": "2026-01-15T23:57:00Z"},
+    {"source": "fanduel", "kind": "sportsbook", "status": "stale-served", "retrieved_at": "2026-01-15T22:40:00Z"}
   ],
   "markets": [
     {"market": "PTS", "players": 4, "book_only_unnamed": 1, "sources": ["dabble", "prizepicks", "draftkings"]},
@@ -1318,13 +1487,15 @@ filters) and `"omitted": {"book_only_unnamed": 1}`, and gives each game its
   "name": "Jayson Tatum",
   "team": "BOS",
   "injury_status": "Questionable",
-  "lines": {"dabble": 27.5, "prizepicks": 28.5},
+  "lines": {"dabble": 27.5, "novig": 9.5, "prizepicks": 28.5},
   "line_prices": {"dabble": {"over": -122, "under": -122}},
+  "line_labels": {"novig": "alternate", "prizepicks": "line-only"},
   "book_lines": {
     "as_of": "2026-01-15T23:57:00Z",
     "closing": false,
     "books": [
-      {"book": "draftkings", "line": 27.5, "over": -128, "under": 100, "updated_at": "2026-01-15T23:57:00Z"}
+      {"book": "draftkings", "line": 27.5, "over": -128, "under": 100, "updated_at": "2026-01-15T23:57:00Z",
+       "stale": false}
     ]
   }
 }
@@ -1355,17 +1526,88 @@ filters) and `"omitted": {"book_only_unnamed": 1}`, and gives each game its
   for such players is still listed in the index, with `"players": 0`.
 - `lines` and `line_prices` are the Matchup row's, for this market only.
   `line_prices` holds American prices as posted, `null` for a missing side; a
-  provider with no per-pick price (PrizePicks) is absent from it.
+  provider with no per-pick price (PrizePicks, or Dabble on a line that is not
+  near-even) is absent from it.
+- `line_labels` (crf04/statsplus#495) is the Matchup row's `line_labels` for
+  this market only, `{provider: label}`: `line-only`, `alternate` or
+  `unpriced` for each `lines` entry with no `line_prices` entry, `{}` when
+  every line is priced. An `alternate` or `unpriced` line is not that
+  provider's line for the player and does not disagree with the other sources.
 - `book_lines` is the Matchup's `book_lines` entry for this market without the
   best-price flags, or `null` when no book quotes it. `as_of` is the newest
   book's update and `closing` is `true` when every listed book's quote is a
-  closing quote.
+  closing quote. Each book carries the Matchup's `stale` (crf04/statsplus#496):
+  its quote is more than 60 minutes old and its game has not started.
 - A started game reads its closing set, as every pool read does, so a line
   posted after the tip is not shown.
 - `sources` lists each provider the pool reports (the
   `freshness.pool.providers` vocabulary: `fresh`, `stale-served`, `missing`,
   and `closing` when every game read has started), then each book quoting a
-  game read, `fresh` with its newest update. Times are UTC with a `Z` suffix.
+  game read in the same vocabulary (crf04/statsplus#496). A book is judged on
+  its quotes for the games that have not started: `retrieved_at` is the newest
+  of their updates, and its status is `stale-served` when that is more than 60
+  minutes old, else `fresh`. A book whose every quoted game has started is
+  `closing`, with the newest update of all its quotes. A book can be `fresh`
+  while its quotes for one game are stale; each row's `book_lines.books[].stale`
+  says which. Times are UTC with a `Z` suffix.
+
+#### Line moves
+
+With `moves=true` (crf04/statsplus#491), each row adds `moves` and the board
+adds `moves_sources` and `pulled`. Every other field is unchanged, and without
+`moves` the response is exactly the one above. Only the sportsbooks have line
+history: the DFS and prediction-market providers have none yet.
+
+```json
+"moves": {
+  "draftkings": {
+    "open": {"line": 27.5, "over": -110, "under": -110, "seen_at": "2026-01-15T03:00:00Z"},
+    "previous": {"line": 28.5, "over": -115, "under": -105, "changed_at": "2026-01-15T23:57:00Z"},
+    "unchanged": false
+  },
+  "fanduel": {
+    "open": {"line": 28.5, "over": -105, "under": -115, "seen_at": "2026-01-15T03:00:00Z"},
+    "previous": null,
+    "unchanged": true
+  }
+}
+```
+
+```json
+"moves_sources": ["betmgm", "betrivers", "draftkings", "fanatics", "fanduel", "williamhill_us"],
+"pulled": {
+  "draftkings": [
+    {"game_id": "0022500602", "player_id": 1630573, "name": "Sam Hauser", "team": "BOS",
+     "line": 9.5, "over": -120, "under": 100, "seen_at": "2026-01-15T15:00:00Z"}
+  ]
+}
+```
+
+- `moves_sources` names the sources with line history: the books `sources`
+  keeps. A provider in `lines` never has a `moves` key, so a row whose only
+  cells are providers' has `"moves": {}`.
+- "Today" is the date's US Eastern day, from 00:00 ET. A value is a line with
+  its Over and Under prices (`null` for a side with no price).
+- `moves` has one key per book in the row's `book_lines.books`, by name. `open`
+  is the value in force at 00:00 ET, or the first value for a line first
+  posted later that day; its `seen_at` is when that value was stored, the
+  evening before for a book's opening line. `previous` is the value before the
+  current one, with `changed_at` the time the current value replaced it, or
+  `null` when the value never changed today. `unchanged` is `true` exactly
+  when `previous` is `null`. A book re-posting the same line and prices, after
+  a pull or not, is not a move; a change to either price is. A line that moved
+  and moved back is `unchanged: false` with the intermediate value as
+  `previous`.
+- `pulled` lists, per book, each player and market the book posted today and
+  no longer posts, in game, team, name and player ID order, with its last value
+  and `seen_at`, when that value was stored. When the book pulled it is not
+  stored: a pull writes no history row. A book with nothing pulled is absent.
+  `game`, `team` and `sources` narrow it as they narrow rows, and a player the
+  catalog cannot name or place on a team is not listed.
+- Book history is `sportsbook_prop_quotes`: a row per change of a book's line or
+  price, first post, re-post after a pull, and closing; it is never pruned, so
+  any date is served. The extra read is one statement on the board's snapshot,
+  through the table's series index for the date's games and the market.
 
 The board is not a research action and records no usage event.
 
@@ -1399,8 +1641,10 @@ servable under its landed stored-pool rules may populate `players`.
 Top-level fields are required:
 
 ```text
-game, experience, as_of, league, teams, players, injuries, freshness
+game, experience, as_of, league, teams, players, injuries, game_context, freshness
 ```
+
+`game_context` is described under [Game context](#game-context).
 
 `as_of` has the [Unscheduled Matchup's](#get-unscheduled-matchup) shape and
 meaning: `season` is the Published Season (a trailing section's own `season`
@@ -1464,6 +1708,9 @@ closing projections". A final game with governed archived projection evidence,
 or with any still-servable stored Player Pool, therefore keeps the
 evidence-appropriate existing experience, as does every scheduled or live game.
 `player_source` is `game_logs` in historical mode and `player_pool` otherwise.
+It names the source of the Participants: in current mode a player row's own
+`player_source` may also be `rotation` (a Rotation Player, below), which never
+changes the experience, the `participants` section or the targetable counts.
 
 `sections` always contains exactly `schedule`, `participants`,
 `season_defense`, `last_15_defense`, and `injuries`. Every section carries its
@@ -1533,6 +1780,14 @@ play_types, shot_zones, shot_types, assist_locations, traditional, rebound_types
 (crf04/statsplus#437): no three is taken inside 10 ft, so those stored metrics
 hold only stray mis-tags whose ranks would read −100% or thousands of percent.
 The scores still read them, where the player's own threes there weigh nothing.
+
+Each shot type also has three derived rows, summed at read time from its
+published stats and never part of a publication: `<slice>:PTS`
+(`2 x FG2M + 3 x FG3M`, crf04/statsplus#315), and `<slice>:FGM`
+(`FG2M + FG3M`) and `<slice>:FGA` (`FG2A + FG3A`, crf04/statsplus#454). They
+rank and compare to the league like every other row. `<slice>:FGM` lists only
+`["FGM"]` and `<slice>:FGA` only `["FGA"]` in `markets`: each is the overall row
+those markets display, and no Matchup Score reads a derived row.
 
 `rebound_types` (crf04/statsplus#234) is the ledger-owned Rebound Types Base,
 listed directly after `traditional`. Its rows have exactly the shape of the
@@ -1701,6 +1956,7 @@ Each stored pool player has this shape:
     }
   ],
   "season_averages": { "FGA": 18.6, "PTS": 25.4 },
+  "season_per_game": { "AST": 7.9, "FG3A": 6.1, "FGA": 18.6, "PTS": 25.4, "REB": 7.2 },
   "last_10_minutes": [35.0, 36.0],
   "diet_shares": {
     "play_types": [
@@ -1809,13 +2065,102 @@ always present: the Over and Under price of the pick behind each `lines` entry,
   the provider is absent until its next changed board. Game-log participants
   (historical mode, and the Unscheduled Matchup) carry `"line_prices": {}`.
 
+`line_labels` (crf04/statsplus#495) is additive and always present: a label for
+every `lines` entry with no `line_prices` entry, `{provider: {market: label}}`.
+A priced line has no label, and a row with every line priced carries `{}`.
+
+- `line-only`: a `dabble` or `prizepicks` line. Both price the entry, never the
+  pick, so their line has no per-pick price and is still that provider's line.
+- `alternate`: a `novig`, `polymarket`, `kalshi` or `underdog` line with no
+  price whose poll priced a different line for the same player, game and
+  market (an available full-game market, any variant). The provider's
+  standard-line pick chose an unpriced number beside a priced one. The poll is
+  the line's stored snapshot, so a statistic-mapping replay keeps it, and each
+  of its markets counts under its newest mapping. Retention
+  keeps a started game's closing set but prunes that poll's other markets, so
+  once they are pruned a frozen alternate reads `unpriced`, which is skipped
+  the same way.
+- `unpriced`: any other line with no price, typically a prediction market with
+  one side bid or a book wider than the 1.10 overround rule. A market the
+  provider's feed marks suspended or not accepting orders is never served, so
+  a served line is never labelled suspended: the feed cannot tell a suspended
+  main line from an unpriced one.
+
+An `alternate` or `unpriced` line stays in `lines` but is never reported as the
+player's line: the game-log `posted_line.lines` majority and the injury
+scenarios' `line` skip it, and a client should not count it as a source
+disagreeing with the others.
+
 `player_source`, `stat_categories`, and `focal_game_line` are additive and
-always present. `player_source` is `player_pool` for a stored pool player and
-`game_logs` for a Historical Matchup participant. `stat_categories` is always
-exactly the key set of `scores`; in current mode it equals `posted_markets`,
-and in historical mode it is the governed Statistic Catalog crossed with the
-score-input contract rather than any DFS archive. `focal_game_line` is `null`
-in current mode.
+always present. `player_source` is `player_pool` for a stored pool player,
+`rotation` for a Rotation Player, and `game_logs` for a Historical Matchup
+participant. In current mode `stat_categories` equals `posted_markets` and the
+key set of `scores` is a superset of it (crf04/statsplus#457); in historical
+mode `stat_categories` is exactly the key set of `scores`, the governed
+Statistic Catalog crossed with the score-input contract rather than any DFS
+archive. `focal_game_line` is `null` in current mode.
+
+**Rotation Players** (crf04/statsplus#459). A current-mode Matchup also lists
+each player with no line in CourtAI's books who played recent minutes: a
+player who is not in the game's Player Pool, played 10 or more minutes for his
+team in at least one of its 5 most recent Regular Season games before the
+game's date in the game's own season (read from that season's game logs
+whether or not the request selects it, so an unselected read of a game in a
+season not yet published still lists them), is placed on that team by the season's
+active Athlete Catalog, and is not listed `Out` on the game's stored injury
+report (a `Doubtful` or `Questionable` player stays, with his
+`injury_badge_ref`). Only the team's own logs count, so a team's first game of
+the season lists none, a player traded to a team is listed once he has played
+10 minutes for it, and a player traded or waived away is not listed for his
+old team. A Historical or Unscheduled Matchup lists none. Every pool row comes
+before every Rotation Player row; each group keeps the order above. A
+Rotation Player row has the pool row's shape with:
+
+| Field | Rotation Player row |
+|---|---|
+| `player_source` | `rotation` |
+| `stat_categories`, `posted_markets` | `[]` |
+| `provenance`, `lines`, `line_prices` | `{}` |
+| `book_lines` | his sportsbook quotes, as a pool row's |
+| `scores` | every scoreable category, as a pool row's |
+| `season_averages` | `{}` |
+| `season_per_game` | every market his season rate counts, as a pool row's |
+| `last_five_games` | his last five games, each with `stats: {}` |
+| `season_scoring`, `last_10_minutes`, `diet_shares`, `diet_thin`, `injury_badge_ref` | as a pool row's |
+
+```json
+{
+  "canonical_id": 1641001,
+  "name": "Example Rotation Player",
+  "team_id": 1610612752,
+  "tricode": "NYK",
+  "player_source": "rotation",
+  "stat_categories": [],
+  "focal_game_line": null,
+  "posted_markets": [],
+  "provenance": {},
+  "lines": {},
+  "line_prices": {},
+  "season_scoring": 4.2,
+  "last_five_games": [
+    { "game_id": "0022600140", "game_date": "2026-11-08", "matchup": "NYK @ MIL",
+      "minutes": 18.5, "stats": {} }
+  ],
+  "season_averages": {},
+  "last_10_minutes": [6.1, 18.5],
+  "diet_shares": { "play_types": [], "shot_zones": [], "shot_types": [],
+                   "assist_locations": [], "rebound_types": [] },
+  "diet_thin": { "play_types": true, "shot_zones": true, "shot_types": true,
+                 "assist_locations": true, "rebound_types": true },
+  "scores": { "PTS": { "season": { "...": "every scoreable category, as a pool row" } } },
+  "injury_badge_ref": null,
+  "book_lines": {}
+}
+```
+
+A Rotation Player is never targetable: `targetable_player_count`, the Slate's
+counts, the Matchup Selection route (`404` for him), the DFS board, posted
+lines and Injury Scenarios lines keep to the pool.
 
 `last_five_games` and `season_averages` (crf04/statsplus#395) are additive and
 always present. Both read the rows behind `season_scoring`: the player's
@@ -1832,6 +2177,14 @@ or no minutes) they are `[]` and `{}`. A Historical Matchup serves `[]` and
 `{}`: its evidence includes the focal game and the games after it. Older
 backends omit both fields.
 
+`season_per_game` (crf04/statsplus#514) is additive and always present: the
+same season per-game rate for every Statistic Catalog market the rate counts,
+posted or not, so it holds `season_averages` and the markets no provider
+posts. It is `{}` only without a season rate. A Historical Matchup serves the
+completed-season rate its `scores` read, focal game included, although its
+`season_averages` is `{}`. The Slate edges' `leaders` read their volume floors
+from it.
+
 `book_lines` (#377, crf04/statsplus#185) is additive and always present: sportsbook
 player-prop lines from The Odds API, keyed by category (a subset of `PTS`,
 `REB`, `AST`, `3PM`, `PRA`, `PR`, `PA`, `RA`). It is `{}` for a Historical or Unscheduled
@@ -1847,10 +2200,10 @@ market only books post is not targetable.
     "closing": false,
     "books": [
       { "book": "draftkings", "line": 27.5, "over": -115, "under": -105,
-        "updated_at": "2026-10-21T21:02:40Z",
+        "updated_at": "2026-10-21T21:02:40Z", "stale": false,
         "best_over": false, "best_under": true },
       { "book": "fanduel", "line": 27.5, "over": -110, "under": -110,
-        "updated_at": "2026-10-21T21:03:02Z",
+        "updated_at": "2026-10-21T21:03:02Z", "stale": false,
         "best_over": true, "best_under": false }
     ]
   }
@@ -1861,10 +2214,14 @@ market only books post is not targetable.
 (`draftkings`, `fanduel`, `betmgm`, `williamhill_us`, `betrivers`,
 `fanatics`); offshore books are never served. `line` is a finite number
 >= 0. `over` and `under` are integer American prices, either `null` when the
-book posts one side only. `best_over` and `best_under` are computed only among
-books posting the same `line`: the higher American price wins (+120 beats
-+110 beats -105 beats -115; +100 and -100 tie), ties all flag, and a book
-alone at its line (or alone on that side) is never flagged. `books` is sorted
+book posts one side only. `updated_at` is the Odds API's update of that
+book's market, else the poll that read it. `stale` (crf04/statsplus#496) is
+`true` when `updated_at` is more than 60 minutes before the read while the game
+has not started; once it has started no quote is stale. `best_over` and
+`best_under` are computed only among the books that are not stale and post the
+same `line`: the higher American price wins (+120 beats +110 beats -105 beats
+-115; +100 and -100 tie), ties all flag, and a book alone at its line (or
+alone on that side) is never flagged. A stale book is never flagged. `books` is sorted
 by `line` ascending, then `book`. `as_of` is the newest `updated_at`.
 `closing` is true only when every entry comes from the game's closing snapshot
 (taken between tip-10 and tip-5 minutes; a missed closing fetch is not
@@ -1876,7 +2233,7 @@ with a logged error and never fails the route.
 this player is too slight to lean on. It is the same rule a score component
 marks itself `thin` with, asked of the whole Base rather than of the slices one
 component consumed, and it is always present for all five Bases -- a component
-only exists where its market was posted and its window available, so `scores`
+only exists where its inputs were stored and its window available, so `scores`
 cannot answer this on its own. A Base is thin when its stored Diet is not a
 usable partition of that Base (including a Base with no stored fact at all,
 which no score would consume), when exact Synergy play-type coverage falls
@@ -1926,6 +2283,15 @@ the shot type's population, restricted to players whose fact has a stored
 split. `shot_values` is `null` when the stored fact has no split. Other Bases
 carry no `shot_values` key.
 
+From 2026-27 the ledger publishes NBA's official box-score counts
+(crf04/statsplus-backend#763), and a correction never makes a Diet
+unavailable. A player-game whose assists that box score corrected reads the
+official AST in game logs, but keeps the provider's assist locations, and its
+`assist_locations` Diet counts the provider's assists, the count those
+locations describe, so the shares still add up to 1. Rebounds are not
+corrected: a differing REB, OREB or DREB is recorded and the provider's count
+stays published everywhere, so the `rebound_types` Diet is unchanged.
+
 The `rebound_types` Diet (crf04/statsplus#234) is derived from the Canonical
 Game Ledger like the assist-location Diet and has the same fact shape, in the
 unit `rebounds`: a player with any rebounds in the Season has all six slices
@@ -1938,11 +2304,15 @@ assist-location floor because six slices dilute a share faster than five and
 team rebounds outnumber assists about 1.7 to 1), on top of the shared
 rules above. Targets and Qualifiers do not use this Base.
 
-`scores` has exactly one row for every `stat_categories` value and no other
-row. In current mode `stat_categories` equals `posted_markets`, so a stored
-pool player still has exactly one row per posted market and no unposted row; a
+`scores` has one row for every scoreable category in the governed Statistic
+Catalog, posted or not, plus any posted market outside it
+(crf04/statsplus#457): CourtAI holds lines from only some books, so a market
+with no line in its data may still be offered. A stored pool player's
+`stat_categories` and `posted_markets` stay the markets with a line, so its
+`scores` keys are a superset of them; a market whose score inputs are missing
+reads as on an Unscheduled Matchup (`missing_inputs`, no `blend`). A
 Historical Matchup participant carries `posted_markets: []` and is keyed by the
-governed categories instead. Each row always carries independent `season` and
+governed categories. Each row always carries independent `season` and
 `last_15` windows. A
 component cell's `value` is the fractional difference from a league-average
 matchup (`0.08` renders as `+8%`), calculated as the sum across that Base's
@@ -2224,6 +2594,92 @@ requires it. Source-specific publication timestamps and lineage remain in the
 additive provenance envelope.
 The same `provenance` object also carries the shared
 [`generation` and `sources`](#response-provenance) keys.
+
+#### Game context
+
+`game_context` (crf04/statsplus#466) is each team's context before the game:
+rest, Season and Last 10 pace and ratings, and the last five results. The
+request reads it from `game_contexts` and `game_context_teams` and computes
+nothing. `scripts/game_context_refresh.py` stores it on the ledger cron (see
+[ARCHITECTURE.md](ARCHITECTURE.md#stored-game-context-crf04statsplus466)).
+
+```json
+"game_context": {
+  "status": "available",
+  "computed_at": "2026-11-08T14:16:02+00:00",
+  "teams": [
+    {
+      "team_id": 1610612740,
+      "tricode": "NOP",
+      "is_home": false,
+      "season": "2026-27",
+      "through_game_date": "2026-11-06",
+      "rest": {"previous_game_date": "2026-11-06", "rest_days": 1, "back_to_back": false},
+      "ratings": {
+        "season": {"games": 9, "possession_games": 9, "pace": 101.8, "offensive_rating": 113.9, "defensive_rating": 113.0, "net_rating": 0.9},
+        "last_10": {"games": 9, "possession_games": 9, "pace": 101.8, "offensive_rating": 113.9, "defensive_rating": 113.0, "net_rating": 0.9}
+      },
+      "last_5": [
+        {"game_date": "2026-11-06", "opponent_tricode": "MIN", "is_home": true, "points": 109, "opponent_points": 115, "result": "L", "margin": -6}
+      ]
+    }
+  ],
+  "game_line": {
+    "status": "available",
+    "source": "espn_scoreboard",
+    "provider": "DraftKings",
+    "read_at": "2026-11-11T00:25:04+00:00",
+    "favorite_team_id": 1610612752,
+    "favorite_tricode": "NYK",
+    "spread": -15.5,
+    "total": 222.5,
+    "teams": [
+      {"team_id": 1610612749, "tricode": "MIL", "is_home": false, "spread": 15.5, "implied_total": 103.5},
+      {"team_id": 1610612752, "tricode": "NYK", "is_home": true, "spread": -15.5, "implied_total": 119.0}
+    ]
+  }
+}
+```
+
+- `status` is `available` when both teams' rows are stored, otherwise
+  `unavailable` with `computed_at: null` and `teams: []`. `teams` lists the
+  away team, then the home team.
+- `computed_at` is when the stored values last changed.
+- Every value counts only games strictly before the game's Eastern date, so a
+  past game's context never includes the game itself. Ratings and results come
+  from the team's final Regular Season games in the Canonical Game Ledger.
+  `through_game_date` is the newest one counted, or null when there is none.
+- `rest` comes from the team's previous Event Catalog game of the same season,
+  excluding Preseason, All-Star and postponed games, so a game the ledger has not
+  ingested yet still counts. `rest_days` is the calendar days between the two
+  games minus 1, and `back_to_back` is true when that is 0. The season's first
+  game has null `previous_game_date` and `rest_days` and `back_to_back: false`.
+- `ratings.season` covers every counted game; `ratings.last_10`, the newest 10.
+  `games` is the window's game count and `possession_games` the games whose
+  ledger `offensive_possessions` both sides carry; only those enter the ratings:
+  offensive rating = 100 x points / own possessions, defensive rating = 100 x
+  points allowed / opponent possessions, net = offensive - defensive (computed
+  from the unrounded ratings), pace = 48 x (own + opponent possessions) / 2 /
+  team minutes. Each is rounded to 1 decimal, and null when
+  `possession_games` is 0.
+- `last_5` holds up to five results, newest first; `margin` is points minus
+  opponent points and `result` is `W` or `L`.
+- `game_line` (crf04/statsplus#493) is the game's line from ESPN's scoreboard,
+  read from `game_lines` whatever `status` says about the team rows.
+  `source` is always `espn_scoreboard`; `provider` is the sportsbook ESPN
+  names. `read_at` is the last time the line was read: the odds cron reads it
+  every five minutes until ESPN lists the game as started, so after tip, and
+  once the game is final, it is the last line read before tip, and a line ESPN
+  stops showing before tip keeps its last value and `read_at`.
+  `spread` is the favourite's spread (negative), `favorite_team_id` and
+  `favorite_tricode` name the favourite, and `total` is the game total. A
+  pick'em has `spread: 0.0` and null favourite fields. `teams` lists the away
+  team, then the home team, each with its own `spread` (negative when
+  favoured) and `implied_total` = (`total` - its `spread`) / 2. With no stored
+  line, `status` is `unavailable`, `source` stays `espn_scoreboard`, every
+  other value is null and `teams` is `[]`.
+
+The Unscheduled Matchup has no game and carries no `game_context`.
 
 #### Trailing inputs
 
@@ -2921,6 +3377,48 @@ images are named by. It comes from the player's season log, so no filter
 changes it, including one that matches no games. It is `null` when the season
 holds no games for the player.
 
+Opponent ranks (crf04/statsplus#456): `opponent_ranks` maps a chart line type
+to a `label` and `ranks`, each team tricode's whole-season rank in that metric
+per 48, 1-30 with 30 = allows the most. The ranks are the Matchup Defense
+Sheet's Traditional row ranks, so tied teams share a rank exactly as the Sheet
+shows them. The line types are `PTS` (Points Allowed), `REB`, `AST`, `FGM`,
+`FGA`, `FG3M`, `FG3A`, `FTM`, `FTA`, `STL`, `BLK`, `TOV`, `STKS` (Steals +
+Blocks, ranked as the Opposing Team Profile ranks it), and the combos `PR`,
+`PA`, `RA` and `PRA`, each ranked by the sum of its stats allowed per 48
+(crf04/statsplus#505). The label is the metric's opponent-filter label, or
+`FG Made Allowed`, `FG Attempts Allowed` or `FT Made Allowed` where no Team
+Filter offers the metric. A combo's label names its stats, as in `Rebounds +
+Assists Allowed`. `FD_PTS` has no entry. The ranks come from the same Season publication
+generation the response reads, and no filter changes them. A metric the
+publication lacks has no entry, and the object is `{}` when the season cannot
+be ranked.
+
+Filter ranks (crf04/statsplus#498): when the request has `teams_against[]`
+filters, every `game_logs[]` row carries `teams_against_ranks`, an object keyed
+by each `teams_against[]` value exactly as the request named it (a Team Filter
+token such as `OPP_AST`, or a Defense Sheet row such as
+`sheet:assist_locations:Arc3Assists`). Each value is that game's opponent's
+rank on the filter's ranking, 1-30 with 30 = allows the most: the number the
+filter compared against its `rank_filter[]` entry. It is a whole-season rank
+from the same Season publication the filter read, not the rank on the game's
+date. Ranking position p (1 = the highest value) is rank `31 - p`, so tied
+teams hold distinct ranks in tricode order, and a tied team's number can
+differ from its shared `opponent_ranks` rank. Without `teams_against[]` the
+rows carry no `teams_against_ranks`.
+
+```json
+{
+  "game_logs": [
+    {
+      "GAME_DATE": "2026-11-08",
+      "MATCHUP": "ORL vs. NYK",
+      "AST": 9,
+      "teams_against_ranks": { "sheet:assist_locations:Arc3Assists": 27, "OPP_PTS": 22 }
+    }
+  ]
+}
+```
+
 Every successful response also carries the shared
 [`provenance`](#response-provenance) block naming the Publications it read.
 
@@ -2932,7 +3430,8 @@ Every successful response also carries the shared
   "season_game_count": 71,
   "next_game": null,
   "player_id": 2544,
-  "posted_line": null
+  "posted_line": null,
+  "opponent_ranks": { "PTS": { "label": "Points Allowed", "ranks": { "BOS": 27, "LAL": 3 } } }
 }
 ```
 
@@ -3086,13 +3585,15 @@ changes no average.
   "lines": { "PTS": { "value": 27.5, "provider": "prizepicks" } },
   "provider_lines": { "prizepicks": { "PTS": 27.5 }, "underdog": { "PTS": 27.5 } },
   "line_prices": { "underdog": { "PTS": { "over": -112, "under": -112 } } },
+  "line_labels": { "prizepicks": { "PTS": "line-only" } },
   "book_lines": {
     "PTS": {
       "as_of": "2026-10-21T21:04:11Z",
       "closing": false,
       "books": [
         { "book": "draftkings", "line": 27.5, "over": -115, "under": -105,
-          "updated_at": "2026-10-21T21:02:40Z", "best_over": false, "best_under": true }
+          "updated_at": "2026-10-21T21:02:40Z", "stale": false,
+          "best_over": false, "best_under": true }
       ]
     }
   }
@@ -3111,18 +3612,31 @@ changes no average.
   store is off, has no quotes, or fails to read (logged; the logs and
   `posted_line` are unaffected). On the closing-line fallback `provider_lines`
   and `line_prices` are `{}` and `book_lines` is still read for that game.
+  `book_lines` judges `stale` at the request's time, against the posted line's
+  game.
+* `line_labels` (crf04/statsplus#495) is additive and always present whenever
+  `posted_line` is non-null: the Matchup row's `line_labels` for
+  `provider_lines`. It is `{}` on the closing-line fallback and is served to
+  every caller, prices or not.
 * Anonymous and waitlisted callers (crf04/statsplus#381) get `posted_line`
   without prices: `line_prices` is absent, and each `book_lines[<market>].books`
   entry keeps `book`, `line` and `updated_at` but has no `over`, `under`,
   `best_over` or `best_under`. `lines`, `provider_lines`, `as_of` and `closing`
   are unchanged. Any offered `season_filter` reads for them as for a signed-in
   caller, including the season after the Published Season while
-  [`/seasons`](#get-seasons) offers it.
+  [`/seasons`](#get-seasons) offers it. With no `season_filter` they read the
+  page season (crf04/statsplus#477): the season after the Published Season
+  once today's ET date falls in it, as the signed-in Log Workspace defaults to,
+  with its `season_context`; while that season serves no game logs, the
+  Published Season as before.
 * `matchup` reads from the player's side: `LAL vs GSW` at home, `LAL @ GSW` away.
 * `lines` has one entry per market the stored player pool holds for that game
   (`PTS`, `REB`, `AST`, `PRA`, `3PM`, ...), one value each: the majority line
-  (crf04/statsplus#274). Each provider in `provider_lines` posting the market
-  and each book in `book_lines[<market>].books` is one source with one vote;
+  (crf04/statsplus#274). Each provider in `provider_lines` posting the market,
+  except one whose line `line_labels` marks `alternate` or `unpriced`
+  (crf04/statsplus#495), and each book in `book_lines[<market>].books` is one
+  source with one vote; a market whose only lines are such lines and no book
+  quotes is not in `lines`;
   `value` is the line the most sources post. Sources are ordered providers first
   (PrizePicks, then alphabetical), then books in served order; a tie between
   lines goes to the line of the first source posting one of them, and
@@ -3259,7 +3773,7 @@ Query parameters:
 | `player_name` | Yes | Player name; resolved against the requested `season_filter`'s Athlete Catalog first (exact case-insensitive match, then fuzzy), preferring the namesake active for that season when multiple catalog rows share a display name, falling back to the legacy `player_information` table when no catalog exists for that season |
 | `minutes_filter` | No | Comma-separated min,max minutes. Default `0,48` |
 | `players_on[]` | No | Teammates that must have a game-log appearance in the same game for the same team; this is game-level played/didn't-play evidence, not lineup-stint evidence |
-| `players_off[]` | No | Teammates that must have no game-log appearance in the same game for the same team; multiple names exclude the union of their appearances |
+| `players_off[]` | No | Teammates that must have no game-log appearance in the same game for the same team, counted only inside each one's team window: from his first game for that team in the season until his first later game for another team (crf04/statsplus#449). A team game before his first game for the team (any team game, when he has none) is inside the window only on membership evidence, report evidence first (crf04/statsplus#450): it is inside when the game's stored official injury report lists him for the team (any status); outside when a stored report on that day or an earlier day of the season lists him for another team, which also ends carry-over; otherwise inside when his last game of the previous season was for the team and he has played for no other team before that game. When any read that evidence needs fails (the stored reports, the previous season's logs, or the Athlete Catalog read that identifies a name with no game), the window opens at his first game for the team and the request still succeeds. A game outside the window is excluded; multiple names keep only games inside every window with no appearance by any of them |
 | `date_filter` | No | `YYYY-MM-DD` start date that trims the player's own game logs. It never reshapes Team Filter rankings, which are always whole-Regular-Season |
 | `date_to` | No | `YYYY-MM-DD` inclusive end date that trims the player's own game logs; with `date_filter` it selects an inclusive range (#307). It never reshapes Team Filter rankings, which are always whole-Regular-Season. An unparsable value, or one earlier than `date_filter`, is rejected with `400` `invalid_input` |
 | `teams_against[]` | No | Opponent filter names such as `OPP_PTS`. Every filter ranks opponents from the durable Season publications for the requested `season_filter` (#198); a request-time provider call is no longer made for any combination of filters. A season with no Season publication ranks no opponents, so the filter resolves to an empty result rather than borrowing another season's rankings. The authoritative accepted set (and its legacy aliases) is not enumerated here except by example: a rejection's `details` carry the full canonical `supported_values` and `supported_aliases` (#145). An entry may instead be a Defense Sheet row reference, `sheet:<base>:<row key>`, which ranks that Sheet row's Season allowed per 48 (#308; see Filtering Reference) |
@@ -3303,6 +3817,10 @@ same code, plus:
 - `line_date`: the posted-line day, as for game logs. The web app sends the
   current ET date so each day's links get a new image URL.
 
+The card reads the link's games as a caller without an account reads
+[Get Game Logs](#get-game-logs) (crf04/statsplus#477): any offered
+`season_filter`, and with none the page season.
+
 The card leads with every game the link's filters match. It shows the player,
 the stat and line as `PTS - 22.5`, the filters in the words of the link's title
 (`2025-26 season, without Trae Young`, or `Every logged game`), and the
@@ -3329,6 +3847,7 @@ alone, the bars are neutral and the headline is the game count (`31 games`).
 | Provider, database or query-timeout failure, including resolving the default season | 200 | Brand fallback PNG | `public, max-age=60` |
 | Bad filter, `line_type` or `line` | 400 | `invalid_input` | `no-store` |
 | Unknown player | 404 | `resource_not_found` | `no-store` |
+| `season_filter` not offered | 503 | `season_unavailable` | `no-store` |
 | Per-IP limit | 429 | `rate_limited`, `Retry-After` | `no-store` |
 
 Every PNG is 1200×630 `image/png`. The card's facts (not the PNG) are cached in
@@ -3417,8 +3936,11 @@ server process allows 15 per minute instead.
 `GET /api/on_off?team=ABBR&season=YYYY-YY&on[]=ID&off[]=ID` (authenticated;
 #424, part of statsplus#220). For one team and season, returns every player
 with minutes while all `on[]` players were on the floor and all `off[]`
-players were off it. Ids are StatsPlus player ids (NBA person ids), at least one in total, and no id on both sides. A missing or invalid
-`team`, `season` or id is a 400.
+players were off it. Ids are StatsPlus player ids (NBA person ids), with no id on both sides. A missing or invalid
+`team`, `season` or id is a 400. With neither `on[]` nor `off[]` the answer is
+the team's full season: every player with minutes for the team, each with all
+of his minutes whatever the lineup, from the same source and cached under the
+same key shape with both lists empty (crf04/statsplus#460).
 
 ```json
 {
@@ -3469,25 +3991,60 @@ first, `[]` when none:
 ```
 
 `game_date` is the Eastern date and `matchup` is `AWAY @ HOME`, both from the
-Event Catalog. `minutes` round half up from the segments' seconds, as
+Event Catalog. Five more fields say which games the split covers
+(crf04/statsplus-backend#761): `team_games`, the team-season's completed
+regular-season games in the Event Catalog; `games_included`, how many of them
+have stored segments (`team_games` minus the `games_missing`); `games_through`,
+the Eastern date of the newest included game; `split_games`, the games in which
+the asked lineup state occurred; and `last_split_game_date`, the Eastern date of
+the newest of those. Each date is `null` when there is no such game. `cached_at`
+is a write time, not a cache: a game rewritten later moves it without changing
+the split, so read currency from these fields instead.
+
+```json
+"team_games": 10, "games_included": 9, "games_through": "2026-11-08",
+"split_games": 7, "last_split_game_date": "2026-11-06",
+"games_missing": [{"game_id": "0022600142", "game_date": "2026-10-28", "matchup": "OKC @ DAL"}]
+``` `minutes` round half up from the segments' seconds, as
 PBPStats rounds. `usage` is StatsPlus usage: 100 · (FGA + 0.44·FTA + TOV) /
 (team on-floor FGA + player-less heaves + 0.44·FTA + TOV). Free throws count
 for the lineup on the floor at the foul; from 2026-27 a heave counts as its
-shooter's missed FGA and 3PA. Every other season, and every season before
-2025-26, keeps the PBPStats path above unchanged, and the warm skips covered
-seasons. The nightly rotation job writes a game's segments with its stints;
+shooter's missed FGA and 3PA. Each player's `totals` and `per36` also carry
+`fg2a`, two-point attempts (`fga - fg3a`; crf04/statsplus#500), last and with
+the same rounding, `0.0` per 36 for a player with minutes and none; a split
+from PBPStats has no `fg2a`. After it come the makes (crf04/statsplus#500):
+`fgm`, made field goals; `fg2m`, made twos (`fgm - fg3m`); and `ftm`, made
+free throws, with the same rounding. Segments stored before migration 089 have
+no makes until `lineup_segment_backfill.py --makes` fills their game, so the
+three keys appear only when every segment in the split has them: a split that
+holds any segment without them omits all three for every player, never a
+partial count. A split from PBPStats has none of them:
+
+```json
+"totals": {"pts": 55, "reb": 15, "ast": 5, "fg3m": 5, "fga": 46, "fg3a": 15,
+           "tov": 11, "fta": 14, "fg2a": 31, "fgm": 20, "fg2m": 15, "ftm": 10},
+"per36": {"pts": 26.76, "reb": 7.3, "ast": 2.43, "fg3m": 2.43, "fga": 22.38,
+          "fg3a": 7.3, "tov": 5.35, "fta": 6.81, "fg2a": 15.08, "fgm": 9.73,
+          "fg2m": 7.3, "ftm": 4.86}
+```
+
+Every other season, and every season before 2025-26, keeps the PBPStats path
+above unchanged, and the warm skips covered seasons. The nightly rotation job writes a game's segments with its stints;
 `python scripts/lineup_segment_backfill.py YYYY-YY --database-url ...` fills a
 season (resumable, about one LiveData request a second) and records its
-coverage once every completed game is stored or rejected.
+coverage once every completed game is stored or rejected. With `--makes` it
+instead fills the makes of games stored before migration 089, refetching each
+and writing only when every count already stored is unchanged.
 
 ### Get Rotation
 
 ```http
 GET /api/games/rotation?player_name=<name>[&player_team=<tricode>][&last_n=5][&season=YYYY-YY]
-GET /api/games/rotation?team=<tricode>[&last_n=5][&season=YYYY-YY]
+GET /api/games/rotation?team=<tricode>[&last_n=5][&season=YYYY-YY][&date=YYYY-MM-DD][&game_logs=true]
 GET /api/games/rotation?game_id=<NBA game id>
 GET /api/games/rotation?player_name=<name>&without=<name>[&without=<name>][&season=YYYY-YY]
-GET /api/games/rotation?team=<tricode>&without=<name>[&without=<name>][&season=YYYY-YY]
+GET /api/games/rotation?team=<tricode>&without=<name>[&without=<name>][&season=YYYY-YY][&date=YYYY-MM-DD]
+GET /api/games/rotation?(player_name=<name>|team=<tricode>)&with=<name>[&with=<name>][&without=<name>][&season=YYYY-YY][&date=YYYY-MM-DD (team only)]
 Authorization: Bearer <firebase-id-token>
 ```
 
@@ -3502,11 +4059,14 @@ The backend computes every average and recent-versus-season comparison.
 | `player_team` | No | Tricode; only with `player_name`, keeps only the namesake on that current catalog team |
 | `team` | One selector | Tricode; the team view |
 | `game_id` | One selector | The 10-digit NBA game id the Slate returns (for example `0022501171`); the game view. Rejects `last_n` and `season` |
-| `last_n` | No | Whole number 1-20, default 5. Counts the player's games on his current team's box scores |
+| `last_n` | No | Whole number 1-20, default 5. Counts his current team's games inside his team window |
 | `season` | No | `YYYY-YY`. Default: the current season, or the latest season with rotation data when the current one has none |
 | `without` | No | Repeatable (crf04/statsplus#239). A player name; with `player_name` or `team`, switches to the [without split](#rotation-without-a-player). Rejected with `game_id` and with `last_n` |
+| `with` | No | Repeatable (crf04/statsplus#499). A player name; with `player_name` or `team`, switches to the [with split](#rotation-with-a-player), alone or beside `without`. Rejected with `game_id` and with `last_n` |
+| `game_logs` | No | `true` or `false`, default `false`. With `team` (crf04/statsplus#504) or a split ([`game_logs`](#rotation-without-a-player)) adds per-game box scores; rejected with `game_id` and on the plain player view |
+| `date` | No | `YYYY-MM-DD`, a US Eastern day; only with `team`. Picks the game whose [lineup](#tonights-lineup) the team view reports. Default: the team's game today (US Eastern), or its next scheduled game |
 
-Exactly one of `player_name`, `team` and `game_id` is required, each parameter except `without` may appear
+Exactly one of `player_name`, `team` and `game_id` is required, each parameter except `with` and `without` may appear
 once, and an unknown parameter is rejected. Every rejected request is
 `400 invalid_input` whose `details.parameters` lists the offending names (a
 tricode that is not an NBA team lists nothing but the message names the
@@ -3516,11 +4076,24 @@ rotation data in the season (after any `player_team`) is also
 as in the Unscheduled Matchup; namesakes without rotation data never make a
 name ambiguous.
 
-*Recent* is the player's last `last_n` stored regular-season games for his
-current team (the team of his latest stored game) whose box score lists him.
-A game he sat out (DNP or box-score inactive) is a 0-minute game; a team game he
-is not listed for, such as one before a trade, is not counted. *Season*
-is all of the player's own stored games in the season (every team he played for).
+A player's *team window* for a team runs from his first stored game for it in
+the season until his first later game for another team, open-ended if he never
+moves (crf04/statsplus#449). *Recent* is the last `last_n` stored
+regular-season games of his current team (the team of his latest stored game)
+inside his window there; *Season* is every stored game of each team he played
+for inside his window for it (crf04/statsplus#483). A team game in the window
+counts whether or not its box score lists him: a DNP or box-score inactive line
+is a 0-minute game, and a game with no line for him (2026-27 LiveData box
+scores list only active players) is a *missed* game, also 0 minutes. A game
+before his first game for the team, such as one before a trade, is outside his
+window and left out.
+The player and team views carry `team_games_counted: true`
+(crf04/statsplus#483): `recent.games` and `season_summary.games` count the
+team's games inside his team window and the averages are per game played. A
+response without the field comes from a backend whose `games` counted only the
+games whose box score lists him, averaged over those games.
+The `without` and `with` splits and the one-game view never carry it: they have no
+`recent` or `season_summary`.
 In the team view each player's `recent` is the same rule applied to that team,
 while `games` lists the team's own last `last_n` games. *Played* is minutes above 0, *started* is the box-score starter
 flag, and *closed* is on court at the end of the fourth period. Minutes are
@@ -3533,6 +4106,7 @@ Player view:
 {
   "season": "2025-26",
   "last_n": 5,
+  "team_games_counted": true,
   "player": {"name": "Ausar Thompson", "team": "DET"},
   "recent": {"games": 5, "played": 5, "starts": 5, "minutes": 31.2, "stints": 3.4, "closed": 4,
              "minutes_by_period": {"Q1": 8.1, "Q2": 6.0, "Q3": 8.4, "Q4": 8.7, "OT": 0.0}},
@@ -3540,17 +4114,27 @@ Player view:
              "minutes_by_period": {"Q1": 7.0, "Q2": 5.9, "Q3": 7.2, "Q4": 7.8, "OT": 0.0}},
   "games": [
     {"game_date": "2026-04-12", "matchup": "DET @ CHA", "started": true, "minutes": 33.1, "closed": true,
+     "on_box_score": true, "injury_status": null, "injury_reason": null,
      "minutes_by_period": {"Q1": 9.4, "Q2": 5.0, "Q3": 9.6, "Q4": 9.1, "OT": 0.0},
      "stints": [{"in": {"period": 1, "clock": "12:00"}, "out": {"period": 1, "clock": "2:36"}, "minutes": 9.4}]}
   ]
 }
 ```
 
-`games` lists the `recent` games newest first, DNPs included (`minutes: 0.0`,
-`stints: []`, `started: false`). `matchup` is `TEAM @ HOME` for an away game and
-`TEAM vs. AWAY` for a home game. `minutes`, `stints` and `minutes_by_period` in
-the summaries are per-game averages over all the games counted (DNPs as 0);
-`played`, `starts` and `closed` are counts. A stint that continues across a
+`games` lists the `recent` games newest first, DNPs and missed games included
+(`minutes: 0.0`, `stints: []`, `started: false`). Each game's `on_box_score` is
+`false` for a missed game (no box-score line for him) and `true` otherwise.
+`injury_status` and `injury_reason` (crf04/statsplus#494) are a missed game's
+status and reason from that game's stored official injury report when it lists
+him for his team (`reason` is `""` when the report gives none), and `null`
+when it does not list him, no report is stored, or the reports cannot be read
+(the rest of the answer is unchanged). They are `null` on every game whose box
+score lists him. The `game_date` of a report row must match the game's.
+`matchup` is `TEAM @ HOME` for an away game and `TEAM vs. AWAY` for a home
+game. In the summaries `games` is the team games counted, `played` the games he
+played, and `starts` and `closed` are counts; `minutes`, `stints` and
+`minutes_by_period` are averages over the games he played (`null` when he
+played none). A stint that continues across a
 period break is one stint (`out` in a later period than `in`); a change made at
 the start of a period ends the earlier stint at the end of the previous period.
 
@@ -3558,7 +4142,7 @@ Team view:
 
 ```json
 {
-  "season": "2025-26", "last_n": 5, "team": "DET",
+  "season": "2025-26", "last_n": 5, "team_games_counted": true, "team": "DET",
   "games": [{"game_date": "2026-04-12", "matchup": "DET @ CHA", "starters": ["Cade Cunningham", "..."]}],
   "players": [
     {"name": "Ausar Thompson",
@@ -3570,11 +4154,101 @@ Team view:
 ```
 
 `players` is everyone on the team's box score (active, DNP or inactive) in at
-least one of the team's last `last_n` games, so players who left earlier drop
-out, sorted by
-`abs(minutes_change)` descending and then by name. `minutes_change` is
-`recent.minutes - season_summary.minutes` computed from the unrounded averages,
-then rounded to one decimal. `starters` are sorted by name.
+least one of the team's last `last_n` games, plus each player with a stored game
+for the team who missed all of them inside his open team window (`recent.played:
+0`, his counts the player view's). Such a player is left out only when the
+season's Athlete Catalog says he left: its `team_id` names another team, or its
+`roster_status` is `inactive` or `historical` (off every NBA roster) or
+`tombstone` (cut from the team's roster). A missing
+catalog row or a `null` `team_id` is unknown, and he stays. Players whose window
+closed before the team's last `last_n` games drop out.
+They are sorted by `abs(minutes_change)` descending, then by name, with a `null`
+`minutes_change` last. `minutes_change` is `recent.minutes -
+season_summary.minutes` (both per game played) computed from the unrounded
+averages, then rounded to one decimal; `null` when either side has no game
+played. `starters` are sorted by name.
+
+`game_logs=true` (crf04/statsplus#504) adds `game_logs` to every entry of
+`players`, so one call reads the whole team's minutes and box scores game by
+game. It lists his game in each of the team's last `last_n` games (the
+top-level `games`) inside his team window, newest first:
+
+```json
+"game_logs": [
+  {"game_date": "2026-04-12", "matchup": "DET @ CHA", "started": true, "minutes": 33.1,
+   "box": {"minutes": 33.0, "PTS": 18.0, "REB": 5.0, "AST": 4.0, "3PM": 2.0, "PRA": 27.0,
+           "FGA": 15.0, "FGM": 7.0, "FG3A": 6.0, "FTM": 2.0, "FTA": 2.0, "OREB": 1.0, "DREB": 4.0,
+           "STL": 1.0, "BLK": 0.0, "TOV": 2.0, "PF": 3.0, "PLUS_MINUS": 6.0}},
+  {"game_date": "2026-04-10", "matchup": "DET vs. ORL", "started": false, "minutes": 0.0, "box": null}
+]
+```
+
+- `game_date`, `matchup` and `started` are the player view's; `minutes` is the
+  rotation's, rounded to one decimal.
+- `box` is his stored game-log row for the team, unrounded, in the keys of the
+  split's `stats` (`minutes` is the game log's whole-minute figure, `3PM` its
+  `FG3M`, `PRA` the sum of PTS, REB and AST); a column missing from the row is
+  `null`.
+- A team game he missed (no box-score line), a DNP and an inactive line are
+  each an entry with `minutes: 0.0`, `started: false` and `box: null`, never a
+  gap. `box` is also `null` when the rotation shows minutes but no game-log row
+  is stored; `minutes` above 0 tells the two apart.
+- A team game outside his team window (before his first game for the team, or
+  after he moved) has no entry, so a player who joined or left inside the
+  window has fewer entries than `games`.
+- The game logs are read once per request for every listed player, through the
+  season's publication snapshot, as for the split's `stats`.
+
+Without `game_logs=true` the team view carries no `game_logs` and reads no
+game logs; `game_logs=false` is the same answer.
+
+#### Tonight's lineup
+
+Every team view (plain, `with` and `without` splits) carries `lineup` (crf04/statsplus#492):
+the starters and inactive players NBA.com's daily lineups feed lists for the
+team's game on `date`, or by default its game today (US Eastern) or its next
+scheduled game. It reports what the feed says and projects nothing. The
+request reads only stored rows; the five-minute odds cron stores today's feed.
+`season` does not change it.
+
+```json
+"lineup": {
+  "status": "posted",
+  "game_id": "0022600216",
+  "game_date": "2026-11-10",
+  "matchup": "OKC @ POR",
+  "feed_timestamp": "2026-11-10T22:29:43-05:00",
+  "collected_at": "2026-11-11T03:30:00+00:00",
+  "starters": [
+    {"player_id": 1628983, "name": "Shai Gilgeous-Alexander", "position": "PG", "lineup_status": "Expected"}
+  ],
+  "inactive": [{"player_id": 1631096, "name": "Chet Holmgren"}]
+}
+```
+
+- `status`: `posted` when a lineup with starters is stored for the game;
+  `not_posted` when the game exists but none is stored yet (or the feed lists
+  no starters for the team); `no_game` when the team has no game on `date`
+  (or none from today on). A postponed game counts as no game.
+- `game_id`, `game_date` (US Eastern) and `matchup` (`TEAM @ HOME` or
+  `TEAM vs. AWAY`) name the game; all three are `null` for `no_game`.
+- `starters`: the feed's starters in feed order, each with `player_id` (the NBA
+  person id), `name`, `position` (`PG`, `SG`, `SF`, `PF` or `C`) and
+  `lineup_status`, the feed's own word: `Expected` before the team confirms,
+  then `Confirmed`. The list holds as many starters as the feed names, normally
+  five; it is `[]` unless `status` is `posted`. Names come from the feed, so a
+  player missing from the Athlete Catalog is still listed.
+- `inactive`: players the feed marks inactive, `{player_id, name}`, in feed order.
+- `feed_timestamp`: the newest timestamp the feed gives the team's rows, US
+  Eastern with its offset. `collected_at`: the collection run that last read
+  the team from the feed (UTC). Both are `null` when nothing is stored. A
+  lineup changed after it was confirmed replaces the stored one at the next
+  run, so the stored lineup is at most about five minutes behind the feed.
+- A lineup stored for a game that has since moved to another date is not
+  served (`not_posted` on the new date).
+- A team view that answers `404 no_rotation_data` (a team with no stored
+  rotation in the season, such as before its first game) keeps that status;
+  its `details.lineup` carries this block.
 
 Game view (crf04/statsplus#233): every box-score player of one stored game, both
 teams, with the stints the player view returns.
@@ -3616,16 +4290,29 @@ no `provenance` block (see [Response provenance](#response-provenance)).
 `without` (crf04/statsplus#239) compares a team's stored rotation games with the
 named player or players **absent** against those with them **present**, over the
 whole `season`; `last_n` is rejected because a "last 5" without sample is rarely
-a sample. A named player is *absent* in a game when his box-score line for that
-team shows 0 minutes (DNP or inactive) and *present* when it shows more than 0;
-a game where he has no line for the team (not yet on the roster) is excluded.
-*Without games* are those where every named player is absent, *with games*
+a sample. A named player's *team window* runs from his first game for the team
+in the season until his first later game for another team, open-ended if he
+never moves (crf04/statsplus#449). A team game before his first game for the
+team (any team game, when he has none) is inside it only on membership
+evidence, report evidence first (crf04/statsplus#450): inside when the game's
+stored official injury report lists him for the team (any status); outside when
+a stored report on that day or an earlier day of the season lists him for
+another team, which also ends carry-over; otherwise inside when his last game of
+the previous season was for the team and he has played for no other team before
+that game. When any read that evidence needs fails, the window opens at his
+first game for the team. Inside it he is *absent* in a game when he
+has no box-score line for the team (inactive) or a 0-minute line (DNP), and
+*present* when his line shows more than 0; a game outside his window is
+excluded. *Without games* are those where every named player is absent, *with games*
 those where every one is present; a mixed game is excluded. A subject's line is
 his box-score line for the team, a DNP counts as 0 minutes, and a game where he
 has no line for the team is excluded from his split.
 
 Names resolve against players with a box-score line for the team in the season
-(case, punctuation and diacritics ignored). An unknown name is `400
+(case, punctuation and diacritics ignored); a name with no line resolves through
+the season's Athlete Catalog, read only for such a name, when that evidence puts
+one of the team's games in his window, as for an injured player who has not
+played (crf04/statsplus#450). An unreadable catalog leaves the name unresolved, as with no evidence. An unknown name is `400
 invalid_input` with `details.parameter: "without"`; an ambiguous one adds
 `details.candidates` (`name`, `team`); naming the `player_name` subject is a
 `400` too. `without` with `game_id` or `last_n` is a `400` whose
@@ -3633,7 +4320,8 @@ invalid_input` with `details.parameter: "without"`; an ambiguous one adds
 
 Each side has `games`, `played`, `starts`, `minutes` (per game, DNPs as 0,
 rounded half-up to 0.1 from exact centiseconds; `null` for a side with no
-games) and `closed`. `minutes_change` is without minus with per-game minutes
+games), `minutes_per_game_played` (the same minutes over `played` games only;
+`null` when he played none, crf04/statsplus#485) and `closed`. `minutes_change` is without minus with per-game minutes
 from exact values, rounded once (`null` when a side has no games). A split with
 fewer than 3 without games is returned with `insufficient: true`.
 
@@ -3641,7 +4329,9 @@ Each side also carries `stats` (crf04/statsplus#252): the subject's box-score
 averages over the side's games in which he has a stored game-log row for the
 team, matched on NBA `game_id`. The logs are read through the season's
 publication snapshot (the reads `GET /api/games/game_logs` uses), once per
-request for every subject of the response. The game set is unchanged.
+request for every subject of the response, scoped to the response's `season`,
+so a season after the Published Season (2026-27 while 2025-26 is published)
+has its stats too (crf04/statsplus#484). The game set is unchanged.
 
 - `played`: side games with a game-log row for him. A DNP has none, so it is
   left out of `stats` while the rotation `minutes` beside it still counts it as 0.
@@ -3656,7 +4346,7 @@ request for every subject of the response. The game set is unchanged.
   but no game-log row exists. They are excluded from the averages.
 - `stats` is `null` for a side where he has no game-log row in any game.
 
-`game_logs=true` (only with `without`; `true` or `false`, anything else is a
+`game_logs=true` (with `without` or `with`, or on the plain team view; `true` or `false`, anything else is a
 `400` naming `game_logs`) adds `game_logs` to each side, beside `stats`: the
 side's games, newest first, each with `game_date`, `started`, `minutes` (the
 rotation's, a DNP as 0) and `box`, the game-log row in the same keys as
@@ -3723,6 +4413,66 @@ under 3 (a player traded in can have fewer without games than the team). Every
                           "stats": {"played": 2, "minutes": 12.0, "PTS": 4.5, "REB": 3.0, "AST": 0.5,
                                     "3PM": 0.0, "PRA": 8.0, "FGA": 3.5, "missing_logs": 0}},
                  "minutes_change": 8.4, "insufficient": false}]
+  }
+}
+```
+
+#### Rotation with a player
+
+`with` (crf04/statsplus#499) reads the same team games, windows and name
+resolution as `without`, from the other side. A named player *played* a game
+inside his team window when his line shows more than 0 and *missed* it
+otherwise (no line, or a 0-minute line).
+
+- `with` alone: the *asked* games are those every `with` player played, the
+  *other* games those every one of them missed. A game where they disagree is
+  *mixed* and on neither side. `with=X` is `without=X` with the sides swapped.
+- `with` and `without` together: the asked games are those every `with` player
+  played and every `without` player missed; every other game inside every
+  named player's window is an other game, so `games_mixed` is 0.
+
+A game outside any named player's window is on neither side and not counted. A
+`with` player who has not played for the team resolves on membership evidence
+as a `without` player does, and leaves the asked side empty. Name errors are the
+`without` errors with `details.parameter: "with"`; `with` with `game_id` or
+`last_n` is a `400` whose `details.parameter` is `"with"`. A player named in
+both `with` and `without` (case, punctuation and diacritics ignored) is a `400`
+whose `details.parameters` is `["with", "without"]`. A request with `with`
+answers `split` in place of `without`; a request with `without` alone answers
+the `without` document above, unchanged.
+
+`split` has `with` and `without` (the resolved names in request order, `[]` for
+a list not given), `games_asked`, `games_other` and `games_mixed` (stored team
+games), and the sides `asked` and `other`, each exactly a `without` side (counts,
+`minutes_per_game_played`, `stats`, `game_logs` on request).
+`minutes_change` is asked minus other per-game minutes, from exact values
+(`null` when a side has no games). `insufficient` is true when the asked side
+has fewer than 3 games: the subject's own asked games in the player view, the
+team's `games_asked` at the top of the team view and each player's own in
+`players`. The player view lists the asked games in `games`, newest first. The
+team view's `starters` are the players who started an asked game (`starts_asked`,
+`starts_other`, by `starts_asked` high to low, then name) and `players` every
+player with a line in an asked game; named players are in neither list.
+
+```json
+{
+  "season": "2025-26",
+  "team": "DET",
+  "split": {
+    "with": ["Jalen Duren"],
+    "without": ["Cade Cunningham"],
+    "games_asked": 2,
+    "games_other": 4,
+    "games_mixed": 0,
+    "insufficient": true,
+    "starters": [{"name": "Ausar Thompson", "starts_asked": 2, "starts_other": 2},
+                 {"name": "Isaiah Stewart", "starts_asked": 1, "starts_other": 2}],
+    "players": [{"name": "Ausar Thompson",
+                 "asked": {"games": 2, "played": 2, "starts": 2, "minutes": 22.0,
+                           "minutes_per_game_played": 22.0, "closed": 0, "stats": null},
+                 "other": {"games": 4, "played": 3, "starts": 2, "minutes": 21.0,
+                           "minutes_per_game_played": 28.0, "closed": 2, "stats": null},
+                 "minutes_change": 1.0, "insufficient": true}]
   }
 }
 ```
@@ -4038,6 +4788,72 @@ which carries no publication tables -- serves nothing, which the route
 reports as `404 resource_not_found`.  A stale publication still serves its
 last-good values.
 
+### Get Defense Ranks
+
+```http
+GET /api/teams/defense-ranks
+```
+
+Every team's Season row of the Matchups Defense Sheet for one base
+(crf04/statsplus#473): the league view the CourtAI MCP reads to answer "who
+allows the most X".  Authentication is optional.
+
+Query parameters:
+
+- `base`: `play_types`, `shot_zones`, `shot_types`, `assist_locations`,
+  `traditional`, or `rebound_types`.  Required.
+- `metric`: optional.  A row's `metric` (every slice's row of it, such as
+  `FGM`) or its full `row` reference (that one row).
+- `season`: optional Evidence season, selected and refused exactly as on
+  `GET /api/teams/stats`.  The body has no `season_context`: `season` names
+  the season the base was served from, which is the previous one while the
+  base trails.
+
+```json
+{
+  "season": "2026-27",
+  "base": "shot_zones",
+  "window": "season",
+  "status": "ok",
+  "reason": null,
+  "as_of": "2026-11-08",
+  "provenance": {"generation": [{"stream_key": "exact_shot_zones_opponent_season", "...": "..."}], "sources": {}},
+  "rows": [
+    {
+      "row": "sheet:shot_zones:Restricted Area:FGM",
+      "slice": "Restricted Area",
+      "metric": "FGM",
+      "label": "Restricted Area FGM",
+      "unit": "per48",
+      "league_average": 14.2,
+      "teams": [{"tricode": "ATL", "value": 18.7, "rank": 30, "vs_league": 0.3169}]
+    }
+  ]
+}
+```
+
+Each row is the Defense Sheet row of the same reference in
+`GET /api/games/matchup`, built from the same Season publication: `row` is
+the `sheet:<base>:<row key>` a game-log Team Filter accepts (Rebound Types
+rows are not Team Filters), `label` is the Sheet's label, `value` is its
+`allowed_per_48`, `rank` its rank (1-30, 30 allows the most, ties share the
+lower rank), and `vs_league` its `percent_vs_league_average` as a fraction.
+Every row is per 48, so `unit` is `per48`.  `slice` is null for rows with no
+slice part: Traditional, Assist Locations and Rebound Types.  Rows keep the
+Sheet's order, and `teams` lists the league most-allowed first.  The Sheet
+omits the threes inside 10 ft, and so does this route.  `as_of` is the
+Eastern date (`YYYY-MM-DD`) the publication covers through, null when
+unavailable.  `provenance` is the Matchup's `provenance` block for the one
+Season stream read: its `generation` entry (the stream's publication,
+`coverage_cutoff`, freshness and reason, `unavailable` when it could not
+serve) and empty `sources`.
+
+An unknown or missing `base`, or a `metric` that names no row of the base,
+is `400 invalid_input` naming the parameter.  A base whose Season league is
+unpublished, unproven or partial is `200` with `status: "unavailable"`, a
+`reason` (such as `missing` or `league_incomplete`), and no rows, never a
+partial league.
+
 ## Data Management Endpoints
 
 These endpoints require an authenticated Firebase token with an admin claim.
@@ -4053,7 +4869,10 @@ claim.  Before replacing any live table, the handler renews that claim as a
 fencing check inside the same database transaction as the table swap.  A
 stale attempt is rejected and cannot overwrite the newer attempt, although
 provider calls already in flight when a lease expires are not cancellable by
-this mechanism.
+this mechanism.  A job is claimed at most three times: when the third attempt's
+lease also expires, the next claim marks the job `failed` with the
+`failure_summary` "The data refresh stopped responding 3 times and was not
+retried.", and a new request for that operation is accepted.
 
 The deployment-owned `scripts/nightly_refresh.py --hosted-only` command is not
 an HTTP endpoint. It runs two independent steps, retrying each failed step once,
@@ -4736,8 +5555,12 @@ POST /api/admin/collection/publication-rebuilds/<family>/rollback
 `GET /api/admin/collection/reconciliation` lists open items with `item_id`,
 `season`, `kind`, `reason`, and `status`; diagnostics' `reconciliation` rows
 have the same shape. Only a `ledger_fallback_evidence` item adds `details`
-(`game_id` and the comma-separated `missing_families`); other kinds keep their
-details private.
+(`game_id` and the comma-separated `missing_families`), and a
+`ledger_box_score_difference` item adds `details` with `game_id`, `player_id`,
+`player_name`, `stat`, `ledger_value` (the provider's count), `box_score_value`
+(NBA's official box score), `applied` (`true` when the box score's value is the
+published one; `false` for REB, OREB and DREB, whose provider count stays
+published) and `last_seen`; other kinds keep their details private.
 
 `POST /api/admin/collection/publication-rebuilds` starts one durable
 publication-format rebuild. The body names the publication `family`, an
@@ -5081,7 +5904,6 @@ Most user endpoints require Firebase auth:
 GET /api/user/profile
 PUT /api/user/profile
 GET /api/user/stats
-POST /api/user/deactivate
 GET /api/user/admin/stats
 POST /api/user/sync
 ```
@@ -6849,7 +7671,7 @@ on exactly the metric the Matchup showed:
 | --- | --- |
 | `play_types` | `PRBallHandler:PTS`, `Isolation:POSS`, `PRBallHandler:TOV`, `Isolation:FTT` (each play type with `PTS`, `POSS`, `TOV` and `FTT`; a Season Publication composed before #416 has no `TOV` or `FTT` rows, and a filter on one then ranks no opponent) |
 | `shot_zones` | `Restricted Area:FGM`, `Mid-Range:FGA`, `Corner 3:FGM` (each governed zone with `FGM` and `FGA`) |
-| `shot_types` | `Catch and Shoot:FG3M`, `Pullups:FG2A`, `Less Than 10 ft:FG2M` (each shot type with `FG2M`, `FG2A`, `FG3M`, `FG3A`, plus the derived `PTS`, e.g. `Catch and Shoot:PTS`, which ranks `2 x FG2M + 3 x FG3M`, the same order as the Sheet row and as the `C&S PTS` filter) |
+| `shot_types` | `Catch and Shoot:FG3M`, `Pullups:FG2A`, `Less Than 10 ft:FG2M` (each shot type with `FG2M`, `FG2A`, `FG3M`, `FG3A`, plus the derived `PTS`, e.g. `Catch and Shoot:PTS`, which ranks `2 x FG2M + 3 x FG3M`, the same order as the Sheet row and as the `C&S PTS` filter, and the derived `FGM` and `FGA`, e.g. `Pullups:FGA`, which rank `FG2M + FG3M` and `FG2A + FG3A`) |
 | `assist_locations` | `Assists`, `Arc3Assists`, `Corner3Assists`, `AtRimAssists`, `ShortMidRangeAssists`, `LongMidRangeAssists` |
 | `traditional` | `OPP_PTS`, `OPP_REB`, `OPP_AST`, `OPP_FGM`, `OPP_FGA`, `OPP_FG3M`, `OPP_FG3A`, `OPP_FTM`, `OPP_FTA`, `OPP_TOV`, `OPP_STL`, `OPP_BLK` (each ranks the per-48 allowed the Sheet row shows) |
 
@@ -6963,7 +7785,7 @@ points and attempts. Each entry has
 `team_filter` (a named Team Filter, a `sheet:<base>:<row key>` reference such as
 `sheet:play_types:Isolation:PTS`, or null), `unit` (`count`, `percent`, or
 `league_ratio`), `family`, and `markets`. Entries that tell the same story share a
-`family`: `points`, `rebounds` (with Putback points), `assists`, `2pt-assists`,
+`family`: `points`, `defensive-rating` (Defensive Rating, crf04/statsplus#433), `rebounds` (with Putback points), `assists`, `2pt-assists`,
 `3pt-assists`, `steals-blocks`, `turnovers`, `free-throws`, `field-goals`,
 `threes`, `inside` (Restricted Area, In The Paint (Non-RA) and Inside 10 ft rows),
 `zone:<zone>`, `shot-type:<stored slice>`, or `play-type:<key>`. `markets` lists

@@ -2696,6 +2696,63 @@ def _add_ledger_offensive_possessions(connection: Connection) -> None:
         )
 
 
+def _add_lineup_segment_makes(connection: Connection) -> None:
+    """Add nullable ``fgm`` and ``ftm`` to ``lineup_segment_players`` (crf04/statsplus#500).
+
+    NULL means "collected before the makes were counted": the migration
+    invents no value, a split holding such a row serves no makes, and
+    ``scripts/lineup_segment_backfill.py --makes`` fills each stored game.  A
+    nullable column with no default is a catalog-only change in PostgreSQL,
+    so the table is not rewritten.  Rerun-safe: a database created from the
+    current model already has them.
+    """
+
+    inspector = inspect(connection)
+    if not inspector.has_table("lineup_segment_players"):
+        return
+    present = {column["name"] for column in inspector.get_columns("lineup_segment_players")}
+    for name in ("fgm", "ftm"):
+        if name not in present:
+            connection.execute(text(f"ALTER TABLE lineup_segment_players ADD COLUMN {name} SMALLINT"))
+
+
+def _create_game_context_tables(connection: Connection) -> None:
+    """Create the stored per-game team context tables (crf04/statsplus#466).
+
+    Repeatable: ``checkfirst`` skips an existing table and never touches its
+    rows.  The parent is created before the table that references it.  Nothing
+    is backfilled: ``scripts/game_context_refresh.py`` fills a season, and
+    until then the Matchup reports its ``game_context`` unavailable.
+    """
+    from app.models.game_context import GameContext, GameContextTeam
+
+    for model in (GameContext, GameContextTeam):
+        model.__table__.create(connection, checkfirst=True)
+
+
+def _create_game_lines_table(connection: Connection) -> None:
+    """Create the stored per-game ESPN line table (crf04/statsplus#493).
+
+    Repeatable: ``checkfirst`` skips an existing table and never touches its
+    rows.  Nothing is backfilled: ``scripts/collect_odds.py`` stores each line
+    from the next run, and until then a game's ``game_line`` is unavailable.
+    """
+    from app.models.game_lines import GameLine
+
+    GameLine.__table__.create(connection, checkfirst=True)
+
+
+def _create_team_lineup_table(connection: Connection) -> None:
+    """Create the stored daily lineups table (crf04/statsplus#492).
+
+    Repeatable: ``checkfirst`` skips an existing table and never touches its
+    rows.  Nothing is backfilled: the odds cron's next run stores today's feed.
+    """
+    from app.models.team_lineup import TeamLineup
+
+    TeamLineup.__table__.create(connection, checkfirst=True)
+
+
 #: The CHECK constraints that enumerate the player Diet bases.
 _PLAYER_DIET_BASE_CONSTRAINTS: Final[frozenset[str]] = frozenset(
     {
@@ -3560,6 +3617,10 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(83, "083_usage_report_published", _admit_report_published_usage_event),
     Migration(84, "084_lineup_segments", _create_lineup_segment_tables),
     Migration(85, "085_ledger_offensive_possessions", _add_ledger_offensive_possessions),
+    Migration(86, "086_game_contexts", _create_game_context_tables),
+    Migration(87, "087_game_lines", _create_game_lines_table),
+    Migration(88, "088_team_lineups", _create_team_lineup_table),
+    Migration(89, "089_lineup_segment_makes", _add_lineup_segment_makes),
 )
 
 

@@ -300,8 +300,12 @@ def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path)
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
-    assert upgraded.current_version == 85
+    assert upgraded.current_version == 89
     assert repeated.applied == ()
     inspector = inspect(engine)
     poll_columns = {column["name"]: column for column in inspector.get_columns("projection_provider_polls")}
@@ -642,6 +646,10 @@ def test_v40_snapshot_replay_keeps_its_historical_poll_identity_after_upgrade(
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
     assert replay == first
     assert repeated_migration.applied == ()
@@ -758,6 +766,10 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -773,6 +785,10 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             "lineup_segment_games",
             "lineup_segment_players",
             "lineup_segment_seasons",
+            "game_contexts",
+            "game_context_teams",
+            "game_lines",
+            "team_lineups",
             "closing_lines",
             "closing_line_purchases",
             "closing_line_spend",
@@ -1034,6 +1050,10 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
     with engine.connect() as connection:
         rows = {
@@ -1291,6 +1311,10 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
             (83, "083_usage_report_published"),
             (84, "084_lineup_segments"),
             (85, "085_ledger_offensive_possessions"),
+            (86, "086_game_contexts"),
+            (87, "087_game_lines"),
+            (88, "088_team_lineups"),
+            (89, "089_lineup_segment_makes"),
         ]
 
 
@@ -1388,6 +1412,10 @@ def test_governed_catalog_freshness_migration_backfills_complete_publications(tm
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
     with engine.connect() as connection:
         freshness = connection.execute(
@@ -1510,6 +1538,10 @@ def test_player_log_projection_migration_backfills_immutable_publications(tmp_pa
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
     with engine.connect() as connection:
         projected = connection.execute(
@@ -1622,6 +1654,10 @@ def test_old_036_correction_columns_backfill_legacy_lineage_before_coalescing(tm
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
     with engine.connect() as connection:
         row = connection.execute(
@@ -1687,7 +1723,7 @@ def test_repair_migration_recreates_ledger_tables_when_024_is_recorded(tmp_path)
     repaired = run_migrations(engine)
 
     assert repaired.applied == ("031_repair_canonical_game_ledger_tables",)
-    assert repaired.current_version == 85
+    assert repaired.current_version == 89
     assert all(inspect(engine).has_table(table) for table in ledger_tables)
 
 
@@ -1774,8 +1810,12 @@ def test_ledger_raw_row_evidence_migration_preserves_pre_032_games_as_unarchived
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
-    assert upgraded.current_version == 85
+    assert upgraded.current_version == 89
     assert inspect(engine).has_table("canonical_game_ledger_raw_rows")
     with engine.connect() as connection:
         raw_checksum = connection.execute(
@@ -1898,8 +1938,12 @@ def test_ledger_observation_evidence_migration_backfills_existing_accepted_games
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
-    assert upgraded.current_version == 85
+    assert upgraded.current_version == 89
     with engine.connect() as connection:
         references = connection.execute(
             text(
@@ -2020,6 +2064,10 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -2120,8 +2168,12 @@ def test_collector_release_status_migration_upgrades_database_stopped_at_022(tmp
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
-    assert upgraded.current_version == 85
+    assert upgraded.current_version == 89
     columns = {column["name"] for column in inspect(engine).get_columns("collector_identities")}
     assert {"release_version", "release_checksum"} <= columns
 
@@ -2257,6 +2309,10 @@ def test_parity_binding_migration_retires_unbound_legacy_evidence(tmp_path):
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
 
 
@@ -2305,7 +2361,7 @@ def test_publication_activation_030_rebuild_preserves_sqlite_fk_enforcement(tmp_
 
     result = run_migrations(engine)
 
-    assert result.current_version == 85
+    assert result.current_version == 89
     with engine.connect() as connection:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
         assert connection.execute(text("PRAGMA foreign_key_check")).fetchall() == []
@@ -2388,6 +2444,10 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
             "lineup_segment_games",
             "lineup_segment_players",
             "lineup_segment_seasons",
+            "game_contexts",
+            "game_context_teams",
+            "game_lines",
+            "team_lineups",
             "closing_lines",
             "closing_line_purchases",
             "closing_line_spend",
@@ -2688,6 +2748,10 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -2794,10 +2858,14 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
-    assert upgraded.current_version == 85
+    assert upgraded.current_version == 89
     assert repeated.applied == ()
-    assert repeated.current_version == 85
+    assert repeated.current_version == 89
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -2909,6 +2977,10 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0
@@ -3015,8 +3087,12 @@ def test_provider_provenance_migration_adds_columns_without_backfilling_rows(tmp
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
-    assert upgraded.current_version == 85
+    assert upgraded.current_version == 89
 
     for table_name in (
         "team_matchup_facts",
@@ -3114,13 +3190,17 @@ def test_migrations_repair_former_provider_version_040_history_idempotently(tmp_
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
     assert repeated.applied == ()
     with engine.connect() as connection:
         history = connection.execute(
             text("SELECT version, name FROM schema_migrations ORDER BY version")
         ).all()
-    assert history[-40:] == [
+    assert history[-44:] == [
         (46, "046_projection_observation_prices"),
         (47, "047_create_saved_filter_sets"),
         (48, "048_drop_legacy_ranking_tables"),
@@ -3161,6 +3241,10 @@ def test_migrations_repair_former_provider_version_040_history_idempotently(tmp_
         (83, "083_usage_report_published"),
         (84, "084_lineup_segments"),
         (85, "085_ledger_offensive_possessions"),
+        (86, "086_game_contexts"),
+        (87, "087_game_lines"),
+        (88, "088_team_lineups"),
+        (89, "089_lineup_segment_makes"),
     ]
     assert inspect(engine).has_table("projection_provider_snapshots")
 
@@ -3170,7 +3254,7 @@ def test_projection_collection_migration_omits_derived_next_poll_state(tmp_path)
 
     result = run_migrations(engine)
 
-    assert result.current_version == 85
+    assert result.current_version == 89
     inspector = inspect(engine)
     columns = {column["name"] for column in inspector.get_columns("projection_collection_provider_states")}
     indexes = {index["name"] for index in inspector.get_indexes("projection_collection_provider_states")}
@@ -3297,8 +3381,12 @@ def test_projection_price_migration_is_additive_and_idempotent(tmp_path):
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
-    assert applied.current_version == 85
+    assert applied.current_version == 89
     assert repeated.applied == ()
     with engine.connect() as connection:
         row = (
@@ -3387,6 +3475,10 @@ def test_saved_filter_set_migration_upgrades_a_database_stopped_at_046(tmp_path)
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
     assert repeated.applied == ()
     inspector = inspect(engine)
@@ -3503,6 +3595,10 @@ def test_legacy_ranking_drop_migration_removes_the_six_tables(tmp_path):
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
     inspector = inspect(engine)
     for table in _DROPPED_LEGACY_RANKING_TABLES:
@@ -3582,6 +3678,10 @@ def test_targets_migration_upgrades_a_database_stopped_at_049(tmp_path):
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
     assert repeated.applied == ()
 
@@ -3683,6 +3783,10 @@ def test_publication_rebuild_migration_upgrades_a_database_stopped_at_048(tmp_pa
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
     assert repeated.applied == ()
     inspector = inspect(engine)
@@ -3807,8 +3911,12 @@ def test_shooting_detail_migration_upgrades_production_054_preserving_targets(tm
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
-    assert upgraded.current_version == 85
+    assert upgraded.current_version == 89
     assert run_migrations(engine).applied == ()
     assert "shooting_detail" in {
         column["name"] for column in inspect(engine).get_columns("player_diet_facts")
@@ -3894,6 +4002,10 @@ def test_pointer_history_migration_seeds_each_active_pointer_and_is_idempotent(t
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
 
     query = text(
@@ -4026,6 +4138,10 @@ def test_pointer_history_retirement_migration_reclassifies_once_and_never_resurr
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
 
     query = text(
@@ -4302,6 +4418,10 @@ def test_parity_artifact_migration_preserves_legacy_adjudication_and_reruns(tmp_
         "083_usage_report_published",
         "084_lineup_segments",
         "085_ledger_offensive_possessions",
+        "086_game_contexts",
+        "087_game_lines",
+        "088_team_lineups",
+        "089_lineup_segment_makes",
     )
     assert run_migrations(engine).applied == ()
     with engine.begin() as connection:
@@ -4375,7 +4495,7 @@ def _database_as_deployed_at_068(tmp_path):
     """A 068 database with the ledger and Diet tables in their pre-069 shape."""
 
     engine = create_engine(f"sqlite:///{tmp_path / 'at-068.sqlite3'}")
-    assert run_migrations(engine).current_version == 85
+    assert run_migrations(engine).current_version == 89
     with engine.begin() as connection:
         for table in (
             "canonical_game_ledger_team_facts",
@@ -4439,7 +4559,7 @@ def test_migrations_069_and_070_upgrade_a_deployed_database_without_inventing_co
         "069_ledger_rebound_types",
         "070_player_diet_rebound_types_base",
     )
-    assert upgraded.current_version == 85
+    assert upgraded.current_version == 89
     assert run_migrations(engine).applied == ()
     with engine.begin() as connection:
         # The stored fact keeps NULL: "not derived yet", never a zero-fill.

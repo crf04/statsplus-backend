@@ -1,0 +1,71 @@
+{
+ "meta": {
+  "version": 1,
+  "code": 200,
+  "request": "https://api.nba.com/statscapture/games/0022600168/playbyplay?Format=json"
+ },
+ "game": {
+  "gameId": "0022600168",
+  "actions": [
+   {
+    "actionNumber": 544,
+    "clock": "PT00M00.00S",
+    "timeActual": "2026-11-03T03:25:06.151Z",
+    "period": 3,
+    "periodType": "REGULAR",
+    "teamId": 1610612762,
+    "teamTricode": "UTA",
+    "actionType": "heave",
+    "subType": "jumpshot",
+    "descriptor": "pullup",
+    "qualifiers": [
+     "heave"
+    ],
+    "personId": 1643408,
+    "x": null,
+    "y": null,
+    "possession": 1610612762,
+    "side": null,
+    "shotDistance": 44.067,
+    "edited": "2026-11-03T03:25:23.238Z",
+    "isTargetScoreLastPeriod": false,
+    "orderNumber": 315113302,
+    "scoreHome": "94",
+    "scoreAway": "69",
+    "xLegacy": null,
+    "yLegacy": null,
+    "isFieldGoal": 0,
+    "description": "UTA Heave",
+    "playerName": "Peterson",
+    "playerNameI": "D. Peterson",
+    "personIdsFilter": [
+     1643408
+    ]
+   },
+   {
+    "actionNumber": 734,
+    "clock": "PT00M00.00S",
+    "timeActual": "2026-11-03T04:03:26.861Z",
+    "period": 4,
+    "periodType": "REGULAR",
+    "teamId": null,
+    "actionType": "game",
+    "subType": "end",
+    "qualifiers": [],
+    "x": null,
+    "y": null,
+    "possession": 0,
+    "side": null,
+    "edited": "2026-11-03T04:03:36.565Z",
+    "isTargetScoreLastPeriod": false,
+    "orderNumber": 430148800,
+    "scoreHome": "119",
+    "scoreAway": "97",
+    "xLegacy": null,
+    "yLegacy": null,
+    "isFieldGoal": 0,
+    "description": "Game End"
+   }
+  ]
+ }
+}

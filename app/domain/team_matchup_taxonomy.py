@@ -91,16 +91,23 @@ NBA_PUBLICATION_METRIC_KEYS = {
     ),
     DEFENSIVE_RATING_BASE: (DEFENSIVE_RATING_METRIC,),
 }
-#: Shot types also carry a derived ``PTS`` Sheet row: points allowed,
-#: ``2*FG2M + 3*FG3M``.  It is computed at read time from the published
-#: FG2M and FG3M metrics and is never part of a publication payload.
-SHOT_TYPE_POINTS_STAT = "PTS"
+#: Shot types also carry derived Sheet rows, each a linear combination of
+#: one slice's published stats: points allowed (``2*FG2M + 3*FG3M``) and
+#: overall makes and attempts (crf04/statsplus#454).  They are computed at
+#: read time and are never part of a publication payload.
+SHOT_TYPE_DERIVED_STATS: dict[str, tuple[tuple[str, float], ...]] = {
+    "PTS": (("FG2M", 2.0), ("FG3M", 3.0)),
+    "FGM": (("FG2M", 1.0), ("FG3M", 1.0)),
+    "FGA": (("FG2A", 1.0), ("FG3A", 1.0)),
+}
 
 
-def shot_type_points_terms(slice_key: str) -> tuple[tuple[str, float], ...]:
-    """The published metrics (with coefficients) that make one slice's points."""
+def shot_type_derived_terms(slice_key: str, stat_key: str) -> tuple[tuple[str, float], ...]:
+    """The published metrics (with coefficients) behind one slice's derived stat."""
 
-    return ((f"{slice_key}_FG2M", 2.0), (f"{slice_key}_FG3M", 3.0))
+    return tuple(
+        (f"{slice_key}_{stat}", coefficient) for stat, coefficient in SHOT_TYPE_DERIVED_STATS[stat_key]
+    )
 
 
 NBA_PUBLICATION_TAXONOMY = {base: frozenset(keys) for base, keys in NBA_PUBLICATION_METRIC_KEYS.items()}
@@ -228,6 +235,30 @@ def defense_sheet_row_key(base: str, slice_key: str, stat_key: str) -> str:
     return display_slice if display_slice == stat_key else f"{display_slice}:{stat_key}"
 
 
+def defense_sheet_row_label(base: str, slice_key: str, stat_key: str) -> str:
+    """The ``defense_sheet[<base>][].label`` of one Sheet row."""
+
+    display_slice = defense_sheet_display_slice(base, slice_key)
+    label = display_slice.replace("_", " ").replace("-", " ")
+    return label if display_slice == stat_key else f"{label} {stat_key}"
+
+
+def defense_sheet_sort_key(identity: tuple[str, str, str]) -> tuple[int, str, str]:
+    """Order ``(base, slice_key, stat_key)`` Sheet rows as the Matchup lists them."""
+
+    base, slice_key, stat_key = identity
+    return DEFENSE_SHEET_BASES.index(base), slice_key, stat_key
+
+
+# No three is taken inside 10 ft, so these rows hold only stray mis-tags (a
+# 2026-27 league average of 0.006 3PA per 48) that rank teams -100% or +2900%.
+# The Defense Sheet omits them; the scores still read them, where his own
+# threes there weigh nothing (crf04/statsplus#437).
+IMPOSSIBLE_DEFENSE_SHEET_IDENTITIES = frozenset(
+    ("shot_types", "less_than_10_ft", stat_key) for stat_key in ("FG3A", "FG3M")
+)
+
+
 #: The Sheet bases a Team Filter may name.  Rebound Types is shown on the
 #: Matchup Defense Sheet only: ranking game logs by it directly is a separate
 #: decision (crf04/statsplus#234, out of scope), so a ``sheet:rebound_types:*``
@@ -246,16 +277,19 @@ DEFENSE_SHEET_ROW_METRICS: dict[str, dict[str, str]] = {
     for base in TEAM_FILTER_SHEET_BASES
 }
 for _slice_key in SHOT_TYPE_SLICES:
-    DEFENSE_SHEET_ROW_METRICS["shot_types"][
-        defense_sheet_row_key("shot_types", _slice_key, SHOT_TYPE_POINTS_STAT)
-    ] = f"{_slice_key}_{SHOT_TYPE_POINTS_STAT}"
+    for _stat_key in SHOT_TYPE_DERIVED_STATS:
+        DEFENSE_SHEET_ROW_METRICS["shot_types"][
+            defense_sheet_row_key("shot_types", _slice_key, _stat_key)
+        ] = f"{_slice_key}_{_stat_key}"
 
 
 def derived_metric_terms(base: str, metric_key: str) -> tuple[tuple[str, float], ...] | None:
     """The published terms behind a derived Sheet metric, else ``None``."""
 
-    if base == "shot_types" and metric_key.endswith(f"_{SHOT_TYPE_POINTS_STAT}"):
-        return shot_type_points_terms(metric_key[: -len(SHOT_TYPE_POINTS_STAT) - 1])
+    if base == "shot_types":
+        slice_key, _, stat_key = metric_key.rpartition("_")
+        if stat_key in SHOT_TYPE_DERIVED_STATS:
+            return shot_type_derived_terms(slice_key, stat_key)
     return None
 
 
@@ -297,6 +331,7 @@ __all__ = [
     "DEFENSE_SHEET_ROW_METRICS",
     "DEFENSIVE_RATING_BASE",
     "DEFENSIVE_RATING_METRIC",
+    "IMPOSSIBLE_DEFENSE_SHEET_IDENTITIES",
     "LEDGER_DEFENSE_SHEET_METRICS",
     "LEDGER_OWNED_MATCHUP_STREAM_KEYS",
     "LEDGER_OWNED_MATCHUP_STREAM_PREFIX",
@@ -315,8 +350,8 @@ __all__ = [
     "PLAY_TYPES",
     "PLAY_TYPE_OPTIONAL_STATS",
     "PLAY_TYPE_STATS",
+    "SHOT_TYPE_DERIVED_STATS",
     "SHOT_TYPE_DISPLAY_TO_STORED",
-    "SHOT_TYPE_POINTS_STAT",
     "SHOT_TYPE_SLICES",
     "SHOT_TYPE_STATS",
     "SHOT_TYPE_STORED_TO_DISPLAY",
@@ -329,9 +364,11 @@ __all__ = [
     "defense_sheet_filter",
     "defense_sheet_identities",
     "defense_sheet_row_key",
+    "defense_sheet_row_label",
+    "defense_sheet_sort_key",
     "derived_metric_terms",
     "matchup_stream_key",
     "nba_publication_taxonomies",
     "publication_metric_identity",
-    "shot_type_points_terms",
+    "shot_type_derived_terms",
 ]

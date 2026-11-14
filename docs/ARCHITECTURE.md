@@ -163,7 +163,9 @@ existing `american_price`/`decimal_price` fields, which are unchanged:
   payout the leg takes part in, which depends on the entry's leg count)
 
 An adapter states the triple only when the provider prices a selection outside
-its payload — PrizePicks' entry payout table, declared in the registry. Every
+its payload — PrizePicks' entry payout table, declared in the registry, and
+Dabble's 2-pick 3x entry (`multiplier`, `entry`) on every line that is not
+near-even, or `unpriced` for a one-sided or unpriced pair (crf04/statsplus#435). Every
 other case is derived once, at the shared normalization seam, from the fields
 the adapter already retained: an American price, then a decimal price, then a
 single payout-multiplier modifier priced at entry scope, and otherwise
@@ -559,7 +561,11 @@ market without both joins cannot affect a slate count. Pool membership is the
 union by canonical player ID, with deterministic Market Categories and
 per-provider provenance retained on each internal `PoolPlayer`.
 
-The Player Pool never synthesizes players. It persists the governed canonical
+The Player Pool never synthesizes players. A scheduled Matchup lists
+Rotation Players beside it (crf04/statsplus#459): players with no line who
+played 10 or more minutes for their team in one of its last 5 games, read from
+the stored game logs and the active Athlete Catalog. They never enter the
+pool, its counts, or anything targetable. The pool persists the governed canonical
 pool result for each season and exact Slate game set in the application
 database; raw provider labels and identities do not enter this store. A
 snapshot at most 15 minutes old is reused with its original provider
@@ -1230,9 +1236,10 @@ through that same derivation.
 `teams_against[]` filters rank the 30 opponents from the durable window-aware
 team matchup publications, always at the Season window
 (`app.services.team_filter_rankings`).  One map names, per Team Filter, the
-publication base and the per-48 metric keys it ranks:
+publication base and the metric keys it ranks:
 `traditional_opponent_season` covers the opponent box set (`OPP_STOCKS` sums
-the published blocks and steals), `grouped_shot_types_opponent_season` covers
+the published blocks and steals; `DRTG` divides 100 × points allowed by the
+published `possessions`), `grouped_shot_types_opponent_season` covers
 the catch-and-shoot, pull-up, and under-10-feet filters (their points columns
 are derived as `3 * FG3M + 2 * FG2M` from the made-shot counts),
 `synergy_play_types_opponent_season` ranks points per possession,
@@ -1317,7 +1324,27 @@ nothing, which resolves to an empty opponent set rather than a new error case.
 lineup-stint filters. For every named player, the same game-log source supplies
 season rows. `players_on[]` intersects `(game_id, team)` pairs across the
 primary player and every named teammate; `players_off[]` removes the union of
-same-team pairs where any named teammate has a row. A player appearing for the
+same-team pairs where any named teammate has a row, and keeps only games inside
+each named teammate's team window, from his first game for the team in the
+season until his first later game for another team (crf04/statsplus#449). A
+team game before his first game for the team is in the window only on
+membership evidence, report evidence first (crf04/statsplus#450): the game's
+stored official injury report (`injury_snapshots`) listing him for the team puts
+it in; a stored report on that day or earlier in the season listing him for
+another team keeps it out and ends carry-over; otherwise his last
+previous-season game being for the team, with no game for another team since,
+puts it in. `app/services/team_membership.py` reads that evidence for game logs,
+rotations and Injury Scenarios alike, only when a named player has a judged team
+game before his first game for the team (or has none), and once per request
+(per season in Injury Scenarios) for all named players: the season's snapshots
+that list them in one statement, matched in SQL on the stored
+`"canonical_player_id":<id>` member (about 82 of a season's 1,230 rows for a
+player out all season), and their previous-season logs in one batch. The
+evidence is optional: every read it takes, a name's identity and the Athlete
+Catalog lookup for a `without` name with no box-score line included, goes
+through one fallback, so when any of them fails the window opens at his first
+game for the team. A
+player appearing for the
 opponent in the same game is therefore never treated as the primary player's
 teammate. Every named player's rows come from an active durable publication;
 unavailable coverage produces no matching games.
@@ -1990,9 +2017,57 @@ without either family keeps one `ledger_fallback_evidence` Reconciliation Item
 (reason `evidence_incomplete`) per season and game, whose details name the game
 and the families it still lacks; each later acceptance updates that list, and
 the first acceptance with both families, from LiveData or a PBP replacement,
-resolves the item. These details are the only ones the admin reconciliation
-route and collection diagnostics show, so the streams held at
-`*_evidence_incomplete` point at the game.
+resolves the item. These details, and a box-score difference's below, are the
+only ones the admin reconciliation route and collection diagnostics show, so
+the streams held at `*_evidence_incomplete` point at the game.
+From 2026-27 every acceptance, including each daily and weekly recheck, also
+fetches NBA's official box score (`boxscoretraditionalv3` on `stats.nba.com`,
+through `NBATrackingProvider`): one request per game with a 10 s timeout, never
+retried (the next run is the retry), starting at least 0.6 s after the previous
+one without waiting for it to finish. Each player's PTS, REB, OREB, DREB, AST,
+STL, BLK, TOV, FGM, FGA, FG3M, FG3A, FTM, FTA and PF are compared with the
+provider's row (crf04/statsplus-backend#763: PBP Stats and LiveData credit
+Darryn Peterson with 6 assists on 2026-11-02, NBA's box score with 5). A
+correction never makes a Base unavailable. Every differing count except
+rebounds takes the box score's value before normalization, the side's
+`team_results` total moves by the same amount, and the row keeps the
+provider's count of each wire it rewrote under `LedgerProvider<wire>`
+(`LEDGER_PROVIDER_COUNT_KEYS`). Game logs, Traditional and per-36 carry the
+official counts. A corrected AST keeps the provider's assist locations, which
+describe the provider's count: `located_player_facts` reads each corrected
+player-game at `LedgerProviderAssists` wherever the locations are proven
+against the assists (`governed_assist_locations`, the assist-location windows
+and the assist-location Diet), so those windows compose as before and that
+player's Diet shares still add up to 1. The opponent AST total in the
+assist-location window is the official one. REB, OREB and DREB differences are
+recorded and not applied: each team's six miss-type slices must add up to the
+player-credited `OPP_REB` of the traditional publication, in
+`materialize_rebound_type_window` and again at activation
+(`rebound_types_identity.check_identity`), and that gate compares two
+publications that cannot say which games were corrected, so a corrected total
+beside the provider's split would make the Rebound Types Base unavailable.
+Each difference keeps one `ledger_box_score_difference` Reconciliation Item
+(reason `box_score_mismatch`) per game, player and stat, with both values,
+`applied` and `last_seen`; a later acceptance on which the two agree resolves
+it. `scripts/ledger_box_score_differences.py` lists the open items; the run
+summary reports `box_score_differences` (found by this run) and
+`open_box_score_differences` (open in the season, the items the command lists).
+The fields a correction writes are the ledger's, so a replacement that adds or
+drops them raises no `schema_drift` alert. When the box-score check gives no
+whole reference, nothing is applied or resolved and the game is listed in
+`unreconciled_game_ids`: when the request fails or times out, when the run has
+spent its 120 s box-score budget or the request's pacing wait plus its timeout
+would end less than 5 s before the manifest's `collect_before`, or when the
+document is not a whole reference. The document is checked whole before
+anything is applied or resolved, every count of both teams' players whether or
+not it is applied: a missing team, a negative or non-integer count, makes above
+attempts, points that disagree with the makes, or REB other than OREB plus DREB
+rejects it, and so does a player of the game it leaves out, a player it credits
+who is not in the game, or counts that miss the final score. A first acceptance then stores the provider's game, as without the
+check. A recheck of a stored game that carries corrections leaves it as it is,
+so a published count never flips back to the provider's because one check
+failed; the game is rechecked inside the daily and weekly windows like any
+other.
 Repair is operator-invoked and bounded per run by `--max-games` and the
 provider retry cap; there is no persisted per-game attempt budget, so a game
 PBP keeps refusing is re-attempted on each run. Every target also fetches its
@@ -2452,8 +2527,10 @@ only the scores that read the missing row, which name
 `team_defense:traditional`. When the other window supplies such a row identity,
 its league/team value is null only in the legacy window even though
 traditional availability remains available; OPP_TOV/OPP_STL/OPP_BLK rows and
-defensive scores remain populated. Those nine rows are the sole row-level
-exception: every other metric identity divergence marks the affected
+defensive scores remain populated. Those nine rows are the sole traditional
+row-level exception (the other is the `play_types` `TOV`/`FTT` rows; see
+Season defensive play-type facts below): every other metric identity
+divergence marks the affected
 Base/window `unavailable/legacy_surface_incomplete` and nulls all of its rows.
 Normalization therefore validates the cross-window traditional identity union
 plus the three required defensive columns, excluding those nine for that
@@ -2945,7 +3022,10 @@ claim through a conditional update on the *same* `engine.begin()` connection.
 That update and all table swaps commit atomically; a stale attempt therefore
 fails before changing a live table and cannot overwrite a newer attempt. This
 protects publication and durable job state, but it cannot cancel provider work
-that was already in flight before a lease expired.
+that was already in flight before a lease expired. A job is claimed at most
+three times (`MAX_REFRESH_ATTEMPTS`): the claim after a third expired lease
+marks it `failed` in the same conditional update, so a handler that kills its
+worker cannot be reclaimed forever.
 
 The `DataService` refresh callables first collect every provider frame in
 memory (failures stop the job before any write), then hand the whole related
@@ -4933,6 +5013,12 @@ beat (every 5 min, its own Railway cron service: scripts/collect_odds.py)
   → roster-scoped AthleteResolver (provider "oddsapi", ids "name:<folded>")
   → one transaction: odds_api_polls + sportsbook_prop_quotes (history, only on
     change, plus every closing snapshot) + sportsbook_prop_latest
+  → then, whatever the beat's outcome (an exception included), each in its own
+    guard (thread start included) and each abandoned after SIDE_STEP_SECONDS
+    (30 s) on a daemon thread, whose database work then ends within 5 s:
+    ESPN game lines (crf04/statsplus#493), then NBA.com daily lineups
+    (crf04/statsplus#492). One failing or hanging never skips the other or
+    changes the exit code; together they add at most about a minute to a run.
 Matchup read (only when ODDS_API_ENABLED): MatchupService._book_lines →
   SportsbookQuoteReader (savepoint)
 Board read (only when ODDS_API_ENABLED): SlateBoardService →
@@ -5159,10 +5245,10 @@ line, so a peak month projects from the first game days as credits per game x
 games.
 
 **Unverified until a live call** (no key existed; fixtures follow the vendor
-documentation): that `prizepicks` returns the five standard markets with Over
+documentation): that `prizepicks` returns the eight standard markets with Over
 and Under outcomes at one `point`; what `price` it states (documented only as
-"default odds"); that a populated response costs 5; how early lines are
-posted. `python scripts/odds_api_spike.py dfs` (two paid calls, at most 10
+"default odds"); that a populated response costs 8; how early lines are
+posted. `python scripts/odds_api_spike.py dfs` (two paid calls, at most 16
 credits) prints these, and `tests/live/test_odds_api_live.py` asserts the
 contract.
 
@@ -5611,7 +5697,13 @@ season. Lifecycle audits are
 append-only and include token issue/use, rotation/revocation, and rejected
 same-ID/different-checksum observations. Maintenance emits deterministic
 first-failure, stale-threshold, six-hour attention, and recovery alerts while
-suppressing false failure/stale alerts when work is queued or running.
+suppressing false failure/stale alerts when work is queued or running. A cycle
+owes a publishing stream until the stream's publication for the cycle's season
+reaches the cycle's cutoff, so a later cutoff's publication settles it. After a
+season cutover that is the season's retained publication; another season's
+publication never settles it. Only a collecting
+cycle moves to `attention`, through `finish_cycle` under a row lock; a failed or
+complete cycle keeps its status, and a superseded one is left alone.
 
 Publication versions retain normalized references to exact accepted
 Observation IDs in `publication_observations`. Garbage collection follows
@@ -5689,7 +5781,10 @@ team ever has other than five players on court. Times are integer centiseconds.
 `RotationCollectionService` selects completed, non-postponed regular-season
 Event Catalog games with no stored rotation and, per game, fetches, derives and
 stores (`rotation_games`, `rotation_player_games`, `rotation_stints`, migration
-066, plus `rotation_attempts`). One game's failure never blocks another:
+066, plus `rotation_attempts`), and each game's lineup segments (migration
+084), which serve on/off splits for covered seasons; a game whose segments are
+refused keeps its rotation and is reported as `segments_rejected`. One game's
+failure never blocks another:
 `rejected` games (documents read, rotation untrustworthy), `failed` games (not
 fetched) and `given_up` games (3 rejections) are reported in the run summary.
 Attempted games queue behind never-tried ones, so none can starve newer games. `RotationRepository.replace_game` deletes and rewrites one game in
@@ -5698,6 +5793,85 @@ runs nightly after `scripts/ledger_refresh.py` in the `ledger-refresh` Railway
 service and is also the season backfill. `RotationService` serves
 `GET /api/games/rotation`, computing every average and comparison from the
 stored centiseconds.
+
+### Daily lineups from NBA.com (crf04/statsplus#492)
+
+NBA.com's daily lineups feed is one static document per US Eastern day
+(`stats.nba.com/js/data/leaders/00_daily_lineups_YYYYMMDD.json`, sent with
+`nba_api`'s `STATS_HEADERS`; a day not published yet redirects to `/error/`).
+`app/providers/nba_daily_lineups.py` fetches and parses it: a starter is a row
+whose `position` is set, and its `lineupStatus` (`Expected`, then `Confirmed`)
+is the lineup's state; until confirmation each starter is also listed as a
+bench row, which the parser drops. `timestamp` is Eastern wall time.
+
+`collect_team_lineups` (`app/services/team_lineups.py`) reads today's
+document and, in one transaction (one DELETE, one INSERT), replaces the
+`team_lineups` row (migration 088, `app/models/team_lineup.py`) of every team it lists, keyed by game and
+team, with the document's Eastern date. A rerun leaves the same rows. One
+request, no retry (the next run is the retry): it runs on a daemon thread
+that is abandoned after ten seconds however slowly the server answers
+(five-second socket reads inside), and on
+Postgres the transaction sets a five-second `lock_timeout` and
+`statement_timeout` (`bound_postgres_transaction`, shared with the game-lines
+step), so a locked table fails the step instead of holding the odds beat. It never raises; an unpublished day, a failed request, a malformed document or a
+database error is reported in its result and changes no row.
+`scripts/collect_odds.py` runs it after every odds beat and after the game
+lines step, each in its own guard and each bounded at 30 s (the `*/5 * * * *`
+odds cron, whatever `ODDS_API_ENABLED` says), so a lineup confirmed about 30
+minutes before tip is stored within about five minutes. Staging runs no
+collectors, so staging stores no lineups.
+
+`TeamLineupRepository.read` serves the rotation team view's `lineup`: the
+team's first non-postponed Event Catalog game on the asked Eastern day (or from
+today on), and its stored row only when the row's date is that game's Eastern
+date, so a moved game is not served an old lineup. The request never fetches
+the feed.
+
+### Stored game context (crf04/statsplus#466)
+
+`game_contexts` heads one Event Catalog game and `game_context_teams` holds one
+row per team in it (migration 086, `app/models/game_context.py`): rest before
+the game, Season and Last 10 pace and offensive, defensive and net ratings with
+their game counts, and the last five results. `GameContextRepository.refresh`
+(`app/services/game_context.py`) recomputes every eligible game of a season
+(not Preseason, All-Star or postponed) from the Canonical Game Ledger's final
+games strictly before the game's Eastern date and the Event Catalog's schedule,
+in one transaction. It writes only the games whose values changed, keeps
+`computed_at` on the rest, and deletes the rows of a game that left the
+schedule, so a rerun reports every game `unchanged`. It calls no provider.
+`scripts/game_context_refresh.py` runs it nightly in the `ledger-refresh`
+service after the ledger and rotation steps, and by hand for an earlier season.
+`MatchupService` reads the two rows per game as `game_context`, on the
+request's own connection, and computes nothing.
+
+### Stored game lines (crf04/statsplus#493)
+
+`game_lines` (migration 087, `app/models/game_lines.py`) holds one row per Event
+Catalog game: the home team's spread, the total, the sportsbook ESPN names, the
+ESPN event id and `read_at`. `game_lines.collect` (`app/services/game_lines.py`)
+reads ESPN's scoreboard
+(`site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=`) once
+for the current Eastern date, with a 5 s connect and 10 s read timeout and a
+15 s deadline on the whole read (the request runs on a daemon thread the step
+stops waiting for), and takes `competitions[0].odds[0]` of every game whose
+state is `pre`. A line is stored only when both `spread` and `overUnder` are
+finite numbers, the total is positive, and `details` ("NY -15.5", or
+"EVEN"/"PK" with a zero spread) does not contradict the spread. ESPN's
+abbreviations are mapped to NBA tricodes (NY, GS, SA, NO, UTAH, WSH, PHO) and
+each line is matched to the single non-postponed Event Catalog game on the same
+Eastern date between the same two teams, either way round; anything else is
+reported `unmatched`. A matched row is inserted or rewritten with the new
+`read_at` in one upsert that keeps a stored row read at the same time or later
+(counted `stale`), so overlapping runs that finish out of order never move a
+line back; a started game, or one ESPN shows no line for, is not written, so it
+keeps its last pre-tip line. On Postgres its transaction sets a five-second
+`lock_timeout` and `statement_timeout` (`bound_postgres_transaction`), so a
+locked table fails the step and no abandoned transaction outlives its run by
+more than five seconds. `scripts/collect_odds.py` runs it after every odds
+beat in the `odds-collector` cron (every five minutes); a failure prints
+`game_lines failed: ...` and never changes the exit code. The Matchup reads the
+row as `game_context.game_line` and never calls ESPN; the favourite and implied
+totals are computed from the stored spread and total on read.
 
 ### Player tracking (crf04/statsplus#349)
 

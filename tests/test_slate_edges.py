@@ -58,6 +58,7 @@ def _player(
     components=None,
     missing=(),
     slices=(("Transition", 0.3), ("Isolation", 0.2), ("Spotup", 0.1)),
+    source="player_pool",
 ):
     window = {
         "components": components if components is not None else {},
@@ -69,6 +70,7 @@ def _player(
         "name": name,
         "team_id": team,
         "tricode": tricode,
+        "player_source": source,
         "season_scoring": scoring,
         "diet_shares": {"play_types": [_slice(k, s) for k, s in slices]},
         "scores": {"PTS": {"season": window}},
@@ -291,6 +293,21 @@ def test_picks_need_twelve_points_a_game():
     assert edges["spotlight"]["best"]["canonical_id"] == 2
 
 
+def test_a_rotation_player_is_an_effect_and_a_leader_but_never_a_pick():
+    """A pick should be playable, so it keeps to players with a line (statsplus#459)."""
+
+    players = [
+        _blend_player(1, "No Line", 0.4, source="rotation"),
+        _blend_player(2, "Posted", 0.1),
+    ]
+
+    edges = _edges([_game()], {"G1": _matchup(players, {HOME: HOME_DEFENSE, AWAY: AWAY_DEFENSE})})
+
+    assert [effect["canonical_id"] for effect in edges["games"][0]["effects"]] == [1, 2]
+    assert [leader["canonical_id"] for leader in edges["games"][0]["leaders"]] == [1, 2]
+    assert edges["spotlight"]["best"]["canonical_id"] == 2
+
+
 def test_best_and_toughest_are_the_slate_wide_extremes():
     g1 = _matchup(
         [_blend_player(1, "A", 0.05), _blend_player(2, "B", -0.03)],
@@ -439,7 +456,7 @@ def test_a_game_that_cannot_be_read_has_no_effects_scores_or_pick_and_the_rest_s
         {"BAD": ProviderUnavailableError("Stored matchup team facts are incomplete."), "GOOD": good},
     )
 
-    assert edges["games"][0] == {"game_id": "BAD", "effects": [], "scores": []}
+    assert edges["games"][0] == {"game_id": "BAD", "effects": [], "leaders": [], "scores": []}
     assert [effect["canonical_id"] for effect in edges["games"][1]["effects"]] == [7]
     assert edges["spotlight"]["best"]["game_id"] == "GOOD"
 
@@ -454,8 +471,250 @@ def test_a_stored_read_database_failure_is_an_unreadable_game_too():
         {"BAD": OperationalError("select 1", {}, Exception("connection lost")), "GOOD": good},
     )
 
-    assert edges["games"][0] == {"game_id": "BAD", "effects": [], "scores": []}
+    assert edges["games"][0] == {"game_id": "BAD", "effects": [], "leaders": [], "scores": []}
     assert [e["canonical_id"] for e in edges["games"][1]["effects"]] == [7]
+
+
+def _windows(**markets):
+    """A ``scores`` map of season windows: each market a Blend cell, or a
+    window dict as given."""
+
+    return {
+        market: {
+            "season": window
+            if "blend" in window
+            else {"blend": window, "components": {}, "missing_inputs": []}
+        }
+        for market, window in markets.items()
+    }
+
+
+#: Enough of every floored stat to clear its leader volume floor.
+VOLUME = {"FG3A": 5.0, "FG2A": 8.0, "AST": 4.0, "REB": 6.0}
+
+
+def _leader_player(cid, name, scoring=20.0, per_game=VOLUME, **markets):
+    player = _player(cid, name, scoring=scoring)
+    player["scores"] = _windows(**markets)
+    player["season_per_game"] = per_game
+    return player
+
+
+def _leader(cid, name, market, value, scoring=20.0, thin=False):
+    return {
+        "canonical_id": cid,
+        "name": name,
+        "tricode": "AWY",
+        "season_scoring": scoring,
+        "market": market,
+        "value": value,
+        "thin": thin,
+    }
+
+
+def test_leaders_take_each_players_largest_cell_across_the_four_markets():
+    players = [
+        _leader_player(
+            1, "Shooter", PTS=_cell(0.03), REB=_cell(-0.05), AST=_cell(0.02), **{"3PM": _cell(-0.18)}
+        ),
+        _leader_player(2, "Glass", PTS=_cell(0.01), REB=_cell(0.12, True), AST=_cell(-0.04)),
+        _leader_player(3, "Passer", AST=_cell(-0.09)),
+        _leader_player(4, "Scorer", PTS=_cell(0.07), **{"3PM": _cell(-0.02)}),
+    ]
+
+    game = _edges([_game()], {"G1": _matchup(players)})["games"][0]
+
+    assert game["leaders"] == [
+        _leader(1, "Shooter", "3PM", -0.18),
+        _leader(2, "Glass", "REB", 0.12, thin=True),
+        _leader(3, "Passer", "AST", -0.09),
+        _leader(4, "Scorer", "PTS", 0.07),
+    ]
+    # The PTS effects are unchanged by the other markets.
+    assert [(e["canonical_id"], e["value"]) for e in game["effects"]] == [(4, 0.07), (1, 0.03), (2, 0.01)]
+
+
+EXCLUDED = {
+    "STL": _cell(0.5),
+    "BLK": _cell(-0.6),
+    "STKS": _cell(0.55),
+    "TOV": _cell(-0.45),
+    "FTA": _cell(0.4),
+    "FTM": _cell(-0.35),
+}
+
+
+def test_leaders_ignore_team_rate_markets_even_when_larger():
+    players = [_leader_player(1, "Defender", REB=_cell(0.04), **EXCLUDED)]
+
+    game = _edges([_game()], {"G1": _matchup(players)})["games"][0]
+
+    assert game["leaders"] == [_leader(1, "Defender", "REB", 0.04)]
+
+
+def test_a_combo_or_shot_volume_market_can_lead():
+    players = [
+        _leader_player(1, "Combo", PTS=_cell(0.05), REB=_cell(0.04), AST=_cell(0.03), PRA=_cell(0.11)),
+        _leader_player(2, "Volume", PTS=_cell(-0.02), **{"3PM": _cell(-0.08), "FG3A": _cell(-0.13)}),
+        _leader_player(3, "Twos", FGA=_cell(0.06), FG2M=_cell(0.07), FG2A=_cell(0.07)),
+    ]
+
+    game = _edges([_game()], {"G1": _matchup(players)})["games"][0]
+
+    assert game["leaders"] == [
+        _leader(2, "Volume", "FG3A", -0.13),
+        _leader(1, "Combo", "PRA", 0.11),
+        # FG2A and FG2M tie: FG2A comes first in market order.
+        _leader(3, "Twos", "FG2A", 0.07),
+    ]
+
+
+@pytest.mark.parametrize(
+    "market", ["PTS", "REB", "AST", "3PM", "PRA", "PR", "PA", "RA", "FGA", "FGM", "FG2A", "FG2M", "FG3A"]
+)
+def test_each_player_level_market_leads_when_it_is_the_largest_cell(market):
+    others = {name: _cell(0.02) for name in ("PTS", "REB", "AST") if name != market}
+    players = [_leader_player(1, "Solo", **others, **{market: _cell(-0.09)})]
+
+    game = _edges([_game()], {"G1": _matchup(players)})["games"][0]
+
+    assert game["leaders"] == [_leader(1, "Solo", market, -0.09)]
+
+
+def test_a_player_with_only_team_rate_markets_is_no_leader():
+    players = [_leader_player(1, "Defender", **EXCLUDED)]
+
+    assert _edges([_game()], {"G1": _matchup(players)})["games"][0]["leaders"] == []
+
+
+def test_leaders_need_eight_points_a_game():
+    players = [
+        _leader_player(1, "Exactly Eight", scoring=8.0, AST=_cell(0.03)),
+        _leader_player(2, "Just Under", scoring=7.9, REB=_cell(0.5)),
+        _leader_player(3, "Unknown Scoring", scoring=None, REB=_cell(0.4)),
+    ]
+
+    game = _edges([_game()], {"G1": _matchup(players)})["games"][0]
+
+    assert game["leaders"] == [_leader(1, "Exactly Eight", "AST", 0.03, scoring=8.0)]
+
+
+def test_a_market_leads_only_when_he_clears_its_volume_floor():
+    """A near-zero base makes a huge percentage: Poeltl's 3PM read +1282%
+    (crf04/statsplus#514)."""
+
+    players = [
+        _leader_player(
+            1,
+            "Center",
+            per_game={**VOLUME, "FG3A": 1.99},
+            FG2M=_cell(0.2),
+            **{"3PM": _cell(12.82), "FG3A": _cell(9.0)},
+        ),
+        _leader_player(
+            2,
+            "Shooter",
+            per_game={**VOLUME, "FG2A": 2.99},
+            FG2A=_cell(12.82),
+            FG2M=_cell(9.0),
+            **{"3PM": _cell(0.19)},
+        ),
+        _leader_player(3, "Finisher", per_game={**VOLUME, "AST": 1.99}, PTS=_cell(0.04), AST=_cell(0.5)),
+        _leader_player(4, "Wing", per_game={**VOLUME, "REB": 2.99}, PTS=_cell(-0.03), REB=_cell(0.5)),
+        _leader_player(5, "Exactly", per_game={"FG3A": 2.0}, PTS=_cell(0.04), **{"3PM": _cell(0.3)}),
+    ]
+
+    game = _edges([_game()], {"G1": _matchup(players)})["games"][0]
+
+    assert game["leaders"] == [
+        _leader(5, "Exactly", "3PM", 0.3),
+        # Each falls back to his largest market that clears its floor.
+        _leader(1, "Center", "FG2M", 0.2),
+        _leader(2, "Shooter", "3PM", 0.19),
+        _leader(3, "Finisher", "PTS", 0.04),
+        _leader(4, "Wing", "PTS", -0.03),
+    ]
+
+
+def test_without_a_season_rate_only_unfloored_markets_lead():
+    players = [
+        _leader_player(1, "Unknown", per_game={}, REB=_cell(0.5), AST=_cell(0.5), PRA=_cell(0.06)),
+        _leader_player(2, "Absent", per_game=None, **{"3PM": _cell(0.5)}, FGA=_cell(-0.02)),
+    ]
+
+    game = _edges([_game()], {"G1": _matchup(players)})["games"][0]
+
+    assert game["leaders"] == [_leader(1, "Unknown", "PRA", 0.06), _leader(2, "Absent", "FGA", -0.02)]
+
+
+def test_leaders_are_capped_at_five_by_absolute_value():
+    players = [
+        _leader_player(cid, f"P{cid}", REB=_cell(value))
+        for cid, value in ((1, 0.01), (2, -0.07), (3, 0.03), (4, 0.06), (5, -0.02), (6, 0.05), (7, 0.04))
+    ]
+
+    game = _edges([_game()], {"G1": _matchup(players)})["games"][0]
+
+    assert game["leaders"] == [
+        _leader(2, "P2", "REB", -0.07),
+        _leader(4, "P4", "REB", 0.06),
+        _leader(6, "P6", "REB", 0.05),
+        _leader(7, "P7", "REB", 0.04),
+        _leader(3, "P3", "REB", 0.03),
+    ]
+
+
+def test_leader_ties_break_on_scoring_then_canonical_id_and_markets_on_market_order():
+    players = [
+        _leader_player(9, "Low Scorer", scoring=10.0, AST=_cell(0.05)),
+        _leader_player(8, "Late Id", scoring=25.0, **{"3PM": _cell(-0.05)}),
+        _leader_player(7, "Early Id", scoring=25.0, REB=_cell(0.05)),
+        # Equal |value| in every market: PTS comes first.
+        _leader_player(6, "Even", scoring=12.0, PTS=_cell(-0.05), REB=_cell(0.05), AST=_cell(0.05)),
+        # Equal |value| in REB and 3PM: REB comes first.
+        _leader_player(5, "Split", scoring=12.0, REB=_cell(-0.05), **{"3PM": _cell(0.05)}),
+    ]
+
+    game = _edges([_game()], {"G1": _matchup(players)})["games"][0]
+
+    assert game["leaders"] == [
+        _leader(7, "Early Id", "REB", 0.05, scoring=25.0),
+        _leader(8, "Late Id", "3PM", -0.05, scoring=25.0),
+        _leader(5, "Split", "REB", -0.05, scoring=12.0),
+        _leader(6, "Even", "PTS", -0.05, scoring=12.0),
+        _leader(9, "Low Scorer", "AST", 0.05, scoring=10.0),
+    ]
+
+
+def test_a_leader_cell_is_the_blend_else_a_lone_component_without_missing_inputs():
+    def window(blend=None, components=None, missing=()):
+        return {"blend": blend, "components": components or {}, "missing_inputs": list(missing)}
+
+    players = [
+        # The Blend, not a larger disagreeing component.
+        _leader_player(1, "Blended", AST=window(_cell(0.04), {"play_types": _cell(0.9)})),
+        # No Blend, one component, nothing missing: the component.
+        _leader_player(2, "Lone", AST=window(components={"traditional": _cell(-0.06, True)})),
+        # No Blend and a named gap: no AST cell, so the smaller REB leads.
+        _leader_player(
+            3,
+            "Withheld",
+            REB=_cell(0.01),
+            AST=window(components={"play_types": _cell(0.8)}, missing=["player_diet:assists"]),
+        ),
+        # Several components without a Blend: no AST cell.
+        _leader_player(
+            4, "Two Components", AST=window(components={"play_types": _cell(0.7), "shot_zones": _cell(0.6)})
+        ),
+    ]
+
+    game = _edges([_game()], {"G1": _matchup(players)})["games"][0]
+
+    assert game["leaders"] == [
+        _leader(2, "Lone", "AST", -0.06, thin=True),
+        _leader(1, "Blended", "AST", 0.04),
+        _leader(3, "Withheld", "REB", 0.01),
+    ]
 
 
 def test_the_blend_value_not_a_components_is_the_score():
@@ -1056,7 +1315,7 @@ def test_a_cached_response_keeps_its_trailing_families_under_the_current_schema(
     assert (cold["trailing"], warm["trailing"]) == ([DEFENSE_TRAILING], [DEFENSE_TRAILING])
     # A body cached before ``trailing`` (schema 2) or the preview cards'
     # ``players`` (schema 3) existed is never served.
-    assert [key.split(":")[2] for key in redis_client.values] == ["v7"]
+    assert [key.split(":")[2] for key in redis_client.values] == ["v11"]
 
 
 def test_the_edges_and_their_matchups_write_what_the_previous_release_wrote():
@@ -1114,15 +1373,21 @@ def test_the_edges_and_their_matchups_write_what_the_previous_release_wrote():
         key: hashlib.sha256(zlib.decompress(payload)).hexdigest()
         for key, payload in redis_client.values.items()
     } == {
-        # v10 (statsplus#437): the Defense Sheets no longer carry the inside-10-ft 3PA/3PM rows.
-        "matchup:composed:v10:d167a3535a1ebe19bc9fcb178a76565b8d05bdb8ffcff4a6fb226bb010ca58bf": (
-            "eb90e3bae268ac86ca0a4c5c35e889594e03f6f98942b574cf9613f612ae794f"
+        # v12/v8 (statsplus#466): every Matchup carries its stored game_context;
+        # v13/v10 (statsplus#459): rows may be Rotation Players;
+        # v14 (statsplus#493): every Matchup's game_context carries its stored game_line.
+        # v15 (statsplus#495): every Matchup player row carries ``line_labels``.
+        # v16 (statsplus#514): every Matchup player row carries ``season_per_game``.
+        "matchup:composed:v16:c420b60e1a80d049d0a6ae510c49c8281f10fdb5aacd85ec2cc883e17b560736": (
+            "2c228f9521978f625918005d5340703971a48e894077ec4a353e5778a9bec8e4"
         ),
-        "matchup:composed:v10:ccd4c789df40d15ac49f43050c6427624cd8eba160edac330dd1caaebd16f666": (
-            "5fee7925e35cc8d4484d29a03396148c68ce048edb0d45c42663589db7576d0c"
+        "matchup:composed:v16:b42972fc428b14a8ee110461b2c5473aed2fa7bd0e06bbc73c8c4195326ef897": (
+            "f39687ebd1395873f5fb0f39952771f3dd72dbd0ea1bcbc0896235c597d41066"
         ),
-        "slate:edges:v7:6f5df36dc5f1b18940a2bffdbf5efc9545f60fdf8583a1501c9bdecfd990c967": (
-            "85542ea8a3695da15ec4c69b0a37cc79b2a6b26a62c64788446e568f105c1552"
+        # v9 (statsplus#470): each game carries ``leaders``.
+        # v11 (statsplus#514): leaders clear their market's volume floor.
+        "slate:edges:v11:991d20325b6d7f68f587f24d0435ac2c6617464515aa9fee4e3d5a60702109b7": (
+            "3b122d82fa39ffbd2cc84f8b61fc1b1a4e3779e6ff3a4e611c4e76599e2e53ec"
         ),
     }
 
@@ -1194,3 +1459,55 @@ def test_the_slate_and_every_games_matchup_count_from_one_pool_read(selected):
     assert (season, game_ids) == ("2025-26", ("G1", "G2"))
     assert seen == [("G1", connection), ("G2", connection)]
     assert (connection is not None) is selected
+
+
+def test_a_player_with_no_pts_line_enters_the_edges_on_his_pts_score():
+    """statsplus#457: a market without a line in CourtAI's data is still
+    scored, so a player posted only in REB carries the same PTS edge as one
+    posted in PTS."""
+
+    from types import SimpleNamespace
+
+    import tests.services.test_matchup_service as doubles
+    from app.services.matchup_injuries import unavailable_injury_result
+    from app.services.player_game_log_repository import PlayerGameLogRepository
+    from app.services.statistic_catalog import StatisticCatalog
+    from tests.test_matchup_reuse import _real_snapshot
+
+    def edges(markets):
+        composer = doubles._service(
+            pool=doubles._posted_pool(markets), statistic_catalog=StatisticCatalog.load_default()
+        )
+        repo = SimpleNamespace(_publication_reader=object())
+        composer.player_logs.get_read_freshness = (
+            lambda season, publication_snapshot: PlayerGameLogRepository.get_read_freshness(
+                repo, season, publication_snapshot=publication_snapshot
+            )
+        )
+        games = [composer._game(doubles._event())]
+
+        class Slate:
+            def get_slate(self, requested_date=None):
+                return {"slate_date": requested_date, "games": games}
+
+        class Publications:
+            def snapshot(self, stream_keys, *, season, **_):
+                return _real_snapshot(age=0)
+
+        class Injuries:
+            def get_injuries(self, *, event, season, pool_players):
+                return unavailable_injury_result("disabled")
+
+        (game,) = SlateEdgesService(
+            slates=Slate(),
+            matchups=composer,
+            publication_reader=Publications(),
+            injuries=Injuries(),
+            settings=composer.settings,
+        ).get_edges("2026-01-15")["games"]
+        return game
+
+    unposted, posted = edges(("REB",)), edges(("PTS",))
+
+    assert unposted["scores"] == [{"canonical_id": 2544, "value": -0.011875}]
+    assert unposted == posted

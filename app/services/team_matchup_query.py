@@ -17,11 +17,11 @@ from sqlalchemy.engine import Connection
 from app.domain.rebound_types import REBOUND_TYPES_BASE
 from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_WINDOWS,
-    SHOT_TYPE_POINTS_STAT,
+    SHOT_TYPE_DERIVED_STATS,
     SHOT_TYPE_SLICES,
     defense_sheet_identities,
     matchup_stream_key,
-    shot_type_points_terms,
+    shot_type_derived_terms,
 )
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.services.database_first_activation import (
@@ -168,8 +168,8 @@ def combined_league_column(table, terms) -> LeagueMetricColumn:
     )
 
 
-def shot_type_points_columns(table) -> tuple[tuple[str, str, LeagueMetricColumn], ...]:
-    """The derived ``PTS`` column (``2*FG2M + 3*FG3M``) of every shot type.
+def shot_type_derived_columns(table) -> tuple[tuple[str, str, LeagueMetricColumn], ...]:
+    """The derived ``PTS``, ``FGM`` and ``FGA`` columns of every shot type.
 
     Derived at read time from the league table, never published, so the
     Opposing Team Profile's "C&S points" and the Matchup's ``:PTS`` row rank
@@ -178,9 +178,10 @@ def shot_type_points_columns(table) -> tuple[tuple[str, str, LeagueMetricColumn]
 
     columns = []
     for slice_key in SHOT_TYPE_SLICES:
-        terms = shot_type_points_terms(slice_key)
-        if all(metric_key in table for metric_key, _coefficient in terms):
-            columns.append((slice_key, SHOT_TYPE_POINTS_STAT, combined_league_column(table, terms)))
+        for stat_key in SHOT_TYPE_DERIVED_STATS:
+            terms = shot_type_derived_terms(slice_key, stat_key)
+            if all(metric_key in table for metric_key, _coefficient in terms):
+                columns.append((slice_key, stat_key, combined_league_column(table, terms)))
     return tuple(columns)
 
 
@@ -196,6 +197,24 @@ def publication_league_table(rows) -> dict[str, LeagueMetricColumn]:
         metric_key: league_metric_column({row.team_id: row.per48[metric_key] for row in rows})
         for metric_key in rows[0].per48
     }
+
+
+def defense_sheet_columns(base: str, table) -> tuple[tuple[str, str, LeagueMetricColumn], ...]:
+    """One base's Defense Sheet columns, ``(slice_key, stat_key, column)``.
+
+    The league table covers every published key; the Sheet projects the
+    curated identities the matchup response contracts for, plus the shot
+    types' derived rows.
+    """
+
+    columns = tuple(
+        (slice_key, stat_key, table[metric_key])
+        for slice_key, stat_key, metric_key in defense_sheet_identities(base)
+        if metric_key in table
+    )
+    if base == "shot_types":
+        columns += shot_type_derived_columns(table)
+    return columns
 
 
 @dataclass(frozen=True, slots=True)
@@ -760,17 +779,7 @@ class TeamMatchupQueryService:
         # grouped shot/zone/Synergy publications project exactly the keys the
         # immutable payload supplied (never a legacy surface), and the
         # ledger-owned bases their curated rows.
-        identities = defense_sheet_identities(base)
-        # The league table covers every published key; this surface projects
-        # the curated identities the matchup response contracts for.
-        table = publication_league_table(rows)
-        columns = tuple(
-            (slice_key, stat_key, table[metric_key])
-            for slice_key, stat_key, metric_key in identities
-            if metric_key in table
-        )
-        if base == "shot_types":
-            columns += shot_type_points_columns(table)
+        columns = defense_sheet_columns(base, publication_league_table(rows))
         league_metrics = [
             LeagueMatchupMetric(
                 base=base,
@@ -995,7 +1004,7 @@ class TeamMatchupQueryService:
                 for (base, slice_key, stat_key), team_values in grouped.items()
                 if base == "shot_types"
             }
-            for slice_key, stat_key, column in shot_type_points_columns(legacy_table):
+            for slice_key, stat_key, column in shot_type_derived_columns(legacy_table):
                 league_metrics.append(
                     LeagueMatchupMetric(
                         "shot_types", slice_key, stat_key, column.average, column.sigma, column.team_count
@@ -1074,4 +1083,5 @@ __all__ = [
     "TeamMatchupMetric",
     "TeamMatchupQueryService",
     "TeamMatchupWindow",
+    "defense_sheet_columns",
 ]

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import and_, delete, exists, insert, select, tuple_, update
+from sqlalchemy import and_, delete, exists, insert, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection, Engine
@@ -150,6 +150,54 @@ class InjurySnapshotRepository:
                 unresolved_team_entry_count=int(row["unresolved_team_entry_count"]),
             )
         return result
+
+    def get_season_mentions(
+        self, season: str, player_ids: Collection[int], *, connection: Connection | None = None
+    ) -> dict[InjurySnapshotScope, StoredInjurySnapshot]:
+        """The season's reconciled snapshots that list one of ``player_ids``, in one statement.
+
+        Matched in SQL on the stored JSON's ``"canonical_player_id":<id>``
+        member, as ``_encode_objects`` writes it, so a longer id holding the
+        same digits does not qualify.  Each snapshot keeps all its entries.
+        """
+
+        if not player_ids:
+            return {}
+        table = InjurySnapshot.__table__
+        members = [
+            f'"canonical_player_id":{int(player_id)}{end}' for player_id in player_ids for end in (",", "}")
+        ]
+        with read_connection(self.engine, connection) as connection:
+            rows = (
+                connection.execute(
+                    select(
+                        table.c.game_id,
+                        table.c.normalized_entries,
+                        table.c.retrieved_at,
+                        table.c.unresolved_team_entry_count,
+                    ).where(
+                        table.c.season == validate_canonical_season(season),
+                        or_(
+                            *(
+                                table.c.normalized_entries.contains(member, autoescape=True)
+                                for member in members
+                            )
+                        ),
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return {
+            InjurySnapshotScope(season, row["game_id"]): StoredInjurySnapshot(
+                normalized_entries=tuple(
+                    self._decode_objects(row["normalized_entries"], "normalized injuries")
+                ),
+                retrieved_at=assume_utc(row["retrieved_at"]),
+                unresolved_team_entry_count=int(row["unresolved_team_entry_count"]),
+            )
+            for row in rows
+        }
 
     def stored_scopes(self, scopes: Sequence[InjurySnapshotScope]) -> set[InjurySnapshotScope]:
         """The given scopes that already hold a snapshot, without loading it."""

@@ -373,6 +373,10 @@ class ResidentialCollector:
                 failures.append(code)
                 if error.retryable:
                     retry = True
+                    if error.status == 429:
+                        # Railway refuses the whole collector, not this item:
+                        # the rest of the pass would only repeat the refusal.
+                        break
                     continue
                 continue
             except OutboxError:

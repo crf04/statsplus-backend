@@ -719,8 +719,10 @@ after the rule holds activates.
   `weekly_recheck_days`). The same service then runs
   `scripts/rotation_refresh.py` (at most 60 games a run), which stores each
   completed regular-season game's starters and on-court stints for
-  `GET /api/games/rotation` (crf04/statsplus#223); it runs whatever the ledger
-  step's outcome, and the run fails if either step failed.
+  `GET /api/games/rotation` (crf04/statsplus#223), and then
+  `scripts/game_context_refresh.py`, which stores each scheduled game's team
+  context for the Matchup's `game_context` (crf04/statsplus#466). Each step runs
+  whatever the earlier steps' outcome, and the run fails if any step failed.
 - `tracking-refresh` (settings in `railway.tracking.json`, plus `DATABASE_URL`)
   runs `scripts/tracking_refresh.py --season 2025-26 --season 2026-27
   --max-games 80` at 10:30 and 14:30 UTC (crf04/statsplus-backend#604). It

@@ -2,14 +2,17 @@
 
 One call asks: for this team and season, how did every teammate play while
 the ``on`` players were on the floor and the ``off`` players were off it?
+With neither list it asks for each player's full season with the team.
 Players are StatsPlus player ids.  Per-36 rates are derived here from raw
 totals and minutes.
 
 A season whose lineup segments are recorded as complete (crf04/statsplus#410)
 is answered from them: one SQL aggregate, ``source: "statsplus"``, never stale,
 with no cache, throttle, quota or deadline.  ``cached_at`` is when the newest
-included game's segments were written and ``games_missing`` lists the
-team-season's games that have none.  Every other season is a PBP Stats call,
+included game's segments were written, ``games_missing`` lists the
+team-season's games that have none, and ``team_games``, ``games_included``,
+``games_through``, ``split_games`` and ``last_split_game_date`` say which games
+the split covers (crf04/statsplus-backend#761).  Every other season is a PBP Stats call,
 as below; the provider translates the ids to PBP Stats ids.
 
 PBP Stats results are cached in Redis, keyed by team, season, on-set and off-set.  An
@@ -38,6 +41,7 @@ from app.domain.nba_teams import (
     canonical_nba_team_abbreviation,
 )
 from app.errors import InvalidInputError, ProviderUnavailableError
+from app.services.lineup_segments import MAKES
 from app.services.nba_stats_adapter import validate_canonical_season
 from app.services.pbp_stats_adapter import WowyPlayerRow
 from app.utils.redis_breaker import RedisCircuitBreaker
@@ -110,7 +114,11 @@ class OnOffRequest:
 
 
 def build_request(team: Any, season: Any, on: Iterable[Any] = (), off: Iterable[Any] = ()) -> OnOffRequest:
-    """Validate raw inputs; anything unusable is ``InvalidInputError``."""
+    """Validate raw inputs; anything unusable is ``InvalidInputError``.
+
+    Naming no player at all is the team's full season: every minute of every
+    player, whatever the lineup (crf04/statsplus#460).
+    """
 
     abbreviation = canonical_nba_team_abbreviation(str(team or "").strip())
     if abbreviation not in NBA_TEAM_TRICODE_TO_ID:
@@ -134,8 +142,6 @@ def build_request(team: Any, season: Any, on: Iterable[Any] = (), off: Iterable[
             raise InvalidInputError(f"{label}[] accepts at most {limit} players.")
         sides.append(tuple(sorted(ids)))
     on_ids, off_ids = sides
-    if not on_ids and not off_ids:
-        raise InvalidInputError("Give at least one player in on[] or off[].")
     if set(on_ids) & set(off_ids):
         raise InvalidInputError("A player cannot be both on and off the floor.")
     return OnOffRequest(abbreviation, canonical_season, on_ids, off_ids)
@@ -173,6 +179,29 @@ def normalize_rows(rows: Iterable[WowyPlayerRow]) -> list[dict[str, Any]]:
     players = [_player_payload(row) for row in rows if row.minutes > 0]
     players.sort(key=lambda player: (-player["minutes"], player["player_id"]))
     return players
+
+
+def _with_segment_counts(player: Mapping[str, Any], sums: Mapping[str, Any] | None) -> dict[str, Any]:
+    """A segments-served player with two-point attempts (FGA minus 3PA) and,
+    given his ``sums`` with makes, made field goals, twos and free throws.
+
+    Not in ``_player_payload``: PBP Stats entries keep their shape, so their
+    cached copies stay current under ``ENTRY_SCHEMA``.
+    """
+
+    extra = {"fg2a": player["totals"]["fga"] - player["totals"]["fg3a"]}
+    if sums is not None:
+        extra["fgm"] = int(sums["fgm"])
+        extra["fg2m"] = extra["fgm"] - player["totals"]["fg3m"]
+        extra["ftm"] = int(sums["ftm"])
+    return {
+        **player,
+        "totals": {**player["totals"], **extra},
+        "per36": {
+            **player["per36"],
+            **{key: _per36(value, player["minutes"]) for key, value in extra.items()},
+        },
+    }
 
 
 def segment_row(sums: Mapping[str, Any]) -> WowyPlayerRow:
@@ -391,13 +420,25 @@ class OnOffService:
         )
         if split is None:
             return None
+        # Makes only when every player's sums have them: a split holding a
+        # segment collected before migration 089 reports none, never a part.
+        sums = {int(row["player_id"]): row for row in split.rows}
+        makes = all(row[key] is not None for row in split.rows for key in MAKES)
         return {
             "status": "ok",
             **self._envelope(request, source=SEGMENTS_SOURCE),
             "cached_at": None if split.written_at is None else split.written_at.astimezone(UTC).isoformat(),
             "stale": False,
-            "players": normalize_rows(segment_row(sums) for sums in split.rows),
+            "players": [
+                _with_segment_counts(player, sums[player["player_id"]] if makes else None)
+                for player in normalize_rows(segment_row(row) for row in split.rows)
+            ],
             "games_missing": list(split.games_missing),
+            "team_games": split.team_games,
+            "games_included": split.games_included,
+            "games_through": split.games_through,
+            "split_games": split.split_games,
+            "last_split_game_date": split.last_split_game_date,
         }
 
     # -- upstream --------------------------------------------------------

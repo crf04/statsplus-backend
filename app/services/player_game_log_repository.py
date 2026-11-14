@@ -1533,6 +1533,59 @@ class PlayerGameLogRepository:
             ).mappings()
             return tuple(PlayerGameLogRecord(**dict(row)) for row in rows)
 
+    def list_team_recent_rows(
+        self,
+        season: str,
+        team_id: int,
+        *,
+        before_date: date,
+        games: int,
+        publication_snapshot: Any | None = None,
+        connection: Connection | None = None,
+    ) -> tuple[PlayerGameLogRecord, ...]:
+        """A team's own rows in its ``games`` most recent games before ``before_date``, newest first.
+
+        The projection reads only those games, so the cost stays flat as the
+        season grows; every other source cuts ``list_team_rows``.
+        """
+
+        season = validate_canonical_season(season)
+        if publication_snapshot is not None:
+            read = publication_snapshot.read("player_game_logs")
+            if getattr(read, "projection_ready", False):
+                if read.publication_id is None:
+                    return ()
+                table = PublicationPlayerGameLog.__table__
+                recent = (
+                    select(table.c.game_id)
+                    .where(
+                        table.c.publication_id == read.publication_id,
+                        table.c.opponent_team_id == team_id,
+                        table.c.game_date < before_date,
+                    )
+                    .group_by(table.c.game_id, table.c.game_date)
+                    .order_by(table.c.game_date.desc(), table.c.game_id.desc())
+                    .limit(games)
+                )
+                return self._decode_projection(
+                    select(table.c.row_payload)
+                    .where(
+                        table.c.publication_id == read.publication_id,
+                        table.c.game_id.in_(recent),
+                        table.c.opponent_team_id != team_id,
+                    )
+                    .order_by(table.c.game_date.desc(), table.c.game_id.desc(), table.c.player_id),
+                    season=season,
+                    connection=connection,
+                )
+        rows = tuple(
+            row
+            for row in self.list_team_rows(season, team_id, publication_snapshot=publication_snapshot)
+            if row.game_date < before_date
+        )
+        kept = set(tuple(dict.fromkeys(row.game_id for row in rows))[:games])
+        return tuple(row for row in rows if row.game_id in kept)
+
     def list_opponent_rows(
         self,
         season: str,

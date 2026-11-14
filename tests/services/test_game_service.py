@@ -4,11 +4,15 @@ Every test here runs against a temporary SQLite database and mocked game logs
 so the suite never contacts stats.nba.com or Redis.
 """
 
+from types import SimpleNamespace
+
 import pandas as pd
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.models.game_logs import GameLogQuery
 from app.services.nl_query.parser import SelfFilter
+from tests.support.injury_reports import injury_reports, store_reports
 
 
 def run(value):
@@ -98,6 +102,9 @@ class _StubRankings:
     def rank_all(self, team_filters, season):
         self.calls.append((tuple(team_filters), season))
         return {team_filter: list(self.ranked) for team_filter in team_filters}
+
+    def season_rows_by_base(self, bases, season):
+        return {base: None for base in bases}
 
 
 @pytest.fixture
@@ -532,22 +539,24 @@ def test_players_on_keeps_only_games_both_players_appeared_in(service, game_logs
 
 
 def test_players_off_excludes_games_the_other_player_appeared_in(service, game_logs, monkeypatch):
-    teammate = game_logs[game_logs["GAME_ID"].isin(["0002", "0003"])]
+    teammate = game_logs[game_logs["GAME_ID"].isin(["0001", "0003"])]
     _stub_game_logs(service, monkeypatch, {"Teammate": teammate})
 
     result = run(service.filter_players_on_off(game_logs, [], ["Teammate"], "2025-26"))
 
-    assert result["GAME_ID"].tolist() == ["0001", "0004"]
+    assert result["GAME_ID"].tolist() == ["0002", "0004"]
 
 
-def test_players_off_does_not_exclude_an_opponents_appearance(service, game_logs, monkeypatch):
+def test_players_off_never_counts_a_game_without_a_player_who_was_never_a_teammate(
+    evidence, game_logs, monkeypatch
+):
     opponent = game_logs[game_logs["GAME_ID"] == "0002"].copy()
     opponent["TEAM_ABBREVIATION"] = "OPP"
-    _stub_game_logs(service, monkeypatch, {"Opponent": opponent})
+    _stub_game_logs(evidence.service, monkeypatch, {"Opponent": opponent})
 
-    result = run(service.filter_players_on_off(game_logs, [], ["Opponent"], "2025-26"))
+    result = run(evidence.service.filter_players_on_off(game_logs, [], ["Opponent"], "2025-26"))
 
-    assert result["GAME_ID"].tolist() == game_logs["GAME_ID"].tolist()
+    assert result["GAME_ID"].tolist() == []
 
 
 def test_common_games_requires_every_named_player(service, game_logs, monkeypatch):
@@ -570,14 +579,404 @@ def test_games_to_exclude_unions_every_named_player(service, game_logs, monkeypa
         service,
         monkeypatch,
         {
-            "A": game_logs[game_logs["GAME_ID"] == "0001"],
-            "B": game_logs[game_logs["GAME_ID"] == "0004"],
+            "A": game_logs[game_logs["GAME_ID"].isin(["0001", "0002"])],
+            "B": game_logs[game_logs["GAME_ID"].isin(["0001", "0004"])],
         },
     )
 
     excluded = run(service.get_games_to_exclude(game_logs, ["A", "B"], "2025-26"))
 
-    assert excluded == {"0001", "0004"}
+    assert excluded == {"0001", "0002", "0004"}
+
+
+def _logs(*games):
+    """Game-log rows from ``(game_id, date, team)``."""
+    return pd.DataFrame(
+        [{"GAME_ID": g, "GAME_DATE": d, "TEAM_ABBREVIATION": t, "MIN": 30} for g, d, t in games]
+    )
+
+
+def test_players_off_leaves_out_games_before_the_named_player_joined_the_team(evidence, monkeypatch):
+    # McCollum's shape (crf04/statsplus#449): three WAS games, then traded to
+    # ATL, where Johnson played two of the four.
+    mccollum = _logs(
+        ("w1", "2025-11-01", "WAS"),
+        ("w2", "2025-11-03", "WAS"),
+        ("w3", "2025-11-05", "WAS"),
+        ("a1", "2026-02-10", "ATL"),
+        ("a2", "2026-02-12", "ATL"),
+        ("a3", "2026-02-14", "ATL"),
+        ("a4", "2026-02-16", "ATL"),
+    )
+    johnson = _logs(
+        ("x1", "2025-11-02", "ATL"),
+        ("x2", "2025-11-04", "ATL"),
+        ("a1", "2026-02-10", "ATL"),
+        ("a3", "2026-02-14", "ATL"),
+    )
+    _stub_game_logs(evidence.service, monkeypatch, {"Jalen Johnson": johnson})
+
+    result = run(evidence.service.filter_players_on_off(mccollum, [], ["Jalen Johnson"], "2025-26"))
+
+    assert result["GAME_ID"].tolist() == ["a2", "a4"]
+
+
+def test_players_off_leaves_out_games_after_the_named_player_moved_to_another_team(service, monkeypatch):
+    primary = _logs(
+        ("g1", "2026-01-01", "LAL"),
+        ("g2", "2026-01-05", "LAL"),
+        ("g3", "2026-01-10", "LAL"),
+        ("g4", "2026-01-15", "LAL"),
+    )
+    traded = _logs(
+        ("g1", "2026-01-01", "LAL"),
+        ("b1", "2026-01-08", "BOS"),
+        ("b2", "2026-01-12", "BOS"),
+    )
+    _stub_game_logs(service, monkeypatch, {"Traded": traded})
+
+    result = run(service.filter_players_on_off(primary, [], ["Traded"], "2025-26"))
+
+    assert result["GAME_ID"].tolist() == ["g2"]
+
+
+def test_players_off_leaves_out_a_game_on_the_named_players_first_day_for_another_team(service, monkeypatch):
+    primary = _logs(
+        ("g1", "2026-01-01", "LAL"),
+        ("g2", "2026-01-05", "LAL"),
+        ("g3", "2026-01-08", "LAL"),
+    )
+    traded = _logs(("g1", "2026-01-01", "LAL"), ("b1", "2026-01-08", "BOS"))
+    _stub_game_logs(service, monkeypatch, {"Traded": traded})
+
+    result = run(service.filter_players_on_off(primary, [], ["Traded"], "2025-26"))
+
+    assert result["GAME_ID"].tolist() == ["g2"]
+
+
+def test_players_off_leaves_out_games_before_a_named_player_traded_in_joined(evidence, monkeypatch):
+    # He played for BOS first, then joined LAL on 01-10 and sat 01-15.
+    primary = _logs(
+        ("g1", "2026-01-01", "LAL"),
+        ("g2", "2026-01-05", "LAL"),
+        ("g3", "2026-01-10", "LAL"),
+        ("g4", "2026-01-15", "LAL"),
+    )
+    traded_in = _logs(("b1", "2025-12-30", "BOS"), ("g3", "2026-01-10", "LAL"))
+    _stub_game_logs(evidence.service, monkeypatch, {"Traded In": traded_in})
+
+    result = run(evidence.service.filter_players_on_off(primary, [], ["Traded In"], "2025-26"))
+
+    assert result["GAME_ID"].tolist() == ["g4"]
+
+
+def test_players_off_counts_games_an_inactive_teammate_missed_as_without(service, monkeypatch):
+    # Ayo without Edwards (crf04/statsplus#449): Edwards played the first two
+    # MIN games and has no row since.
+    ayo = _logs(*((f"m{n}", f"2026-10-{20 + 2 * n}", "MIN") for n in range(1, 6)))
+    edwards = ayo[ayo["GAME_ID"].isin(["m1", "m2"])]
+    _stub_game_logs(service, monkeypatch, {"Anthony Edwards": edwards})
+
+    result = run(service.filter_players_on_off(ayo, [], ["Anthony Edwards"], "2026-27"))
+
+    assert result["GAME_ID"].tolist() == ["m3", "m4", "m5"]
+
+
+HART, INGRAM, SIGNEE = 1628404, 1627742, 1630999
+_NO_GAMES = pd.DataFrame(columns=["GAME_ID", "GAME_DATE", "TEAM_ABBREVIATION", "MIN"])
+_LAC_GAMES = _logs(*((f"c{n}", f"2026-11-{n:02d}", "LAC") for n in range(1, 10)))
+
+
+def _days(frame, *game_ids):
+    """``{game_id: game day}`` for ``game_ids`` of ``frame``, or all of its games."""
+
+    return {
+        game_id: day
+        for game_id, day in zip(frame["GAME_ID"], frame["GAME_DATE"], strict=True)
+        if not game_ids or game_id in game_ids
+    }
+
+
+class _PreviousSeasonLogs:
+    """The stored game-log source; the current season's logs are stubbed by name."""
+
+    def __init__(self):
+        self.frames = {}
+
+    def get_player_logs(self, player_id, season, *, publication_snapshot=None):
+        return self.frames.get(player_id, _NO_GAMES)
+
+
+class _AnySeasonCatalog:
+    def __init__(self, names):
+        self.names = names
+
+    def get_catalog(self, season, *, active_only=False):
+        return [
+            {"player_id": player_id, "display_name": name, "is_active_for_season": True}
+            for player_id, name in self.names.items()
+        ]
+
+
+@pytest.fixture
+def evidence(game_engine, monkeypatch, tmp_path):
+    """A GameService reading stored injury reports and last season's logs as team-window evidence."""
+    from app.services import game_service as game_service_module
+
+    monkeypatch.setattr(game_service_module, "get_redis_client", lambda *args, **kwargs: None)
+    names = ("Josh Hart", "Brandon Ingram", "Late Signee", "Opponent", "Jalen Johnson", "Traded In")
+    catalog = _AnySeasonCatalog(dict(zip((HART, INGRAM, SIGNEE, 1, 2, 3), names, strict=True)))
+    previous, reports = _PreviousSeasonLogs(), injury_reports(tmp_path)
+    service = game_service_module.GameService(
+        game_engine,
+        team_filter_rankings=_StubRankings(["GSW", "LAL", "BOS"]),
+        athlete_catalog=catalog,
+        game_logs_source=previous,
+        injury_reports=reports,
+    )
+    return SimpleNamespace(service=service, previous=previous.frames, reports=reports)
+
+
+_NYK_GAMES = _logs(*((f"n{n}", f"2026-10-{20 + 2 * n}", "NYK") for n in range(1, 5)))
+
+
+def test_players_off_counts_a_missed_opener_when_the_named_player_ended_last_season_on_the_team(
+    evidence, monkeypatch
+):
+    # Hart's missed opener (crf04/statsplus#450): he ended 2025-26 with NYK and
+    # has played for no other team since, so n1 and n2 are without him.
+    evidence.previous[HART] = _logs(("p1", "2026-04-12", "NYK"))
+    _stub_game_logs(
+        evidence.service, monkeypatch, {"Josh Hart": _NYK_GAMES[_NYK_GAMES["GAME_ID"].isin(["n3", "n4"])]}
+    )
+
+    result = run(evidence.service.filter_players_on_off(_NYK_GAMES, [], ["Josh Hart"], "2026-27"))
+
+    assert result["GAME_ID"].tolist() == ["n1", "n2"]
+
+
+def test_players_off_leaves_out_games_before_a_debut_with_no_membership_evidence(evidence, monkeypatch):
+    # No 2025-26 game and no stored report: the window opens at his first game.
+    _stub_game_logs(
+        evidence.service, monkeypatch, {"Josh Hart": _NYK_GAMES[_NYK_GAMES["GAME_ID"].isin(["n3", "n4"])]}
+    )
+
+    result = run(evidence.service.filter_players_on_off(_NYK_GAMES, [], ["Josh Hart"], "2026-27"))
+
+    assert result["GAME_ID"].tolist() == []
+
+
+def test_players_off_leaves_out_a_new_teams_games_before_a_signing_debut(evidence, monkeypatch):
+    # The review's case: he ended 2025-26 on BOS, signed with LAC on November 1
+    # (no LAC report lists him before then) and debuted on November 2, so LAC's
+    # October games are not without him; November 4, which he sat, is.
+    lac = _logs(
+        ("o1", "2026-10-21", "LAC"),
+        ("o2", "2026-10-23", "LAC"),
+        ("o3", "2026-10-25", "LAC"),
+        ("v1", "2026-11-02", "LAC"),
+        ("v2", "2026-11-04", "LAC"),
+    )
+    evidence.previous[SIGNEE] = _logs(("p1", "2026-04-12", "BOS"))
+    store_reports(evidence.reports, "2026-27", _days(lac, "o1", "o2", "o3"), (INGRAM, "LAC"))
+    store_reports(evidence.reports, "2026-27", _days(lac, "v2"), (SIGNEE, "LAC"))
+    _stub_game_logs(evidence.service, monkeypatch, {"Late Signee": lac[lac["GAME_ID"] == "v1"]})
+
+    result = run(evidence.service.filter_players_on_off(lac, [], ["Late Signee"], "2026-27"))
+
+    assert result["GAME_ID"].tolist() == ["v2"]
+
+
+def test_players_off_counts_every_game_whose_report_lists_a_player_with_no_game(evidence, monkeypatch):
+    # Ingram, out all season for LAC (crf04/statsplus-backend#759): every LAC
+    # report lists him, so all 9 LAC games are without him.
+    store_reports(evidence.reports, "2026-27", _days(_LAC_GAMES), (INGRAM, "LAC"))
+    _stub_game_logs(evidence.service, monkeypatch, {"Brandon Ingram": _NO_GAMES})
+
+    result = run(evidence.service.filter_players_on_off(_LAC_GAMES, [], ["Brandon Ingram"], "2026-27"))
+
+    assert result["GAME_ID"].tolist() == [f"c{n}" for n in range(1, 10)]
+
+
+def test_players_off_counts_only_the_games_whose_report_lists_him(evidence, monkeypatch):
+    store_reports(
+        evidence.reports, "2026-27", _days(_LAC_GAMES, "c5", "c6", "c7", "c8", "c9"), (INGRAM, "LAC")
+    )
+    store_reports(evidence.reports, "2026-27", _days(_LAC_GAMES, "c1", "c2", "c3", "c4"), (SIGNEE, "LAC"))
+    _stub_game_logs(evidence.service, monkeypatch, {"Brandon Ingram": _NO_GAMES})
+
+    result = run(evidence.service.filter_players_on_off(_LAC_GAMES, [], ["Brandon Ingram"], "2026-27"))
+
+    assert result["GAME_ID"].tolist() == ["c5", "c6", "c7", "c8", "c9"]
+
+
+@pytest.mark.parametrize("listed", [[], [(INGRAM, "BOS")]], ids=["no-report", "listed-for-another-team"])
+def test_players_off_counts_no_game_for_a_player_with_no_game_and_no_evidence_for_the_team(
+    evidence, monkeypatch, listed
+):
+    if listed:
+        store_reports(evidence.reports, "2026-27", _days(_LAC_GAMES), *listed)
+    _stub_game_logs(evidence.service, monkeypatch, {"Brandon Ingram": _NO_GAMES})
+
+    result = run(evidence.service.filter_players_on_off(_LAC_GAMES, [], ["Brandon Ingram"], "2026-27"))
+
+    assert result["GAME_ID"].tolist() == []
+
+
+def test_players_off_carries_last_seasons_team_only_until_a_game_for_another_team(evidence, monkeypatch):
+    # He ended 2025-26 on LAC, never played for LAC this season and debuted for
+    # BOS on November 5: LAC's games before then are without him, later ones are not.
+    evidence.previous[INGRAM] = _logs(("p1", "2026-04-12", "LAC"))
+    _stub_game_logs(evidence.service, monkeypatch, {"Brandon Ingram": _logs(("b1", "2026-11-05", "BOS"))})
+
+    result = run(evidence.service.filter_players_on_off(_LAC_GAMES, [], ["Brandon Ingram"], "2026-27"))
+
+    assert result["GAME_ID"].tolist() == ["c1", "c2", "c3", "c4"]
+
+
+_BOS_GAMES = _logs(*((f"b{n}", f"2026-11-{2 * n - 1:02d}", "BOS") for n in range(1, 6)))
+
+
+def test_players_off_counts_only_reports_that_list_his_exact_id(evidence, monkeypatch):
+    # 201's digits begin 2011's.  c6's report lists 201 for BOS beside 2011 for
+    # LAC, and a player it could not identify.
+    evidence.service.athlete_catalog.names.update({201: "Short Id", 2011: "Long Id"})
+    store_reports(evidence.reports, "2026-27", _days(_LAC_GAMES, "c1", "c2", "c3"), (2011, "LAC"))
+    store_reports(evidence.reports, "2026-27", _days(_LAC_GAMES, "c4", "c5"), (201, "LAC"))
+    store_reports(
+        evidence.reports, "2026-27", _days(_LAC_GAMES, "c6"), (201, "BOS"), (2011, "LAC"), (None, "LAC")
+    )
+    _stub_game_logs(evidence.service, monkeypatch, {"Short Id": _NO_GAMES, "Long Id": _NO_GAMES})
+
+    short = run(evidence.service.filter_players_on_off(_LAC_GAMES, [], ["Short Id"], "2026-27"))
+    long = run(evidence.service.filter_players_on_off(_LAC_GAMES, [], ["Long Id"], "2026-27"))
+
+    assert (short["GAME_ID"].tolist(), long["GAME_ID"].tolist()) == (["c4", "c5"], ["c1", "c2", "c3", "c6"])
+
+
+@pytest.mark.parametrize("status", ["Available", "Probable"])
+def test_players_off_counts_a_game_whose_report_lists_him_with_any_status(evidence, monkeypatch, status):
+    store_reports(evidence.reports, "2026-27", _days(_LAC_GAMES, "c2", "c7"), (INGRAM, "LAC"), status=status)
+    _stub_game_logs(evidence.service, monkeypatch, {"Brandon Ingram": _NO_GAMES})
+
+    result = run(evidence.service.filter_players_on_off(_LAC_GAMES, [], ["Brandon Ingram"], "2026-27"))
+
+    assert result["GAME_ID"].tolist() == ["c2", "c7"]
+
+
+def test_players_off_carries_over_only_the_team_he_ended_last_season_on(evidence, monkeypatch):
+    # He played for LAC in January 2026 and ended 2025-26 on BOS in April.
+    evidence.previous[INGRAM] = _logs(("p1", "2026-01-10", "LAC"), ("p2", "2026-04-12", "BOS"))
+    _stub_game_logs(evidence.service, monkeypatch, {"Brandon Ingram": _NO_GAMES})
+
+    lac = run(evidence.service.filter_players_on_off(_LAC_GAMES, [], ["Brandon Ingram"], "2026-27"))
+    bos = run(evidence.service.filter_players_on_off(_BOS_GAMES, [], ["Brandon Ingram"], "2026-27"))
+
+    assert (lac["GAME_ID"].tolist(), bos["GAME_ID"].tolist()) == ([], ["b1", "b2", "b3", "b4", "b5"])
+
+
+def test_players_off_counts_the_new_teams_games_not_the_old_teams_after_an_offseason_move(
+    evidence, monkeypatch
+):
+    # He ended 2025-26 on LAC, is on BOS's reports from opening night (November
+    # 1, LAC's first game too) and has not played: a report for another team
+    # ends carry-over that day.
+    evidence.previous[INGRAM] = _logs(("p1", "2026-04-12", "LAC"))
+    store_reports(evidence.reports, "2026-27", _days(_BOS_GAMES), (INGRAM, "BOS"))
+    _stub_game_logs(evidence.service, monkeypatch, {"Brandon Ingram": _NO_GAMES})
+
+    lac = run(evidence.service.filter_players_on_off(_LAC_GAMES, [], ["Brandon Ingram"], "2026-27"))
+    bos = run(evidence.service.filter_players_on_off(_BOS_GAMES, [], ["Brandon Ingram"], "2026-27"))
+
+    assert (lac["GAME_ID"].tolist(), bos["GAME_ID"].tolist()) == ([], ["b1", "b2", "b3", "b4", "b5"])
+
+
+def test_players_off_carries_last_seasons_team_until_a_report_lists_him_for_another_team(
+    evidence, monkeypatch
+):
+    # BOS's reports list him from November 5: LAC's earlier games are without him.
+    evidence.previous[INGRAM] = _logs(("p1", "2026-04-12", "LAC"))
+    store_reports(evidence.reports, "2026-27", _days(_BOS_GAMES, "b3", "b4", "b5"), (INGRAM, "BOS"))
+    _stub_game_logs(evidence.service, monkeypatch, {"Brandon Ingram": _NO_GAMES})
+
+    result = run(evidence.service.filter_players_on_off(_LAC_GAMES, [], ["Brandon Ingram"], "2026-27"))
+
+    assert result["GAME_ID"].tolist() == ["c1", "c2", "c3", "c4"]
+
+
+def test_players_off_counts_a_game_whose_report_lists_him_for_the_team_after_one_for_another(
+    evidence, monkeypatch
+):
+    # The game's own report outranks an earlier report for another team.
+    store_reports(evidence.reports, "2026-27", _days(_BOS_GAMES, "b1"), (INGRAM, "BOS"))
+    store_reports(evidence.reports, "2026-27", _days(_LAC_GAMES, "c6"), (INGRAM, "LAC"))
+    _stub_game_logs(evidence.service, monkeypatch, {"Brandon Ingram": _NO_GAMES})
+
+    result = run(evidence.service.filter_players_on_off(_LAC_GAMES, [], ["Brandon Ingram"], "2026-27"))
+
+    assert result["GAME_ID"].tolist() == ["c6"]
+
+
+def _unreadable(*args, **kwargs):
+    raise SQLAlchemyError("unreadable")
+
+
+@pytest.mark.parametrize(
+    ("unreadable", "expected"),
+    [(None, ["o1", "v2"]), ("reports", ["v2"]), ("last-season-logs", ["v2"])],
+    ids=["readable", "reports", "last-season-logs"],
+)
+def test_players_off_opens_at_the_first_game_when_membership_evidence_cannot_be_read(
+    evidence, monkeypatch, unreadable, expected
+):
+    # He debuted for LAC on November 2; o1's report lists him and he ended
+    # 2025-26 on LAC, but without that evidence only November 4 is without him.
+    lac = _logs(("o1", "2026-10-21", "LAC"), ("v1", "2026-11-02", "LAC"), ("v2", "2026-11-04", "LAC"))
+    evidence.previous[SIGNEE] = _logs(("p1", "2026-04-12", "LAC"))
+    store_reports(evidence.reports, "2026-27", _days(lac, "o1"), (SIGNEE, "LAC"))
+    _stub_game_logs(evidence.service, monkeypatch, {"Late Signee": lac[lac["GAME_ID"] == "v1"]})
+    if unreadable == "reports":
+        monkeypatch.setattr(evidence.reports, "get_season_mentions", _unreadable)
+    elif unreadable == "last-season-logs":
+        monkeypatch.setattr(evidence.service, "get_players_logs_by_id", _unreadable)
+
+    result = run(evidence.service.filter_players_on_off(lac, [], ["Late Signee"], "2026-27"))
+
+    assert result["GAME_ID"].tolist() == expected
+
+
+def test_players_off_reads_membership_evidence_once_for_several_names(evidence, monkeypatch):
+    store_reports(evidence.reports, "2026-27", _days(_LAC_GAMES), (INGRAM, "LAC"))
+    store_reports(evidence.reports, "2026-27", _days(_BOS_GAMES, "b3", "b4", "b5"), (SIGNEE, "BOS"))
+    evidence.previous[SIGNEE] = _logs(("p1", "2026-04-12", "LAC"))
+    _stub_game_logs(evidence.service, monkeypatch, {"Brandon Ingram": _NO_GAMES, "Late Signee": _NO_GAMES})
+    reads = {"reports": 0, "last-season-logs": 0}
+
+    def counted(key, read):
+        def wrapper(*args, **kwargs):
+            reads[key] += 1
+            return read(*args, **kwargs)
+
+        return wrapper
+
+    monkeypatch.setattr(
+        evidence.reports, "get_season_mentions", counted("reports", evidence.reports.get_season_mentions)
+    )
+    monkeypatch.setattr(
+        evidence.service,
+        "get_players_logs_by_id",
+        counted("last-season-logs", evidence.service.get_players_logs_by_id),
+    )
+
+    result = run(
+        evidence.service.filter_players_on_off(_LAC_GAMES, [], ["Brandon Ingram", "Late Signee"], "2026-27")
+    )
+
+    # Late Signee carries over on LAC until BOS's first report, November 5.
+    assert (result["GAME_ID"].tolist(), reads) == (
+        ["c1", "c2", "c3", "c4"],
+        {"reports": 1, "last-season-logs": 1},
+    )
 
 
 # --- team ranking ----------------------------------------------------------

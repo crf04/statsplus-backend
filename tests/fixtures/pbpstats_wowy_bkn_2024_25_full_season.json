@@ -1,0 +1,59 @@
+{
+ "single_row_table_data": {},
+ "multi_row_table_data": [
+  {
+   "EntityId": "1630592",
+   "TeamId": "1610612751",
+   "Name": "Jalen Wilson",
+   "TeamAbbreviation": "BKN",
+   "SecondsPlayed": 121884.0,
+   "Minutes": 2031,
+   "Points": 749,
+   "Rebounds": 270,
+   "Assists": 145,
+   "FG3M": 122,
+   "FG2A": 258,
+   "FG3A": 362,
+   "OffPoss": 4020,
+   "Usage": 16.65944540727903,
+   "Turnovers": 79,
+   "FTA": 165
+  },
+  {
+   "EntityId": "1629661",
+   "TeamId": "1610612751",
+   "Name": "Cameron Johnson",
+   "TeamAbbreviation": "BKN",
+   "SecondsPlayed": 107984.0,
+   "Minutes": 1800,
+   "Points": 1070,
+   "Rebounds": 247,
+   "Assists": 193,
+   "FG3M": 159,
+   "FG2A": 339,
+   "FG3A": 408,
+   "OffPoss": 3587,
+   "Usage": 22.98991885910991,
+   "Turnovers": 99,
+   "FTA": 225
+  },
+  {
+   "EntityId": "203471",
+   "TeamId": "1610612751",
+   "Name": "Dennis Schröder",
+   "TeamAbbreviation": "BKN",
+   "SecondsPlayed": 46329.0,
+   "Minutes": 772,
+   "Points": 424,
+   "Rebounds": 68,
+   "Assists": 152,
+   "FG3M": 58,
+   "FG2A": 175,
+   "FG3A": 150,
+   "OffPoss": 1549,
+   "Usage": 23.946912867859208,
+   "Turnovers": 59,
+   "FTA": 81
+  }
+ ]
+}

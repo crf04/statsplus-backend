@@ -57,6 +57,8 @@ def test_the_migration_creates_the_tables_and_reruns_as_a_noop(tmp_path):
         "team_tov",
         "team_heaves",
         "off_poss",
+        "fgm",
+        "ftm",
     ]
     assert inspector.get_pk_constraint("lineup_segment_players")["constrained_columns"] == [
         "game_id",
@@ -117,3 +119,28 @@ def test_the_downgrade_drops_only_the_tables_and_their_record(tmp_path):
     with engine.connect() as connection:
         versions = connection.execute(text("SELECT version FROM schema_migrations")).scalars().all()
     assert 84 not in versions and 83 in versions
+
+
+def test_089_adds_null_makes_to_stored_rows_and_reruns_as_a_noop(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'm.db'}")
+    run_migrations(engine)
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE lineup_segment_players DROP COLUMN fgm"))
+        connection.execute(text("ALTER TABLE lineup_segment_players DROP COLUMN ftm"))
+        connection.execute(
+            text(
+                "INSERT INTO lineup_segment_players VALUES "
+                "('0022500001', 1, 0, 7, '2025-26', '2026-11-03 12:00:00', 1, 6000,"
+                " 5, 1, 2, 1, 3, 1, 0, 0, 10, 2, 1, 0, 9)"
+            )
+        )
+        connection.execute(text("DELETE FROM schema_migrations WHERE version = 89"))
+
+    first = run_migrations(engine)
+    second = run_migrations(engine)
+
+    assert (first.applied, second.applied) == (("089_lineup_segment_makes",), ())
+    with engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT pts, fg3m, off_poss, fgm, ftm FROM lineup_segment_players")
+        ).all() == [(5, 1, 9, None, None)]

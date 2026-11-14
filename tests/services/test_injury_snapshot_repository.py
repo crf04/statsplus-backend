@@ -10,6 +10,7 @@ from app.services.injury_snapshot_repository import (
     InjurySnapshotRepository,
     InjurySnapshotScope,
 )
+from tests.support.injury_reports import injury_reports, store_reports
 
 NOW = datetime(2026, 1, 15, 23, 55, tzinfo=UTC)
 
@@ -244,3 +245,16 @@ def test_stored_scopes_names_only_the_games_that_hold_a_snapshot(tmp_path):
 
     assert repository.stored_scopes((held, other_season, free)) == {held}
     assert repository.stored_scopes(()) == set()
+
+
+def test_season_mentions_reads_only_the_seasons_reports_that_list_an_exact_id(tmp_path):
+    repository = injury_reports(tmp_path)
+    store_reports(repository, "2026-27", {"listed": "2026-10-21"}, (1627742, "LAC"), (201, "LAC"))
+    store_reports(repository, "2026-27", {"longer-ids": "2026-10-22"}, (16277420, "LAC"), (21627742, "BOS"))
+    store_reports(repository, "2026-27", {"other-player": "2026-10-23"}, (2011, "LAC"))
+    store_reports(repository, "2025-26", {"last-season": "2025-10-21"}, (1627742, "LAC"))
+
+    found = repository.get_season_mentions("2026-27", [1627742, 201])
+
+    assert [scope.game_id for scope in found] == ["listed"]
+    assert repository.get_season_mentions("2026-27", []) == {}

@@ -20,7 +20,7 @@ timeouts keep the documented 503 ``provider_unavailable`` contract.
 import logging
 import re
 import threading
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any
 
 import requests
@@ -29,8 +29,10 @@ from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.datastructures import MultiDict
 
+from ..config.settings import current_nba_season
 from ..dependencies import get_dependencies
 from ..domain.nba_teams import NBA_TEAM_TRICODES
+from ..domain.slate_time import slate_date_for_instant
 from ..errors import (
     InvalidInputError,
     ProviderUnavailableError,
@@ -40,12 +42,13 @@ from ..errors import (
     sanitize_public_value,
 )
 from ..models.game_logs import GameLogFilterError, GameLogQuery
-from ..services.database_first_activation import SeasonUnavailable
+from ..services.database_first_activation import ReadSeason, SeasonUnavailable
 from ..services.game_log_preview import GameLogPreviewService, parse_line, parse_line_type
 from ..services.matchup_slate_preview import MatchupSlatePreviewService
 from ..services.nba_stats_adapter import validate_canonical_season
 from ..services.posted_lines import without_prices
-from ..services.research_season import refuse_after_published, season_scoped
+from ..services.research_season import season_is_pinned, season_scoped
+from ..services.serving_season import next_season
 from ..services.slate_board import BOARD_SOURCES
 from ..utils.auth import get_current_user, is_waitlisted, require_auth, require_auth_optional_allow_waitlisted
 from ._selected_season import season_argument, season_refusals, selected
@@ -87,13 +90,16 @@ _UNSCHEDULED_PARAMETERS = frozenset({*_UNSCHEDULED_SELECTORS, "player_team", "op
 _TRICODE = re.compile(r"[A-Za-z]{3}\Z")
 _ROTATION_SELECTORS = ("player_name", "team", "game_id")
 _ROTATION_PARAMETERS = frozenset(
-    {*_ROTATION_SELECTORS, "player_team", "last_n", "season", "without", "game_logs"}
+    {*_ROTATION_SELECTORS, "player_team", "last_n", "season", "with", "without", "game_logs", "date"}
 )
+_ROTATION_NAME_LISTS = ("with", "without")
 _ROTATION_DEFAULT_LAST_N = 5
 _ROTATION_MAX_LAST_N = 20
 _LAST_N = re.compile(r"[0-9]{1,2}\Z")
 _NBA_GAME_ID = re.compile(r"[0-9]{10}\Z")
-_BOARD_PARAMETERS = frozenset({"date", "season", "market", "game", "team", "sources"})
+_BOARD_PARAMETERS = frozenset({"date", "season", "market", "game", "team", "sources", "moves"})
+#: One player's stored statuses over a date range (crf04/statsplus#494).
+_INJURY_HISTORY_PARAMETERS = frozenset({"player", "from_date", "to_date"})
 
 
 def _is_canonical_player_id(value: str) -> bool:
@@ -123,12 +129,30 @@ def get_slate_edges():
 @injuries_bp.route("", methods=["GET"], strict_slashes=False)
 @require_auth
 def get_injuries():
-    """List the stored official injury report for one ET date, or one team."""
-    unknown = sorted(set(request.args) - {"date", "team"})
+    """List the stored official injury report for one ET date, or one team; or one player's statuses over a range."""
+    unknown = sorted(set(request.args) - {"date", "team", *_INJURY_HISTORY_PARAMETERS})
     if unknown:
         raise InvalidInputError(
             "The injuries parameters are invalid.",
             public_details={"parameters": [sanitize_public_value(name) for name in unknown]},
+        )
+    if "player" in request.args:
+        conflicting = sorted({"date", "team"} & set(request.args))
+        if conflicting:
+            raise InvalidInputError(
+                "The injuries player cannot be combined with date or team.",
+                public_details={"parameters": conflicting},
+            )
+        return jsonify(
+            injuries_service.player_history(
+                request.args["player"], request.args.get("from_date"), request.args.get("to_date")
+            )
+        )
+    misplaced = sorted(_INJURY_HISTORY_PARAMETERS & set(request.args))
+    if misplaced:
+        raise InvalidInputError(
+            "The injuries from_date and to_date need a player.",
+            public_details={"parameters": misplaced},
         )
     return jsonify(injuries_service.list_injuries(request.args.get("date"), request.args.get("team")))
 
@@ -137,7 +161,7 @@ def get_injuries():
 @require_auth
 def get_injury_scenarios():
     """Scenarios for each Questionable, Doubtful or Out player of one ET date."""
-    unknown = sorted(set(request.args) - {"date", "game_id", "player"})
+    unknown = sorted(set(request.args) - {"date", "game_id", "player", "teammate"})
     if unknown:
         raise InvalidInputError(
             "The injury scenarios parameters are invalid.",
@@ -149,6 +173,7 @@ def get_injury_scenarios():
             request.args.get("date"),
             game_id=request.args.get("game_id"),
             player=request.args.get("player"),
+            teammate=request.args.get("teammate"),
             user_id=user.get("uid"),
         )
     )
@@ -193,6 +218,9 @@ def get_board():
         )
         if not sources or not sources <= BOARD_SOURCES:
             raise _invalid_board("sources")
+    moves = request.args.get("moves", "false")
+    if moves not in ("true", "false"):
+        raise _invalid_board("moves")
     return jsonify(
         slate_board_service.get_board(
             slate_date=slate_date,
@@ -201,6 +229,7 @@ def get_board():
             game_id=game_id,
             team=team,
             sources=sources,
+            moves=moves == "true",
         )
     )
 
@@ -540,8 +569,8 @@ def _filtered_logs(player_name: str, query: GameLogQuery, *, selected: bool = Fa
 
     A ``selected`` season is a Selected Season (crf04/statsplus#330): it may
     read an Unpublished Season and adds ``season_context``; one that is not
-    offered is refused, never answered from another season.  Anonymous
-    previews and the ladder never select, so public pages stay on published data.
+    offered is refused, never answered from another season.  The ladder
+    never selects; a link read without an account selects (``_link_logs``).
     """
     service = game_service
     if selected:
@@ -584,7 +613,9 @@ def get_game_logs():
     selected_season = request.args.get("season_filter") is not None
     if not admitted:
         g.research_action = False
-    logs = _filtered_logs(player_name, query, selected=selected_season)
+        logs = _link_logs(player_name, query, named=selected_season)
+    else:
+        logs = _filtered_logs(player_name, query, selected=selected_season)
     if not admitted and logs.get("posted_line") is not None:
         logs = {**logs, "posted_line": without_prices(logs["posted_line"])}
     return jsonify(logs)
@@ -606,18 +637,94 @@ def _admitted(viewer: dict[str, Any] | None) -> bool:
         return False
 
 
-def _preview_query_from(args: Any) -> tuple[str, GameLogQuery]:
-    """Parse a preview's link, refusing a season after the Published Season.
+_PLAYER_GAME_LOGS = "player_game_logs"
 
-    A preview never selects, so it never reads an Unpublished Season: it is
-    refused as game logs refuse an unoffered one, never drawn as an empty
-    sample, and before the facts cache so no card stands in for it.
+
+def _slate_today() -> date:
+    return slate_date_for_instant(datetime.now(UTC))
+
+
+def _page_season() -> str | None:
+    """The season a link naming none opens on for a reader who cannot choose one.
+
+    The season after the Published Season once today falls in it, as the
+    signed-in Workspace defaults to (crf04/statsplus#348); ``None`` before
+    then, under an ``NBA_CURRENT_SEASON`` pin, or when no publication reader
+    can select it.
+    """
+
+    reader = getattr(game_service, "publication_reader", None)
+    if getattr(reader, "captures_published_season", False) is not True or season_is_pinned(
+        game_service.settings
+    ):
+        return None
+    published = reader.last_published_season()
+    if published is None:
+        return None
+    upcoming = next_season(published)
+    return upcoming if upcoming <= current_nba_season(_slate_today()) else None
+
+
+def _link_logs(player_name: str, query: GameLogQuery, *, named: bool) -> dict[str, Any]:
+    """A link's game logs as a reader without an account sees them (crf04/statsplus#477).
+
+    Any offered season it names reads as selected; with none it reads the
+    page season, falling back to the Published Season while that season has
+    no game logs to serve.
+    """
+
+    season = None if named else _page_season()
+    if season is not None:
+        try:
+            return _filtered_logs(
+                player_name, query.model_copy(update={"season_filter": season}), selected=True
+            )
+        except SelectedSeasonUnavailableError:
+            pass
+    return _filtered_logs(player_name, query, selected=named)
+
+
+def _offered(season: str) -> bool:
+    """Whether a selection of ``season`` serves game logs, from their labels alone."""
+
+    reader = game_service.publication_reader.for_season(season)
+    try:
+        reader.snapshot(
+            (_PLAYER_GAME_LOGS,),
+            season=ReadSeason(season, requested=season),
+            projection_only_keys=frozenset({_PLAYER_GAME_LOGS}),
+        )
+    except SeasonUnavailable:
+        return False
+    return True
+
+
+def _preview_query_from(args: Any) -> tuple[str, GameLogQuery]:
+    """Parse a preview's link to the season ``_link_logs`` would read for it.
+
+    The season is resolved, and a named one that is not offered refused,
+    before the facts cache, so a card is keyed by the season it draws and no
+    cached card stands in for a season no longer offered.
     """
 
     player_name, query = _game_log_query_from(args)
-    if args.get("season_filter") is not None:
-        refuse_after_published(getattr(game_service, "publication_reader", None), query.season_filter)
+    named = args.get("season_filter") is not None
+    season = query.season_filter if named else _page_season()
+    reader = getattr(game_service, "publication_reader", None)
+    if season is None or getattr(reader, "captures_published_season", False) is not True:
+        return player_name, query
+    if _offered(season):
+        return player_name, query.model_copy(update={"season_filter": season})
+    if named:
+        raise SelectedSeasonUnavailableError(
+            selected_season=season, published_season=reader.last_published_season()
+        )
     return player_name, query
+
+
+def _preview_logs(player_name: str, query: GameLogQuery) -> dict[str, Any]:
+    selected = request.args.get("season_filter") is not None or query.season_filter != _default_season()
+    return _filtered_logs(player_name, query, selected=selected)
 
 
 @game_bp.route("/game_logs/preview.png", methods=["GET"])
@@ -628,7 +735,7 @@ def get_game_log_preview():
     previews = current_app.extensions.setdefault(
         "game_log_previews",
         GameLogPreviewService(
-            parse=_preview_query_from, logs=_filtered_logs, redis_client=get_dependencies().redis_client
+            parse=_preview_query_from, logs=_preview_logs, redis_client=get_dependencies().redis_client
         ),
     )
     image = previews.render(request.args, line_type, link_line)
@@ -696,7 +803,7 @@ def _invalid_rotation(*parameters: str) -> InvalidInputError:
     return InvalidInputError(
         f"The rotation parameters are invalid: {names}.",
         public_details={
-            **({"parameter": "without"} if "without" in parameters else {}),
+            **next(({"parameter": name} for name in ("without", "with") if name in parameters), {}),
             "parameters": list(parameters),
         },
     )
@@ -715,19 +822,23 @@ def get_rotation():
     (selector,) = selectors
     if "player_team" in request.args and selector != "player_name":
         raise _invalid_rotation("player_team")
+    if "date" in request.args and selector != "team":
+        raise _invalid_rotation("date")
     for name in request.args:
-        if name != "without" and len(request.args.getlist(name)) != 1:
+        if name not in _ROTATION_NAME_LISTS and len(request.args.getlist(name)) != 1:
             raise _invalid_rotation(name)
+    with_ = request.args.getlist("with")
     without = request.args.getlist("without")
-    if without and selector == "game_id":
-        raise _invalid_rotation("without")
-    if without and "last_n" in request.args:
-        raise _invalid_rotation("last_n", "without")
-    if any(not name.strip() for name in without):
-        raise _invalid_rotation("without")
+    for name, names in (("with", with_), ("without", without)):
+        if names and selector == "game_id":
+            raise _invalid_rotation(name)
+        if names and "last_n" in request.args:
+            raise _invalid_rotation("last_n", name)
+        if any(not typed.strip() for typed in names):
+            raise _invalid_rotation(name)
     game_logs = False
     if "game_logs" in request.args:
-        if not without or request.args["game_logs"] not in ("true", "false"):
+        if not (with_ or without or selector == "team") or request.args["game_logs"] not in ("true", "false"):
             raise _invalid_rotation("game_logs")
         game_logs = request.args["game_logs"] == "true"
     if selector == "game_id":
@@ -754,9 +865,23 @@ def get_rotation():
     if selector == "team":
         if _TRICODE.fullmatch(value) is None:
             raise _invalid_rotation("team")
+        day = None
+        if "date" in request.args:
+            try:
+                day = date.fromisoformat(request.args["date"])
+            except ValueError:
+                raise _invalid_rotation("date") from None
+            if day.isoformat() != request.args["date"]:
+                raise _invalid_rotation("date")
         return jsonify(
             rotation_service.get_team_rotation(
-                team=value.upper(), last_n=last_n, season=season, without=without, game_logs=game_logs
+                team=value.upper(),
+                last_n=last_n,
+                season=season,
+                with_=with_,
+                without=without,
+                game_logs=game_logs,
+                day=day,
             )
         )
     if not value.strip():
@@ -772,6 +897,7 @@ def get_rotation():
             player_team=player_team,
             last_n=last_n,
             season=season,
+            with_=with_,
             without=without,
             game_logs=game_logs,
         )

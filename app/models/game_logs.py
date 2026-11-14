@@ -658,6 +658,13 @@ def _format_rating(raw: float) -> str:
     return str(raw)
 
 
+class OpponentRank(BaseModel):
+    """One line type's opponent-filter label and Season rank per tricode."""
+
+    label: str
+    ranks: dict[str, int]
+
+
 class GameLogResponse(BaseModel):
     """The public game-log response contract.
 
@@ -675,6 +682,13 @@ class GameLogResponse(BaseModel):
     ``posted_line`` is the player's posted lines for his team's game on the line
     day (default: today, else his next game within seven days), ``null`` when
     there is none (crf04/statsplus#238).
+    ``opponent_ranks`` maps a chart line type to each opponent's whole-season
+    rank in its allowed metric, 30 = allows the most; ``{}`` when the season
+    cannot be ranked (crf04/statsplus#456).
+    With ``teams_against`` filters, each ``game_logs`` row carries
+    ``teams_against_ranks``: each filter, as the request named it, mapped to the
+    rank its ``rank_filter`` compared for that game's opponent, 1-30 with 30 =
+    allows the most (crf04/statsplus#498).
     """
 
     game_logs: list[dict[str, Any]]
@@ -684,6 +698,7 @@ class GameLogResponse(BaseModel):
     next_game: str | None = None
     player_id: int | None = None
     posted_line: dict[str, Any] | None = None
+    opponent_ranks: dict[str, OpponentRank] = Field(default_factory=dict)
     provenance: dict[str, Any]
     #: ``{selected_season, published_season}``, only when the request selected
     #: a season explicitly (crf04/statsplus#330); omitted otherwise.
@@ -696,6 +711,7 @@ __all__ = [
     "GameLogQuery",
     "GameLogResponse",
     "Location",
+    "OpponentRank",
     "SelfFilter",
     "SelfFilterOperator",
 ]

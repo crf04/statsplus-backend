@@ -541,6 +541,30 @@ PBP_BOXSCORE_ITEM_FIELDS = frozenset(
         "PenaltyOffPossPct",
     }
 )
+#: The player-row wires NBA's official box score may rewrite
+#: (crf04/statsplus-backend#763).  A corrected row keeps the provider's own
+#: count of each wire it rewrote under ``LedgerProvider<wire>``, so the archive
+#: still holds what the provider sent, and the assist locations, which stay the
+#: provider's, are read against the count they describe.
+LEDGER_PROVIDER_COUNT_KEYS = {
+    wire: f"LedgerProvider{wire}"
+    for wire in (
+        "Points",
+        "FG2M",
+        "FG2A",
+        "FG3M",
+        "FG3A",
+        "FGM",
+        "FGA",
+        "FtPoints",
+        "FTA",
+        "Assists",
+        "Steals",
+        "Blocks",
+        "Turnovers",
+        "Fouls",
+    )
+}
 #: The governed FullGame wire-field baseline for ``LEDGER_SCHEMA_VERSION``:
 #: every provider key the extractor understands and tolerates on an archived
 #: raw row.  A first raw archive (a brand-new game, or a pre-032 game
@@ -610,6 +634,7 @@ LEDGER_GOVERNED_FULLGAME_FIELDS = PBP_BOXSCORE_ITEM_FIELDS | frozenset(
         # Self-identification of LiveData fallback evidence (see
         # ``game_derives_rebound_types``).
         "LedgerEvidenceProvider",
+        *LEDGER_PROVIDER_COUNT_KEYS.values(),
     }
 )
 NBA_CALENDAR_TIMEZONE = ZoneInfo("America/New_York")
@@ -3279,6 +3304,9 @@ class CanonicalGameLedgerRepository:
         baseline stays silent.  A correction whose corresponding archived rows
         gain or lose provider fields is drift for the same reason.  Either
         alert is recorded without rejecting the otherwise valid replacement.
+        The fields a box-score correction wrote (``LEDGER_PROVIDER_COUNT_KEYS``
+        and the wires they replaced) are the ledger's, not the provider's, so
+        their coming and going is never drift.
         """
         if not candidate.raw_rows:
             return None
@@ -3322,14 +3350,23 @@ class CanonicalGameLedgerRepository:
         def row_key(row: Any) -> tuple[Any, Any, Any]:
             return (row["side"], row["row_type"], row["entity_id"])
 
+        def box_score_written(fields: frozenset[str]) -> frozenset[str]:
+            return frozenset(
+                name
+                for wire, key in LEDGER_PROVIDER_COUNT_KEYS.items()
+                if key in fields
+                for name in (wire, key)
+            )
+
         existing_fields = {
             row_key(row): frozenset(json.loads(row["observed_fields"] or "[]")) for row in raw_rows
         }
         added: set[str] = set()
         removed: set[str] = set()
         for key in existing_fields.keys() & candidate_fields.keys():
-            added |= candidate_fields[key] - existing_fields[key]
-            removed |= existing_fields[key] - candidate_fields[key]
+            written = box_score_written(existing_fields[key]) | box_score_written(candidate_fields[key])
+            added |= candidate_fields[key] - existing_fields[key] - written
+            removed |= existing_fields[key] - candidate_fields[key] - written
         if not added and not removed:
             return None
         return {
@@ -4339,6 +4376,7 @@ __all__ = [
     "COUNT_FIELDS",
     "LEDGER_GOVERNED_DIAGNOSTIC_COUNTS",
     "LEDGER_GOVERNED_FULLGAME_FIELDS",
+    "LEDGER_PROVIDER_COUNT_KEYS",
     "LEDGER_SCHEMA_VERSION",
     "CanonicalGame",
     "CanonicalGameLedgerRepository",

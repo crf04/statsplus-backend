@@ -614,7 +614,7 @@ def test_one_games_failed_matchup_read_is_the_fallback_not_a_card_without_it(cli
     assert broken_game.data == draw_fallback()
     assert _is_png(fine_game, CARD)
     # The JSON still degrades per game.
-    assert edges["games"][0] == {"game_id": broken["game_id"], "effects": [], "scores": []}
+    assert edges["games"][0] == {"game_id": broken["game_id"], "effects": [], "leaders": [], "scores": []}
 
 
 def test_a_game_outside_the_matchup_window_is_a_game_without_scores(client, board, drawn):

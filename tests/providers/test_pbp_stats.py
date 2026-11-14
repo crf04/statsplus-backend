@@ -110,6 +110,9 @@ WOWY_FIXTURE = Path(__file__).parents[1] / "fixtures" / "pbpstats_wowy_den_jokic
 
 
 WOWY_ON_TWO_FIXTURE = Path(__file__).parents[1] / "fixtures" / "pbpstats_wowy_den_jokic_murray_on.json"
+WOWY_FULL_SEASON_FIXTURE = (
+    Path(__file__).parents[1] / "fixtures" / "pbpstats_wowy_bkn_2024_25_full_season.json"
+)
 
 
 def _wowy_session() -> Mock:
@@ -214,3 +217,25 @@ def test_get_wowy_two_on_players_asks_for_exactly_two_on_floor() -> None:
         43,
     )
     assert (gordon.fg3m, gordon.fga) == (31, 202)  # FG2A 125 + FG3A 77
+
+
+def test_get_wowy_naming_no_player_asks_for_the_whole_season() -> None:
+    session = Mock()
+    session.get.return_value = FakeResponse(json.loads(WOWY_FULL_SEASON_FIXTURE.read_text()))
+
+    rows = _adapter(session).get_wowy(team_id=1610612751, season="2024-25")
+
+    assert session.get.call_args.kwargs["params"] == {
+        "Season": "2024-25",
+        "SeasonType": "Regular Season",
+        "TeamId": "1610612751",
+        "Type": "Player",
+    }
+    # Recorded 2026-11-08 (three of BKN's 24 rows): with no lineup filter every
+    # row equals the player's BKN season in /get-totals (Schroder's 772 minutes
+    # are his BKN games only, before his trade).
+    assert [(row.name, row.minutes, row.points, row.assists) for row in rows] == [
+        ("Jalen Wilson", 2031, 749, 145),
+        ("Cameron Johnson", 1800, 1070, 193),
+        ("Dennis Schröder", 772, 424, 152),
+    ]
