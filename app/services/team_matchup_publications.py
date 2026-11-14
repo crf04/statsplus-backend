@@ -10,6 +10,7 @@ from inspect import Parameter, signature
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.slate_time import publication_cutoff_is_after_slate_day
 from app.domain.team_matchup_taxonomy import (
+    NBA_GOVERNED_PUBLICATION_STREAMS,
     NBA_PUBLICATION_BASES,
     NBA_PUBLICATION_METRIC_KEYS,
     NBA_PUBLICATION_STREAM_KEYS,
@@ -43,7 +44,7 @@ class PublicationGovernanceUnavailable(ValueError):
 
 
 def publication_base_for_stream(stream_key: str) -> str | None:
-    for base, template in NBA_PUBLICATION_STREAMS.items():
+    for base, template in NBA_GOVERNED_PUBLICATION_STREAMS.items():
         if stream_key in {template.format(window=window) for window in NBA_PUBLICATION_WINDOWS}:
             return base
     return None
@@ -369,7 +370,7 @@ def resolve_governed_season_is_complete(
 
 
 def publication_stream(base: str, window: str) -> str:
-    return NBA_PUBLICATION_STREAMS[base].format(window=window)
+    return NBA_GOVERNED_PUBLICATION_STREAMS[base].format(window=window)
 
 
 def publication_metric_keys(base: str) -> tuple[str, ...]:

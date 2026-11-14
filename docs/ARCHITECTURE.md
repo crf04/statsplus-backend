@@ -1242,8 +1242,10 @@ the published blocks and steals; `DRTG` divides 100 × points allowed by the
 published `possessions`), `grouped_shot_types_opponent_season` covers
 the catch-and-shoot, pull-up, and under-10-feet filters (their points columns
 are derived as `3 * FG3M + 2 * FG2M` from the made-shot counts),
-`synergy_play_types_opponent_season` ranks points per possession, and
-`assist_locations_season` ranks the published location counters.
+`synergy_play_types_opponent_season` ranks points per possession,
+`assist_locations_season` ranks the published location counters, and
+`defensive_rating_season` ranks `DRTG` by NBA.com's `DEF_RATING`
+(crf04/statsplus#447).
 
 A Defense Sheet row reference, `sheet:<base>:<row key>` (#308), ranks the one
 Season publication metric behind that Matchup Sheet row, per 48 with no
@@ -1383,7 +1385,8 @@ the same Season publications the Team Filters read: `Traditional` from
 `traditional_opponent_season`, `Playtypes` from
 `synergy_play_types_opponent_season`, `Assists` from `assist_locations_season`,
 `Zone Shooting` from `exact_shot_zones_opponent_season`, and `Shooting Type`
-from `grouped_shot_types_opponent_season`.  The service holds the same
+from `grouped_shot_types_opponent_season`; `Traditional` also reads
+`defensive_rating_season` in the same snapshot for its `DRTG` fields.  The service holds the same
 publication read seam the game service injects, so no provider client is
 reachable from it by construction and the legacy `general_opponent_stats`,
 `team_play_types`, `processed_team_assists`, `opp_shooting_zone`,
@@ -3470,6 +3473,35 @@ itself is bound to, and a resolver that cannot prove it leaves the refusal in
 place. The reason describes one read at one `as_of`, not the immutable
 publication row, so it is reported rather than stored and needs no migration.
 
+### NBA.com Defensive Rating (crf04/statsplus#447)
+
+`DRTG` is NBA.com's team `DEF_RATING`, not a ledger metric. The residential
+collector reads it with one league-wide `LeagueDashTeamStats` call per window
+(`MeasureType=Advanced`, `PerMode=PerGame`, Regular Season, `LastNGames` 0 for
+the Season and 15 for the Last 15, `DateTo` the manifest's slate date) as the
+`defensive_rating` observation. It is composed into `defensive_rating_season`
+and `defensive_rating_l15` with the same governance as the opponent shot
+streams: the manifest and its Event Catalog, the cutoff, `games_played` equal
+to each team's governed game count, held candidates for an unpublished season,
+and the `team_defense` and `last_15` Readiness Rules. A Last-15 read is issued
+only once every team has fifteen governed games.
+
+The base is `defensive_rating` with the single metric `DEF_RATING`, registered
+in `NBA_TEAM_RATING_STREAMS` beside, not inside, the Matchup bases
+(`NBA_PUBLICATION_STREAMS`), so it never reaches the Defense Sheet or the
+Matchup materializer. Its row value sits in the generic `per48` mapping but is
+the provider's rating as published. A response that does not rate each of the
+thirty teams once with a positive number, an empty one, or a 5xx publishes
+nothing: the collector uploads no incomplete observation, and composition
+refuses one, so the active Publication keeps serving.
+
+Three readers use the Season stream: the `DRTG` Team Filter (highest first),
+the `Traditional` Team Profile (`DRTG`, `DRTG_RANK`, `DRTG_vs_avg_pct`, read in
+the same snapshot as `traditional_opponent_season` and omitted when the season
+has no Defensive Rating publication), and Next Opponent's `defensive-rating`
+entry. `scripts/defensive_rating_backfill.py` collects the finished 2025-26
+season, which no daily manifest asks for.
+
 ### Traditional-opponent publication formats (#50)
 
 `app.services.traditional_opponent_publications` is the deep module that owns
@@ -3511,6 +3543,13 @@ only when every opponent team-game in it carries `offensive_possessions`;
 otherwise it composes v2, so a missing possession count is never published as
 zero. A rebuild whose ledger facts still lack possessions therefore composes
 v2 and fails as `publication_format_unsupported`, moving nothing.
+
+**No reader uses possessions any more.** Defensive Rating moved to NBA.com's
+own `DEF_RATING` (crf04/statsplus#447, "NBA.com Defensive Rating" below), so the
+`possessions` metric in a v3 publication is carried but read by no product
+surface. v3 stays readable and stays the composition target, and v2 stays
+readable, so nothing already stored needs a rebuild. The
+`offensive_possessions` ledger column and its backfill script are kept.
 
 **The v1 compatibility window is closed.** This release reads v2 and v3 only. v1
 remains in `KNOWN_TRADITIONAL_OPPONENT_FORMATS`, because recognizing a stored

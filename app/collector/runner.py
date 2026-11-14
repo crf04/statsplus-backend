@@ -187,6 +187,7 @@ class ResidentialCollector:
             "synergy_opponent",
             "shot_types_opponent",
             "shot_zones_opponent",
+            "defensive_rating",
         }
     )
 

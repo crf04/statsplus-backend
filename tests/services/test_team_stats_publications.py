@@ -14,6 +14,8 @@ from app.services.ledger_derivations import (
     TEAM_METRICS,
 )
 from app.services.team_service import TeamService
+from tests.support.defensive_rating import STREAM as DRTG_STREAM
+from tests.support.defensive_rating import defensive_rating_read
 from tests.support.publication_stubs import (
     SEASON,
 )
@@ -143,34 +145,63 @@ def test_traditional_serves_the_rebound_split_every_publication_now_carries():
     assert stats["OPP_REB"] == 44.0
 
 
-def _drtg_reads():
-    """LAL allows 120 per 96 possessions; the other twenty-nine 100 per 100."""
+def _drtg_reads(*, possessions=False):
+    """The Traditional publication beside NBA.com's DEF_RATING publication.
+
+    With ``possessions`` the traditional rows are v3 and carry a points per
+    possession that would rank LAL first: Defensive Rating must not read it.
+    """
 
     def per48(tricode):
-        if tricode != "LAL":
-            return _traditional_per48(points=100.0, possessions=100.0)
-        return _traditional_per48(points=120.0, possessions=96.0)
+        if not possessions:
+            return _traditional_per48(points=100.0)
+        return _traditional_per48(points=100.0, possessions=200.0 if tricode == "LAL" else 50.0)
 
-    return {"traditional_opponent_season": _read("traditional_opponent_season", _league(per48))}
+    return {
+        "traditional_opponent_season": _read("traditional_opponent_season", _league(per48)),
+        DRTG_STREAM: defensive_rating_read(),
+    }
 
 
-def test_traditional_serves_defensive_rating_per_100_possessions():
+def test_traditional_serves_nba_def_rating_as_defensive_rating():
     stats = _service(_drtg_reads()).get_team_stats("Traditional", LAKERS)
-    celtics = _service(_drtg_reads()).get_team_stats("Traditional", "Boston Celtics")
+    thunder = _service(_drtg_reads()).get_team_stats("Traditional", "Oklahoma City Thunder")
+    jazz = _service(_drtg_reads()).get_team_stats("Traditional", "Utah Jazz")
 
-    assert stats["DRTG"] == pytest.approx(125.0)
-    assert stats["DRTG_RANK"] == 30
-    # League average (29 * 100 + 125) / 30 = 100.8333...
-    assert stats["DRTG_vs_avg_pct"] == pytest.approx((125.0 / (3025.0 / 30) - 1) * 100)
-    assert (celtics["DRTG"], celtics["DRTG_RANK"]) == (pytest.approx(100.0), 1)
+    assert stats["DRTG"] == 114.8
+    assert stats["DRTG_RANK"] == 18
+    assert stats["DRTG_vs_avg_pct"] == pytest.approx((114.8 / (3412.6 / 30) - 1) * 100)
+    # Rank 1 is the lowest rating, 30 the highest.
+    assert (thunder["DRTG"], thunder["DRTG_RANK"]) == (106.9, 1)
+    assert (jazz["DRTG"], jazz["DRTG_RANK"]) == (120.4, 30)
+    # The rest of the category is the traditional publication's.
+    assert stats["OPP_PTS"] == 100.0
 
 
-def test_a_publication_without_possessions_omits_defensive_rating_only():
+def test_defensive_rating_ignores_possessions_a_v3_publication_still_carries():
+    stats = _service(_drtg_reads(possessions=True)).get_team_stats("Traditional", LAKERS)
+
+    assert (stats["DRTG"], stats["DRTG_RANK"]) == (114.8, 18)
+
+
+def test_without_a_def_rating_publication_traditional_omits_defensive_rating_only():
     stats = _service(_traditional_reads()).get_team_stats("Traditional", LAKERS)
 
     assert {"DRTG", "DRTG_RANK", "DRTG_vs_avg_pct"}.isdisjoint(stats)
     assert stats["OPP_PTS"] == 120.0
     assert stats["OPP_FG_PCT"] == pytest.approx(0.5)
+
+
+def test_a_v3_publication_alone_serves_no_defensive_rating():
+    """The ledger possessions route is retired: possessions alone rate nothing."""
+
+    reads = _drtg_reads(possessions=True)
+    del reads[DRTG_STREAM]
+
+    stats = _service(reads).get_team_stats("Traditional", LAKERS)
+
+    assert {"DRTG", "DRTG_RANK", "DRTG_vs_avg_pct"}.isdisjoint(stats)
+    assert stats["OPP_PTS"] == 100.0
 
 
 def test_the_clippers_display_name_the_panel_sends_resolves_to_its_publication():
@@ -458,6 +489,7 @@ def test_each_category_reads_only_its_own_season_stream():
     assert {season for _stream, season in reader.calls} == {SEASON}
     assert {stream for stream, _season in reader.calls} == {
         "traditional_opponent_season",
+        "defensive_rating_season",
         "synergy_play_types_opponent_season",
         "assist_locations_season",
         "exact_shot_zones_opponent_season",

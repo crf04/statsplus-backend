@@ -87,6 +87,7 @@ READINESS_RULES: tuple[ReadinessRule, ...] = (
                 "synergy_play_types_opponent_season",
                 "assist_locations_season",
                 "rebound_types_season",
+                "defensive_rating_season",
             }
         ),
         min_team_games=1,
@@ -113,6 +114,7 @@ READINESS_RULES: tuple[ReadinessRule, ...] = (
                 "exact_shot_zones_opponent_l15",
                 "assist_locations_l15",
                 "rebound_types_l15",
+                "defensive_rating_l15",
             }
         ),
         wording="its first window of the season is composed",

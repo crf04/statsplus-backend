@@ -23,6 +23,8 @@ from app.domain.nba_teams import (
 )
 from app.domain.team_matchup_taxonomy import (
     DEFENSE_SHEET_FILTER_PREFIX,
+    DEFENSIVE_RATING_BASE,
+    DEFENSIVE_RATING_METRIC,
     PLAY_TYPES,
     SHOT_TYPE_SLICES,
     SHOT_TYPE_STATS,
@@ -125,7 +127,7 @@ class TeamService:
         not ready serves its previous season and ``trailing`` names it.
         """
 
-        scoped = self._captured(_category(category)[0])
+        scoped = self._captured(*_category_bases(category))
         capture = scoped._selected_capture
         return {
             "data": scoped._get_team_stats(category, team, date),
@@ -144,11 +146,12 @@ class TeamService:
         )
         return asdict(defense_ranks(base, selection, scoped._season_league(base)))
 
-    def _captured(self, base):
-        """A copy reading one capture of ``base``'s Season stream, which decides the season."""
+    def _captured(self, *bases):
+        """A copy reading one capture of the bases' Season streams; the first decides the season."""
 
         capture = self.publication_reader.snapshot(
-            (season_stream_key(base),), season=ReadSeason(self.settings.nba.current_season)
+            tuple(season_stream_key(base) for base in bases),
+            season=ReadSeason(self.settings.nba.current_season),
         )
         scoped = copy(self)
         scoped._selected_capture = capture
@@ -164,22 +167,30 @@ class TeamService:
 
         base, profile, empty = _category(category)
         team_id = _resolve_team_id(team)
-        rows = self._season_rows(base)
+        rows_by_base = self._season_rows(_category_bases(category))
+        rows = rows_by_base[base]
         if team_id is None or rows is None:
             return empty()
-        return profile(publication_league_table(rows), team_id)
+        stats = profile(publication_league_table(rows), team_id)
+        # A category's companion bases add fields from their own publication,
+        # read in the same generation; one that cannot serve omits its fields.
+        for companion in _CATEGORY_COMPANIONS.get(category, ()):
+            companion_rows = rows_by_base[companion]
+            if companion_rows is not None:
+                stats.update(
+                    _COMPANION_PROFILES[companion](publication_league_table(companion_rows), team_id)
+                )
+        return stats
 
-    def _season_rows(self, base):
-        """Read one publication base's canonical thirty Season rows."""
+    def _season_rows(self, bases):
+        """Read each publication base's canonical thirty Season rows in one generation."""
 
         if self.publications is None:
-            return None
+            return {base: None for base in bases}
         capture = self._selected_capture
         if capture is not None:
-            return self.publications.season_rows_by_base(
-                (base,), capture.season, publication_snapshot=capture
-            )[base]
-        return self.publications.season_rows(base, self.settings.nba.current_season)
+            return self.publications.season_rows_by_base(bases, capture.season, publication_snapshot=capture)
+        return self.publications.season_rows_by_base(bases, self.settings.nba.current_season)
 
     def _season_league(self, base) -> SeasonLeague:
         capture = self._selected_capture
@@ -195,6 +206,12 @@ def _category(category):
     return _CATEGORIES[category]
 
 
+def _category_bases(category) -> tuple[str, ...]:
+    """The category's own base, then any companion bases it adds fields from."""
+
+    return (_category(category)[0], *_CATEGORY_COMPANIONS.get(category, ()))
+
+
 def _resolve_team_id(team_name) -> int | None:
     """Resolve the panel's display name to a published team identity."""
 
@@ -206,7 +223,7 @@ def _resolve_team_id(team_name) -> int | None:
     return None
 
 
-def _rate_column(table, numerator_key, denominator_key, *, scale=1.0) -> LeagueMetricColumn:
+def _rate_column(table, numerator_key, denominator_key) -> LeagueMetricColumn:
     """Rank one published rate over the teams that have a rate at all.
 
     A team that faced no possessions of a play type has no points per
@@ -219,7 +236,7 @@ def _rate_column(table, numerator_key, denominator_key, *, scale=1.0) -> LeagueM
 
     denominator = table[denominator_key].values
     rates = {
-        team_id: scale * value / denominator[team_id]
+        team_id: value / denominator[team_id]
         for team_id, value in table[numerator_key].values.items()
         if denominator[team_id]
     }
@@ -259,11 +276,18 @@ def _traditional_profile(table, team_id) -> dict:
             field = "OPP_FG_PCT" if label == "FG%" else "OPP_FG3_PCT"
         elif token == "OPP_STOCKS":
             field = "OPP_STL+BLK"
-        elif token == "DRTG":
-            field = "DRTG"
         else:
             field = fields[definition.numerator[0][0]]
         _place(stats, field, column, team_id)
+    return stats
+
+
+def _defensive_rating_profile(table, team_id) -> dict:
+    """``DRTG``, its rank (30 = highest) and its distance from the league average."""
+
+    stats: dict = {}
+    for _, _, column, _, token, _ in opponent_profile_metrics(DEFENSIVE_RATING_BASE, table):
+        _place(stats, token, column, team_id)
     return stats
 
 
@@ -323,6 +347,13 @@ _CATEGORIES: dict[str, tuple[str, Callable, Callable]] = {
     "Shooting Type": ("shot_types", _shot_type_profile, list),
 }
 
+#: Bases a category reads beside its own.  Traditional carries Defensive
+#: Rating, which is NBA.com's ``DEF_RATING`` publication rather than a ledger
+#: metric (crf04/statsplus#447); without that publication the fields are
+#: omitted and the rest of the category still serves.
+_CATEGORY_COMPANIONS: dict[str, tuple[str, ...]] = {"Traditional": (DEFENSIVE_RATING_BASE,)}
+_COMPANION_PROFILES: dict[str, Callable] = {DEFENSIVE_RATING_BASE: _defensive_rating_profile}
+
 
 def opponent_profile_metrics(base, table):
     """Project the same five categories as the Opposing Team Profile."""
@@ -372,17 +403,15 @@ def opponent_profile_metrics(base, table):
                 None,
                 "percent",
             )
-        # A publication whose format predates possessions has no Defensive
-        # Rating; the field is omitted rather than ranked as zero.
-        if "possessions" in table:
-            yield (
-                "General",
-                "Defensive rating",
-                _rate_column(table, "points", "possessions", scale=100.0),
-                TEAM_FILTER_RANKINGS["DRTG"],
-                "DRTG",
-                "rating",
-            )
+    elif base == DEFENSIVE_RATING_BASE:
+        yield (
+            "General",
+            "Defensive rating",
+            table[DEFENSIVE_RATING_METRIC],
+            TEAM_FILTER_RANKINGS["DRTG"],
+            "DRTG",
+            "rating",
+        )
     elif base == "play_types":
         for key in PLAY_TYPES:
             metric = key + "_PTS"

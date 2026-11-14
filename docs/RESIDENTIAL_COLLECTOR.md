@@ -173,7 +173,8 @@ One-time operator steps:
    - surfaces, one per observation type the collector emits: `event_catalog`
      and `athlete_catalog` (the Event and Athlete Catalogs), and the collection
      surfaces `synergy_play_types`, `grouped_shot_types`, `exact_shot_zones`,
-     `synergy_opponent`, `shot_types_opponent` and `shot_zones_opponent`.
+     `synergy_opponent`, `shot_types_opponent`, `shot_zones_opponent` and
+     `defensive_rating` (NBA.com team `DEF_RATING`, crf04/statsplus#447).
 
    ```python
    tokens.create_identity(
@@ -181,7 +182,7 @@ One-time operator steps:
        scopes=["poll", "ingest"], owner="residential_collector", providers=["nba"],
        surfaces=["event_catalog", "athlete_catalog", "synergy_play_types",
                  "grouped_shot_types", "exact_shot_zones", "synergy_opponent",
-                 "shot_types_opponent", "shot_zones_opponent"],
+                 "shot_types_opponent", "shot_zones_opponent", "defensive_rating"],
    )
    ```
 

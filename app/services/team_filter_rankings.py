@@ -28,7 +28,10 @@ from zoneinfo import ZoneInfo
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.rebound_types import REBOUND_TYPES_BASE
 from app.domain.team_matchup_taxonomy import (
-    NBA_PUBLICATION_STREAMS,
+    DEFENSIVE_RATING_BASE,
+    DEFENSIVE_RATING_METRIC,
+    NBA_GOVERNED_PUBLICATION_BASES,
+    NBA_GOVERNED_PUBLICATION_STREAMS,
     PLAY_TYPES,
     defense_sheet_filter,
     derived_metric_terms,
@@ -39,7 +42,6 @@ from app.domain.utc import assume_utc, parse_utc_iso
 from app.models.catalogs import LESS_THAN_TEN_FEET_FILTER
 from app.services.response_provenance import provenance_block
 from app.services.team_matchup_publications import (
-    NBA_PUBLICATION_BASES,
     PublicationGovernanceUnavailable,
     publication_cutoff_reason,
     resolve_governed_team_game_ids,
@@ -65,7 +67,7 @@ _PLAY_TYPES_BASE = "play_types"
 _STREAM_KEY_BY_BASE: dict[str, str] = {
     _TRADITIONAL: matchup_stream_key(_TRADITIONAL, _WINDOW),
     _ASSIST_LOCATIONS: matchup_stream_key(_ASSIST_LOCATIONS, _WINDOW),
-    **{base: template.format(window=_WINDOW) for base, template in NBA_PUBLICATION_STREAMS.items()},
+    **{base: template.format(window=_WINDOW) for base, template in NBA_GOVERNED_PUBLICATION_STREAMS.items()},
 }
 TEAM_FILTER_PUBLICATION_STREAM_KEYS = frozenset(_STREAM_KEY_BY_BASE.values())
 #: Rebound Types ranks no Team Filter (#234), but its Season league is read
@@ -189,9 +191,9 @@ TEAM_FILTER_RANKINGS: dict[str, TeamFilterRanking] = {
     "OPP_STL": _traditional("steals"),
     "OPP_FG3M": _traditional("three_pointers_made"),
     "OPP_FG3A": _traditional("three_pointers_attempted"),
-    # Defensive Rating: points allowed per 100 opponent possessions.  A
-    # publication without possessions cannot read it and ranks nothing.
-    "DRTG": TeamFilterRanking(_TRADITIONAL, (("points", 100.0),), denominator="possessions"),
+    # Defensive Rating: NBA.com's own DEF_RATING, highest first
+    # (crf04/statsplus#447).  With no Season publication it ranks nothing.
+    "DRTG": TeamFilterRanking(DEFENSIVE_RATING_BASE, ((DEFENSIVE_RATING_METRIC, 1.0),)),
     "C&S 3s": _shot_type("catch_and_shoot", "FG3M"),
     "C&S PTS": _shot_type_points("catch_and_shoot"),
     "C&S 3A": _shot_type("catch_and_shoot", "FG3A"),
@@ -388,7 +390,7 @@ class TeamFilterRankingService:
             logger.warning("%s publication has no provenance; refusing to rank", stream_key)
             return None
         rows = read.decoded
-        if base in NBA_PUBLICATION_BASES and not self._governed(read, rows, base, stream_key):
+        if base in NBA_GOVERNED_PUBLICATION_BASES and not self._governed(read, rows, base, stream_key):
             return None
         # NBA-owned streams already proved the canonical league and its
         # identities at decode; the ledger-owned traditional and
