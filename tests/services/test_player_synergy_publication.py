@@ -540,7 +540,9 @@ def test_synergy_held_candidate_keeps_carried_evidence_past_retention(tmp_path):
         )
     assert carried_evidence == sorted(PLAY_TYPES)
     assert stray is None
-    assert _rows_by_player(json.loads(current.payload), 2544) == [(category, 1, 6) for category in sorted(PLAY_TYPES)]
+    assert _rows_by_player(json.loads(current.payload), 2544) == [
+        (category, 1, 6) for category in sorted(PLAY_TYPES)
+    ]
 
 
 def test_synergy_latest_per_category_retry_preserves_all_eleven(plane):
