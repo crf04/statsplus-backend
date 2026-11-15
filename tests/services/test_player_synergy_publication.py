@@ -59,7 +59,16 @@ def plane(tmp_path):
         clock=lambda: NOW + timedelta(seconds=next(ticks)),
     )
 
-    def deliver(*, suffix="", categories=PLAY_TYPES, share=0.01, ambiguous=False, games=20, teammate=False):
+    def deliver(
+        *,
+        suffix="",
+        categories=PLAY_TYPES,
+        share=0.01,
+        ambiguous=False,
+        games=20,
+        teammate=False,
+        possessions=1,
+    ):
         receipts = []
         for category in categories:
             rows = [
@@ -67,7 +76,7 @@ def plane(tmp_path):
                     "PLAYER_ID": 2544,
                     "TEAM_ID": 1610612737,
                     "GP": games,
-                    "POSS": 1,
+                    "POSS": possessions,
                     "POSS_PCT": share,
                     "PLAY_TYPE": category,
                 }
@@ -240,6 +249,83 @@ def test_synergy_recomposes_a_withheld_player_once_the_lagging_play_type_catches
             select(CompositionJob).where(CompositionJob.stream_key == "synergy_play_types")
         ).one()
         assert (job.status, job.attempts, job.generation) == ("succeeded", 0, 2)
+
+
+def _compose_synergy(publications, manifest):
+    version = publications.compose_from_observations(
+        "synergy_play_types",
+        season="2025-26",
+        cutoff=NOW,
+        manifest_id=manifest.manifest_id,
+    )
+    return version.publication_id, json.loads(version.payload)
+
+
+def _rows_by_player(payload, player_id):
+    return sorted(
+        (row["slice_key"], row["volume"], row["games_played"])
+        for row in payload["rows"]
+        if row["player_id"] == player_id
+    )
+
+
+def test_synergy_carries_a_player_torn_mid_refresh_from_the_last_version_that_had_him(plane):
+    # NBA.com refreshes one play type at a time after a game night, so on
+    # 2026-11-14 Brunson read 11 games in Isolation and 12 in the others.
+    from app.services.player_diet import PlayerDietRepository
+
+    engine, manifest, publications, deliver = plane
+    deliver(games=6, teammate=True)
+    first_id, _ = _compose_synergy(publications, manifest)
+
+    deliver(
+        suffix="-refresh",
+        categories=[category for category in PLAY_TYPES if category != "Isolation"],
+        games=7,
+        teammate=True,
+    )
+    second_id, second = _compose_synergy(publications, manifest)
+    assert second["withheld_players"] == []
+    assert _rows_by_player(second, 2544) == [(category, 1, 6) for category in sorted(PLAY_TYPES)]
+    assert second["carried_players"] == [{"player_id": 2544, "publication_id": first_id}]
+    assert _rows_by_player(second, 201939) == [(category, 1, 7) for category in sorted(PLAY_TYPES)]
+
+    # Still torn at the next composition: the rows keep naming where they came from.
+    deliver(suffix="-again", categories=("Cut",), games=7, teammate=True)
+    _, third = _compose_synergy(publications, manifest)
+    assert third["carried_players"] == [{"player_id": 2544, "publication_id": first_id}]
+    assert _rows_by_player(third, 2544) == [(category, 1, 6) for category in sorted(PLAY_TYPES)]
+
+    diets = PlayerDietRepository(engine, publication_reader=DatabaseFirstPublicationReader(engine))
+    served = diets.get_for_players("2025-26", [2544])
+    assert sorted(
+        (fact.slice_key, fact.games_played) for fact in served.players[2544] if fact.base == "play_types"
+    ) == [(category, 6) for category in sorted(PLAY_TYPES)]
+    with Session(engine) as session:
+        assert session.get(PublicationVersion, second_id).status == "superseded"
+
+
+def test_synergy_torn_player_no_earlier_version_had_stays_withheld(plane):
+    _, manifest, publications, deliver = plane
+    deliver(teammate=True, games=7)
+    deliver(suffix="-torn", categories=("Isolation",), games=6, teammate=True)
+    _, payload = _compose_synergy(publications, manifest)
+    assert payload["withheld_players"] == [{"player_id": 2544, "reason": "inconsistent team games played"}]
+    assert payload["carried_players"] == []
+    assert _rows_by_player(payload, 2544) == []
+
+
+def test_synergy_player_withheld_for_another_reason_is_not_carried(plane):
+    _, manifest, publications, deliver = plane
+    deliver(games=7, teammate=True)
+    _compose_synergy(publications, manifest)
+    deliver(suffix="-zero", games=7, possessions=0, teammate=True)
+    _, payload = _compose_synergy(publications, manifest)
+    assert payload["withheld_players"] == [
+        {"player_id": 2544, "reason": "zero possessions contradict the rounded share"}
+    ]
+    assert payload["carried_players"] == []
+    assert _rows_by_player(payload, 2544) == []
 
 
 def test_synergy_latest_per_category_retry_preserves_all_eleven(plane):
