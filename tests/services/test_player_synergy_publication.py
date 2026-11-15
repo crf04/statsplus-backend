@@ -10,16 +10,19 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.collector.normalizers import PLAY_TYPES, normalize_synergy_response
+from app.domain.publication_integrity import publication_payload_checksum
 from app.models.collection_control import (
     CollectionManifest,
     CollectionObservation,
     CompositionJob,
+    PublicationObservation,
     PublicationPointer,
     PublicationStream,
     PublicationVersion,
 )
 from app.services import collection_control as module
 from app.services.collection_control import (
+    NBA_TEAM_IDS,
     CollectionControlService,
     CollectionOperationsService,
     CollectorTokenService,
@@ -36,17 +39,25 @@ from tests.test_residential_collector import (
 
 @pytest.fixture
 def plane(tmp_path):
-    engine, _, publications, _ = _grouped_shot_type_control_plane(tmp_path, "synergy.sqlite3")
+    return _synergy_plane(tmp_path)
+
+
+def _synergy_plane(tmp_path, *, season="2025-26", engine=None):
+    first = engine is None
+    engine, _, publications, _ = _grouped_shot_type_control_plane(
+        tmp_path, "synergy.sqlite3", engine=engine, season=season
+    )
     control = CollectionControlService(engine, clock=lambda: NOW)
     manifest = control.create_manifest(
-        "2025-26",
+        season,
         cutoff=NOW,
         scopes={"grouped_shot_types", "synergy_play_types", "canonical_game_ledger"},
         collect_before=NOW + timedelta(hours=1),
     )
-    CollectionOperationsService(engine, publication_service=publications, clock=lambda: NOW).activate_stream(
-        "synergy_play_types", actor="test", reason="first player Synergy collection"
-    )
+    if first:
+        CollectionOperationsService(
+            engine, publication_service=publications, clock=lambda: NOW
+        ).activate_stream("synergy_play_types", actor="test", reason="first player Synergy collection")
     tokens = CollectorTokenService(engine, environment="testing", signing_secret="test", clock=lambda: NOW)
     identity = tokens.create_identity(
         "test", scopes=["ingest"], providers=["nba"], surfaces=["synergy_play_types"]
@@ -59,7 +70,18 @@ def plane(tmp_path):
         clock=lambda: NOW + timedelta(seconds=next(ticks)),
     )
 
-    def deliver(*, suffix="", categories=PLAY_TYPES, share=0.01, ambiguous=False, games=20, teammate=False):
+    def deliver(
+        *,
+        suffix="",
+        categories=PLAY_TYPES,
+        share=0.01,
+        ambiguous=False,
+        games=20,
+        teammate=False,
+        possessions=1,
+        on=manifest,
+    ):
+        cutoff = on.cutoff.replace(tzinfo=NOW.tzinfo)
         receipts = []
         for category in categories:
             rows = [
@@ -67,7 +89,7 @@ def plane(tmp_path):
                     "PLAYER_ID": 2544,
                     "TEAM_ID": 1610612737,
                     "GP": games,
-                    "POSS": 1,
+                    "POSS": possessions,
                     "POSS_PCT": share,
                     "PLAY_TYPE": category,
                 }
@@ -97,8 +119,8 @@ def plane(tmp_path):
                 ]
             observation = normalize_synergy_response(
                 rows,
-                season="2025-26",
-                cutoff=NOW,
+                season=season,
+                cutoff=cutoff,
                 scope={
                     "window": "season",
                     "subject": "player",
@@ -111,11 +133,11 @@ def plane(tmp_path):
                 "client_observation_id": category + suffix,
                 "observation_type": "synergy_play_types",
                 "provider": "nba",
-                "season": "2025-26",
-                "cutoff": NOW.isoformat(),
+                "season": season,
+                "cutoff": cutoff.isoformat(),
                 "schema_version": 2,
-                "retrieved_at": NOW.isoformat(),
-                "manifest_id": manifest.manifest_id,
+                "retrieved_at": cutoff.isoformat(),
+                "manifest_id": on.manifest_id,
                 "scope": observation.scope,
                 "environment": "testing",
                 "checksum": hashlib.sha256(raw).hexdigest(),
@@ -240,6 +262,287 @@ def test_synergy_recomposes_a_withheld_player_once_the_lagging_play_type_catches
             select(CompositionJob).where(CompositionJob.stream_key == "synergy_play_types")
         ).one()
         assert (job.status, job.attempts, job.generation) == ("succeeded", 0, 2)
+
+
+def _compose_synergy(publications, manifest):
+    version = publications.compose_from_observations(
+        "synergy_play_types",
+        season="2025-26",
+        cutoff=NOW,
+        manifest_id=manifest.manifest_id,
+    )
+    return version.publication_id, json.loads(version.payload)
+
+
+def _rows_by_player(payload, player_id):
+    return sorted(
+        (row["slice_key"], row["volume"], row["games_played"])
+        for row in payload["rows"]
+        if row["player_id"] == player_id
+    )
+
+
+def _open_day(engine, days):
+    """The manifest a later collection day runs under, with its own Event Catalog."""
+
+    day = NOW + timedelta(days=days)
+    control = CollectionControlService(engine, clock=lambda: day)
+    request = control.create_bootstrap_request("2025-26", "event", cutoff=day)
+    control.publish_catalog(
+        request.request_id,
+        {
+            "complete_snapshot": True,
+            "events": [
+                {
+                    "nba_game_id": f"game-{index}",
+                    "home_team_id": team_ids[index * 2],
+                    "away_team_id": team_ids[index * 2 + 1],
+                    "scheduled_at": (NOW - timedelta(days=2, hours=index)).isoformat(),
+                    "phase": "Regular Season",
+                    "status": "Final",
+                }
+                for team_ids in [sorted(NBA_TEAM_IDS)]
+                for index in range(15)
+            ],
+        },
+        version=f"event-day-{days}",
+    )
+    return control.create_manifest(
+        "2025-26",
+        cutoff=day,
+        scopes={"synergy_play_types", "canonical_game_ledger"},
+        collect_before=day + timedelta(hours=1),
+    )
+
+
+def _compose_day(publications, manifest):
+    version = publications.compose_from_observations(
+        "synergy_play_types",
+        season="2025-26",
+        cutoff=manifest.cutoff.replace(tzinfo=NOW.tzinfo),
+        manifest_id=manifest.manifest_id,
+    )
+    return version.publication_id, json.loads(version.payload)
+
+
+def test_synergy_carries_a_player_torn_mid_refresh_from_the_last_version_that_had_him(plane):
+    # NBA.com refreshes one play type at a time after a game night, so on
+    # 2026-11-14 Brunson read 11 games in Isolation and 12 in the others.
+    from app.services.player_diet import PlayerDietRepository
+
+    engine, manifest, publications, deliver = plane
+    deliver(games=6, teammate=True)
+    first_id, _ = _compose_synergy(publications, manifest)
+
+    deliver(
+        suffix="-refresh",
+        categories=[category for category in PLAY_TYPES if category != "Isolation"],
+        games=7,
+        teammate=True,
+    )
+    second_id, second = _compose_synergy(publications, manifest)
+    assert second["withheld_players"] == []
+    assert _rows_by_player(second, 2544) == [(category, 1, 6) for category in sorted(PLAY_TYPES)]
+    assert second["carried_players"] == [
+        {"player_id": 2544, "publication_id": first_id, "manifest_id": manifest.manifest_id}
+    ]
+    assert _rows_by_player(second, 201939) == [(category, 1, 7) for category in sorted(PLAY_TYPES)]
+
+    # Still torn at the next composition: the rows keep naming where they came from.
+    deliver(suffix="-again", categories=("Cut",), games=7, teammate=True)
+    _, third = _compose_synergy(publications, manifest)
+    assert third["carried_players"] == [
+        {"player_id": 2544, "publication_id": first_id, "manifest_id": manifest.manifest_id}
+    ]
+    assert _rows_by_player(third, 2544) == [(category, 1, 6) for category in sorted(PLAY_TYPES)]
+
+    diets = PlayerDietRepository(engine, publication_reader=DatabaseFirstPublicationReader(engine))
+    served = diets.get_for_players("2025-26", [2544])
+    assert sorted(
+        (fact.slice_key, fact.games_played) for fact in served.players[2544] if fact.base == "play_types"
+    ) == [(category, 6) for category in sorted(PLAY_TYPES)]
+    with Session(engine) as session:
+        assert session.get(PublicationVersion, second_id).status == "superseded"
+
+
+def test_synergy_torn_player_no_earlier_version_had_stays_withheld(plane):
+    _, manifest, publications, deliver = plane
+    deliver(teammate=True, games=7)
+    deliver(suffix="-torn", categories=("Isolation",), games=6, teammate=True)
+    _, payload = _compose_synergy(publications, manifest)
+    assert payload["withheld_players"] == [{"player_id": 2544, "reason": "inconsistent team games played"}]
+    assert payload["carried_players"] == []
+    assert _rows_by_player(payload, 2544) == []
+
+
+def test_synergy_player_withheld_for_another_reason_is_not_carried(plane):
+    _, manifest, publications, deliver = plane
+    deliver(games=7, teammate=True)
+    _compose_synergy(publications, manifest)
+    deliver(suffix="-zero", games=7, possessions=0, teammate=True)
+    _, payload = _compose_synergy(publications, manifest)
+    assert payload["withheld_players"] == [
+        {"player_id": 2544, "reason": "zero possessions contradict the rounded share"}
+    ]
+    assert payload["carried_players"] == []
+    assert _rows_by_player(payload, 2544) == []
+
+
+def _tamper_volume(version):
+    version.payload = version.payload.replace('"volume":1', '"volume":99')
+
+
+def _tamper_authority(version):
+    version.event_catalog_checksum = "0" * 64
+
+
+def _tamper_decodable(version):
+    version.payload = version.payload.replace('"slice_key":"Isolation"', '"slice_key":"Bogus"')
+    version.checksum = publication_payload_checksum(version.payload)
+
+
+@pytest.mark.parametrize("tamper", [_tamper_volume, _tamper_authority, _tamper_decodable])
+def test_synergy_skips_a_source_the_reader_would_refuse_and_carries_from_an_older_one(plane, tamper):
+    engine, manifest, publications, deliver = plane
+    deliver(games=5, teammate=True)
+    intact_id, _ = _compose_synergy(publications, manifest)
+    deliver(suffix="-next", games=6, teammate=True)
+    refused_id, _ = _compose_synergy(publications, manifest)
+    with Session(engine) as session, session.begin():
+        tamper(session.get(PublicationVersion, refused_id))
+
+    deliver(suffix="-torn", categories=("Isolation",), games=7, teammate=True)
+    _, payload = _compose_synergy(publications, manifest)
+    assert payload["carried_players"] == [
+        {"player_id": 2544, "publication_id": intact_id, "manifest_id": manifest.manifest_id}
+    ]
+    assert _rows_by_player(payload, 2544) == [(category, 1, 5) for category in sorted(PLAY_TYPES)]
+
+
+def test_synergy_never_carries_from_a_later_cutoff(plane):
+    engine, manifest, publications, deliver = plane
+    deliver(
+        categories=[category for category in PLAY_TYPES if category != "Isolation"], games=6, teammate=True
+    )
+    deliver(suffix="-torn", categories=("Isolation",), games=7, teammate=True)
+    tomorrow = _open_day(engine, 1)
+    deliver(on=tomorrow, suffix="-tomorrow", games=8, teammate=True)
+    _compose_day(publications, tomorrow)
+
+    _, payload = _compose_synergy(publications, manifest)
+    assert payload["withheld_players"] == [{"player_id": 2544, "reason": "inconsistent team games played"}]
+    assert payload["carried_players"] == []
+
+
+def test_synergy_never_carries_from_a_withdrawn_version(plane):
+    engine, manifest, publications, deliver = plane
+    deliver(games=6, teammate=True)
+    _compose_synergy(publications, manifest)
+    tomorrow = _open_day(engine, 1)
+    deliver(on=tomorrow, suffix="-tomorrow", games=7, teammate=True)
+    _compose_day(publications, tomorrow)
+    restored = publications.rollback("synergy_play_types", reason="withdraw the bad day")
+
+    deliver(on=tomorrow, suffix="-torn", categories=("Isolation",), games=8, teammate=True)
+    _, payload = _compose_day(publications, tomorrow)
+    assert payload["carried_players"] == [
+        {"player_id": 2544, "publication_id": restored.publication_id, "manifest_id": manifest.manifest_id}
+    ]
+    assert _rows_by_player(payload, 2544) == [(category, 1, 6) for category in sorted(PLAY_TYPES)]
+
+
+def test_synergy_carried_rows_keep_their_evidence_after_prune_and_gc(plane):
+    engine, manifest, publications, deliver = plane
+    deliver(games=6, teammate=True)
+    origin_id, _ = _compose_synergy(publications, manifest)
+    for day in (1, 2):
+        later = _open_day(engine, day)
+        deliver(
+            on=later,
+            suffix=f"-day{day}",
+            categories=[category for category in PLAY_TYPES if category != "Isolation"],
+            games=6 + day,
+            teammate=True,
+        )
+        deliver(on=later, suffix=f"-day{day}-torn", categories=("Isolation",), games=7 + day, teammate=True)
+        _, payload = _compose_day(publications, later)
+        assert payload["carried_players"] == [
+            {"player_id": 2544, "publication_id": origin_id, "manifest_id": manifest.manifest_id}
+        ]
+
+    publications.prune_history(stream_key="synergy_play_types")
+    operations = CollectionOperationsService(engine, publication_service=publications, clock=lambda: NOW)
+    assert operations.gc_observations(now=NOW + timedelta(days=90)) == 0
+    with Session(engine) as session:
+        assert session.get(PublicationVersion, origin_id) is None
+        origin_evidence = session.scalars(
+            select(CollectionObservation.observation_id).where(
+                CollectionObservation.manifest_id == manifest.manifest_id
+            )
+        ).all()
+    assert len(origin_evidence) == len(PLAY_TYPES)
+
+
+def test_synergy_held_candidate_keeps_carried_evidence_past_retention(tmp_path):
+    # A season serves from held candidates while the pointer stays on the last,
+    # so retention must keep what a candidate carries once its origin is pruned.
+    engine, prior_manifest, publications, prior_deliver = _synergy_plane(tmp_path, season="2024-25")
+    prior_deliver(games=6, teammate=True)
+    publications.compose_from_observations(
+        "synergy_play_types", season="2024-25", cutoff=NOW, manifest_id=prior_manifest.manifest_id
+    )
+    engine, manifest, publications, deliver = _synergy_plane(tmp_path, engine=engine)
+    deliver(games=6, teammate=True)
+    origin_id, _ = _compose_synergy(publications, manifest)
+    deliver(on=_open_day(engine, 1), suffix="-stray", categories=("Cut",), games=6, teammate=True)
+    later = _open_day(engine, 2)
+    deliver(
+        on=later,
+        suffix="-later",
+        categories=[category for category in PLAY_TYPES if category != "Isolation"],
+        games=7,
+        teammate=True,
+    )
+    deliver(on=later, suffix="-torn", categories=("Isolation",), games=8, teammate=True)
+    current_id, payload = _compose_day(publications, later)
+    assert payload["carried_players"] == [
+        {"player_id": 2544, "publication_id": origin_id, "manifest_id": manifest.manifest_id}
+    ]
+    with Session(engine) as session, session.begin():
+        for observation in session.scalars(
+            select(CollectionObservation).where(CollectionObservation.manifest_id == later.manifest_id)
+        ):
+            observation.accepted_at = NOW + timedelta(days=89)
+
+    publications.clock = lambda: NOW + timedelta(days=90)
+    publications.prune_history(stream_key="synergy_play_types")
+    operations = CollectionOperationsService(engine, publication_service=publications, clock=lambda: NOW)
+    assert operations.gc_observations(now=NOW + timedelta(days=90)) == 1
+    with Session(engine) as session:
+        assert session.get(PublicationVersion, origin_id) is None
+        current = session.get(PublicationVersion, current_id)
+        assert current.status == "candidate"
+        carried_evidence = sorted(
+            session.scalars(
+                select(CollectionObservation.client_observation_id)
+                .join(
+                    PublicationObservation,
+                    PublicationObservation.observation_id == CollectionObservation.observation_id,
+                )
+                .where(
+                    PublicationObservation.publication_id == current_id,
+                    PublicationObservation.role == "carried_evidence",
+                )
+            )
+        )
+        stray = session.scalar(
+            select(CollectionObservation).where(CollectionObservation.client_observation_id == "Cut-stray")
+        )
+    assert carried_evidence == sorted(PLAY_TYPES)
+    assert stray is None
+    assert _rows_by_player(json.loads(current.payload), 2544) == [
+        (category, 1, 6) for category in sorted(PLAY_TYPES)
+    ]
 
 
 def test_synergy_latest_per_category_retry_preserves_all_eleven(plane):

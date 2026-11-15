@@ -2208,7 +2208,11 @@ def _compose_player_synergy_observation_payload(
     manifest_id: str,
     provenance_ids: set[str],
 ) -> dict[str, Any]:
-    """Aggregate all eleven player categories from their latest source rows."""
+    """Aggregate all eleven player categories from their latest source rows.
+
+    A player withheld only because NBA.com is mid-refresh keeps the rows of
+    the newest earlier version that had him, listed under ``carried_players``.
+    """
     from app.domain.player_synergy import aggregate_player_synergy
 
     latest: dict[str, CollectionObservation] = {}
@@ -2265,6 +2269,18 @@ def _compose_player_synergy_observation_payload(
             records.append(record)
         sources.append({"observation_id": observation.observation_id, "checksum": observation.checksum})
     rows, withheld_players = aggregate_player_synergy(records)
+    carried_rows, carried_from = _carry_torn_synergy_players(
+        session,
+        stream_key=stream.stream_key,
+        season=season,
+        cutoff=cutoff,
+        torn={
+            player_id
+            for player_id, reason in withheld_players.items()
+            if reason == "inconsistent team games played"
+        },
+    )
+    rows = sorted(rows + carried_rows, key=lambda row: row["player_id"])
     if not rows:
         raise ValueError("publication observation rows missing")
     return {
@@ -2274,8 +2290,80 @@ def _compose_player_synergy_observation_payload(
         "withheld_players": [
             {"player_id": player_id, "reason": reason}
             for player_id, reason in sorted(withheld_players.items())
+            if player_id not in carried_from
+        ],
+        "carried_players": [
+            {"player_id": player_id, **origin} for player_id, origin in sorted(carried_from.items())
         ],
     }
+
+
+def _carry_torn_synergy_players(
+    session: Session,
+    *,
+    stream_key: str,
+    season: str,
+    cutoff: datetime,
+    torn: set[int],
+) -> tuple[list[dict[str, Any]], dict[int, dict[str, str]]]:
+    """Each torn player's rows from the newest earlier version that had him.
+
+    NBA.com refreshes Synergy one play type at a time over hours after a game
+    night, so mid-refresh a player's categories disagree on games played and
+    he is withheld whole (crf04/statsplus#516).  His last coherent rows, one
+    game stale, serve until the refresh completes.  Only versions at or before
+    this cutoff count, so a composition never reads a later cutoff's games,
+    and a withdrawn version is never a source.  A version the reader would
+    refuse (checksum, authority, or Diet decoder) is skipped.  Each player
+    maps to the version his rows were first published in and its manifest.
+    """
+
+    rows: list[dict[str, Any]] = []
+    carried_from: dict[int, dict[str, str]] = {}
+    if not torn:
+        return rows, carried_from
+    earlier = session.scalars(
+        select(PublicationVersion.publication_id)
+        .where(
+            PublicationVersion.stream_key == stream_key,
+            PublicationVersion.season == season,
+            PublicationVersion.cutoff <= cutoff,
+            ~publication_withdrawn(PublicationVersion.publication_id),
+        )
+        .order_by(PublicationVersion.cutoff.desc(), PublicationVersion.version.desc())
+    ).all()
+    verified_catalogs: set[tuple[str, str]] = set()
+    for publication_id in earlier:
+        pending = torn - set(carried_from)
+        if not pending:
+            break
+        source = session.get(PublicationVersion, publication_id)
+        if not publication_payload_matches_checksum(source.payload, source.checksum):
+            continue
+        try:
+            verify_publication_authority(session, source, verified_payloads=verified_catalogs)
+            _validate_activation_candidate_payload(stream_key, source.payload, season=season)
+        except (PublicationGovernanceUnavailable, ControlPlaneError):
+            continue
+        document = json.loads(source.payload)
+        origins = {
+            int(entry["player_id"]): {
+                "publication_id": entry["publication_id"],
+                "manifest_id": entry["manifest_id"],
+            }
+            for entry in document.get("carried_players", ())
+        }
+        found = {row["player_id"] for row in document["rows"] if row["player_id"] in pending}
+        rows.extend(row for row in document["rows"] if row["player_id"] in found)
+        carried_from.update(
+            {
+                player_id: origins.get(
+                    player_id, {"publication_id": source.publication_id, "manifest_id": source.manifest_id}
+                )
+                for player_id in found
+            }
+        )
+    return rows, carried_from
 
 
 def _surface_names(definition: SurfaceDefinition, observation_type: str | None = None) -> set[str]:
@@ -2539,6 +2627,60 @@ def _completed_ledger_l15_game_ids(
     if governed_game_ids and publication_game_ids == governed_game_ids:
         return governed_game_ids
     return None
+
+
+def _add_publication_evidence(
+    session: Session,
+    *,
+    stream_key: str,
+    publication_id: str,
+    provenance_ids: set[str],
+    payload: Any,
+    now: datetime,
+) -> None:
+    """Name every observation a new version's rows rest on, so retention keeps it.
+
+    Rows carried from an earlier version (``carried_players``) rest on their
+    origin manifest's observations, which can outlive the origin version.
+    """
+
+    for observation_id in sorted(provenance_ids):
+        session.add(
+            PublicationObservation(
+                publication_id=publication_id,
+                observation_id=observation_id,
+                role="completeness_evidence",
+                created_at=now,
+            )
+        )
+    carried_manifests = (
+        {str(entry["manifest_id"]) for entry in payload.get("carried_players", ())}
+        if isinstance(payload, Mapping)
+        else set()
+    )
+    if not carried_manifests:
+        return
+    stream = session.get(PublicationStream, stream_key)
+    for observation in session.scalars(
+        select(CollectionObservation)
+        .where(
+            CollectionObservation.manifest_id.in_(sorted(carried_manifests)),
+            CollectionObservation.provider == stream.provider,
+            CollectionObservation.observation_type.in_(json.loads(stream.required_observations)),
+            CollectionObservation.observation_id.not_in(provenance_ids),
+        )
+        .order_by(CollectionObservation.observation_id)
+    ):
+        if _observation_matches_scope(observation, stream):
+            session.add(
+                PublicationObservation(
+                    publication_id=publication_id,
+                    observation_id=observation.observation_id,
+                    role="carried_evidence",
+                    slice_key=observation.manifest_id,
+                    created_at=now,
+                )
+            )
 
 
 def _write_publication_projection(
@@ -6953,15 +7095,14 @@ class PublicationService(_SessionService):
         session.add(publication)
         session.flush()
         _write_publication_projection(session, publication, payload)
-        for observation_id in sorted(provenance_ids):
-            session.add(
-                PublicationObservation(
-                    publication_id=publication.publication_id,
-                    observation_id=observation_id,
-                    role="completeness_evidence",
-                    created_at=now,
-                )
-            )
+        _add_publication_evidence(
+            session,
+            stream_key=stream_key,
+            publication_id=publication.publication_id,
+            provenance_ids=provenance_ids,
+            payload=payload,
+            now=now,
+        )
         stale_versions = session.scalars(
             select(PublicationVersion).where(
                 PublicationVersion.stream_key == stream_key,
@@ -7191,15 +7332,14 @@ class PublicationService(_SessionService):
         session.add(candidate)
         session.flush()
         _write_publication_projection(session, candidate, payload)
-        for observation_id in sorted(provenance_ids):
-            session.add(
-                PublicationObservation(
-                    publication_id=candidate.publication_id,
-                    observation_id=observation_id,
-                    role="completeness_evidence",
-                    created_at=now,
-                )
-            )
+        _add_publication_evidence(
+            session,
+            stream_key=stream_key,
+            publication_id=candidate.publication_id,
+            provenance_ids=provenance_ids,
+            payload=payload,
+            now=now,
+        )
         return candidate
 
     @staticmethod
@@ -10193,30 +10333,11 @@ class CollectionOperationsService(_SessionService):
         with self.session() as session, session.begin():
             # Retention joins exact normalized provenance rows.  It never
             # searches arbitrary rendered publication JSON for identifiers.
-            protected_publication_ids: set[str] = set(
-                session.scalars(
-                    select(PublicationVersion.publication_id).where(
-                        PublicationVersion.status.in_(("active", "rollback"))
-                    )
-                )
-            )
-            for active_id, previous_id in session.execute(
-                select(
-                    PublicationPointer.active_publication_id,
-                    PublicationPointer.previous_publication_id,
-                )
-            ):
-                if active_id:
-                    protected_publication_ids.add(active_id)
-                if previous_id:
-                    protected_publication_ids.add(previous_id)
-            protected = set(
-                session.scalars(
-                    select(PublicationObservation.observation_id).where(
-                        PublicationObservation.publication_id.in_(protected_publication_ids)
-                    )
-                )
-            )
+            # Every publication prune_history keeps (held candidates carrying
+            # an older manifest's rows included) still needs its evidence;
+            # a pruned publication's links cascade away with it, so its
+            # observations age out here.
+            protected = set(session.scalars(select(PublicationObservation.observation_id)))
             # Canonical-ledger evidence is governed and retained indefinitely
             # (#25): every observation that has ever supplied an accepted game
             # -- including superseded correction observations -- is referenced
