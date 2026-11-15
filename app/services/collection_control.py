@@ -10333,30 +10333,11 @@ class CollectionOperationsService(_SessionService):
         with self.session() as session, session.begin():
             # Retention joins exact normalized provenance rows.  It never
             # searches arbitrary rendered publication JSON for identifiers.
-            protected_publication_ids: set[str] = set(
-                session.scalars(
-                    select(PublicationVersion.publication_id).where(
-                        PublicationVersion.status.in_(("active", "rollback"))
-                    )
-                )
-            )
-            for active_id, previous_id in session.execute(
-                select(
-                    PublicationPointer.active_publication_id,
-                    PublicationPointer.previous_publication_id,
-                )
-            ):
-                if active_id:
-                    protected_publication_ids.add(active_id)
-                if previous_id:
-                    protected_publication_ids.add(previous_id)
-            protected = set(
-                session.scalars(
-                    select(PublicationObservation.observation_id).where(
-                        PublicationObservation.publication_id.in_(protected_publication_ids)
-                    )
-                )
-            )
+            # Every publication prune_history keeps (held candidates carrying
+            # an older manifest's rows included) still needs its evidence;
+            # a pruned publication's links cascade away with it, so its
+            # observations age out here.
+            protected = set(session.scalars(select(PublicationObservation.observation_id)))
             # Canonical-ledger evidence is governed and retained indefinitely
             # (#25): every observation that has ever supplied an accepted game
             # -- including superseded correction observations -- is referenced
