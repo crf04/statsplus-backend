@@ -444,7 +444,11 @@ unique integer possession denominator. The player denominator is the sum of
 those proven team totals; per-category games played cannot supply that total.
 Single-team shares remain exactly as supplied. Sparse shares are not rescaled
 to sum to one. Ambiguous or inconsistent players are omitted with deterministic
-`withheld_players` reasons in the internal publication payload. The remaining
+`withheld_players` reasons in the internal publication payload. A player
+withheld only for inconsistent games played, which happens while NBA.com
+refreshes one play type at a time after a game night, instead keeps the rows of
+the newest earlier version at or before the cutoff that had him, listed under
+`carried_players` with that version's publication ID. The remaining
 source stays available; omitted players cannot fall back to legacy facts after
 activation. A candidate with no valid rows, missing categories, or malformed
 evidence preserves the last-good publication.
