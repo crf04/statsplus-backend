@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.collector.normalizers import PLAY_TYPES, normalize_synergy_response
+from app.domain.publication_integrity import publication_payload_checksum
 from app.models.collection_control import (
     CollectionManifest,
     CollectionObservation,
@@ -20,14 +21,13 @@ from app.models.collection_control import (
 )
 from app.services import collection_control as module
 from app.services.collection_control import (
-    CollectionControlService,
     NBA_TEAM_IDS,
+    CollectionControlService,
     CollectionOperationsService,
     CollectorTokenService,
     ControlPlaneError,
     ObservationIngestionService,
 )
-from app.domain.publication_integrity import publication_payload_checksum
 from app.services.database_first_activation import DatabaseFirstPublicationReader
 from tests.test_residential_collector import (
     NOW,
@@ -412,7 +412,9 @@ def test_synergy_skips_a_source_the_reader_would_refuse_and_carries_from_an_olde
 
 def test_synergy_never_carries_from_a_later_cutoff(plane):
     engine, manifest, publications, deliver = plane
-    deliver(categories=[category for category in PLAY_TYPES if category != "Isolation"], games=6, teammate=True)
+    deliver(
+        categories=[category for category in PLAY_TYPES if category != "Isolation"], games=6, teammate=True
+    )
     deliver(suffix="-torn", categories=("Isolation",), games=7, teammate=True)
     tomorrow = _open_day(engine, 1)
     deliver(on=tomorrow, suffix="-tomorrow", games=8, teammate=True)
