@@ -530,6 +530,9 @@ Sheet down rather than restore them.
 Production now deploys from the `production` branch, so roll back by
 redeploying the previous successful Railway deployment, then land a forward
 revert through master, staging and production; never force-push `production`.
+Redeploying a previous production deployment is an operator action the user
+approves; agents never redeploy production. The forward revert reaches
+production through the coordination repository's Nightly Release.
 
 The retained dual-format release must not be pruned while any v1 publication
 is still a possible rollback destination. The v1 pair remains the
@@ -706,7 +709,10 @@ after the rule holds activates.
   without it.
 - `ledger-refresh` (settings in `railway.ledger.json`, `LEDGER_SEASON=<season>`,
   plus `DATABASE_URL`) runs `scripts/ledger_refresh.py --compose` at 10:15,
-  12:15 and 14:15 UTC, inside that window. It accepts the completed games up to
+  12:15 and 14:15 UTC, inside that window. The day's manifest opens between the
+  10:15 and 12:15 runs, so a run before 12:00 UTC that finds no open collection
+  manifest prints `"skipped": "no_active_manifest"` and exits 0; from noon on,
+  the missing manifest fails the run (#789). It accepts the completed games up to
   the manifest cutoff from pbpstats.com, with the NBA live-data CDN as fallback;
   Railway egress reaches both, so it needs no residential proxy. It then
   composes the ledger streams (`player_game_logs`, `player_per36`,

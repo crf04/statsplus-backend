@@ -1238,8 +1238,7 @@ team matchup publications, always at the Season window
 (`app.services.team_filter_rankings`).  One map names, per Team Filter, the
 publication base and the metric keys it ranks:
 `traditional_opponent_season` covers the opponent box set (`OPP_STOCKS` sums
-the published blocks and steals; `DRTG` divides 100 × points allowed by the
-published `possessions`), `grouped_shot_types_opponent_season` covers
+the published blocks and steals), `grouped_shot_types_opponent_season` covers
 the catch-and-shoot, pull-up, and under-10-feet filters (their points columns
 are derived as `3 * FG3M + 2 * FG2M` from the made-shot counts),
 `synergy_play_types_opponent_season` ranks points per possession,
@@ -3721,6 +3720,9 @@ family. Recovery to v1 is therefore **code first, data second**:
 Production now deploys from the `production` branch, so a rollback redeploys a
 previous successful Railway deployment (as in step 1), then lands a forward
 revert through master, staging and production; never force-push `production`.
+Redeploying a previous production deployment is an operator action the user
+approves; agents never redeploy production. The forward revert reaches
+production through the coordination repository's Nightly Release.
 
 Doing it in the other order does not work and is refused rather than
 half-completed: under this release the family rollback fails closed with
@@ -5572,7 +5574,16 @@ many games in `Overall` as in the box score. The three types do not cover
 every shot (a floater from 12 feet is none of them), so a fully tracked player
 whose attempts all fall outside them is absent from the Diet; requiring each
 shooter in a category refused the 2026-10-28 collection over one such
-attempt (crf04/statsplus#386). An observation without the bound or the
+attempt (crf04/statsplus#386). One exception covers games NBA.com tracking
+never reaches: they are declared, with evidence, in
+`app/collector/untracked_games.py` (never remove an entry; past publications
+are validated against it), and `app/services/shot_type_coverage.py`
+reconciles them. A declared game is absent when every participant is short for
+it. A shortfall explained exactly by absent declared games publishes without
+them: team rows carry the governed games less those games, with their minutes
+removed from the per-48 denominator, and L15 excludes them inside its governed
+15 without backfill. Any other shortfall still refuses with
+`provider_window_lagging` (#754). An observation without the bound or the
 evidence is `provider_window_unverified`. The refused job is retried by the next upload
 inside the collection window, so the publication moves as soon as NBA catches
 up and never to a lagging candidate. The version binds the same manifest and Event Catalog

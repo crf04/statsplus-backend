@@ -103,7 +103,7 @@ reads.
 | Link previews | `GET /api/games/game_logs/preview.png`, `GET /api/games/slate/preview.png`, `GET /api/games/matchup/preview.png` | Chat apps fetch them signed out to unfurl a shared link; there is no account to count. |
 | Target resolve | `GET /api/user/targets/resolve` | The Slate page reads it on every load to show live Targets, so counting it would count Slate loads. This also means the connector's `get_targets` call is not counted. |
 | Reference lists | `GET /api/players`, `GET /api/teams`, `GET /api/games/seasons`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, `GET /api/players/next-opponent` | Pickers and reference data. |
-| Other research reads | `GET /api/games/board`, `GET /api/games/rotation`, `GET /api/players/season_stats`, `GET /api/on_off`, `GET /api/injuries`, `GET /api/injury_scenarios` | Not among the surfaces #213 names, so not counted. To count one, add its endpoint to `RESEARCH_ENDPOINTS`. |
+| Other research reads | `GET /api/games/board`, `GET /api/games/rotation`, `GET /api/players/season_stats`, `GET /api/on_off`, `GET /api/injuries`, `GET /api/injury_scenarios`, `GET /api/teams/defense-ranks` | Not among the surfaces #213 names, so not counted. To count one, add its endpoint to `RESEARCH_ENDPOINTS`. |
 | Account | every other `/api/user/*` route, `POST /api/user/attribution` | Account management, not research. |
 
 `RESEARCH_ENDPOINTS` in `app/services/research_activity.py` is the single list
@@ -4502,7 +4502,11 @@ GET /api/players
 ```
 
 Returns a JSON array of canonical current-season Athlete Catalog display names
-that have at least one durable Player Diet fact of any base. A traded player
+that have at least one durable Player Diet fact of any base. While the next
+season is offered (`GET /api/games/seasons`), the array also includes that
+season's players, so a rookie with only next-season games is listed before the
+cutover; a player in both seasons keeps his current-season name. Pinning the
+season with `NBA_CURRENT_SEASON` lists the current season only. A traded player
 whose Synergy play types are withheld (an ambiguous team stint) is still listed
 through his assist-location or shot Diets; his `Playtypes` profile stays
 `resource_not_found`. The request is database-only and
@@ -5840,7 +5844,7 @@ raw payloads or source identifiers. Absent evidence is JSON `null`:
     "concurrency_count": 0,
     "limits": {
       "poll_count": 100,
-      "envelope_count": 1000,
+      "envelope_count": 5000,
       "byte_count": 52428800,
       "concurrency_count": 1
     },
