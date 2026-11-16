@@ -90,8 +90,10 @@ work, measuring the allocated database plus WAL footprint with page overhead,
 and refuses to silently discard unsent entries older than 30 days. Aged entries
 are marked for operator attention and skipped while the newer-cutoff-first
 drain continues; only a server-governed obsolete cutoff may remove an unsent
-row. Use the governed cutoff with the repository's `prune_obsolete` recovery
-operation, never filesystem deletion.
+row. A 429 from Railway refuses the whole collector, not one entry, so it ends
+the drain pass at once and leaves the remaining entries pending for the next
+run (#756). Use the governed cutoff with the repository's `prune_obsolete`
+recovery operation, never filesystem deletion.
 The collector invokes that operation only from Railway discovery's
 `obsolete_before_cutoff`; local age alone can alert but never delete.
 SQLite cannot atomically roll back filesystem allocation after commit. The

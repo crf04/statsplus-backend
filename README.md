@@ -649,8 +649,11 @@ the master, an import or startup failure stops the whole server; see
   copy of production with caching off and no collectors, behind the
   `staging.courtai.app` frontend.
 - Production services deploy from the `production` branch. It is only
-  fast-forwarded, on release, to a commit staging has already run; never
-  force-push it.
+  fast-forwarded, on release, to a commit staging has already run, by the
+  coordination repository's Nightly Release workflow
+  (`crf04/statsplus` `.github/workflows/nightly-release.yml`), its only writer.
+  Never push or force-push `production`, and never redeploy production in
+  Railway by hand.
 
 For production:
 
