@@ -139,9 +139,81 @@ def test_a_publication_with_no_usage_anywhere_serves_null_and_a_filter_matches_n
 
     try:
         assert {value for _date, value in _usage(client.get(URL))} == {None}
+        body = client.get(URL).get_json()
+        assert (body["averages"][0]["USG_PCT"], body["season_averages"][0]["USG_PCT"]) == (None, None)
         assert _usage(client.get(URL + "&self_filters[USG_PCT]=0,100")) == []
     finally:
         built.engine.dispose()
+
+
+#: (usage, minutes) per game, oldest first (10-22 .. 10-26): 10-24 has no
+#: usage, 10-25 has a usage but no minutes.
+WEIGHTED_GAMES = [(30.0, 30.0), (10.0, 10.0), (MISSING, 40.0), (50.0, 0.0), (20.0, 20.0)]
+
+
+@pytest.fixture
+def weighted(dependencies, tmp_path):
+    built = seasons.World(create_engine(f"sqlite:///{tmp_path / 'weighted.sqlite3'}"))
+    rows = seasons._season_logs(NEW, okc_games=0)
+    for row, (usage, minutes) in zip(rows, WEIGHTED_GAMES, strict=True):
+        row["minutes"] = minutes
+        if usage is MISSING:
+            row.pop("usage_pct", None)
+        else:
+            row["usage_pct"] = usage
+    built.compose("player_game_logs", NEW, {"rows": rows})
+    with built.engine.begin() as connection:
+        connection.execute(
+            AthleteCatalog.__table__.insert(),
+            {
+                "season": NEW,
+                "player_id": seasons.bt.LEBRON,
+                "display_name": "LeBron James",
+                "roster_status": "active",
+                "is_active": True,
+                "is_active_for_season": True,
+                "published_at": seasons.NOW,
+            },
+        )
+    settings = built.settings.model_copy(
+        update={"cache": built.settings.cache.model_copy(update={"enabled": False})}
+    )
+    dependencies.game_service = GameService(
+        built.engine,
+        Mock(),
+        settings=settings,
+        game_logs_source=StoredGameLogsSource(built.logs),
+        publication_reader=built.reader,
+        game_log_seasons=built.logs,
+        athlete_catalog=AthleteCatalogReader(built.engine),
+    )
+    yield
+    built.engine.dispose()
+
+
+def _usage_averages(response):
+    assert response.status_code == 200
+    body = response.get_json()
+    return body["averages"][0]["USG_PCT"], body["season_averages"][0]["USG_PCT"]
+
+
+def test_usage_average_is_weighted_by_minutes_not_a_plain_mean(weighted, client):
+    # 30 @ 30 min and 10 @ 10 min: (900 + 100) / 40 = 25.0, not the plain mean 20.
+    assert _usage_averages(client.get(URL + "&date_to=2026-10-23")) == (25.0, 25.0)
+
+
+def test_usage_average_skips_games_without_usage_or_minutes(weighted, client):
+    # Season: (900 + 100 + 400) / 60 = 23.33; the null-usage 40-minute game and
+    # the 50% zero-minute game add nothing. From 10-24: only 20 @ 20 qualifies.
+    assert _usage_averages(client.get(URL + "&date_filter=2026-10-24")) == (20.0, 23.33)
+
+
+def test_usage_average_is_null_when_only_a_null_usage_game_is_left(weighted, client):
+    assert _usage_averages(client.get(URL + "&self_filters[MIN]=40,40")) == (None, 23.33)
+
+
+def test_usage_average_is_null_when_only_a_zero_minute_game_is_left(weighted, client):
+    assert _usage_averages(client.get(URL + "&self_filters[MIN]=0,0")) == (None, 23.33)
 
 
 def _publication_row(**extra):

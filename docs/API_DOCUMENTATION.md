@@ -3478,8 +3478,12 @@ means 28.57%), unrounded, or `null`:
 * A publication composed before the `usage_pct` backfill has no such value, so
   its rows carry `null`.
 * `self_filters[USG_PCT]=min,max` filters on it. A `null` value fails any range,
-  the way a `NaN` comparison does. It is not a Game Logs table column, an
-  average, or an opponent-defense category.
+  the way a `NaN` comparison does. It is not a Game Logs table column or an
+  opponent-defense category.
+* Both `averages` and `season_averages` carry `USG_PCT`, weighted by minutes:
+  sum(`USG_PCT` x `MIN`) / sum(`MIN`) over games with a usage and `MIN` above
+  0, 0-100, 2 decimals. 30 at 30 minutes and 10 at 10 minutes average 25.0.
+  It is `null` when no game qualifies.
 
 Player tracking (crf04/statsplus#349): every `game_logs` row carries four NBA.com
 player-tracking counts, each an integer or `null`:
