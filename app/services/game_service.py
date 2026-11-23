@@ -164,6 +164,17 @@ def _tracking_averages(frame: pd.DataFrame) -> dict[str, float | None]:
     return averages
 
 
+def _usage_average(frame: pd.DataFrame) -> dict[str, float | None]:
+    """Minutes-weighted USG% over games with a usage and minutes; ``None`` when none qualify."""
+
+    usage = frame["USG_PCT"].astype("Float64") if "USG_PCT" in frame else pd.Series([], dtype="Float64")
+    minutes = frame["MIN"].astype("Float64")
+    played = (usage.notna() & (minutes > 0)).fillna(False).astype(bool)
+    if not played.any():
+        return {"USG_PCT": None}
+    return {"USG_PCT": round(float((usage[played] * minutes[played]).sum() / minutes[played].sum()), 2)}
+
+
 def _records(frame: pd.DataFrame):
     """Convert a DataFrame to JSON-safe dictionaries (empty frame -> [])."""
     if frame is None or frame.shape[0] == 0:
@@ -845,7 +856,7 @@ class GameService:
         if not filtered_logs.empty:
             filtered_averages = filtered_logs[average_columns].mean().round(2)
             filtered_average_rows = _records(filtered_averages.to_frame().T)
-            filtered_average_rows[0].update(_tracking_averages(filtered_logs))
+            filtered_average_rows[0].update(_tracking_averages(filtered_logs) | _usage_average(filtered_logs))
         else:
             filtered_average_rows = []
         # Season-to-date rule: only ``date_to`` bounds the season average and
@@ -857,7 +868,7 @@ class GameService:
         if not season_logs.empty:
             season_averages = season_logs[average_columns].mean().round(2)
             season_average_rows = _records(season_averages.to_frame().T)
-            season_average_rows[0].update(_tracking_averages(season_logs))
+            season_average_rows[0].update(_tracking_averages(season_logs) | _usage_average(season_logs))
         closing_lines = self._closing_lines_for(filtered_logs, query.season_filter)
         filtered_logs.drop(
             [
