@@ -384,7 +384,8 @@ class _RequestReads:
         batch = getattr(self.games(season), "get_players_logs_by_id", None)
         if not callable(batch):
             return  # the per-player read in ``logs`` serves a games seam without one
-        frames = batch(missing, season, publication_snapshot=self.snapshot(season))
+        # No scenario reads the tracking columns.
+        frames = batch(missing, season, publication_snapshot=self.snapshot(season), tracking=False)
         for pid in missing:
             self._logs[(pid, season)] = _lean(frames.get(pid))
 

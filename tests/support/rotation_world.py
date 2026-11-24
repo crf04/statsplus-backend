@@ -173,7 +173,7 @@ class StoredLogs:
         return {pid: self.get_player_logs(pid, season) for pid in ids}
 
     # The stored game-log source seam a real ``GameService`` reads through.
-    def get_players_logs(self, player_ids, season, *, publication_snapshot=None):
+    def get_players_logs(self, player_ids, season, *, publication_snapshot=None, tracking=True):
         return self.get_players_logs_by_id(player_ids, season, publication_snapshot=publication_snapshot)
 
     def get_player_logs(self, player_id, season, *, publication_snapshot=None):

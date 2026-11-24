@@ -516,11 +516,12 @@ class GameService:
             publication_snapshot=publication_snapshot,
         )
 
-    def get_players_logs_by_id(self, player_ids, season, *, publication_snapshot=None):
+    def get_players_logs_by_id(self, player_ids, season, *, publication_snapshot=None, tracking=True):
         """Several players' stored logs for a season, one source read.
 
         ``{player_id: frame}``, each frame what ``get_player_logs_by_id``
         returns for that player, all under one publication snapshot.
+        ``tracking=False`` lets the source leave out its player-tracking columns.
         """
         if self.game_logs_source is None:
             raise RuntimeError(
@@ -537,7 +538,9 @@ class GameService:
                 )
                 for player_id in ids
             }
-        return call_with_read_scope(batch, ids, season, publication_snapshot=publication_snapshot)
+        return call_with_read_scope(
+            batch, ids, season, publication_snapshot=publication_snapshot, tracking=tracking
+        )
 
     def capture_publication_snapshot(self, season):
         """The immutable publications a read of ``season`` composes, for sharing across reads."""

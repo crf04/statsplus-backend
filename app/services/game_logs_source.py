@@ -89,11 +89,13 @@ class StoredGameLogsSource:
         season: str,
         *,
         publication_snapshot: Any | None = None,
+        tracking: bool = True,
     ) -> dict[int, pd.DataFrame]:
         """Several players' frames for a season from one repository read.
 
         Each frame is exactly what ``get_player_logs`` returns for that player,
         including the empty frame for a player with no rows or unreadable ones.
+        ``tracking=False`` leaves out the player-tracking columns, and their read.
         """
 
         ids = tuple(sorted(set(player_ids)))
@@ -103,6 +105,10 @@ class StoredGameLogsSource:
             if complete and ids
             else {}
         )
+        if not tracking:
+            return {
+                player_id: _player_frame(found.get(player_id) or (), with_tracking=False) for player_id in ids
+            }
         stored = self._tracking_for(
             season, tuple(player_id for player_id in ids if found.get(player_id)), None
         )
@@ -133,16 +139,17 @@ class StoredGameLogsSource:
 
 
 def _player_frame(
-    records: tuple[Any, ...], tracking: dict[str, dict[str, int | None]] | None = None
+    records: tuple[Any, ...],
+    tracking: dict[str, dict[str, int | None]] | None = None,
+    *,
+    with_tracking: bool = True,
 ) -> pd.DataFrame:
     # The request-time contract serves Regular Season games only.
     records = tuple(record for record in records if record.season_type == "Regular Season")
-    return _recency_frame(
-        derive_game_log_frame(
-            _with_tracking(_records_to_primitive_frame(records), tracking or {}),
-            round_minutes=True,
-        )
-    )
+    frame = _records_to_primitive_frame(records)
+    if with_tracking:
+        frame = _with_tracking(frame, tracking or {})
+    return _recency_frame(derive_game_log_frame(frame, round_minutes=True))
 
 
 #: Frame column to stored tracking column.  Whole counts or null, never 0 for

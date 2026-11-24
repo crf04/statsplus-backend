@@ -597,7 +597,7 @@ class PublishedSeasonReader:
 class PublishedOnlyLogs(StoredLogs):
     """Stored logs served only under a snapshot that serves the season, as the real source reads."""
 
-    def get_players_logs(self, player_ids, season, *, publication_snapshot=None):
+    def get_players_logs(self, player_ids, season, *, publication_snapshot=None, tracking=True):
         frames = self.get_players_logs_by_id(player_ids, season, publication_snapshot=publication_snapshot)
         if publication_snapshot.served:
             return frames

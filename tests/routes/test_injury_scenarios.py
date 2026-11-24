@@ -207,7 +207,7 @@ class FakeGameLogs:
     def get_player_logs(self, player_id, season, publication_snapshot=None):
         return self._frame(player_id, season)
 
-    def get_players_logs(self, player_ids, season, publication_snapshot=None):
+    def get_players_logs(self, player_ids, season, publication_snapshot=None, tracking=True):
         """The batched read: one call, each player's frame as ``get_player_logs`` gives it."""
         self.batches.append((tuple(sorted(player_ids)), season))
         return {pid: self._frame(pid, season) for pid in player_ids}
@@ -1138,7 +1138,7 @@ def test_an_unpublished_slate_season_still_counts_its_games(client, authenticate
     """crf04/statsplus#467: the Slate's season after the Published Season was read as no games."""
 
     class PublishedOnlyLogs(FakeGameLogs):
-        def get_players_logs(self, player_ids, season, publication_snapshot=None):
+        def get_players_logs(self, player_ids, season, publication_snapshot=None, tracking=True):
             return {
                 pid: self._frame(pid, season) if publication_snapshot.served else self._frame(None, season)
                 for pid in player_ids
@@ -1248,7 +1248,7 @@ def test_one_publication_snapshot_per_season_serves_the_roster_and_the_batched_l
     world.logs.list_team_player_ids = lambda season, team_id, publication_snapshot=None: (
         roster_reads.append((season, publication_snapshot.name)) or team_rows(season, team_id)
     )
-    world.logs.get_players_logs = lambda ids, season, publication_snapshot=None: (
+    world.logs.get_players_logs = lambda ids, season, publication_snapshot=None, tracking=True: (
         log_reads.append((season, publication_snapshot.name)) or batch(ids, season)
     )
 
