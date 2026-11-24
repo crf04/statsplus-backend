@@ -244,11 +244,16 @@ class _OnOffReads:
         self._user_id = request.user_id
         self._deadline = request.on_off_deadline
         self._phases = request.phases
+        self._request = request
         self._memo: dict[tuple[str, str], Mapping[str, Any]] = {}
 
     def get(self, season: str, side: str) -> Mapping[str, Any]:
         key = (season, side)
         if key not in self._memo:
+            from_segments = self._request.segment_split(self.team, season, self.injured_id, side)
+            if from_segments is not None:
+                self._memo[key] = from_segments
+                return from_segments
             splits = {side: [self.injured_id]}
             with self._phases("on_off"):
                 if self._fetch:
@@ -304,6 +309,9 @@ class _RequestReads:
         self._views: dict[tuple[int, str], _Logs] = {}
         self._team_games: dict[tuple[str, str], pd.DataFrame | None] = {}
         self._pool_lines: dict[tuple[str, str], dict[int, dict[str, dict[str, float]]]] = {}
+        self._segment_splits: dict[tuple[str, str], dict[tuple[int, str], Mapping[str, Any]] | None] = {}
+        #: Each team's listed players with a scenario; their splits are read together.
+        self.injured: dict[str, set[int]] = {}
         self._rosters: dict[tuple[int, str], set[int]] = {}
         self._snapshots: dict[str, Any] = {}
         self._catalog: dict[str, dict[int, int]] = {}
@@ -396,6 +404,28 @@ class _RequestReads:
             ]
             self._team_games[key] = pd.concat(frames).drop_duplicates("GAME_ID") if frames else None
         return self._team_games[key]
+
+    def segment_split(self, team: str, season: str, injured_id: int, side: str) -> Mapping[str, Any] | None:
+        """His ``side`` split when the season is served from segments, else ``None``.
+
+        The first read of a team season reads both sides of every listed
+        player on the team in one pass (``OnOffService.segment_splits``).
+        """
+
+        key = (team, season)
+        if key not in self._segment_splits:
+            pairs = [
+                (pid, s)
+                for pid in sorted(self.injured.get(team, set()) | {injured_id})
+                for s in ("on", "off")
+            ]
+            with self.phases("on_off"):
+                found = self._service.on_off.segment_splits(
+                    team, season, [([pid], []) if s == "on" else ([], [pid]) for pid, s in pairs]
+                )
+            self._segment_splits[key] = None if found is None else dict(zip(pairs, found, strict=True))
+        found = self._segment_splits[key]
+        return None if found is None else found.get((injured_id, side))
 
     def pool_lines(self, season: str, game_id: str) -> dict[int, dict[str, dict[str, float]]]:
         key = (season, game_id)
@@ -505,6 +535,9 @@ class InjuryScenarioService:
             if row["status"] == "Out" and row["player_id"] is not None:
                 listed_out.setdefault(row["team"], set()).add(int(row["player_id"]))
         reads = _RequestReads(self, phases, fetch_on_off=bool(wanted), user_id=user_id)
+        for row in selected:
+            if row["player_id"] is not None:
+                reads.injured.setdefault(row["team"], set()).add(int(row["player_id"]))
         with phases("prefetch"):
             self._prefetch(selected, season, reads)
         with phases("windows"):

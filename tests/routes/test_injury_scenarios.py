@@ -2552,6 +2552,11 @@ class SegmentSplits:
     def covered(self, season):
         return season in self.missing
 
+    def read_splits(self, season, team_id, pairs):
+        if not self.covered(season):
+            return None
+        return [self.read_split(season, team_id, on, off) for on, off in pairs]
+
     def read_split(self, season, team_id, on, off):
         if season not in self.missing:
             return None
@@ -2600,6 +2605,35 @@ def _serve_from_segments(world, missing):
 
 def _provenance(row):
     return row["on_off_sources"], row["on_off_games_missing"]
+
+
+def test_a_segment_season_is_read_once_per_team_for_both_sides_of_every_listed_player(
+    client, authenticate, world
+):
+    _serve_from_segments(world, {CURRENT: [], PRIOR: []})
+    segments, batches = world.on_off._segments, []
+    read_splits = segments.read_splits
+    segments.read_splits = lambda season, team_id, pairs: (
+        batches.append((team_id, season, sorted(pairs))) or read_splits(season, team_id, pairs)
+    )
+    world.wowy.asked.clear()
+
+    body = _scenarios(client, authenticate)
+
+    assert sorted(s["injured"]["player"] for s in body["scenarios"]) == [
+        "Jaxson Hayes",
+        "Jayson Tatum",
+        "LeBron James",
+    ]
+    lal = [((), (pid,)) for pid in (LEBRON, HAYES)] + [((pid,), ()) for pid in (LEBRON, HAYES)]
+    assert sorted(batches) == sorted(
+        [
+            (LAL, CURRENT, sorted(lal)),
+            (LAL, PRIOR, sorted(lal)),
+            (BOS, CURRENT, [((), (TATUM,)), ((TATUM,), ())]),
+        ]
+    )
+    assert world.wowy.asked == []
 
 
 def test_a_pbp_stats_row_names_its_source_and_no_missing_games(client, authenticate, world):
