@@ -442,7 +442,7 @@ class InjuryScenarioService:
     ) -> dict[str, Any]:
         phases = _Phases()
         with phases("listing"):
-            listing = self.injuries.list_injuries(requested_date, None)
+            listing = self.injuries.list_injuries(requested_date, None, with_minutes=False)
         slate_date = datetime.strptime(listing["date"], "%Y-%m-%d").date()
         season = schedule_season(self.settings, self.event_catalog, slate_date)
         wanted = str(player).strip().casefold() if player else None

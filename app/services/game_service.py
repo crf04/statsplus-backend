@@ -547,8 +547,8 @@ class GameService:
         """Ids of the players with a game-log row for a team in a season."""
         if self.game_log_seasons is None:
             return set()
-        rows = call_with_read_scope(
-            self.game_log_seasons.list_team_rows,
+        player_ids = call_with_read_scope(
+            self.game_log_seasons.list_team_player_ids,
             season,
             int(team_id),
             publication_snapshot=(
@@ -557,7 +557,7 @@ class GameService:
                 else self._publication_snapshot(season)
             ),
         )
-        return {int(row.player_id) for row in rows}
+        return {int(player_id) for player_id in player_ids}
 
     def games_without_and_with_player(self, player_logs, absent_player_logs, windows):
         """The ``players_off`` absence rule, for logs already read by id.

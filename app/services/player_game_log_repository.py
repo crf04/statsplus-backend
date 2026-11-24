@@ -1533,6 +1533,40 @@ class PlayerGameLogRepository:
             ).mappings()
             return tuple(PlayerGameLogRecord(**dict(row)) for row in rows)
 
+    def list_team_player_ids(self, season: str, team_id: int, *, publication_snapshot=None) -> frozenset[int]:
+        """The ids of the players ``list_team_rows`` returns rows for, without decoding a row.
+
+        Ids are read from the indexed projection columns, so a corrupt row's
+        player still counts; his own rows are judged where they are decoded.
+        """
+        season = validate_canonical_season(season)
+        if publication_snapshot is not None:
+            read = publication_snapshot.read("player_game_logs")
+            if getattr(read, "projection_ready", False):
+                if read.publication_id is None:
+                    return frozenset()
+                table = PublicationPlayerGameLog.__table__
+                games = select(table.c.game_id).where(
+                    table.c.publication_id == read.publication_id,
+                    table.c.opponent_team_id == team_id,
+                )
+                with read_connection(self.engine, None) as connection:
+                    return frozenset(
+                        connection.execute(
+                            select(table.c.player_id)
+                            .where(
+                                table.c.publication_id == read.publication_id,
+                                table.c.game_id.in_(games),
+                                table.c.opponent_team_id != team_id,
+                            )
+                            .distinct()
+                        ).scalars()
+                    )
+        return frozenset(
+            row.player_id
+            for row in self.list_team_rows(season, team_id, publication_snapshot=publication_snapshot)
+        )
+
     def list_team_recent_rows(
         self,
         season: str,

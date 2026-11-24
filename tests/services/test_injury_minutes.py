@@ -273,6 +273,31 @@ def test_the_list_reads_each_season_once_however_many_players_it_has(cut_over):
     assert len(reads) == 2
 
 
+def test_a_list_without_minutes_reads_no_game_logs_and_keeps_every_other_column(cut_over):
+    reads = []
+
+    @event.listens_for(cut_over.engine, "before_cursor_execute")
+    def _count(connection, cursor, statement, *_rest):
+        if "publication_player_game_logs" in statement:
+            reads.append(statement)
+
+    listing = _listing(cut_over, _service(cut_over))
+    full = listing.list_injuries(REPORT_DATE, None)
+    reads.clear()
+    bare = listing.list_injuries(REPORT_DATE, None, with_minutes=False)
+
+    assert reads == []
+    assert set(_minutes_columns(bare).values()) == {(NONE, NONE)}
+    minutes_keys = {"average_minutes", "games_played", "minutes_season"}
+    minutes_keys |= {f"prior_{key}" for key in minutes_keys}
+
+    def without_minutes(body):
+        return [{k: v for k, v in row.items() if k not in minutes_keys} for row in body["injuries"]]
+
+    assert without_minutes(bare) == without_minutes(full)
+    assert (bare["minutes_season"], bare["minutes_published_season"]) == (None, None)
+
+
 def test_seasons_are_null_with_no_minutes_service(world):
     body = _listing(world, None).list_injuries(REPORT_DATE, None)
 

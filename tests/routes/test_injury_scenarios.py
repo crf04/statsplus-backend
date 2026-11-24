@@ -189,14 +189,14 @@ class FakeGameLogs:
                 }
             )
 
-    def list_team_rows(self, season, team_id, publication_snapshot=None):
+    def list_team_player_ids(self, season, team_id, publication_snapshot=None):
         """The game-log repository's team roster read."""
-        return [
-            SimpleNamespace(player_id=player, team_id=team_id)
+        return frozenset(
+            player
             for (player, row_season), rows in self.rows.items()
             if row_season == season
             and any(NBA_TEAM_TRICODE_TO_ID[r["TEAM_ABBREVIATION"]] == team_id for r in rows)
-        ]
+        )
 
     def _frame(self, player_id, season):
         rows = self.rows.get((player_id, season))
@@ -1244,8 +1244,8 @@ def test_one_publication_snapshot_per_season_serves_the_roster_and_the_batched_l
             return SimpleNamespace(name=f"snapshot-{len(captures)}", read=lambda key: None)
 
     world.games.publication_reader = Reader()
-    team_rows, batch = world.logs.list_team_rows, world.logs.get_players_logs
-    world.logs.list_team_rows = lambda season, team_id, publication_snapshot=None: (
+    team_rows, batch = world.logs.list_team_player_ids, world.logs.get_players_logs
+    world.logs.list_team_player_ids = lambda season, team_id, publication_snapshot=None: (
         roster_reads.append((season, publication_snapshot.name)) or team_rows(season, team_id)
     )
     world.logs.get_players_logs = lambda ids, season, publication_snapshot=None: (

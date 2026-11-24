@@ -154,7 +154,16 @@ class StoredInjuryListing:
 
     # -- /api/injuries -----------------------------------------------------
 
-    def list_injuries(self, requested_date: str | None, team: str | None) -> dict[str, Any]:
+    def list_injuries(
+        self, requested_date: str | None, team: str | None, *, with_minutes: bool = True
+    ) -> dict[str, Any]:
+        """The stored report rows of one date's games.
+
+        ``with_minutes=False`` skips the two seasons of game logs behind each
+        row's minutes columns (they are then empty), for a caller that does
+        not read them.
+        """
+
         slate_date = self._parse_date(requested_date)
         tricode = self._parse_team(team)
         if not self.enabled:
@@ -165,7 +174,7 @@ class StoredInjuryListing:
         season = schedule_season(self.settings, self.event_catalog, slate_date)
         stored = self._stored(events, season, strict=True)
         now = assume_utc(self._clock())
-        minutes = self._minutes(stored, tricode, season)
+        minutes = self._minutes(stored, tricode, season) if with_minutes else None
         injuries: list[dict[str, Any]] = []
         for event in events:
             game_id = str(event["nba_game_id"])
