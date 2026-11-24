@@ -57,6 +57,7 @@ import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime
+from functools import cached_property
 from typing import Any
 
 import pandas as pd
@@ -151,10 +152,12 @@ def _agree(first: float | None, second: float | None) -> bool:
 
 
 class _Logs:
-    """One player's stored logs for one season."""
+    """One player's stored logs for one season, each team's rows split off once."""
 
     def __init__(self, frame: pd.DataFrame | None) -> None:
         self.frame = frame if frame is not None and not frame.empty else None
+        self._team_rows: dict[str, pd.DataFrame | None] = {}
+        self._other_team_rows: dict[str, pd.DataFrame | None] = {}
 
     def absent_frame(self) -> pd.DataFrame:
         """Frame for the absence rule; an empty one when he has no rows."""
@@ -164,15 +167,21 @@ class _Logs:
         return self.frame
 
     def team_rows(self, team: str) -> pd.DataFrame | None:
-        if self.frame is None:
-            return None
-        rows = self.frame[self.frame["TEAM_ABBREVIATION"] == team]
-        return None if rows.empty else rows
+        if team not in self._team_rows:
+            self._team_rows[team] = (
+                self._rows(self.frame["TEAM_ABBREVIATION"] == team) if self.frame is not None else None
+            )
+        return self._team_rows[team]
 
     def other_team_rows(self, team: str) -> pd.DataFrame | None:
-        if self.frame is None:
-            return None
-        rows = self.frame[self.frame["TEAM_ABBREVIATION"] != team]
+        if team not in self._other_team_rows:
+            self._other_team_rows[team] = (
+                self._rows(self.frame["TEAM_ABBREVIATION"] != team) if self.frame is not None else None
+            )
+        return self._other_team_rows[team]
+
+    def _rows(self, mask: pd.Series) -> pd.DataFrame | None:
+        rows = self.frame[mask]
         return None if rows.empty else rows
 
     def name(self) -> str | None:
@@ -292,6 +301,9 @@ class _RequestReads:
         #: One deadline for all of the request's fetches, however many splits.
         self.on_off_deadline = service.on_off.request_deadline() if fetch_on_off else None
         self._logs: dict[tuple[int, str], pd.DataFrame | None] = {}
+        self._views: dict[tuple[int, str], _Logs] = {}
+        self._team_games: dict[tuple[str, str], pd.DataFrame | None] = {}
+        self._pool_lines: dict[tuple[str, str], dict[int, dict[str, dict[str, float]]]] = {}
         self._rosters: dict[tuple[int, str], set[int]] = {}
         self._snapshots: dict[str, Any] = {}
         self._catalog: dict[str, dict[int, int]] = {}
@@ -363,6 +375,34 @@ class _RequestReads:
                 *key, publication_snapshot=self.snapshot(season)
             )
         return self._logs[key]
+
+    def view(self, player_id: int, season: str) -> _Logs:
+        """``logs`` as a ``_Logs``, shared by every scenario of the request."""
+
+        key = (int(player_id), season)
+        if key not in self._views:
+            self._views[key] = _Logs(self.logs(*key))
+        return self._views[key]
+
+    def team_games(self, team: str, season: str) -> pd.DataFrame | None:
+        """One row per team game the season roster played for ``team``; ``None`` with none."""
+
+        key = (team, season)
+        if key not in self._team_games:
+            frames = [
+                rows
+                for pid in sorted(self.roster(NBA_TEAM_TRICODE_TO_ID[team], season))
+                if (rows := self.view(pid, season).team_rows(team)) is not None
+            ]
+            self._team_games[key] = pd.concat(frames).drop_duplicates("GAME_ID") if frames else None
+        return self._team_games[key]
+
+    def pool_lines(self, season: str, game_id: str) -> dict[int, dict[str, dict[str, float]]]:
+        key = (season, game_id)
+        if key not in self._pool_lines:
+            with self.phases("pool"):
+                self._pool_lines[key] = self._service._pool_lines(season, game_id)
+        return self._pool_lines[key]
 
     def rotation_lines(
         self, rotations: Any | None, team: str, season: str
@@ -506,7 +546,7 @@ class InjuryScenarioService:
             roster = {pid: team for team in teams for pid in reads.roster(NBA_TEAM_TRICODE_TO_ID[team], s)}
             reads.load_logs(roster, s)
             for pid, team in roster.items():
-                name = _Logs(reads.logs(pid, s)).name() or ""
+                name = reads.view(pid, s).name() or ""
                 if wanted in (str(pid), name.casefold()):
                     found[pid] = {"player_id": pid, "name": name, "team": team}
         if not found:
@@ -646,13 +686,12 @@ class InjuryScenarioService:
         """Every teammate in the pair window (rotation or not) and the injured player's starts."""
 
         seasons = [previous_nba_season(season), season]  # chronological
-        injured_logs = {s: _Logs(request.logs(injured_id, s)) for s in seasons}
+        injured_logs = {s: request.view(injured_id, s) for s in seasons}
         reads = _OnOffReads(self.on_off, team, injured_id, request)
         roster = self._roster(injured_id, team, season, request, listed_out)
         windows = {s: request.windows[s][injured_id][team] for s in seasons}
         rotation_reads = _RotationReads(self.rotations, team, injured_id, request, windows)
-        with request.phases("pool"):
-            pool_lines = self._pool_lines(season, game_id)
+        pool_lines = request.pool_lines(season, game_id)
         teammates = []
         for teammate_id in sorted(roster):
             built = self._teammate(
@@ -681,14 +720,14 @@ class InjuryScenarioService:
         membership = TeamMembership(self.injuries.snapshot_repository, request.logs_by_id)
         for s in seasons:
             judged = {}
+            days: dict[str, set[Any]] = {}
             for row in rows:
                 if row["player_id"] is None:
                     continue
                 injured_id, team = int(row["player_id"]), row["team"]
-                judged[injured_id] = (
-                    appearances(request.logs(injured_id, s)),
-                    {team: self._team_days(team, s, request)},
-                )
+                if team not in days:
+                    days[team] = self._team_days(team, s, request)
+                judged[injured_id] = (appearances(request.logs(injured_id, s)), {team: days[team]})
             request.windows[s] = membership.windows(s, judged)
 
     def _team_days(self, team: str, season: str, request: _RequestReads) -> set[Any]:
@@ -699,7 +738,7 @@ class InjuryScenarioService:
             for by_player in request.rotation_lines(self.rotations, team, season).values()
         }
         for teammate_id in request.roster(NBA_TEAM_TRICODE_TO_ID[team], season):
-            rows = _Logs(request.logs(teammate_id, season)).team_rows(team)
+            rows = request.view(teammate_id, season).team_rows(team)
             if rows is not None:
                 days.update(pd.to_datetime(rows["GAME_DATE"]).dt.date)
         return days
@@ -713,21 +752,15 @@ class InjuryScenarioService:
         game-log absence rule (his team window) sorts it.
         """
 
-        team_id = NBA_TEAM_TRICODE_TO_ID[team]
         counts = []
         for s in (season, previous_nba_season(season)):
-            frames = [
-                rows
-                for pid in sorted(request.roster(team_id, s))
-                if (rows := _Logs(request.logs(pid, s)).team_rows(team)) is not None
-            ]
+            team_games = request.team_games(team, s)
             missed: set[str] = set()
             played: set[str] = set()
-            if frames:
-                team_games = pd.concat(frames).drop_duplicates("GAME_ID")
+            if team_games is not None:
                 missed, played = self.games.games_without_and_with_player(
                     team_games,
-                    _Logs(request.logs(injured_id, s)).absent_frame(),
+                    request.view(injured_id, s).absent_frame(),
                     {team: request.windows[s][injured_id][team]},
                 )
             counts.append({"season": s, "missed": len(missed), "played": len(played)})
@@ -775,7 +808,7 @@ class InjuryScenarioService:
         pool_lines: Mapping[int, Mapping[str, Mapping[str, float]]],
         request: _RequestReads,
     ) -> _Teammate | None:
-        mates = {s: _Logs(request.logs(teammate_id, s)) for s in seasons}
+        mates = {s: request.view(teammate_id, s) for s in seasons}
         # A team change resets the pair: the window starts after either
         # player's last appearance for a different team.  That also drops a
         # teammate whose latest game was for another team (he has left).
@@ -1153,17 +1186,26 @@ class _Teammate:
             return self.slate_season
         return next((w.season for w in self.window if w.season != self.slate_season), self.slate_season)
 
+    @cached_property
+    def _pooled(self) -> _Evidence:
+        """The evidence over every window season; both branches render it."""
+
+        return _Evidence(self, self.window)
+
+    @cached_property
     def _by_season(self) -> list[_Evidence]:
         """One evidence per window season, the Slate season first."""
 
+        if len(self.window) == 1:
+            return [self._pooled]
         ordered = sorted(self.window, key=lambda w: w.season != self.slate_season)
         return [_Evidence(self, [w]) for w in ordered]
 
     # -- rendering ------------------------------------------------------------
 
     def rows(self, branch: str, stale_report: bool) -> list[dict[str, Any]]:
-        pooled = _Evidence(self, self.window)
-        seasons = self._by_season()
+        pooled = self._pooled
+        seasons = self._by_season
         flag_season = self.flag_season()
         rendered = [
             self._scored(market, branch, pooled, seasons, flag_season, stale_report)
