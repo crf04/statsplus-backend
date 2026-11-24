@@ -1289,6 +1289,32 @@ def test_filters_by_game_and_player_and_validates_parameters(client, authenticat
     assert client.get("/api/injury_scenarios?date=2026-11-10&x=1", headers=headers).status_code == 400
 
 
+def test_each_request_logs_its_shape_and_phase_timings_but_never_a_name(client, authenticate, world, caplog):
+    caplog.set_level("INFO", logger="app.services.injury_scenarios")
+
+    _scenarios(client, authenticate, f"date=2026-11-10&game_id={GAME}&player=lebron james&teammate={REAVES}")
+
+    (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("injury_scenarios timing")]
+    fields = dict(field.split("=", 1) for field in line.split()[2:])
+    assert {key: fields[key] for key in ("date", "game_id", "player", "teammate", "scenarios")} == {
+        "date": "2026-11-10",
+        "game_id": GAME,
+        "player": "name",
+        "teammate": str(REAVES),
+        "scenarios": "1",
+    }
+    assert {
+        "total_ms",
+        "listing_ms",
+        "prefetch_ms",
+        "windows_ms",
+        "teammate_ms",
+        "scenarios_ms",
+        "on_off_ms",
+    } <= set(fields)
+    assert "lebron" not in line.casefold()
+
+
 def test_a_g_league_assignment_opens_no_scenario_unless_named(client, authenticate, world):
     """crf04/statsplus#485: a two-way player sent down is not an injury."""
 

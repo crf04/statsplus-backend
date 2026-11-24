@@ -19,7 +19,7 @@ from sqlalchemy import create_engine, insert, text
 from app.config.settings import CacheSettings, RuntimeSettings
 from app.migrations import run_migrations
 from app.models.event_catalog import EventCatalogEntry
-from app.services.injury_scenarios import _OnOffReads
+from app.services.injury_scenarios import _OnOffReads, _Phases
 from app.services.lineup_segment_repository import (
     LineupSegmentRepository,
     RosterSlotsExhausted,
@@ -1343,7 +1343,10 @@ def test_injury_scenarios_read_a_covered_season_from_segments_on_both_paths(cove
     service = _service(provider, covered.engine)
     for fetch in (True, False):
         request = SimpleNamespace(
-            fetch_on_off=fetch, user_id="u1", on_off_deadline=service.request_deadline() if fetch else None
+            fetch_on_off=fetch,
+            user_id="u1",
+            on_off_deadline=service.request_deadline() if fetch else None,
+            phases=_Phases(),
         )
         reads = _OnOffReads(service, "BOS", TATUM, request)
 

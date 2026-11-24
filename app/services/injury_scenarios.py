@@ -52,7 +52,10 @@ prints what it printed before.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+import logging
+import time
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
 
@@ -66,6 +69,8 @@ from app.services.posted_lines import line_labels, posted_line, reported_lines
 from app.services.research_season import previous_nba_season, schedule_season, season_scoped
 from app.services.rotation_service import rotation_split, split_games
 from app.services.team_membership import TeamMembership, appearances
+
+logger = logging.getLogger(__name__)
 
 #: Statuses that get a scenario; Probable and Available get none.
 SCENARIO_STATUSES = ("Out", "Doubtful", "Questionable")
@@ -176,6 +181,44 @@ class _Logs:
         return str(self.frame["PLAYER_NAME"].iloc[0])
 
 
+class _Phases:
+    """Wall milliseconds per phase of one request, logged once when it ends.
+
+    A phase timed inside another (``on_off`` inside ``scenarios``) is also
+    counted in the outer one.
+    """
+
+    def __init__(self) -> None:
+        self.started = time.perf_counter()
+        self.ms: dict[str, float] = {}
+
+    @contextmanager
+    def __call__(self, name: str) -> Iterator[None]:
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.ms[name] = self.ms.get(name, 0.0) + (time.perf_counter() - started) * 1000
+
+    def log(self, **arguments: Any) -> None:
+        """One ``injury_scenarios timing`` line: the request's shape and every phase."""
+
+        fields = {
+            **arguments,
+            "total_ms": round((time.perf_counter() - self.started) * 1000),
+            **{f"{name}_ms": round(ms) for name, ms in self.ms.items()},
+        }
+        logger.info("injury_scenarios timing %s", " ".join(f"{key}={value}" for key, value in fields.items()))
+
+
+def _argument_shape(value: str | None) -> str:
+    """A request argument for the timing log: an id as is, a name only as ``name``."""
+
+    if value is None:
+        return "-"
+    return value if str(value).strip().isdigit() else "name"
+
+
 class _OnOffReads:
     """On/off reads for one injured player, one per season and side.
 
@@ -191,18 +234,20 @@ class _OnOffReads:
         self._fetch = request.fetch_on_off
         self._user_id = request.user_id
         self._deadline = request.on_off_deadline
+        self._phases = request.phases
         self._memo: dict[tuple[str, str], Mapping[str, Any]] = {}
 
     def get(self, season: str, side: str) -> Mapping[str, Any]:
         key = (season, side)
         if key not in self._memo:
             splits = {side: [self.injured_id]}
-            if self._fetch:
-                self._memo[key] = self.on_off.get(
-                    self.team, season, **splits, user_id=self._user_id, deadline=self._deadline
-                )
-            else:
-                self._memo[key] = self.on_off.get_cached(self.team, season, **splits)
+            with self._phases("on_off"):
+                if self._fetch:
+                    self._memo[key] = self.on_off.get(
+                        self.team, season, **splits, user_id=self._user_id, deadline=self._deadline
+                    )
+                else:
+                    self._memo[key] = self.on_off.get_cached(self.team, season, **splits)
         return self._memo[key]
 
 
@@ -232,9 +277,15 @@ class _RequestReads:
     """
 
     def __init__(
-        self, service: InjuryScenarioService, *, fetch_on_off: bool = False, user_id: str | None = None
+        self,
+        service: InjuryScenarioService,
+        phases: _Phases,
+        *,
+        fetch_on_off: bool = False,
+        user_id: str | None = None,
     ) -> None:
         self._service = service
+        self.phases = phases
         #: A named-player request fetches the splits it lacks; see ``_OnOffReads``.
         self.fetch_on_off = fetch_on_off
         self.user_id = user_id
@@ -320,8 +371,9 @@ class _RequestReads:
         if key not in self._rotation_lines:
             lines: dict[str, dict[int, dict[str, Any]]] = {}
             if rotations is not None:
-                for row in rotations.player_games(season, team=team):
-                    lines.setdefault(row["game_id"], {})[row["player_id"]] = row
+                with self.phases("rotation"):
+                    for row in rotations.player_games(season, team=team):
+                        lines.setdefault(row["game_id"], {})[row["player_id"]] = row
             self._rotation_lines[key] = lines
         return self._rotation_lines[key]
 
@@ -388,7 +440,9 @@ class InjuryScenarioService:
         teammate: str | None = None,
         user_id: str | None = None,
     ) -> dict[str, Any]:
-        listing = self.injuries.list_injuries(requested_date, None)
+        phases = _Phases()
+        with phases("listing"):
+            listing = self.injuries.list_injuries(requested_date, None)
         slate_date = datetime.strptime(listing["date"], "%Y-%m-%d").date()
         season = schedule_season(self.settings, self.event_catalog, slate_date)
         wanted = str(player).strip().casefold() if player else None
@@ -410,21 +464,33 @@ class InjuryScenarioService:
         for row in listing["injuries"]:
             if row["status"] == "Out" and row["player_id"] is not None:
                 listed_out.setdefault(row["team"], set()).add(int(row["player_id"]))
-        reads = _RequestReads(self, fetch_on_off=bool(wanted), user_id=user_id)
-        self._prefetch(selected, season, reads)
-        self._windows(selected, season, reads)
+        reads = _RequestReads(self, phases, fetch_on_off=bool(wanted), user_id=user_id)
+        with phases("prefetch"):
+            self._prefetch(selected, season, reads)
+        with phases("windows"):
+            self._windows(selected, season, reads)
         teammate_ids = None
         if teammate:
             # With no scenario selected, the name is still checked, against every team on the report.
             on_report = selected or listing["injuries"]
-            teammate_ids = self._teammate_ids(teammate, on_report, season, reads)
+            with phases("teammate"):
+                teammate_ids = self._teammate_ids(teammate, on_report, season, reads)
+        with phases("scenarios"):
+            scenarios = [
+                self._scenario(row, season, reads, listed_out.get(row["team"], set()), teammate_ids)
+                for row in selected
+            ]
+        phases.log(
+            date=listing["date"],
+            game_id=game_id or "-",
+            player=_argument_shape(player),
+            teammate=_argument_shape(teammate),
+            scenarios=len(scenarios),
+        )
         return {
             "date": listing["date"],
             "g_league_skipped": g_league_skipped,
-            "scenarios": [
-                self._scenario(row, season, reads, listed_out.get(row["team"], set()), teammate_ids)
-                for row in selected
-            ],
+            "scenarios": scenarios,
         }
 
     @staticmethod
@@ -585,7 +651,8 @@ class InjuryScenarioService:
         roster = self._roster(injured_id, team, season, request, listed_out)
         windows = {s: request.windows[s][injured_id][team] for s in seasons}
         rotation_reads = _RotationReads(self.rotations, team, injured_id, request, windows)
-        pool_lines = self._pool_lines(season, game_id)
+        with request.phases("pool"):
+            pool_lines = self._pool_lines(season, game_id)
         teammates = []
         for teammate_id in sorted(roster):
             built = self._teammate(
