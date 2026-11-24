@@ -103,6 +103,25 @@ SCORED_MARKETS: dict[str, tuple[str, tuple[str, ...]]] = {
 }
 #: Supporting context, never scored or flagged.
 CONTEXT_MARKETS = ("MIN", "FGA", "USG")
+#: The game-log columns a scenario reads.  Each frame is cut to them when it is
+#: read, so the many row filters after that copy a dozen columns, not forty.
+FRAME_COLUMNS = (
+    "PLAYER_NAME",
+    "GAME_ID",
+    "GAME_DATE",
+    "TEAM_ABBREVIATION",
+    *dict.fromkeys(column for column, _keys in SCORED_MARKETS.values()),
+    "MIN",
+    "FGA",
+)
+
+
+def _lean(frame: pd.DataFrame | None) -> pd.DataFrame | None:
+    """``frame`` cut to ``FRAME_COLUMNS`` (those it has)."""
+
+    if frame is None:
+        return None
+    return frame[[column for column in FRAME_COLUMNS if column in frame.columns]]
 
 
 def _season_span(seasons: Iterable[str]) -> str | None:
@@ -367,7 +386,7 @@ class _RequestReads:
             return  # the per-player read in ``logs`` serves a games seam without one
         frames = batch(missing, season, publication_snapshot=self.snapshot(season))
         for pid in missing:
-            self._logs[(pid, season)] = frames.get(pid)
+            self._logs[(pid, season)] = _lean(frames.get(pid))
 
     def logs_by_id(self, player_ids: Iterable[int], season: str) -> dict[int, pd.DataFrame | None]:
         """``logs`` for several players, those not yet read in one batch."""
@@ -379,8 +398,8 @@ class _RequestReads:
     def logs(self, player_id: int, season: str) -> pd.DataFrame | None:
         key = (int(player_id), season)
         if key not in self._logs:
-            self._logs[key] = self.games(season).get_player_logs_by_id(
-                *key, publication_snapshot=self.snapshot(season)
+            self._logs[key] = _lean(
+                self.games(season).get_player_logs_by_id(*key, publication_snapshot=self.snapshot(season))
             )
         return self._logs[key]
 
