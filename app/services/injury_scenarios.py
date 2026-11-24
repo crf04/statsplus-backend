@@ -240,11 +240,12 @@ class _Phases:
 
 
 def _argument_shape(value: str | None) -> str:
-    """A request argument for the timing log: an id as is, a name only as ``name``."""
+    """A request argument for the timing log: an id as is, any other text only as ``name``."""
 
     if value is None:
         return "-"
-    return value if str(value).strip().isdigit() else "name"
+    stripped = str(value).strip()
+    return stripped if stripped.isdigit() else "name"
 
 
 class _OnOffReads:
@@ -575,7 +576,7 @@ class InjuryScenarioService:
             ]
         phases.log(
             date=listing["date"],
-            game_id=game_id or "-",
+            game_id=_argument_shape(game_id),
             player=_argument_shape(player),
             teammate=_argument_shape(teammate),
             scenarios=len(scenarios),

@@ -1315,6 +1315,20 @@ def test_each_request_logs_its_shape_and_phase_timings_but_never_a_name(client, 
     assert "lebron" not in line.casefold()
 
 
+def test_the_timing_log_keeps_free_text_out_of_its_line(client, authenticate, world, caplog):
+    caplog.set_level("INFO", logger="app.services.injury_scenarios")
+
+    _scenarios(
+        client, authenticate, f"date=2026-11-10&game_id=alice%40example.com%0AFORGED%3D1&teammate=%0A{REAVES}"
+    )
+
+    (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("injury_scenarios timing")]
+    assert "\n" not in line
+    assert "alice" not in line
+    fields = dict(field.split("=", 1) for field in line.split()[2:])
+    assert (fields["game_id"], fields["teammate"]) == ("name", str(REAVES))
+
+
 def test_a_g_league_assignment_opens_no_scenario_unless_named(client, authenticate, world):
     """crf04/statsplus#485: a two-way player sent down is not an injury."""
 

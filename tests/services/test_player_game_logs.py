@@ -2755,3 +2755,18 @@ def test_a_teams_player_ids_decode_no_row(tmp_path):
 
     assert repository.list_team_player_ids(SEASON, 1, publication_snapshot=snapshot) == {101, 102, 103}
     assert [statement for statement in statements if "row_payload" in statement] == []
+
+
+def test_a_corrupt_row_drops_only_its_player_from_the_team(tmp_path):
+    """Response-parity exception in #809: one unreadable row used to empty the whole roster."""
+
+    repository, snapshot = _projected_publication_repository(tmp_path, _two_team_games())
+    with repository.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE publication_player_game_logs SET row_payload = '{not json' WHERE player_id = 102"
+        )
+
+    assert repository.list_team_player_ids(SEASON, 1, publication_snapshot=snapshot) == {101, 102, 103}
+    rows = repository.list_players_rows(SEASON, [101, 102, 103], publication_snapshot=snapshot)
+    assert {pid for pid, found in rows.items() if found} == {101, 103}
+    assert rows[102] is None
