@@ -812,6 +812,9 @@ class RotationService:
             for player_id, line in split.lines_by_game[game_id].items():
                 if player_id not in named:
                     sides.setdefault(player_id, ([], []))[0].append(line)
+        entries = self._split_entries(season, team, split, named) if game_logs else {}
+        for player_id in entries:
+            sides.setdefault(player_id, ([], []))
         for game_id in split.other:
             for player_id, line in split.lines_by_game[game_id].items():
                 if player_id in sides:
@@ -824,8 +827,10 @@ class RotationService:
             entry[asked_key]["stats"] = _side_stats(asked_lines, logs[player_id])
             entry[other_key]["stats"] = _side_stats(other_lines, logs[player_id])
             if game_logs:
-                entry[asked_key]["game_logs"] = _side_games(asked_lines, logs[player_id])
-                entry[other_key]["game_logs"] = _side_games(other_lines, logs[player_id])
+                for key, game_ids in ((asked_key, split.asked), (other_key, split.other)):
+                    entry[key]["game_logs"] = _team_game_logs(
+                        entries[player_id], set(game_ids), team, logs[player_id]
+                    )
             players.append({"name": split.names[player_id], **entry})
         players.sort(
             key=lambda player: (
@@ -853,6 +858,28 @@ class RotationService:
                 "starters": starters,
                 "players": players,
             },
+        }
+
+    def _split_entries(
+        self, season: str, team: str, split: _Split, named: set[int]
+    ) -> dict[int, list[dict[str, Any]]]:
+        """The team grid's entries (:func:`_team_entries`) of every unnamed player on the team in a game of
+        either side, as the team view picks them: a player the catalog says left is listed only with a
+        box-score line in one of those games (crf04/statsplus#520)."""
+
+        side_ids = {*split.asked, *split.other}
+        listed = {player_id for game_id in side_ids for player_id in split.lines_by_game[game_id]}
+        departed = self._catalog_departed_ids(season, team)
+        player_ids = sorted(set(split.names) - named - (departed - listed))
+        rows_by_player = self._rows_by_player(self.repository.player_games(season, player_ids=player_ids))
+        team_games = self.repository.team_games(season, team)
+        entries = {
+            player_id: _team_entries(rows_by_player[player_id], team, team_games) for player_id in player_ids
+        }
+        return {
+            player_id: own
+            for player_id, own in entries.items()
+            if any(entry["game_id"] in side_ids for entry in own)
         }
 
     def _logs_by_player(
