@@ -863,24 +863,33 @@ class RotationService:
     def _split_entries(
         self, season: str, team: str, split: _Split, named: set[int]
     ) -> dict[int, list[dict[str, Any]]]:
-        """The team grid's entries (:func:`_team_entries`) of every unnamed player on the team in a game of
-        either side, as the team view picks them: a player the catalog says left is listed only with a
-        box-score line in one of those games (crf04/statsplus#520)."""
+        """The team grid's entries (:func:`_team_entries`) of every unnamed player whose team window holds a
+        game of either side (crf04/statsplus#520).
+
+        A window closed by a later game for another team needs no catalog. Only a window that never closes
+        defers to the catalog, as in the team view: a player it says left is listed only with a box-score
+        line in one of those games.
+        """
 
         side_ids = {*split.asked, *split.other}
         listed = {player_id for game_id in side_ids for player_id in split.lines_by_game[game_id]}
-        departed = self._catalog_departed_ids(season, team)
-        player_ids = sorted(set(split.names) - named - (departed - listed))
+        departed = self._catalog_departed_ids(season, team) - listed
+        player_ids = sorted(set(split.names) - named)
         rows_by_player = self._rows_by_player(self.repository.player_games(season, player_ids=player_ids))
         team_games = self.repository.team_games(season, team)
-        entries = {
-            player_id: _team_entries(rows_by_player[player_id], team, team_games) for player_id in player_ids
-        }
-        return {
-            player_id: own
-            for player_id, own in entries.items()
-            if any(entry["game_id"] in side_ids for entry in own)
-        }
+        entries = {}
+        for player_id in player_ids:
+            own_rows = rows_by_player[player_id]
+            if player_id in departed:
+                window = team_window(
+                    ((row["game_date"], row["team_tricode"]) for row in own_rows), team, Membership()
+                )
+                if window is None or window.closes is None:
+                    continue
+            own = _team_entries(own_rows, team, team_games)
+            if any(entry["game_id"] in side_ids for entry in own):
+                entries[player_id] = own
+        return entries
 
     def _logs_by_player(
         self, season: str, team: str, player_ids: Iterable[int]

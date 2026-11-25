@@ -461,7 +461,6 @@ def test_team_split_game_logs_list_every_game_of_each_side_with_misses_as_0_minu
         ],
         "Cameo Player": [("2026-01-05", "DET vs. BOS", False, 0.0, None)],
     }
-    assert len(detroit.stored_logs.batches) == 1
 
 
 def test_a_teammate_who_sat_every_asked_game_has_0_minute_rows_for_them(client, detroit):

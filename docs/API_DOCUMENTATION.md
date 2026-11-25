@@ -4364,9 +4364,12 @@ lists every game of that side inside the player's team window, newest first,
 with `matchup`, and a game he missed while on the team (no box-score line) is a
 `minutes: 0.0`, `box: null` row; a game outside his window has no row, and a
 mixed game is on neither side. `players` then also lists every player on the
-team in a game of either side, as the team view picks them, even one with no
+team in a game of either side (his team window holds it), even one with no
 box-score line in those games (his side counts stay over box-score lines, so
-`games` can be lower than the rows). The player split's `game_logs` are
+`games` can be lower than the rows). A window that a later game for another
+team closes is trusted as is; only a window that never closes defers to the
+Athlete Catalog, as in the team view, which drops a player it says left unless
+he has a box-score line in one of those games. The player split's `game_logs` are
 unchanged: his box-score lines in the side's games.
 
 For the same player, absent teammate and season, `without.stats` matches
