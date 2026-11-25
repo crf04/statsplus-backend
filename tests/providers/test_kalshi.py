@@ -573,13 +573,25 @@ def test_head_to_head_and_season_long_tickers_are_excluded_not_malformed(event_t
 
 @pytest.mark.parametrize(
     "overrides",
-    [{"market_type": "scalar"}, {"strike_type": "greater"}],
+    [{"market_type": "scalar"}, {"strike_type": "between"}],
 )
-def test_a_market_that_is_not_a_structured_binary_ladder_rung_is_excluded(overrides):
+def test_a_market_that_is_not_a_binary_ladder_rung_is_excluded(overrides):
     snapshot = _with_one_excluded_row(_rung(29.5, bid="0.4800", ask="0.5000", suffix="x", **overrides))
 
     assert len(snapshot.markets) == 1
     assert _skipped(snapshot) == (CoverageCode.NON_PROJECTION_MARKET,)
+
+
+def test_a_greater_strike_rung_is_read_as_a_ladder_rung():
+    # Since 2026-11 Kalshi states its "N+" player ladders as strike_type "greater"
+    # ("Morez Johnson Jr.: 14+ rebounds", floor_strike 13.5); the rung means the same.
+    snapshot = _ladder_snapshot(
+        _rung(24.5, bid="0.5900", ask="0.6100", strike_type="greater"),
+        _rung(29.5, bid="0.3900", ask="0.4100", strike_type="greater"),
+    )
+
+    assert _lines_by_variant(snapshot) == {"standard": ["24.5"], "alternate": ["29.5"]}
+    assert snapshot.coverage.skipped_count == 0
 
 
 def test_a_market_with_no_player_is_excluded_as_a_non_player_market():

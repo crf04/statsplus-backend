@@ -93,6 +93,9 @@ SERIES_STATISTIC_LABELS: Mapping[str, str] = {
     "KXNBASTL": "Steals",
 }
 GAME_SERIES = "KXNBAGAME"
+#: Strike types of an "N+" ladder rung.  Kalshi stated them as "structured"
+#: through 2026-06 and as "greater" since 2026-11; floor_strike is N - 0.5 in both.
+_LADDER_STRIKE_TYPES = frozenset({"structured", "greater"})
 
 _EVENT_TICKER = re.compile(
     r"^(?P<series>[A-Z0-9]+)-(?P<game>\d{2}[A-Z]{3}\d{2}(?P<away>[A-Z]{3})(?P<home>[A-Z]{3}))$"
@@ -517,7 +520,7 @@ class KalshiAdapter:
         event_match = _EVENT_TICKER.match(event_ticker)
         if event_match is None:
             raise CoverageRecordMalformed("event_ticker is not a Kalshi game event")
-        if row.get("market_type") != "binary" or row.get("strike_type") != "structured":
+        if row.get("market_type") != "binary" or row.get("strike_type") not in _LADDER_STRIKE_TYPES:
             raise CoverageRecordExcluded(CoverageCode.NON_PROJECTION_MARKET)
         custom_strike = row.get("custom_strike")
         player_id = (
