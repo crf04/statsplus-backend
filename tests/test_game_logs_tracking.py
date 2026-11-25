@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from unittest.mock import Mock
 
+import pandas as pd
 import pytest
 from sqlalchemy import create_engine
 
@@ -169,6 +170,23 @@ def test_the_batched_read_joins_the_same_values(world):
     assert lebron["REB_CHANCES"].tolist()[:4] == [9, 3, 0, 6]
     assert lebron["POTENTIAL_AST"].isna().tolist() == [False, False, False, True, True]
     assert frames[12345].empty
+
+
+def test_a_batched_read_without_tracking_reads_none_and_keeps_every_other_column(world):
+    built, tracking = world
+    source = StoredGameLogsSource(built.logs, tracking=tracking)
+    reads = []
+    for_players = tracking.for_players
+    tracking.for_players = lambda *args, **kwargs: reads.append(args) or for_players(*args, **kwargs)
+
+    tracked = source.get_players_logs([seasons.bt.LEBRON], NEW)[seasons.bt.LEBRON]
+    reads.clear()
+    bare = source.get_players_logs([seasons.bt.LEBRON], NEW, tracking=False)[seasons.bt.LEBRON]
+
+    assert reads == []
+    gone = ["REB_CHANCES", "OREB_CHANCES", "DREB_CHANCES", "POTENTIAL_AST", "REB_CONV_PCT", "AST_CONV_PCT"]
+    assert sorted(set(tracked.columns) - set(bare.columns)) == sorted(gone)
+    pd.testing.assert_frame_equal(bare, tracked.drop(columns=gone))
 
 
 def _serve_custom(dependencies, tmp_path, rows, tracked, player_id, name):

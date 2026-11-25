@@ -189,14 +189,14 @@ class FakeGameLogs:
                 }
             )
 
-    def list_team_rows(self, season, team_id, publication_snapshot=None):
+    def list_team_player_ids(self, season, team_id, publication_snapshot=None):
         """The game-log repository's team roster read."""
-        return [
-            SimpleNamespace(player_id=player, team_id=team_id)
+        return frozenset(
+            player
             for (player, row_season), rows in self.rows.items()
             if row_season == season
             and any(NBA_TEAM_TRICODE_TO_ID[r["TEAM_ABBREVIATION"]] == team_id for r in rows)
-        ]
+        )
 
     def _frame(self, player_id, season):
         rows = self.rows.get((player_id, season))
@@ -207,7 +207,7 @@ class FakeGameLogs:
     def get_player_logs(self, player_id, season, publication_snapshot=None):
         return self._frame(player_id, season)
 
-    def get_players_logs(self, player_ids, season, publication_snapshot=None):
+    def get_players_logs(self, player_ids, season, publication_snapshot=None, tracking=True):
         """The batched read: one call, each player's frame as ``get_player_logs`` gives it."""
         self.batches.append((tuple(sorted(player_ids)), season))
         return {pid: self._frame(pid, season) for pid in player_ids}
@@ -1138,7 +1138,7 @@ def test_an_unpublished_slate_season_still_counts_its_games(client, authenticate
     """crf04/statsplus#467: the Slate's season after the Published Season was read as no games."""
 
     class PublishedOnlyLogs(FakeGameLogs):
-        def get_players_logs(self, player_ids, season, publication_snapshot=None):
+        def get_players_logs(self, player_ids, season, publication_snapshot=None, tracking=True):
             return {
                 pid: self._frame(pid, season) if publication_snapshot.served else self._frame(None, season)
                 for pid in player_ids
@@ -1244,11 +1244,11 @@ def test_one_publication_snapshot_per_season_serves_the_roster_and_the_batched_l
             return SimpleNamespace(name=f"snapshot-{len(captures)}", read=lambda key: None)
 
     world.games.publication_reader = Reader()
-    team_rows, batch = world.logs.list_team_rows, world.logs.get_players_logs
-    world.logs.list_team_rows = lambda season, team_id, publication_snapshot=None: (
+    team_rows, batch = world.logs.list_team_player_ids, world.logs.get_players_logs
+    world.logs.list_team_player_ids = lambda season, team_id, publication_snapshot=None: (
         roster_reads.append((season, publication_snapshot.name)) or team_rows(season, team_id)
     )
-    world.logs.get_players_logs = lambda ids, season, publication_snapshot=None: (
+    world.logs.get_players_logs = lambda ids, season, publication_snapshot=None, tracking=True: (
         log_reads.append((season, publication_snapshot.name)) or batch(ids, season)
     )
 
@@ -1287,6 +1287,46 @@ def test_filters_by_game_and_player_and_validates_parameters(client, authenticat
     headers = authenticate()
     assert client.get("/api/injury_scenarios", headers=headers).status_code == 400
     assert client.get("/api/injury_scenarios?date=2026-11-10&x=1", headers=headers).status_code == 400
+
+
+def test_each_request_logs_its_shape_and_phase_timings_but_never_a_name(client, authenticate, world, caplog):
+    caplog.set_level("INFO", logger="app.services.injury_scenarios")
+
+    _scenarios(client, authenticate, f"date=2026-11-10&game_id={GAME}&player=lebron james&teammate={REAVES}")
+
+    (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("injury_scenarios timing")]
+    fields = dict(field.split("=", 1) for field in line.split()[2:])
+    assert {key: fields[key] for key in ("date", "game_id", "player", "teammate", "scenarios")} == {
+        "date": "2026-11-10",
+        "game_id": GAME,
+        "player": "name",
+        "teammate": str(REAVES),
+        "scenarios": "1",
+    }
+    assert {
+        "total_ms",
+        "listing_ms",
+        "prefetch_ms",
+        "windows_ms",
+        "teammate_ms",
+        "scenarios_ms",
+        "on_off_ms",
+    } <= set(fields)
+    assert "lebron" not in line.casefold()
+
+
+def test_the_timing_log_keeps_free_text_out_of_its_line(client, authenticate, world, caplog):
+    caplog.set_level("INFO", logger="app.services.injury_scenarios")
+
+    _scenarios(
+        client, authenticate, f"date=2026-11-10&game_id=alice%40example.com%0AFORGED%3D1&teammate=%0A{REAVES}"
+    )
+
+    (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("injury_scenarios timing")]
+    assert "\n" not in line
+    assert "alice" not in line
+    fields = dict(field.split("=", 1) for field in line.split()[2:])
+    assert (fields["game_id"], fields["teammate"]) == ("name", str(REAVES))
 
 
 def test_a_g_league_assignment_opens_no_scenario_unless_named(client, authenticate, world):
@@ -2526,6 +2566,11 @@ class SegmentSplits:
     def covered(self, season):
         return season in self.missing
 
+    def read_splits(self, season, team_id, pairs):
+        if not self.covered(season):
+            return None
+        return [self.read_split(season, team_id, on, off) for on, off in pairs]
+
     def read_split(self, season, team_id, on, off):
         if season not in self.missing:
             return None
@@ -2574,6 +2619,35 @@ def _serve_from_segments(world, missing):
 
 def _provenance(row):
     return row["on_off_sources"], row["on_off_games_missing"]
+
+
+def test_a_segment_season_is_read_once_per_team_for_both_sides_of_every_listed_player(
+    client, authenticate, world
+):
+    _serve_from_segments(world, {CURRENT: [], PRIOR: []})
+    segments, batches = world.on_off._segments, []
+    read_splits = segments.read_splits
+    segments.read_splits = lambda season, team_id, pairs: (
+        batches.append((team_id, season, sorted(pairs))) or read_splits(season, team_id, pairs)
+    )
+    world.wowy.asked.clear()
+
+    body = _scenarios(client, authenticate)
+
+    assert sorted(s["injured"]["player"] for s in body["scenarios"]) == [
+        "Jaxson Hayes",
+        "Jayson Tatum",
+        "LeBron James",
+    ]
+    lal = [((), (pid,)) for pid in (LEBRON, HAYES)] + [((pid,), ()) for pid in (LEBRON, HAYES)]
+    assert sorted(batches) == sorted(
+        [
+            (LAL, CURRENT, sorted(lal)),
+            (LAL, PRIOR, sorted(lal)),
+            (BOS, CURRENT, [((), (TATUM,)), ((TATUM,), ())]),
+        ]
+    )
+    assert world.wowy.asked == []
 
 
 def test_a_pbp_stats_row_names_its_source_and_no_missing_games(client, authenticate, world):

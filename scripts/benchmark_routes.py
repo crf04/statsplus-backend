@@ -163,6 +163,7 @@ def _build(database_url: str, relay: _Relay):
             "FLASK_ENV": "development",
             "PROJECTION_ARCHIVE_READ_ENABLED": "true",
             "ODDS_API_ENABLED": "true",
+            "INJURY_REPORT_ENABLED": os.environ.get("INJURY_REPORT_ENABLED", "true"),
             "DFS_ENABLED_PROVIDERS": os.environ.get(
                 "GAME_LOGS_BENCH_DFS_PROVIDERS", "prizepicks,underdog,dabble,kalshi,polymarket,novig"
             ),
@@ -330,6 +331,7 @@ ROUTES = {
     "seasons": ("game_routes", "get_game_log_seasons", "/api/games/seasons", True, True),
     "unscheduled": ("game_routes", "get_unscheduled_matchup", "/api/matchups/unscheduled", True, True),
     "targets_resolve": ("user_routes", "resolve_targets", "/api/user/targets/resolve", True, True),
+    "injury_scenarios": ("game_routes", "get_injury_scenarios", "/api/injury_scenarios", True, True),
 }
 
 
@@ -433,6 +435,20 @@ def main() -> int:
 
         return call
 
+    # ``BENCH_LOGGER=app.services.injury_scenarios`` keeps that logger's INFO
+    # lines per run (the route's own phase timings) in ``results.json``.
+    logged: list[str] = []
+    if os.environ.get("BENCH_LOGGER"):
+        import logging
+
+        class _Keep(logging.Handler):
+            def emit(self, record):
+                logged.append(record.getMessage())
+
+        bench_logger = logging.getLogger(os.environ["BENCH_LOGGER"])
+        bench_logger.setLevel(logging.INFO)
+        bench_logger.addHandler(_Keep())
+
     results = {"meta": meta, "cases": {}}
     for spec in args.case:
         name, rest = spec.split("=", 1)
@@ -448,6 +464,7 @@ def main() -> int:
         for _ in range(args.runs):
             relay.reset()
             counters.reset()
+            logged.clear()
             cpu0, proc0 = time.thread_time(), time.process_time()
             started = time.perf_counter()
             status, body = call()
@@ -467,6 +484,7 @@ def main() -> int:
                     **r,
                     "response_bytes": len(body),
                     "sha256": hashlib.sha256(body).hexdigest(),
+                    "logged": list(logged),
                     "_shapes": c["shapes"],
                 }
             )

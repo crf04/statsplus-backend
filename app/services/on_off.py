@@ -412,6 +412,29 @@ class OnOffService:
 
     # -- segments --------------------------------------------------------
 
+    def segment_splits(
+        self, team: Any, season: Any, splits: Sequence[tuple[Iterable[Any], Iterable[Any]]]
+    ) -> list[dict[str, Any]] | None:
+        """What ``get`` and ``get_cached`` answer for each ``(on, off)`` of one
+        team season served from segments, read in one pass; ``None`` when the
+        season is not served from segments (nothing is read upstream)."""
+
+        if self._segments is None:
+            return None
+        requests = [build_request(team, season, on, off) for on, off in splits]
+        if not requests:
+            return []
+        found = self._segments.read_splits(
+            requests[0].season,
+            NBA_TEAM_TRICODE_TO_ID[requests[0].team],
+            [(request.on, request.off) for request in requests],
+        )
+        if found is None:
+            return None
+        return [
+            self._segment_response(request, split) for request, split in zip(requests, found, strict=True)
+        ]
+
     def _from_segments(self, request: OnOffRequest) -> dict[str, Any] | None:
         if self._segments is None:
             return None
@@ -420,6 +443,9 @@ class OnOffService:
         )
         if split is None:
             return None
+        return self._segment_response(request, split)
+
+    def _segment_response(self, request: OnOffRequest, split: Any) -> dict[str, Any]:
         # Makes only when every player's sums have them: a split holding a
         # segment collected before migration 089 reports none, never a part.
         sums = {int(row["player_id"]): row for row in split.rows}

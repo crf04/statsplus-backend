@@ -14,12 +14,12 @@ from types import SimpleNamespace
 
 import pytest
 import requests
-from sqlalchemy import create_engine, insert, text
+from sqlalchemy import create_engine, event, insert, text
 
 from app.config.settings import CacheSettings, RuntimeSettings
 from app.migrations import run_migrations
 from app.models.event_catalog import EventCatalogEntry
-from app.services.injury_scenarios import _OnOffReads
+from app.services.injury_scenarios import _OnOffReads, _Phases, _RequestReads
 from app.services.lineup_segment_repository import (
     LineupSegmentRepository,
     RosterSlotsExhausted,
@@ -1234,6 +1234,11 @@ class _OneSplit:
     def covered(self, season):
         return True
 
+    def read_splits(self, season, team_id, pairs):
+        if not self.covered(season):
+            return None
+        return [self.read_split(season, team_id, on, off) for on, off in pairs]
+
     def read_split(self, season, team_id, on, off):
         return SegmentSplit(
             rows=tuple(self.rows),
@@ -1339,12 +1344,33 @@ def test_an_uncovered_season_keeps_the_pbp_stats_path_byte_for_byte(tmp_path, bo
     assert not segment_service.serves_from_segments("2025-26")
 
 
+def test_a_batch_of_splits_answers_each_as_it_is_answered_alone_in_fewer_statements(covered, provider):
+    service = _service(provider, covered.engine)
+    pairs = [([TATUM], []), ([], [TATUM]), ([BROWN], [TATUM]), ([], []), ([999], []), ([], [999])]
+    alone = [service.get_cached("BOS", "2025-26", on=on, off=off) for on, off in pairs]
+    statements = []
+    event.listen(covered.engine, "before_cursor_execute", lambda *args: statements.append(args[2]))
+
+    batch = service.segment_splits("BOS", "2025-26", pairs)
+
+    assert batch == alone
+    assert [split["source"] for split in batch] == ["statsplus"] * len(pairs)
+    # Tatum and 999 never played in the stored games: on with either is empty.
+    assert [len(split["players"]) for split in batch] == [0, 13, 12, 13, 0, 13]
+    # Coverage, roster slots and the team's games once; two statements per split whose on players have slots.
+    assert len(statements) == 3 + 2 * 4
+    assert provider.calls == []
+
+
+def test_a_season_not_served_from_segments_is_no_batch(covered, provider):
+    assert _service(provider, covered.engine).segment_splits("BOS", "2024-25", [([TATUM], [])]) is None
+    assert provider.calls == []
+
+
 def test_injury_scenarios_read_a_covered_season_from_segments_on_both_paths(covered, provider):
     service = _service(provider, covered.engine)
     for fetch in (True, False):
-        request = SimpleNamespace(
-            fetch_on_off=fetch, user_id="u1", on_off_deadline=service.request_deadline() if fetch else None
-        )
+        request = _RequestReads(SimpleNamespace(on_off=service), _Phases(), fetch_on_off=fetch, user_id="u1")
         reads = _OnOffReads(service, "BOS", TATUM, request)
 
         for side in ("on", "off"):

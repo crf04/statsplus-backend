@@ -2687,3 +2687,86 @@ def test_prerequisite_database_read_failure_records_rejection_once(tmp_path, sta
             rejected_publication_count=1,
         )
     ]
+
+
+def _two_team_games():
+    """Team 1 (101, 102, 103) plays team 2 (201) and then team 3 (301)."""
+
+    first = {"game_id": "0022500001", "game_date": date(2026, 1, 2)}
+    second = {"game_id": "0022500002", "game_date": date(2026, 1, 4)}
+    return [
+        _record(player_id=101, **first),
+        _record(player_id=102, **first),
+        _record(
+            player_id=201,
+            team_id=2,
+            team_tricode="BBB",
+            opponent_team_id=1,
+            opponent_team_tricode="AAA",
+            **first,
+        ),
+        _record(player_id=101, opponent_team_id=3, opponent_team_tricode="CCC", **second),
+        _record(player_id=103, opponent_team_id=3, opponent_team_tricode="CCC", **second),
+        _record(
+            player_id=301,
+            team_id=3,
+            team_tricode="CCC",
+            opponent_team_id=1,
+            opponent_team_tricode="AAA",
+            **second,
+        ),
+    ]
+
+
+@pytest.fixture(params=["legacy_sql", "rendered_payload", "projection"])
+def team_reads(request, tmp_path):
+    """Two games of team 1 over each of the three read paths."""
+
+    records = _two_team_games()
+    if request.param == "legacy_sql":
+        repository = _repository(tmp_path)
+        repository.publish(
+            SEASON,
+            records,
+            retrieved_at=RETRIEVED_AT,
+            source_provider="nba_stats",
+            source_row_count=len(records),
+        )
+        return repository, None
+    if request.param == "rendered_payload":
+        return _repository(tmp_path, publication_reader=_RenderedPayloadReader(records)), None
+    return _projected_publication_repository(tmp_path, records)
+
+
+def test_a_teams_player_ids_are_the_players_its_rows_name(team_reads):
+    repository, snapshot = team_reads
+
+    for team_id, expected in ((1, {101, 102, 103}), (2, {201}), (3, {301}), (4, set())):
+        ids = repository.list_team_player_ids(SEASON, team_id, publication_snapshot=snapshot)
+        rows = repository.list_team_rows(SEASON, team_id, publication_snapshot=snapshot)
+        assert ids == expected
+        assert ids == {row.player_id for row in rows}
+
+
+def test_a_teams_player_ids_decode_no_row(tmp_path):
+    repository, snapshot = _projected_publication_repository(tmp_path, _two_team_games())
+    statements = []
+    event.listen(repository.engine, "before_cursor_execute", lambda *args: statements.append(args[2]))
+
+    assert repository.list_team_player_ids(SEASON, 1, publication_snapshot=snapshot) == {101, 102, 103}
+    assert [statement for statement in statements if "row_payload" in statement] == []
+
+
+def test_a_corrupt_row_drops_only_its_player_from_the_team(tmp_path):
+    """Response-parity exception in #809: one unreadable row used to empty the whole roster."""
+
+    repository, snapshot = _projected_publication_repository(tmp_path, _two_team_games())
+    with repository.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE publication_player_game_logs SET row_payload = '{not json' WHERE player_id = 102"
+        )
+
+    assert repository.list_team_player_ids(SEASON, 1, publication_snapshot=snapshot) == {101, 102, 103}
+    rows = repository.list_players_rows(SEASON, [101, 102, 103], publication_snapshot=snapshot)
+    assert {pid for pid, found in rows.items() if found} == {101, 103}
+    assert rows[102] is None

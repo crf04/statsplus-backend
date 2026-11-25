@@ -366,6 +366,18 @@ class LineupSegmentRepository:
         no slot is off the floor in every segment.
         """
 
+        splits = self.read_splits(season, team_id, [(on, off)])
+        return None if splits is None else splits[0]
+
+    def read_splits(
+        self, season: str, team_id: int, pairs: Sequence[tuple[Sequence[int], Sequence[int]]]
+    ) -> list[SegmentSplit] | None:
+        """``read_split`` for each ``(on, off)`` of one team season, in order, on one connection.
+
+        The coverage, roster slots and the team's games are read once for all
+        of them; each split is then its own aggregate.
+        """
+
         with self.engine.connect() as connection:
             if not self.covered(season, connection=connection):
                 return None
@@ -410,30 +422,36 @@ class LineupSegmentRepository:
             included = [
                 dates[event["nba_game_id"]] for event in completed if event["stored_game_id"] is not None
             ]
-            rows: tuple[Mapping[str, Any], ...] = ()
-            written = None
-            split_game_ids: set[str] = set()
-            if all(player_id in roster for player_id in on):
-                rows, written, split_game_ids = self._sums(
-                    connection,
-                    season,
-                    team_id,
-                    mask_of(roster[player_id][0] for player_id in on),
-                    mask_of(roster[player_id][0] for player_id in off if player_id in roster),
-                    {player_id: name for player_id, (_slot, name) in roster.items()},
+            names = {player_id: name for player_id, (_slot, name) in roster.items()}
+            splits = []
+            for on, off in pairs:
+                rows: tuple[Mapping[str, Any], ...] = ()
+                written = None
+                split_game_ids: set[str] = set()
+                if all(player_id in roster for player_id in on):
+                    rows, written, split_game_ids = self._sums(
+                        connection,
+                        season,
+                        team_id,
+                        mask_of(roster[player_id][0] for player_id in on),
+                        mask_of(roster[player_id][0] for player_id in off if player_id in roster),
+                        names,
+                    )
+                splits.append(
+                    SegmentSplit(
+                        rows=rows,
+                        written_at=_utc(written) if written is not None else None,
+                        games_missing=tuple(games_missing),
+                        team_games=len(completed),
+                        games_included=len(included),
+                        games_through=max(included, default=None),
+                        split_games=len(split_game_ids),
+                        last_split_game_date=max(
+                            (dates[game_id] for game_id in split_game_ids if game_id in dates), default=None
+                        ),
+                    )
                 )
-        return SegmentSplit(
-            rows=rows,
-            written_at=_utc(written) if written is not None else None,
-            games_missing=tuple(games_missing),
-            team_games=len(completed),
-            games_included=len(included),
-            games_through=max(included, default=None),
-            split_games=len(split_game_ids),
-            last_split_game_date=max(
-                (dates[game_id] for game_id in split_game_ids if game_id in dates), default=None
-            ),
-        )
+        return splits
 
     @staticmethod
     def _sums(
