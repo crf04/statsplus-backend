@@ -94,7 +94,7 @@ _ROTATION_PARAMETERS = frozenset(
 )
 _ROTATION_NAME_LISTS = ("with", "without")
 _ROTATION_DEFAULT_LAST_N = 5
-_ROTATION_MAX_LAST_N = 20
+_ROTATION_MAX_LAST_N = 82
 _LAST_N = re.compile(r"[0-9]{1,2}\Z")
 _NBA_GAME_ID = re.compile(r"[0-9]{10}\Z")
 _BOARD_PARAMETERS = frozenset({"date", "season", "market", "game", "team", "sources", "moves"})
@@ -852,7 +852,11 @@ def get_rotation():
     if "last_n" in request.args:
         submitted = request.args["last_n"]
         if _LAST_N.fullmatch(submitted) is None or not 1 <= int(submitted) <= _ROTATION_MAX_LAST_N:
-            raise _invalid_rotation("last_n")
+            raise InvalidInputError(
+                "The rotation parameters are invalid: last_n "
+                f"(a whole number from 1 to {_ROTATION_MAX_LAST_N}).",
+                public_details={"parameters": ["last_n"]},
+            )
         last_n = int(submitted)
     season = request.args.get("season")
     if season is not None:

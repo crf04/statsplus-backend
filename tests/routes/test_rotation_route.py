@@ -135,6 +135,48 @@ def test_last_n_defaults_to_five(client, seeded):
     assert len(body["games"]) == 2
 
 
+def test_last_n_reaches_a_whole_season_of_82_games(client, seeded):
+    """crf04/statsplus#520: one call reads past the old 20-game cap."""
+
+    repository = seeded.rotation_service.repository
+    store(
+        repository,
+        *(
+            game(
+                f"00225010{n:02d}",
+                f"2026-02-{n:02d}",
+                "DET",
+                "BOS",
+                [line(1, "Unit One", "DET", minutes=n, started=True)],
+            )
+            for n in range(1, 24)
+        ),
+    )
+
+    body = client.get(f"{ROTATION}?team=DET&last_n=82").get_json()
+
+    # 23 February games and the two January ones: 25 stored DET games, all of them.
+    assert body["last_n"] == 82
+    assert [g["game_date"] for g in body["games"]] == [
+        *(f"2026-02-{n:02d}" for n in range(23, 0, -1)),
+        "2026-01-04",
+        "2026-01-02",
+    ]
+    assert client.get(f"{ROTATION}?team=DET&last_n=21").get_json()["games"][-1]["game_date"] == "2026-02-03"
+
+
+@pytest.mark.parametrize("last_n", ["0", "83"])
+def test_last_n_outside_1_to_82_is_refused_naming_the_range(client, seeded, last_n):
+    response = client.get(f"{ROTATION}?team=DET&last_n={last_n}")
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == {
+        "code": "invalid_input",
+        "message": "The rotation parameters are invalid: last_n (a whole number from 1 to 82).",
+        "details": {"parameters": ["last_n"]},
+    }
+
+
 def test_a_namesake_without_rotation_data_does_not_make_a_name_ambiguous(client, seeded):
     response = client.get(f"{ROTATION}?player_name=Tyrese%20Maxey")
 
@@ -187,7 +229,7 @@ def test_a_namesake_with_data_makes_the_name_ambiguous(client, seeded):
         ("player_name=%20", ["player_name"]),
         ("player_name=Unit%20One&player_team=D3T", ["player_team"]),
         ("team=DET&last_n=0", ["last_n"]),
-        ("team=DET&last_n=21", ["last_n"]),
+        ("team=DET&last_n=83", ["last_n"]),
         ("team=DET&last_n=five", ["last_n"]),
         ("team=DET&last_n=-1", ["last_n"]),
         ("team=DET&season=2025", ["season"]),
