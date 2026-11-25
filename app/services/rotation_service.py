@@ -812,6 +812,9 @@ class RotationService:
             for player_id, line in split.lines_by_game[game_id].items():
                 if player_id not in named:
                     sides.setdefault(player_id, ([], []))[0].append(line)
+        entries = self._split_entries(season, team, split, named) if game_logs else {}
+        for player_id in entries:
+            sides.setdefault(player_id, ([], []))
         for game_id in split.other:
             for player_id, line in split.lines_by_game[game_id].items():
                 if player_id in sides:
@@ -824,8 +827,10 @@ class RotationService:
             entry[asked_key]["stats"] = _side_stats(asked_lines, logs[player_id])
             entry[other_key]["stats"] = _side_stats(other_lines, logs[player_id])
             if game_logs:
-                entry[asked_key]["game_logs"] = _side_games(asked_lines, logs[player_id])
-                entry[other_key]["game_logs"] = _side_games(other_lines, logs[player_id])
+                for key, game_ids in ((asked_key, split.asked), (other_key, split.other)):
+                    entry[key]["game_logs"] = _team_game_logs(
+                        entries[player_id], set(game_ids), team, logs[player_id]
+                    )
             players.append({"name": split.names[player_id], **entry})
         players.sort(
             key=lambda player: (
@@ -854,6 +859,37 @@ class RotationService:
                 "players": players,
             },
         }
+
+    def _split_entries(
+        self, season: str, team: str, split: _Split, named: set[int]
+    ) -> dict[int, list[dict[str, Any]]]:
+        """The team grid's entries (:func:`_team_entries`) of every unnamed player whose team window holds a
+        game of either side (crf04/statsplus#520).
+
+        A window closed by a later game for another team needs no catalog. Only a window that never closes
+        defers to the catalog, as in the team view: a player it says left is listed only with a box-score
+        line in one of those games.
+        """
+
+        side_ids = {*split.asked, *split.other}
+        listed = {player_id for game_id in side_ids for player_id in split.lines_by_game[game_id]}
+        departed = self._catalog_departed_ids(season, team) - listed
+        player_ids = sorted(set(split.names) - named)
+        rows_by_player = self._rows_by_player(self.repository.player_games(season, player_ids=player_ids))
+        team_games = self.repository.team_games(season, team)
+        entries = {}
+        for player_id in player_ids:
+            own_rows = rows_by_player[player_id]
+            if player_id in departed:
+                window = team_window(
+                    ((row["game_date"], row["team_tricode"]) for row in own_rows), team, Membership()
+                )
+                if window is None or window.closes is None:
+                    continue
+            own = _team_entries(own_rows, team, team_games)
+            if any(entry["game_id"] in side_ids for entry in own):
+                entries[player_id] = own
+        return entries
 
     def _logs_by_player(
         self, season: str, team: str, player_ids: Iterable[int]

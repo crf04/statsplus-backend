@@ -5,6 +5,7 @@ game (the overtime fixture) beside two synthetic DET games.
 """
 
 import json
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -135,6 +136,76 @@ def test_last_n_defaults_to_five(client, seeded):
     assert len(body["games"]) == 2
 
 
+def test_last_n_82_reads_a_whole_season_grid_with_every_game_and_its_starters(client, seeded):
+    """crf04/statsplus#520: the two January games plus 80 more make an 82-game DET season. Unit One
+    starts every February-on game with 30 minutes; Unit Two starts the even ones with 20 and has no line
+    in the odd ones (a 0-minute row)."""
+
+    repository = seeded.rotation_service.repository
+    days = [date(2026, 2, 1) + timedelta(days=n) for n in range(80)]
+    store(
+        repository,
+        *(
+            game(
+                f"0022501{n:03d}",
+                day.isoformat(),
+                "DET",
+                "BOS",
+                [
+                    line(1, "Unit One", "DET", minutes=30, started=True),
+                    *([line(2, "Unit Two", "DET", minutes=20, started=True)] if n % 2 == 0 else []),
+                ],
+            )
+            for n, day in enumerate(days)
+        ),
+    )
+
+    body = client.get(f"{ROTATION}?team=DET&last_n=82&game_logs=true").get_json()
+
+    newest_first = list(reversed(list(enumerate(days))))
+    assert body["last_n"] == 82
+    assert [(g["game_date"], g["starters"]) for g in body["games"]] == [
+        *(
+            (day.isoformat(), ["Unit One", "Unit Two"] if n % 2 == 0 else ["Unit One"])
+            for n, day in newest_first
+        ),
+        ("2026-01-04", ["Unit One", "Unit Two"]),
+        ("2026-01-02", ["Unit One"]),
+    ]
+    grid = {
+        player["name"]: [(g["game_date"], g["started"], g["minutes"]) for g in player["game_logs"]]
+        for player in body["players"]
+    }
+    assert grid == {
+        "Unit One": [
+            *((day.isoformat(), True, 30.0) for _, day in newest_first),
+            ("2026-01-04", True, 20.0),
+            ("2026-01-02", True, 30.0),
+        ],
+        "Unit Two": [
+            *(
+                (day.isoformat(), True, 20.0) if n % 2 == 0 else (day.isoformat(), False, 0.0)
+                for n, day in newest_first
+            ),
+            ("2026-01-04", True, 20.0),
+            ("2026-01-02", False, 10.0),
+        ],
+    }
+    assert len(grid["Unit Two"]) == 82
+
+
+@pytest.mark.parametrize("last_n", ["0", "83", "100", "9" * 5000], ids=["0", "83", "100", "5000-digits"])
+def test_last_n_outside_1_to_82_is_refused_naming_the_range(client, seeded, last_n):
+    response = client.get(f"{ROTATION}?team=DET&last_n={last_n}")
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == {
+        "code": "invalid_input",
+        "message": "The rotation parameters are invalid: last_n (a whole number from 1 to 82).",
+        "details": {"parameters": ["last_n"]},
+    }
+
+
 def test_a_namesake_without_rotation_data_does_not_make_a_name_ambiguous(client, seeded):
     response = client.get(f"{ROTATION}?player_name=Tyrese%20Maxey")
 
@@ -187,7 +258,7 @@ def test_a_namesake_with_data_makes_the_name_ambiguous(client, seeded):
         ("player_name=%20", ["player_name"]),
         ("player_name=Unit%20One&player_team=D3T", ["player_team"]),
         ("team=DET&last_n=0", ["last_n"]),
-        ("team=DET&last_n=21", ["last_n"]),
+        ("team=DET&last_n=83", ["last_n"]),
         ("team=DET&last_n=five", ["last_n"]),
         ("team=DET&last_n=-1", ["last_n"]),
         ("team=DET&season=2025", ["season"]),

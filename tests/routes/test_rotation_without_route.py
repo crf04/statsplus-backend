@@ -972,3 +972,108 @@ def test_one_player_resolved_from_two_names_in_with_and_without_is_a_400_naming_
 
     assert response.status_code == 400
     assert response.get_json()["error"]["details"]["parameters"] == ["with", "without"]
+
+
+def _rows(split, side):
+    return {
+        p["name"]: [(g["game_date"], g["started"], g["minutes"]) for g in p[side]["game_logs"]]
+        for p in split["players"]
+    }
+
+
+def test_split_game_logs_of_a_mid_season_arrival_start_at_his_first_game(client, detroit):
+    """crf04/statsplus#520: Late Joiner's first DET game is g5, so Cade's missed g0, g2, g3 and g4 are
+    outside his window: no rows, not 0-minute rows."""
+
+    body = _get(client, "team=DET&without=Cade%20Cunningham&game_logs=true").get_json()["without"]
+
+    assert _rows(body, "without")["Late Joiner"] == [("2026-01-09", False, 10.0)]
+    assert _rows(body, "with")["Late Joiner"] == [("2026-01-11", False, 10.0)]
+    assert _rows(body, "without")["Isaiah Stewart"] == [
+        ("2026-01-09", False, 14.0),
+        ("2026-01-07", True, 28.0),
+        ("2026-01-05", True, 30.0),
+        ("2026-01-03", True, 20.0),
+        ("2025-12-30", False, 10.0),
+    ]
+
+
+def test_split_game_logs_list_only_each_sides_games_and_no_mixed_game(client, detroit):
+    """``with`` Cade and Duren: both played g1 (asked), both missed g3 and g4 (other); g2, g5 and g6 are
+    mixed and g0 is before Duren's window, so none of them has a row. The Sams' window opens at g1 and
+    they have no later line: 0-minute rows. Late Joiner is on the team in none of these games."""
+
+    split = _get(client, "team=DET&with=Cade%20Cunningham&with=Jalen%20Duren&game_logs=true").get_json()[
+        "split"
+    ]
+
+    assert (split["games_asked"], split["games_other"], split["games_mixed"]) == (1, 2, 3)
+    assert _rows(split, "asked") == {
+        "Ausar Thompson": [("2026-01-01", True, 30.0)],
+        "Isaiah Stewart": [("2026-01-01", False, 12.0)],
+        "Sam Same": [("2026-01-01", False, 5.0)],
+    }
+    assert _rows(split, "other") == {
+        "Ausar Thompson": [("2026-01-07", False, 0.0), ("2026-01-05", True, 36.0)],
+        "Isaiah Stewart": [("2026-01-07", True, 28.0), ("2026-01-05", True, 30.0)],
+        "Sam Same": [("2026-01-07", False, 0.0), ("2026-01-05", False, 0.0)],
+    }
+    assert [p["name"] for p in split["players"]].count("Sam Same") == 2
+
+
+def test_split_game_logs_with_and_without_together_follow_both_lists(client, detroit):
+    """``with`` Duren and ``without`` Cade: Duren played and Cade missed g2 and g5 (asked); every other
+    game from Duren's first, g1, is the other side; g0 is before Duren's window."""
+
+    split = _get(client, "team=DET&with=Jalen%20Duren&without=Cade%20Cunningham&game_logs=true").get_json()[
+        "split"
+    ]
+
+    assert _rows(split, "asked")["Ausar Thompson"] == [("2026-01-09", True, 24.0), ("2026-01-03", True, 20.0)]
+    assert _rows(split, "other")["Ausar Thompson"] == [
+        ("2026-01-11", False, 18.0),
+        ("2026-01-07", False, 0.0),
+        ("2026-01-05", True, 36.0),
+        ("2026-01-01", True, 30.0),
+    ]
+    assert _rows(split, "asked")["Late Joiner"] == [("2026-01-09", False, 10.0)]
+    assert _rows(split, "other")["Late Joiner"] == [("2026-01-11", False, 10.0)]
+
+
+def test_split_game_logs_keep_a_player_traded_away_for_the_games_he_missed_before_the_trade(
+    client, tmp_path, dependencies
+):
+    """Traded played DET Jan 1, missed Jan 2 and played for BOS Jan 3: Jan 2 is inside his DET window, so
+    it is a 0-minute row although the catalog now places him on BOS. Waived played DET Jan 1 and is off
+    every roster with no later team: his window never closes, so the catalog leaves him out, as in the
+    team view. Named's window opens Jan 2: he sat Jan 2 (asked) and played Jan 4 (other)."""
+
+    repository = migrated_repository(tmp_path)
+    named = lambda m: line(CADE, "Named Player", "DET", minutes=m)  # noqa: E731
+    steady = lambda s: line(AUSAR, "Steady", "DET", minutes=20, started=s)  # noqa: E731
+    store(
+        repository,
+        _g(
+            1, "2026-01-01", line(LATE, "Traded", "DET", minutes=25), line(ISAIAH, "Waived", "DET", minutes=5)
+        ),
+        _g(2, "2026-01-02", named(0), steady(True)),
+        game("0022500099", "2026-01-03", "BOS", "NYK", [line(LATE, "Traded", "BOS", minutes=25)]),
+        _g(4, "2026-01-04", named(30), steady(False)),
+    )
+    dependencies.rotation_service = service_for(
+        repository,
+        Catalog(
+            (CADE, "Named Player", "DET"),
+            (AUSAR, "Steady", "DET"),
+            (LATE, "Traded", "BOS"),
+            (ISAIAH, "Waived", None, "inactive"),
+        ),
+    )
+
+    body = _get(client, "team=DET&without=Named%20Player&game_logs=true").get_json()["without"]
+
+    assert _rows(body, "without") == {
+        "Steady": [("2026-01-02", True, 20.0)],
+        "Traded": [("2026-01-02", False, 0.0)],
+    }
+    assert _rows(body, "with") == {"Steady": [("2026-01-04", False, 20.0)], "Traded": []}

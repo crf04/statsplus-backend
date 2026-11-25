@@ -4063,7 +4063,7 @@ The backend computes every average and recent-versus-season comparison.
 | `player_team` | No | Tricode; only with `player_name`, keeps only the namesake on that current catalog team |
 | `team` | One selector | Tricode; the team view |
 | `game_id` | One selector | The 10-digit NBA game id the Slate returns (for example `0022501171`); the game view. Rejects `last_n` and `season` |
-| `last_n` | No | Whole number 1-20, default 5. Counts his current team's games inside his team window |
+| `last_n` | No | Whole number 1-82, default 5 (82 reads a whole season, crf04/statsplus#520). Counts his current team's games inside his team window. Outside 1-82 it is a `400 invalid_input` naming `last_n` and the range |
 | `season` | No | `YYYY-YY`. Default: the current season, or the latest season with rotation data when the current one has none |
 | `without` | No | Repeatable (crf04/statsplus#239). A player name; with `player_name` or `team`, switches to the [without split](#rotation-without-a-player). Rejected with `game_id` and with `last_n` |
 | `with` | No | Repeatable (crf04/statsplus#499). A player name; with `player_name` or `team`, switches to the [with split](#rotation-with-a-player), alone or beside `without`. Rejected with `game_id` and with `last_n` |
@@ -4357,6 +4357,20 @@ rotation's, a DNP as 0) and `box`, the game-log row in the same keys as
 `stats` (unrounded; `PRA` summed) or `null` where he has no game-log row, so a
 caller can count any line or minutes band without a game-logs call per player.
 Absent by default, which keeps the team view small.
+
+On the team split (`team` with `with` and/or `without`), `game_logs` are the
+team view's [`game_logs`](#get-rotation) rows (crf04/statsplus#520): each side
+lists every game of that side inside the player's team window, newest first,
+with `matchup`, and a game he missed while on the team (no box-score line) is a
+`minutes: 0.0`, `box: null` row; a game outside his window has no row, and a
+mixed game is on neither side. `players` then also lists every player on the
+team in a game of either side (his team window holds it), even one with no
+box-score line in those games (his side counts stay over box-score lines, so
+`games` can be lower than the rows). A window that a later game for another
+team closes is trusted as is; only a window that never closes defers to the
+Athlete Catalog, as in the team view, which drops a player it says left unless
+he has a box-score line in one of those games. The player split's `game_logs` are
+unchanged: his box-score lines in the side's games.
 
 For the same player, absent teammate and season, `without.stats` matches
 `GET /api/games/game_logs` with `players_off[]` (same games, same averages) for

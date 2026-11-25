@@ -387,10 +387,99 @@ def test_game_logs_true_lists_each_sides_games_newest_first_with_the_box_score(c
 def test_game_logs_reach_every_player_of_the_team_view_and_are_absent_by_default(client, detroit):
     with_logs = _get(client, "team=DET&without=Cade%20Cunningham&game_logs=true")
     isaiah = _entry(with_logs, "Isaiah Stewart")
-    assert [g["box"]["PTS"] for g in isaiah["without"]["game_logs"]] == [0.0, 0.0, 0.0, 1.0]
+    assert [g["box"] and g["box"]["PTS"] for g in isaiah["without"]["game_logs"]] == [
+        None,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    ]
 
     plain = _get(client, "team=DET&without=Cade%20Cunningham")
     assert "game_logs" not in _entry(plain, "Isaiah Stewart")["without"]
+
+
+def _side_grid(body, side):
+    return {
+        player["name"]: [
+            (g["game_date"], g["matchup"], g["started"], g["minutes"], g["box"] and g["box"]["PTS"])
+            for g in player[side]["game_logs"]
+        ]
+        for player in body["players"]
+    }
+
+
+def test_team_split_game_logs_list_every_game_of_each_side_with_misses_as_0_minute_rows(client, detroit):
+    """crf04/statsplus#520: the team grid's rows for the games Cade missed (g2, g3, g4, g6, g7) and played
+    (g1, g5). Isaiah has no line in g7 and Cameo none in g4-g7: 0-minute rows. Cameo's window opens at g2,
+    so g1 has no row."""
+
+    body = _get(client, "team=DET&without=Cade%20Cunningham&game_logs=true")
+
+    assert _side_grid(body, "without") == {
+        "Ausar Thompson": [
+            ("2026-01-07", "DET vs. BOS", False, 26.0, 20.0),
+            ("2026-01-06", "DET vs. BOS", False, 28.0, None),
+            ("2026-01-04", "DET vs. BOS", False, 0.0, None),
+            ("2026-01-03", "DET vs. BOS", False, 36.0, 18.0),
+            ("2026-01-02", "DET vs. BOS", False, 20.0, 17.0),
+        ],
+        "Jalen Duren": [
+            ("2026-01-07", "DET vs. BOS", False, 25.0, 9.0),
+            ("2026-01-06", "DET vs. BOS", False, 0.0, None),
+            ("2026-01-04", "DET vs. BOS", False, 0.0, None),
+            ("2026-01-03", "DET vs. BOS", False, 0.0, None),
+            ("2026-01-02", "DET vs. BOS", False, 25.0, 9.0),
+        ],
+        "Isaiah Stewart": [
+            ("2026-01-07", "DET vs. BOS", False, 0.0, None),  # missed: no line in g7
+            ("2026-01-06", "DET vs. BOS", False, 10.0, 0.0),
+            ("2026-01-04", "DET vs. BOS", False, 10.0, 0.0),
+            ("2026-01-03", "DET vs. BOS", False, 10.0, 0.0),
+            ("2026-01-02", "DET vs. BOS", False, 10.0, 1.0),
+        ],
+        "Cameo Player": [
+            ("2026-01-07", "DET vs. BOS", False, 0.0, None),  # missed
+            ("2026-01-06", "DET vs. BOS", False, 0.0, None),  # missed
+            ("2026-01-04", "DET vs. BOS", False, 0.0, None),  # missed
+            ("2026-01-03", "DET vs. BOS", False, 0.0, None),  # a DNP line
+            ("2026-01-02", "DET vs. BOS", False, 0.0, None),
+        ],
+    }
+    assert _side_grid(body, "with") == {
+        "Ausar Thompson": [
+            ("2026-01-05", "DET vs. BOS", False, 24.0, 14.0),
+            ("2026-01-01", "DET vs. BOS", False, 30.0, 10.0),
+        ],
+        "Jalen Duren": [
+            ("2026-01-05", "DET vs. BOS", False, 22.0, 9.0),
+            ("2026-01-01", "DET vs. BOS", False, 25.0, 9.0),
+        ],
+        "Isaiah Stewart": [
+            ("2026-01-05", "DET vs. BOS", False, 12.0, 4.0),
+            ("2026-01-01", "DET vs. BOS", False, 12.0, 5.0),
+        ],
+        "Cameo Player": [("2026-01-05", "DET vs. BOS", False, 0.0, None)],
+    }
+
+
+def test_a_teammate_who_sat_every_asked_game_has_0_minute_rows_for_them(client, detroit):
+    """Isaiah misses only g7, so ``without`` Isaiah asks g7 alone. Cameo has no line in g7 (his lines are
+    g2 and g3), yet g7 is inside his window: he is listed, with a 0-minute row."""
+
+    body = _get(client, "team=DET&without=Isaiah%20Stewart&game_logs=true")
+
+    cameo = _entry(body, "Cameo Player")
+    assert [(g["game_date"], g["minutes"], g["box"]) for g in cameo["without"]["game_logs"]] == [
+        ("2026-01-07", 0.0, None)
+    ]
+    assert [g["game_date"] for g in cameo["with"]["game_logs"]] == [
+        "2026-01-06",
+        "2026-01-05",
+        "2026-01-04",
+        "2026-01-03",
+        "2026-01-02",
+    ]
 
 
 @pytest.mark.parametrize(
