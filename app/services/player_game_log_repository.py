@@ -1546,11 +1546,24 @@ class PlayerGameLogRepository:
                 if read.publication_id is None:
                     return frozenset()
                 table = PublicationPlayerGameLog.__table__
-                games = select(table.c.game_id).where(
-                    table.c.publication_id == read.publication_id,
-                    table.c.opponent_team_id == team_id,
-                )
+                # Two reads, not one semi-join: a publication newer than the
+                # table's statistics is estimated at one row, and Postgres then
+                # nests the loop (about 4 s for a 2025-26 team in production).
                 with read_connection(self.engine, None) as connection:
+                    games = (
+                        connection.execute(
+                            select(table.c.game_id)
+                            .where(
+                                table.c.publication_id == read.publication_id,
+                                table.c.opponent_team_id == team_id,
+                            )
+                            .distinct()
+                        )
+                        .scalars()
+                        .all()
+                    )
+                    if not games:
+                        return frozenset()
                     return frozenset(
                         connection.execute(
                             select(table.c.player_id)
